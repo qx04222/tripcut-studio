@@ -37,7 +37,7 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 ## 一条从原片到剪映的工作流
 
 <p align="center">
-  <img src="https://github.com/qx04222/tripcut-studio/releases/download/v0.1/tripcut-v0.1-workflow.svg" alt="TripCut 五步工作流：只读导入、播放筛选、故事结构、稳定交付、继续剪辑" width="100%">
+  <img src="https://github.com/qx04222/tripcut-studio/releases/download/v0.1/tripcut-v0.1-workflow.png" alt="TripCut 五步工作流：只读导入、播放筛选、故事结构、稳定交付、继续剪辑" width="100%">
 </p>
 
 | 阶段 | 工作台帮你完成 | 创作者保留的决定权 |
