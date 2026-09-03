@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "旅剪工作台",
+  "version": "0.1.0",
+  "identifier": "com.tripcut.studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "旅剪工作台",
+        "width": 1512,
+        "height": 945,
+        "minWidth": 720,
+        "minHeight": 760,
+        "center": true,
+        "resizable": true,
+        "maximizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*; img-src 'self' asset: http://asset.localhost blob: data: http://127.0.0.1:*; media-src 'self' blob: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg"
+    ],
+    "shortDescription": "本地优先的旅行 Vlog 素材筛选与交付工作台",
+    "longDescription": "旅剪工作台在本机完成素材导入、分析、筛选、故事组织与剪映交付。原始素材保持只读。",
+    "icon": [
+      "icons/icon-128.png",
+      "icons/icon-256.png",
+      "icons/icon-512.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "../sidecar/*.py": "sidecar/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      },
+      "entitlements": "entitlements.plist"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Whisper model tier is a public model name, not a credential"
+paths = ['''src-tauri/src/core/settings\.rs''']
+regexTarget = "match"
+regexes = ['''WHISPER_MODEL_TIER_KEY,\s*"large-v3-turbo"''']

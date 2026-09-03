@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+sidecar/.venv/
+.DS_Store
+*.log
+sidecar/__pycache__/
+sidecar/.venv/

@@ -1,0 +1,55 @@
+TripCut Studio — Third-Party Notices
+====================================
+
+This application bundles dynamically linked native components and open-source
+application dependencies. The corresponding license texts shipped beside this
+file are part of the application distribution.
+
+Native runtime components
+-------------------------
+
+FFmpeg 7.1.5
+  License: GNU Lesser General Public License, version 2.1 or later, for the
+  configuration used by this distribution.
+  Source: https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+  Project: https://ffmpeg.org/
+  The exact build configuration and artifact hashes are recorded in the
+  package compliance manifest generated for each candidate.
+
+mpv / libmpv
+  License: GNU Lesser General Public License, version 2.1 or later, for the
+  LGPL-only build used by this distribution. See the bundled mpv Copyright
+  file for per-file licensing details.
+  Source: https://github.com/mpv-player/mpv
+  Project: https://mpv.io/
+
+libplacebo 7.360.1
+  License: GNU Lesser General Public License, version 2.1 or later.
+  Source: https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/
+  This distribution uses an OpenGL-only build. Vulkan, shaderc and glslang are
+  disabled because TripCut does not use those backends.
+
+whisper.cpp
+  License: MIT
+  Source: https://github.com/ggml-org/whisper.cpp
+
+Application dependencies
+------------------------
+
+The in-app Open-Source Licenses screen lists the direct Cargo and npm
+dependencies, locked versions, SPDX license expressions, ecosystem, and
+runtime/build/development scope. Every packaged native Mach-O file is mapped to
+a component, SPDX expression, artifact hash and bundled license evidence in
+legal/native-sbom.json. Homebrew bottle SPDX records and selected license and
+copyright materials for dynamic dependencies are retained under legal/native/.
+
+Relinking and source availability
+---------------------------------
+
+FFmpeg and libmpv are shipped as replaceable dynamic libraries under
+Contents/Frameworks. No license in this notice restricts rights granted by the
+corresponding full license text. Source archives, build scripts, configuration,
+and local modifications must be retained with each commercial release record.
+
+TripCut Studio itself is not licensed under the third-party licenses listed
+above. Product names and trademarks belong to their respective owners.

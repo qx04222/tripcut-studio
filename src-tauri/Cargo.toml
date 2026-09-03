@@ -1,0 +1,48 @@
+[package]
+name = "tripcut-studio"
+version = "0.1.0"
+description = "旅剪工作台桌面应用"
+authors = ["TripCut Studio"]
+edition = "2021"
+
+[lib]
+name = "tripcut_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+tauri-plugin-dialog = "2"
+axum = { version = "=0.8.9", features = ["http1", "tokio"] }
+blake3 = "=1.8.7"
+libc = "=0.2.189"
+libmpv2 = "=6.0.0"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", features = ["objc2-core-foundation"] }
+objc2-app-kit = { version = "=0.3.2", features = [
+    "NSWindow",
+    "NSView",
+    "NSResponder",
+    "NSGraphics",
+    "NSOpenGL",
+    "NSOpenGLView",
+] }
+rfd = "=0.17.2"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tauri = { version = "=2.11.5", features = [] }
+thiserror = "=2.0.17"
+tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "time"] }
+tracing = "=0.1.41"
+uuid = { version = "=1.26.0", features = ["v4"] }
+walkdir = "=2.5.0"
+
+[dev-dependencies]
+tower = { version = "=0.5.3", features = ["util"] }
+
+# 上游 libmpv2 6.0.0 的 RenderContext Drop 存在回调释放竞态(vo 线程 SIGSEGV),
+# vendor 版先解除 mpv 侧回调再 free;上游修复后可移除。
+[patch.crates-io]
+libmpv2 = { path = "../vendor/libmpv2" }

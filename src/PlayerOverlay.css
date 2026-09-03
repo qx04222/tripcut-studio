@@ -1,0 +1,351 @@
+.player-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  overflow: hidden;
+  color: var(--media-ink);
+  background: var(--media-well);
+  outline: none;
+}
+
+.player-native-slot {
+  position: absolute;
+  inset: 0 0 76px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at center, var(--sheen), transparent 48%),
+    var(--media-well);
+}
+
+.player-opening-mark {
+  color: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--font-xs);
+  letter-spacing: 0.14em;
+}
+
+.player-controlbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 76px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: 0 -18px 50px var(--card-shadow);
+}
+
+.player-progress {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  width: 100%;
+  height: 5px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--border);
+  cursor: pointer;
+}
+
+.player-progress:disabled {
+  cursor: wait;
+}
+
+.player-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  box-shadow: 0 0 14px var(--accent-glow);
+  transition: width 70ms linear;
+}
+
+.player-segment-marker,
+.player-draft-marker {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.player-segment-marker {
+  min-width: 2px;
+  background: var(--warning);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warning) 70%, transparent);
+}
+
+.player-draft-marker {
+  width: 2px;
+  background: var(--media-ink);
+}
+
+.player-transport {
+  /* 列宽按内容自适应:字号提级后固定列宽会互相重叠 */
+  display: grid;
+  grid-template-columns: 42px auto auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 76px;
+  padding: 9px 16px 6px;
+}
+
+.player-inout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 8px;
+  min-width: 0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--font-xs);
+}
+
+.player-inout span,
+.player-inout strong,
+.player-inout small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-inout span {
+  color: var(--text-secondary);
+}
+
+.player-inout strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.player-inout small {
+  color: var(--text-muted);
+}
+
+.player-inout kbd {
+  color: var(--warning);
+}
+
+.player-play-button,
+.player-exit,
+.player-error button {
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.player-play-button {
+  width: 38px;
+  height: 38px;
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-size: var(--font-sm);
+}
+
+.player-play-button:disabled {
+  cursor: wait;
+  opacity: 0.85;
+}
+
+.player-play-button:focus-visible,
+.player-exit:focus-visible,
+.player-progress:focus-visible,
+.player-error button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.player-timecode {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  white-space: nowrap;
+}
+
+.player-timecode strong {
+  color: var(--text-primary);
+  font-size: var(--font-base);
+  font-weight: 620;
+  letter-spacing: 0.04em;
+}
+
+.player-timecode span {
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+}
+
+.player-clip-meta {
+  min-width: 0;
+}
+
+.player-clip-meta strong,
+.player-clip-meta span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-clip-meta strong {
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+}
+
+.player-clip-meta span {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--font-xs);
+  letter-spacing: 0.06em;
+}
+
+.player-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+}
+
+.player-shortcuts.disabled {
+  opacity: 0.7;
+}
+
+.player-shortcuts span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.player-shortcuts kbd,
+.player-exit kbd {
+  min-width: 18px;
+  padding: 3px 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  background: var(--media-well);
+  font: 7px/1 "SFMono-Regular", Consolas, monospace;
+  text-align: center;
+}
+
+.player-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+}
+
+.player-ime-state {
+  position: absolute;
+  top: -31px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: var(--bg-elevated);
+  font-size: var(--font-xs);
+}
+
+.player-ime-state > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 9px var(--warning);
+}
+
+.player-exit:hover,
+.player-error button:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.player-error {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 76px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 40px;
+  color: var(--text-primary);
+  background:
+    linear-gradient(135deg, var(--danger-tint), transparent 58%),
+    var(--bg);
+  text-align: center;
+}
+
+.player-error > span {
+  color: var(--danger);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--font-xs);
+  letter-spacing: 0.18em;
+}
+
+.player-error strong {
+  margin-top: 14px;
+  font-family: Georgia, "Songti SC", serif;
+  font-size: 1.6875rem;
+  font-weight: 400;
+}
+
+.player-error p {
+  max-width: 620px;
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: 1.7;
+}
+
+.player-error button {
+  min-height: 36px;
+  margin-top: 24px;
+  padding: 0 16px;
+  font-size: var(--font-xs);
+}
+
+@media (max-width: 1180px) {
+  .player-transport {
+    grid-template-columns: 42px auto auto minmax(120px, 1fr) auto;
+  }
+
+  .player-shortcuts {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .player-transport {
+    grid-template-columns: 40px auto minmax(120px, 1fr) auto;
+    gap: 8px;
+    padding-right: 9px;
+    padding-left: 9px;
+  }
+
+  .player-clip-meta span {
+    display: none;
+  }
+
+  .player-clip-meta {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-progress-fill {
+    transition: none;
+  }
+}
