@@ -311,7 +311,7 @@ fn corrupt_source_fails_each_artifact_independently_and_keeps_clip_metadata() {
             _ => artifacts::run_proxy(&mut connection, &job, &directory.cache_root()),
         };
         assert!(result.is_err(), "{kind} unexpectedly succeeded");
-        jobs::mark_failed(&mut connection, job.id, &result.unwrap_err().to_string()).unwrap();
+        jobs::mark_failed(&mut connection, job.id, job.attempt, &result.unwrap_err().to_string()).unwrap();
     }
 
     let failed: i64 = connection

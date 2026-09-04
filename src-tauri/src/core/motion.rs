@@ -1,7 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,10 +74,10 @@ struct PairMotion {
     residual_rms: f64,
 }
 
-struct CommandOutput {
+struct CommandOutput<T = Vec<u8>> {
     success: bool,
     code: Option<i32>,
-    stdout: Vec<u8>,
+    stdout: T,
     stderr: Vec<u8>,
 }
 
@@ -184,8 +187,7 @@ pub fn run_analyze_motion(connection: &mut Connection, job: &Job) -> Result<()> 
         super::settings::DEFAULT_JITTER_THRESHOLD,
     )?
     .clamp(0.0, 1.0);
-    let frames = extract_gray_frames(&source.path, &ffmpeg)?;
-    let mut motion = analyze_frames(&frames)?;
+    let mut motion = analyze_video(&source.path, &ffmpeg)?;
     motion.clip_id = source.clip_id;
     motion.is_shaky = shake_is_flagged(motion.shake_score, jitter_threshold);
     motion.tool_version = format!(
@@ -250,11 +252,11 @@ fn load_source(connection: &Connection, payload: &AnalyzeMotionPayload) -> Resul
         })
 }
 
-fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
+fn gray_frame_args(path: &Path) -> Vec<OsString> {
     let filter = format!(
         "fps={MOTION_SAMPLE_FPS},scale={MOTION_WIDTH}:{MOTION_HEIGHT}:force_original_aspect_ratio=increase,crop={MOTION_WIDTH}:{MOTION_HEIGHT},format=gray"
     );
-    let args = [
+    vec![
         OsString::from("-v"),
         OsString::from("error"),
         OsString::from("-nostdin"),
@@ -270,7 +272,61 @@ fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
         OsString::from("-f"),
         OsString::from("rawvideo"),
         OsString::from("-"),
-    ];
+    ]
+}
+
+fn analyze_video(path: &Path, ffmpeg: &OsStr) -> Result<ClipMotion> {
+    let output = execute_with_reader(ffmpeg, &gray_frame_args(path), MOTION_TIMEOUT, analyze_frame_stream)
+        .map_err(|error| CoreError::Motion(format!("提取运镜采样帧失败：{error}")))?;
+    if !output.success {
+        return Err(command_failure("ffmpeg 运镜采样", &output));
+    }
+    aggregate_motion(&output.stdout?)
+}
+
+// Keep only two raw frames; the compact pair metrics preserve median, endpoint
+// and per-second evidence exactly, including for long clips.
+fn analyze_frame_stream(mut reader: impl Read) -> std::io::Result<Result<Vec<PairMotion>>> {
+    let mut previous = vec![0_u8; FRAME_BYTES];
+    let mut current = vec![0_u8; FRAME_BYTES];
+    let mut pairs = Vec::new();
+    let mut have_previous = false;
+    loop {
+        let mut filled = 0;
+        while filled < FRAME_BYTES {
+            match reader.read(&mut current[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        if filled != FRAME_BYTES {
+            return Ok(Err(CoreError::Motion(format!(
+                "灰度采样帧不完整：{filled} 字节，期望 {FRAME_BYTES}"
+            ))));
+        }
+        if have_previous {
+            match estimate_pair(&previous, &current) {
+                Ok(pair) => pairs.push(pair),
+                Err(error) => return Ok(Err(error)),
+            }
+        }
+        std::mem::swap(&mut previous, &mut current);
+        have_previous = true;
+    }
+    if pairs.is_empty() {
+        return Ok(Err(CoreError::Motion("运镜分析至少需要 2 个采样帧".to_owned())));
+    }
+    Ok(Ok(pairs))
+}
+
+#[cfg(test)]
+fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
+    let args = gray_frame_args(path);
     let output = execute_with_timeout(ffmpeg, &args, MOTION_TIMEOUT)
         .map_err(|error| CoreError::Motion(format!("提取运镜采样帧失败：{error}")))?;
     if !output.success {
@@ -296,6 +352,7 @@ fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
     Ok(frames)
 }
 
+#[cfg(test)]
 fn analyze_frames(frames: &[Vec<u8>]) -> Result<ClipMotion> {
     if frames.len() < 2 || frames.iter().any(|frame| frame.len() != FRAME_BYTES) {
         return Err(CoreError::Motion("运镜采样帧数量或尺寸无效".to_owned()));
@@ -318,7 +375,7 @@ fn estimate_pair(previous: &[u8], next: &[u8]) -> Result<PairMotion> {
         for column in 0..GRID_SIZE {
             let x = GRID_ORIGIN + column * BLOCK_SIZE;
             let y = GRID_ORIGIN + row * BLOCK_SIZE;
-            vectors.push(best_block_vector(previous, next, x, y, &offsets));
+            vectors.push(best_block_vector(previous, next, x, y, offsets));
         }
     }
 
@@ -359,12 +416,15 @@ fn estimate_pair(previous: &[u8], next: &[u8]) -> Result<PairMotion> {
     })
 }
 
-fn search_offsets() -> Vec<(isize, isize)> {
-    let mut offsets = (-SEARCH_RADIUS..=SEARCH_RADIUS)
-        .flat_map(|dy| (-SEARCH_RADIUS..=SEARCH_RADIUS).map(move |dx| (dx, dy)))
-        .collect::<Vec<_>>();
-    offsets.sort_by_key(|(dx, dy)| (dx.abs() + dy.abs(), dy.abs(), dx.abs(), *dy, *dx));
-    offsets
+fn search_offsets() -> &'static [(isize, isize)] {
+    static OFFSETS: OnceLock<Vec<(isize, isize)>> = OnceLock::new();
+    OFFSETS.get_or_init(|| {
+        let mut offsets = (-SEARCH_RADIUS..=SEARCH_RADIUS)
+            .flat_map(|dy| (-SEARCH_RADIUS..=SEARCH_RADIUS).map(move |dx| (dx, dy)))
+            .collect::<Vec<_>>();
+        offsets.sort_by_key(|(dx, dy)| (dx.abs() + dy.abs(), dy.abs(), dx.abs(), *dy, *dx));
+        offsets
+    })
 }
 
 fn best_block_vector(
@@ -401,6 +461,11 @@ fn best_block_vector(
             best_sad = sad;
             best_dx = dx;
             best_dy = dy;
+            // SAD cannot be negative. Offsets are ordered by distance, so a
+            // later exact match cannot improve the original tie-break rule.
+            if sad == 0 {
+                break;
+            }
         }
     }
 
@@ -678,7 +743,7 @@ fn tool_version(executable: &OsStr) -> Result<String> {
         .ok_or_else(|| CoreError::Motion("ffmpeg 版本输出为空".to_owned()))
 }
 
-fn command_failure(label: &str, output: &CommandOutput) -> CoreError {
+fn command_failure<T>(label: &str, output: &CommandOutput<T>) -> CoreError {
     let summary = String::from_utf8_lossy(&output.stderr)
         .trim()
         .replace(['\r', '\n'], " ")
@@ -700,56 +765,86 @@ fn execute_with_timeout(
     args: &[OsString],
     timeout: Duration,
 ) -> std::io::Result<CommandOutput> {
-    let mut child = Command::new(executable)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_reader = thread::spawn(move || read_pipe(stdout));
-    let stderr_reader = thread::spawn(move || read_pipe(stderr));
-    let started = Instant::now();
+    execute_with_reader(executable, args, timeout, |pipe| read_pipe(Some(pipe)))
+}
 
-    let status = loop {
-        if super::jobs::current_cancellation_requested() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+fn execute_with_reader<T: Send + 'static>(
+    executable: &OsStr,
+    args: &[OsString],
+    timeout: Duration,
+    read_stdout: impl FnOnce(ChildStdout) -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<CommandOutput<T>> {
+    let mut command = Command::new(executable);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A configured executable may be a wrapper. Kill its process group on
+    // cancellation/timeout so inherited pipes cannot keep readers alive.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take();
+    let (stdout_sender, stdout_receiver) = std::sync::mpsc::channel();
+    let (stderr_sender, stderr_receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || { let _ = stdout_sender.send(read_stdout(stdout)); });
+    thread::spawn(move || { let _ = stderr_sender.send(read_pipe(stderr)); });
+    let started = Instant::now();
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+    loop {
+        let interrupted = super::jobs::current_cancellation_requested();
+        if interrupted || started.elapsed() >= timeout {
+            terminate_command(&mut child);
             return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "用户已取消",
+                if interrupted { std::io::ErrorKind::Interrupted } else { std::io::ErrorKind::TimedOut },
+                if interrupted { "用户已取消".to_owned() } else { format!("命令超过 {} 秒未完成", timeout.as_secs()) },
             ));
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(next) => status = next,
+                Err(error) => { terminate_command(&mut child); return Err(error); }
+            }
         }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("命令超过 {} 秒未完成", timeout.as_secs()),
-            ));
+        if stdout.is_none() {
+            match stdout_receiver.try_recv() {
+                Ok(Ok(value)) => stdout = Some(value),
+                Ok(Err(error)) => { terminate_command(&mut child); return Err(error); }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    terminate_command(&mut child);
+                    return Err(std::io::Error::other("stdout reader thread panicked"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
         }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| std::io::Error::other("stdout reader thread panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| std::io::Error::other("stderr reader thread panicked"))??;
-    Ok(CommandOutput {
-        success: status.success(),
-        code: status.code(),
-        stdout,
-        stderr,
-    })
+        if stderr.is_none() {
+            match stderr_receiver.try_recv() {
+                Ok(Ok(value)) => stderr = Some(value),
+                Ok(Err(error)) => { terminate_command(&mut child); return Err(error); }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    terminate_command(&mut child);
+                    return Err(std::io::Error::other("stderr reader thread panicked"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        match (status, stdout, stderr) {
+            (Some(exit), Some(output), Some(errors)) => return Ok(CommandOutput {
+                success: exit.success(), code: exit.code(), stdout: output, stderr: errors,
+            }),
+            (exit, output, errors) => { status = exit; stdout = output; stderr = errors; }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn terminate_command(child: &mut Child) {
+    #[cfg(unix)]
+    // SAFETY: this child was spawned into a fresh process group whose id is
+    // its positive pid. This never targets TripCut's own process group.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn read_pipe<R: Read>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
@@ -876,7 +971,9 @@ mod tests {
             return None;
         }
         let frames = extract_gray_frames(&path, &test_ffmpeg()).unwrap();
-        Some(analyze_frames(&frames).unwrap())
+        let streamed = analyze_video(&path, &test_ffmpeg()).unwrap();
+        assert_eq!(streamed, analyze_frames(&frames).unwrap());
+        Some(streamed)
     }
 
     const FIXED_PATTERN: &str =
@@ -891,6 +988,62 @@ mod tests {
             "ffmpeg",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn streamed_short_reads_preserve_all_motion_evidence() {
+        struct ShortReads(std::io::Cursor<Vec<u8>>);
+        impl Read for ShortReads {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let count = bytes.len().min(97);
+                self.0.read(&mut bytes[..count])
+            }
+        }
+        let first = patterned_frame();
+        let frames = vec![first.clone(), translated_frame(&first, 3, -2), first.clone(), first];
+        let pairs = analyze_frame_stream(ShortReads(std::io::Cursor::new(frames.concat()))).unwrap().unwrap();
+        assert_eq!(aggregate_motion(&pairs).unwrap(), analyze_frames(&frames).unwrap());
+    }
+
+    #[test]
+    fn streamed_empty_single_and_truncated_frames_are_rejected() {
+        for size in [0, FRAME_BYTES, FRAME_BYTES * 2 + 1] {
+            assert!(analyze_frame_stream(std::io::Cursor::new(vec![0; size])).unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn streaming_decoder_timeout_reaps_the_process() {
+        let started = Instant::now();
+        let result = execute_with_reader(
+            OsStr::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from("exec sleep 5")],
+            Duration::from_millis(40), analyze_frame_stream,
+        );
+        assert_eq!(result.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn reader_deadline_applies_after_child_exit() {
+        let started = Instant::now();
+        let result = execute_with_reader(OsStr::new("/usr/bin/true"), &[], Duration::from_millis(40), |_| {
+            thread::sleep(Duration::from_millis(300));
+            Ok(Vec::<u8>::new())
+        });
+        assert_eq!(result.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_wrapper_pipes_cannot_defeat_deadline() {
+        let started = Instant::now();
+        let result = execute_with_reader(OsStr::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from("sleep 5 & exit 0")],
+            Duration::from_millis(60), analyze_frame_stream);
+        assert_eq!(result.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

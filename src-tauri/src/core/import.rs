@@ -37,6 +37,7 @@ const PACKAGE_EXTENSIONS: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImportStart {
+    pub batch_id: i64,
     pub folder: String,
     pub total: u64,
     pub enqueued: u64,
@@ -165,6 +166,10 @@ struct FrameTimingProbe {
 }
 
 pub fn scan_video_files(root: &Path) -> Result<Vec<PathBuf>> {
+    scan_video_files_checked(root, || Ok(()))
+}
+
+fn scan_video_files_checked(root: &Path, check: impl Fn() -> Result<()>) -> Result<Vec<PathBuf>> {
     if !root.is_dir() {
         return Err(CoreError::Import(format!(
             "导入路径不是文件夹：{}",
@@ -178,6 +183,7 @@ pub fn scan_video_files(root: &Path) -> Result<Vec<PathBuf>> {
         .into_iter()
         .filter_entry(|entry| should_visit_entry(entry, root))
     {
+        check()?;
         let entry = entry.map_err(|error| CoreError::Import(error.to_string()))?;
         if entry.file_type().is_file() && is_supported_video(entry.path()) {
             files.push(entry.into_path());
@@ -333,7 +339,10 @@ pub fn rescan_watched_folders(connection: &mut Connection) -> Result<RescanOutco
             continue;
         }
         scanned += 1;
-        match start_import(connection, &path) {
+        let gate=import_gate(connection); let _guard=gate.lock().unwrap_or_else(|e|e.into_inner());
+        let still_enabled: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM watched_folders WHERE id=?1 AND auto_sync=1)",[folder.id],|r|r.get(0))?;
+        if !still_enabled { continue; }
+        match start_import_inner(connection, &path) {
             Ok(outcome) => enqueued += outcome.enqueued,
             Err(error) => {
                 tracing::warn!(%error, folder = %folder.path, "watched folder rescan failed");
@@ -349,18 +358,32 @@ pub fn rescan_watched_folders(connection: &mut Connection) -> Result<RescanOutco
     Ok(RescanOutcome { enqueued, unavailable, scanned })
 }
 
+pub fn import_gate(connection: &Connection) -> std::sync::Arc<std::sync::Mutex<()>> {
+    fingerprint_gate(&format!("import-mutation:{}", connection.path().unwrap_or("<memory>")))
+}
+fn scan_generation(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("SELECT coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key='import_generation'),0)", [], |r|r.get(0))?)
+}
 pub fn start_import(connection: &mut Connection, folder: &Path) -> Result<ImportStart> {
+    let generation=scan_generation(connection)?;
+    let gate=import_gate(connection); let _guard=gate.lock().unwrap_or_else(|e|e.into_inner());
+    if generation!=scan_generation(connection)? { return Err(CoreError::Import("素材已清理，请重新选择文件夹".into())); }
+    start_import_inner(connection,folder)
+}
+fn start_import_inner(connection: &mut Connection, folder: &Path) -> Result<ImportStart> {
     let root = folder.canonicalize().map_err(|error| {
         CoreError::Import(format!("无法打开导入文件夹 {}：{error}", folder.display()))
     })?;
     // 记为关注文件夹(NAS/云盘工作流:后台增量同步的扫描根)。
     connection.execute(
         "INSERT INTO watched_folders(path, auto_sync, added_at)
-         VALUES (?1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         VALUES (?1, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          ON CONFLICT(path) DO NOTHING",
         [root.to_string_lossy().as_ref()],
     )?;
-    let files = scan_video_files(&root)?;
+    let batch_id = super::import_control::create_batch(connection, &root.to_string_lossy())?;
+    let result = (|| {
+    let files = scan_video_files_checked(&root, || super::import_control::ensure_batch_active(connection, batch_id))?;
     // 相对根目录的第一级子文件夹名 = 用户的分类,自动落为素材文件夹标签。
     let labeled = files
         .into_iter()
@@ -380,10 +403,16 @@ pub fn start_import(connection: &mut Connection, folder: &Path) -> Result<Import
             (file, label)
         })
         .collect::<Vec<_>>();
-    enqueue_labeled_files(connection, root.to_string_lossy().into_owned(), labeled)
+    enqueue_labeled_files_batch(connection, root.to_string_lossy().into_owned(), labeled, batch_id)
+    })();
+    if result.is_err() { super::import_control::fail_scans(connection, Some(batch_id))?; }
+    result
 }
 
 pub fn start_import_files(connection: &mut Connection, paths: &[PathBuf]) -> Result<ImportStart> {
+    let generation=scan_generation(connection)?;
+    let gate=import_gate(connection); let _guard=gate.lock().unwrap_or_else(|e|e.into_inner());
+    if generation!=scan_generation(connection)? { return Err(CoreError::Import("素材已清理，请重新选择文件".into())); }
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         let canonical = path.canonicalize().map_err(|error| {
@@ -408,13 +437,23 @@ fn enqueue_import_files(
     files: Vec<PathBuf>,
 ) -> Result<ImportStart> {
     let labeled = files.into_iter().map(|file| (file, None)).collect();
-    enqueue_labeled_files(connection, source, labeled)
+    let batch_id = super::import_control::create_batch(connection, &source)?;
+    let result=enqueue_labeled_files_batch(connection, source, labeled, batch_id);
+    if result.is_err() { super::import_control::fail_scans(connection,Some(batch_id))?; }
+    result
 }
 
-fn enqueue_labeled_files(
+#[cfg(test)]
+fn enqueue_labeled_files(connection: &mut Connection, source: String, files: Vec<(PathBuf, Option<String>)>) -> Result<ImportStart> {
+    let batch_id = super::import_control::create_batch(connection, &source)?;
+    enqueue_labeled_files_batch(connection, source, files, batch_id)
+}
+
+fn enqueue_labeled_files_batch(
     connection: &mut Connection,
     source: String,
     files: Vec<(PathBuf, Option<String>)>,
+    batch_id: i64,
 ) -> Result<ImportStart> {
     let ffprobe = super::settings::configured_executable(
         connection,
@@ -440,6 +479,7 @@ fn enqueue_labeled_files(
         .then(|| volume_identity(Path::new(&source)));
 
     for (path, folder_label) in &files {
+        super::import_control::ensure_batch_active(connection, batch_id)?;
         let volume = source_volume
             .clone()
             .unwrap_or_else(|| volume_identity(path));
@@ -482,14 +522,16 @@ fn enqueue_labeled_files(
             "import_probe\0{}\0{identity}\0episode:{}",
             payload.path, payload.episode_id
         ));
-        if enqueue_unique(connection, "import_probe", &payload_json, &payload_hash)?.is_some() {
+        if enqueue_unique(connection, "import_probe", &payload_json, &payload_hash, Some(batch_id))?.is_some() {
             enqueued += 1;
         } else {
             skipped += 1;
         }
     }
 
+    connection.execute("UPDATE import_batches SET status='queued' WHERE id=?1 AND status='scanning'", [batch_id])?;
     Ok(ImportStart {
+        batch_id,
         folder: source,
         total: files.len() as u64,
         enqueued,
@@ -502,8 +544,10 @@ fn enqueue_unique(
     kind: &str,
     payload: &str,
     payload_hash: &str,
+    batch_id: Option<i64>,
 ) -> Result<Option<i64>> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(id) = batch_id { super::import_control::ensure_batch_active(&transaction, id)?; }
     let existing = transaction
         .query_row(
             "SELECT id FROM jobs WHERE kind = ?1 AND payload_hash = ?2 LIMIT 1",
@@ -511,25 +555,55 @@ fn enqueue_unique(
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
-    if existing.is_some() {
-        transaction.commit()?;
-        return Ok(None);
+    if let Some(id) = existing {
+        let final_failure: bool = transaction.query_row("SELECT status IN ('failed','blocked') FROM jobs WHERE id=?1", [id], |r|r.get(0))?;
+        if batch_id.is_none() || !final_failure { transaction.commit()?; return Ok(None); }
+        // A retry is a new attempt history, with a fresh budget and batch owner.
+        transaction.execute("UPDATE jobs SET payload_hash=payload_hash||':history:'||id WHERE id=?1", [id])?;
     }
     transaction.execute(
         "INSERT INTO jobs(
-            kind, payload, payload_hash, status, attempt,
+            kind, payload, payload_hash, status, attempt, import_batch_id,
             next_attempt_at, created_at, updated_at
          ) VALUES (
-            ?1, ?2, ?3, 'pending', 0,
+            ?1, ?2, ?3, 'pending', 0, ?4,
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          )",
-        params![kind, payload, payload_hash],
+        params![kind, payload, payload_hash, batch_id],
     )?;
     let id = transaction.last_insert_rowid();
     transaction.commit()?;
     Ok(Some(id))
+}
+
+fn fingerprint_gate(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static GATES: OnceLock<Mutex<std::collections::HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut gates=GATES.get_or_init(Mutex::default).lock().unwrap_or_else(|e|e.into_inner());
+    gates.retain(|_, value| value.strong_count()>0);
+    if let Some(gate)=gates.get(key).and_then(Weak::upgrade) { return gate; }
+    let gate=Arc::new(Mutex::new(())); gates.insert(key.into(),Arc::downgrade(&gate)); gate
+}
+
+// Quick hashes cover the entire contents only at <= 8 MiB. Larger matches
+// require full-file verification; an unavailable old path is not proof of equality.
+fn confirmed_duplicate(connection: &Connection, path: &Path, quick: &str, size: u64, volume: &str, relative: &str) -> Result<Option<i64>> {
+    let mut statement = connection.prepare("SELECT c.id,c.full_hash,c.rel_path FROM clips c WHERE c.quick_hash=?1 AND c.byte_size=?2 AND NOT(c.volume_uuid=?3 AND c.rel_path=?4)")?;
+    let rows = statement.query_map(params![quick, size as i64, volume, relative], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Option<String>>(1)?, r.get::<_,String>(2)?)))?;
+    let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut full = None;
+    for (id, stored, candidate) in candidates {
+        if size <= QUICK_HASH_CHUNK_SIZE * 2 { return Ok(Some(id)); }
+        let incoming = match &full { Some(value) => value, None => full.insert(full_fingerprint(path)?) };
+        let old = stored.or_else(|| {
+            let resolved = if Path::new(&candidate).is_absolute() { Some(PathBuf::from(&candidate)) } else { super::media_source::clip_path_for_full_hash(connection,id).ok() };
+            resolved.and_then(|path| full_fingerprint(&path).ok())
+        });
+        if old.as_ref() == Some(incoming) { return Ok(Some(id)); }
+    }
+    Ok(None)
 }
 
 pub fn run_import_probe(
@@ -554,21 +628,26 @@ fn run_import_probe_with(
     let payload: ImportPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Import(format!("导入任务数据无效：{error}")))?;
     ensure_import_episode_active(connection, payload.episode_id)?;
+    super::import_control::ensure_job_current(connection, job)?;
     let path = PathBuf::from(&payload.path);
     let (quick_hash, byte_size) = quick_fingerprint(&path)?;
+    // Serialize only identical quick fingerprints, never hold a SQLite write
+    // transaction while hashing media. Different footage still probes in parallel.
+    let gate = fingerprint_gate(&quick_hash);
+    let _fingerprint_guard = loop {
+        match gate.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                super::import_control::ensure_job_current(connection, job)?;
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
     let volume = volume_identity(&path);
     let rel_path = relative_path(&path, volume.mount_point.as_deref());
 
-    let duplicate_id = connection
-        .query_row(
-            "SELECT id FROM clips
-             WHERE quick_hash = ?1 AND byte_size = ?2
-               AND NOT (volume_uuid = ?3 AND rel_path = ?4)
-             LIMIT 1",
-            params![quick_hash, byte_size as i64, volume.uuid, rel_path],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
+    let duplicate_id = confirmed_duplicate(connection, &path, &quick_hash, byte_size, &volume.uuid, &rel_path)?;
     if let Some(existing_id) = duplicate_id {
         // 同指纹不一定是重复:用户在子文件夹间整理素材(NAS 常见工作流)时,
         // 旧路径已不存在,这是「移动」而非「复制」——应更新归属而不是丢弃。
@@ -591,6 +670,7 @@ fn run_import_probe_with(
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             ensure_import_episode_active(&transaction, payload.episode_id)?;
+            super::import_control::ensure_job_current(&transaction, job)?;
             let existing_owner: Option<i64> = transaction.query_row(
                 "SELECT episode_id FROM clips WHERE id = ?1",
                 [existing_id],
@@ -637,6 +717,7 @@ fn run_import_probe_with(
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_import_episode_active(&transaction, payload.episode_id)?;
+    super::import_control::ensure_job_current(&transaction, job)?;
     let existing_owner = transaction
         .query_row(
             "SELECT episode_id FROM clips WHERE volume_uuid = ?1 AND rel_path = ?2",
@@ -669,13 +750,14 @@ fn run_import_probe_with(
     )?;
     transaction.execute(
         "INSERT INTO clips(
-            volume_uuid, rel_path, byte_size, quick_hash,
+            id, volume_uuid, rel_path, byte_size, quick_hash,
             tb_num, tb_den, duration_ticks, fps_num, fps_den, is_vfr,
             codec, width, height, captured_at, gps_lat, gps_lon,
             imported_at, missing_since, audio_sample_rate, rotation,
             color_transfer, hdr_flag, tz_guess, tz_conflict, device_model,
             vfr_timing_checked
          ) VALUES (
+            (SELECT max(coalesce((SELECT max(id) FROM clips),0), coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key='removed_clip_high_water'),0))+1),
             ?1, ?2, ?3, ?4,
             ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13,
@@ -744,6 +826,10 @@ fn run_import_probe_with(
         params![volume.uuid, rel_path],
         |row| row.get::<_, i64>(0),
     )?;
+    if previous_quick_hash.is_none() {
+        transaction.execute("UPDATE clips SET import_batch_id=(SELECT import_batch_id FROM jobs WHERE id=?2) WHERE id=?1", params![clip_id, job.id])?;
+    }
+    transaction.execute("INSERT OR IGNORE INTO import_batch_clips(batch_id,clip_id) SELECT import_batch_id,?1 FROM jobs WHERE id=?2 AND import_batch_id IS NOT NULL",params![clip_id,job.id])?;
     super::episode::assign_clip_to_episode(&transaction, clip_id, payload.episode_id)?;
     // 素材文件夹的第一级子目录 = 用户分类,落为可过滤标签。
     if let Some(label) = &payload.folder_label {
@@ -799,6 +885,7 @@ fn run_import_probe_with(
         "full_hash",
         &full_payload_json,
         &full_payload_hash,
+        None,
     )?;
     super::artifacts::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?;
 
@@ -875,7 +962,7 @@ pub fn enqueue_metadata_backfill(connection: &mut Connection) -> Result<usize> {
             "metadata_backfill_v2\0{}\0{}",
             payload.clip_id, payload.quick_hash
         ));
-        if enqueue_unique(connection, "metadata_backfill", &payload_json, &payload_hash)?.is_some() {
+        if enqueue_unique(connection, "metadata_backfill", &payload_json, &payload_hash, None)?.is_some() {
             enqueued += 1;
         }
     }
@@ -954,7 +1041,7 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
                 COALESCE(SUM(status IN ('failed', 'blocked')), 0),
                 COALESCE(SUM(status = 'running'), 0)
              FROM jobs
-             WHERE kind = 'import_probe'
+             WHERE kind = 'import_probe' AND import_dismissed=0
                AND json_valid(payload)
                AND CAST(json_extract(payload, '$.episode_id') AS INTEGER) = (
                    SELECT id FROM episodes WHERE status = 'active'
@@ -1147,7 +1234,8 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
     let mut problem_statement = connection.prepare(
         "SELECT payload, status, blocked_summary, result_path
          FROM jobs
-         WHERE kind = 'import_probe'
+         WHERE kind = 'import_probe' AND import_dismissed=0
+           AND cancel_requested=0
            AND (status IN ('failed', 'blocked')
                 OR (status = 'done' AND result_path IS NOT NULL))
            AND json_valid(payload)
@@ -1737,6 +1825,85 @@ mod tests {
     use crate::core::jobs;
     use crate::core::test_support::TestDirectory;
 
+
+    #[test]
+    fn cancelled_import_requeues_as_new_job_and_preserves_old_batch() {
+        let directory=TestDirectory::new();
+        let mut c=db::open_project(&directory.db_path()).unwrap();
+        let first=super::super::import_control::create_batch(&c,"/fixture").unwrap();
+        let payload=r#"{"path":"/fixture/a.mp4","episode_id":1}"#;
+        let id=enqueue_unique(&mut c,"import_probe",payload,"identity",Some(first)).unwrap().unwrap();
+        super::super::import_control::cancel_batch(&mut c,first).unwrap();
+        let next=super::super::import_control::create_batch(&c,"/fixture").unwrap();
+        let new_id=enqueue_unique(&mut c,"import_probe",payload,"identity",Some(next)).unwrap().unwrap();
+        assert_ne!(id,new_id);
+        assert_eq!(jobs::get(&c,id).unwrap().status,jobs::JobStatus::Failed);
+        assert_eq!(jobs::get(&c,new_id).unwrap().attempt,0);
+        let owner:i64=c.query_row("SELECT import_batch_id FROM jobs WHERE id=?1",[id],|r|r.get(0)).unwrap();
+        assert_eq!(owner,first);
+        assert!(super::super::import_control::ensure_batch_active(&c,first).is_err());
+    }
+
+    #[test]
+    fn matching_edges_with_different_middle_are_not_duplicates() {
+        let directory=TestDirectory::new();
+        let c=db::open_project(&directory.db_path()).unwrap();
+        let a=directory.path().join("a.mp4"); let b=directory.path().join("b.mp4");
+        let file=File::create(&a).unwrap(); file.set_len(QUICK_HASH_CHUNK_SIZE*2+32).unwrap(); drop(file);
+        fs::copy(&a,&b).unwrap();
+        let mut file=fs::OpenOptions::new().write(true).open(&b).unwrap();
+        file.seek(SeekFrom::Start(QUICK_HASH_CHUNK_SIZE+2)).unwrap(); file.write_all(b"different").unwrap(); drop(file);
+        let (quick,size)=quick_fingerprint(&a).unwrap(); assert_eq!(quick_fingerprint(&b).unwrap().0,quick);
+        c.execute("INSERT INTO volumes(uuid) VALUES ('fixture')",[]).unwrap();
+        c.execute("INSERT INTO clips(id,volume_uuid,rel_path,quick_hash,byte_size,episode_id) VALUES (1,'fixture',?1,?2,?3,1)",params![a.to_string_lossy(),quick,size as i64]).unwrap();
+        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy()).unwrap(),None);
+        fs::copy(&a,&b).unwrap();
+        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy()).unwrap(),Some(1));
+    }
+
+    #[test]
+    fn parallel_duplicate_probes_create_one_clip_and_removed_source_can_be_reimported() {
+        let directory=TestDirectory::new(); let media=directory.path().join("media"); fs::create_dir(&media).unwrap();
+        let a=media.join("a.mp4"); let b=media.join("b.mp4");
+        let status=Command::new("/opt/homebrew/bin/ffmpeg").args(["-v","error","-f","lavfi","-i","testsrc2=s=64x64:r=10:d=1","-c:v","mpeg4","-y"]).arg(&a).status();
+        if !status.is_ok_and(|s|s.success()) { return; }
+        fs::copy(&a,&b).unwrap();
+        let mut c=db::open_project(&directory.db_path()).unwrap();
+        let started=start_import_files(&mut c,&[a.clone(),b.clone()]).unwrap();
+        let first=jobs::claim_next(&mut c).unwrap().unwrap(); let second=jobs::claim_next(&mut c).unwrap().unwrap();
+        let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles=[first,second].into_iter().map(|job| {
+            let path=directory.db_path(); let barrier=barrier.clone();
+            thread::spawn(move || { let mut c=db::open_project(&path).unwrap(); barrier.wait(); run_import_probe_with(&mut c,&job,OsStr::new("/opt/homebrew/bin/ffprobe"),Duration::from_secs(10)).unwrap() })
+        }).collect::<Vec<_>>();
+        let outcomes=handles.into_iter().map(|h|h.join().unwrap()).collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|o|matches!(o,ImportProbeOutcome::Imported)).count(),1);
+        let id:i64=c.query_row("SELECT id FROM clips",[],|r|r.get(0)).unwrap();
+        let request=super::super::import_control::RemovalRequest { batch_id:Some(started.batch_id),clip_ids:vec![],all:false };
+        super::super::import_control::prepare_removal(&mut c,&request).unwrap();
+        assert_eq!(super::super::import_control::remove_records(&mut c,&request).unwrap(),1);
+        assert!(a.exists() && b.exists());
+        assert_eq!(c.query_row("SELECT count(*) FROM clips",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        let imported=start_import_files(&mut c,std::slice::from_ref(&a)).unwrap(); assert_eq!(imported.enqueued,1);
+        let job=jobs::claim_next(&mut c).unwrap().unwrap();
+        run_import_probe_with(&mut c,&job,OsStr::new("/opt/homebrew/bin/ffprobe"),Duration::from_secs(10)).unwrap();
+        assert!(c.query_row("SELECT id FROM clips",[],|r|r.get::<_,i64>(0)).unwrap()>id);
+    }
+
+    #[test]
+    fn scan_cancellation_and_late_probe_cannot_enqueue_or_commit() {
+        let directory=TestDirectory::new(); let c=db::open_project(&directory.db_path()).unwrap();
+        fs::write(directory.path().join("a.mp4"),b"fixture").unwrap();
+        let id=super::super::import_control::create_batch(&c,"/fixture").unwrap();
+        c.execute("UPDATE import_batches SET status='cancelled' WHERE id=?1",[id]).unwrap();
+        assert!(scan_video_files_checked(directory.path(),|| super::super::import_control::ensure_batch_active(&c,id)).is_err());
+        let mut c=c;
+        assert!(enqueue_unique(&mut c,"import_probe","{}","cancelled",Some(id)).is_err());
+        let job_id=jobs::enqueue(&mut c,"import_probe",r#"{"path":"missing.mp4","episode_id":1}"#,"late").unwrap();
+        let job=jobs::claim_next(&mut c).unwrap().unwrap(); jobs::request_cancel(&mut c,job_id).unwrap();
+        assert!(run_import_probe_with(&mut c,&job,OsStr::new("/opt/homebrew/bin/ffprobe"),Duration::from_secs(1)).unwrap_err().to_string().contains("取消"));
+    }
+
     fn cfr_probe_json() -> Value {
         json!({
             "streams": [{
@@ -2230,7 +2397,7 @@ mod tests {
             Duration::from_millis(50),
         )
         .unwrap_err();
-        jobs::mark_failed(&mut connection, id, &error.to_string()).unwrap();
+        jobs::mark_failed(&mut connection, id, job.attempt, &error.to_string()).unwrap();
 
         let failed = jobs::get(&connection, id).unwrap();
         assert_eq!(failed.status, jobs::JobStatus::Failed);

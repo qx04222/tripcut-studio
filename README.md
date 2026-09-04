@@ -81,13 +81,15 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 - FFmpeg、FFprobe、libmpv 与 whisper-cli 随应用打包；
 - 剪映原生草稿仍属实验能力，稳定交付包是默认出口。
 
+本次更新新增素材库切换与恢复、导入批次停止与撤销，以及长视频分析和桌面交互优化，详见 [v0.1.1 更新说明](docs/releases/v0.1.1.md)。
+
 ## 下载与第一次使用
 
-1. 前往 [v0.1 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.1)，下载 `TripCut-Studio_0.1.0_20260903T211000Z-v0.1-r1_preview_aarch64.dmg`；
+1. 前往 [v0.1.1 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.1.1)，下载 `TripCut-Studio_0.1.1_v0.1.1-preview-r3_preview_aarch64.dmg`；
 2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256：
 
    ```text
-   e03ffd00884218c283605a57854579f34df4d62083bc74482a95c0d854be4c78
+   12e2a8db84cffa2abfd268d5a2481f69bea5e74b7211b1f4896fadbc97cd0b21
    ```
 
 3. 打开 DMG，把“旅剪工作台”拖入 Applications；

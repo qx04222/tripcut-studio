@@ -316,14 +316,14 @@ pub fn mark_blocked_deterministic(
     Ok(())
 }
 
-pub fn mark_failed(connection: &mut Connection, id: i64, summary: &str) -> Result<()> {
+pub fn mark_failed(connection: &mut Connection, id: i64, attempt: i64, summary: &str) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = transaction.execute(
         "UPDATE jobs
          SET status = 'failed', blocked_summary = ?2,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?1 AND status = 'running'",
-        params![id, summary],
+         WHERE id = ?1 AND status = 'running' AND attempt = ?3",
+        params![id, summary, attempt],
     )?;
     if changed != 1 {
         return Err(CoreError::InvalidTransition(format!(
@@ -334,12 +334,12 @@ pub fn mark_failed(connection: &mut Connection, id: i64, summary: &str) -> Resul
     Ok(())
 }
 
-pub fn retry_or_block(connection: &mut Connection, id: i64) -> Result<JobStatus> {
+pub fn retry_or_block(connection: &mut Connection, id: i64, expected_attempt: i64) -> Result<JobStatus> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = transaction
         .query_row(
-            "SELECT attempt FROM jobs WHERE id = ?1 AND status = 'failed'",
-            [id],
+            "SELECT attempt FROM jobs WHERE id = ?1 AND status = 'failed' AND attempt = ?2 AND cancel_requested = 0",
+            params![id, expected_attempt],
             |row| row.get::<_, i64>(0),
         )
         .optional()?
@@ -510,22 +510,36 @@ pub fn cancel_cache_jobs(connection: &mut Connection) -> Result<usize> {
 }
 
 fn fail_or_retry(connection: &mut Connection, job: &Job, summary: &str) -> Result<JobStatus> {
-    let cancelled = cancel_requested(connection, job.id)? || summary.contains("用户已取消");
-    mark_failed(
-        connection,
-        job.id,
-        if cancelled { "用户已取消" } else { summary },
+    // Failure, cancellation and retry are one attempt-scoped transition. A
+    // worker whose lease was reclaimed must never change its successor's state.
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let cancelled = transaction.query_row(
+        "SELECT cancel_requested != 0 FROM jobs
+         WHERE id=?1 AND attempt=?2 AND status='running'",
+        params![job.id, job.attempt], |row| row.get::<_, bool>(0),
+    ).optional()?.ok_or_else(|| CoreError::InvalidTransition(format!(
+        "job {} attempt {} is no longer running", job.id, job.attempt
+    )))? || summary.contains("用户已取消");
+    let status = if cancelled { JobStatus::Failed }
+        else if job.attempt >= MAX_ATTEMPTS { JobStatus::Blocked }
+        else { JobStatus::Pending };
+    let message = if cancelled { Some("用户已取消") }
+        else if status == JobStatus::Blocked { Some(summary) }
+        else { None };
+    let delay = 1_i64 << job.attempt.saturating_sub(1).min(30) as u32;
+    transaction.execute(
+        "UPDATE jobs SET status=?3, blocked_summary=?4, owner_id=NULL,
+         lease_expires_at=NULL, cancel_requested=?5,
+         next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?6),
+         updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+         finished_at=CASE WHEN ?3='pending' THEN NULL
+                    ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END
+         WHERE id=?1 AND attempt=?2 AND status='running'",
+        params![job.id, job.attempt, status.as_str(), message, cancelled,
+                format!("+{delay} seconds")],
     )?;
-    if cancelled {
-        connection.execute(
-            "UPDATE jobs SET owner_id=NULL, lease_expires_at=NULL,
-             finished_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=?1",
-            [job.id],
-        )?;
-        Ok(JobStatus::Failed)
-    } else {
-        retry_or_block(connection, job.id)
-    }
+    transaction.commit()?;
+    Ok(status)
 }
 
 pub fn current_cancellation_requested() -> bool {
@@ -1063,7 +1077,7 @@ impl JobRunner {
                 if let Err(error) = super::deliver::run_export_package(connection, job) {
                     super::deliver::mark_export_failed(connection, job, &error.to_string())?;
                     if !cancel_requested(connection, job.id)? {
-                        retry_or_block(connection, job.id)?;
+                        retry_or_block(connection, job.id, job.attempt)?;
                     }
                 }
             }
@@ -1546,16 +1560,32 @@ mod tests {
     }
 
     #[test]
+    fn stale_failure_cannot_change_a_reclaimed_attempt() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let id = enqueue(&mut connection, "noop", "{}", "stale-failure").unwrap();
+        let old = claim_next(&mut connection).unwrap().unwrap();
+        connection.execute(
+            "UPDATE jobs SET attempt=attempt+1, owner_id='new-worker' WHERE id=?1", [id]
+        ).unwrap();
+        let current = get(&connection, id).unwrap();
+        assert!(fail_or_retry(&mut connection, &old, "late decoder failure").is_err());
+        assert_eq!(get(&connection, id).unwrap(), current);
+        let owner: String = connection.query_row("SELECT owner_id FROM jobs WHERE id=?1", [id], |row| row.get(0)).unwrap();
+        assert_eq!(owner, "new-worker");
+    }
+
+    #[test]
     fn failed_job_is_requeued_with_backoff_before_attempt_three() {
         let directory = TestDirectory::new();
         let mut connection = db::open_project(&directory.db_path()).unwrap();
         let id = enqueue(&mut connection, "unknown", "{}", "hash-2").unwrap();
         claim_next(&mut connection).unwrap().unwrap();
 
-        mark_failed(&mut connection, id, "transient failure").unwrap();
+        mark_failed(&mut connection, id, 1, "transient failure").unwrap();
         assert_eq!(get(&connection, id).unwrap().status, JobStatus::Failed);
         assert_eq!(
-            retry_or_block(&mut connection, id).unwrap(),
+            retry_or_block(&mut connection, id, 1).unwrap(),
             JobStatus::Pending
         );
 
@@ -1600,9 +1630,9 @@ mod tests {
             )
             .unwrap();
 
-        mark_failed(&mut connection, id, "three attempts exhausted").unwrap();
+        mark_failed(&mut connection, id, 3, "three attempts exhausted").unwrap();
         assert_eq!(
-            retry_or_block(&mut connection, id).unwrap(),
+            retry_or_block(&mut connection, id, 3).unwrap(),
             JobStatus::Blocked
         );
         let job = get(&connection, id).unwrap();
@@ -1732,8 +1762,8 @@ mod tests {
         std::fs::write(&abandoned_path, b"partial").unwrap();
         std::fs::remove_file(&abandoned_path).unwrap();
 
-        mark_failed(&mut connection, id, "interrupted write").unwrap();
-        retry_or_block(&mut connection, id).unwrap();
+        mark_failed(&mut connection, id, first_attempt.attempt, "interrupted write").unwrap();
+        retry_or_block(&mut connection, id, 1).unwrap();
         let transaction = connection.transaction().unwrap();
         transaction
             .execute(

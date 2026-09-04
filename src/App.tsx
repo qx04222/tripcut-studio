@@ -4,6 +4,7 @@ import { DeliverPage } from "./DeliverPage";
 import { FirstRunGuide } from "./FirstRunGuide";
 import { ImportPage } from "./ImportPage";
 import { CommandPalette } from "./CommandPalette";
+import { LibraryPanel } from "./LibraryPanel";
 import { EpisodePanel } from "./EpisodePanel";
 import { SetupWizard } from "./SetupWizard";
 import { SidebarSearch } from "./SidebarSearch";
@@ -195,6 +196,7 @@ export function AppShell({ route }: { route: RoutePath }) {
                 }, 120);
               }}
             />
+            <LibraryPanel />
             <EpisodePanel />
           </>
         )}

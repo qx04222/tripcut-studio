@@ -1,3 +1,4 @@
+import { ImportManagement } from "./ImportManagement";
 import { AnalysisBadges, AnalysisPanel } from "./AnalysisPanel";
 import {
   useCallback,
@@ -302,9 +303,13 @@ function rowIndexAtOffset(offset: number, selectedIndex: number | null): number 
 export function VirtualClipList({
   clips,
   viewportHeight = 396,
+  checkedIds = [],
+  onCheck,
 }: {
   clips: ClipListItem[];
   viewportHeight?: number;
+  checkedIds?: number[];
+  onCheck?: (id: number) => void;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -336,6 +341,7 @@ export function VirtualClipList({
     if (selectedId === null) return;
     let active = true;
     let firstRequest = true;
+    let timer: number | undefined;
     const refreshArtifacts = async () => {
       if (firstRequest) setArtifactLoading(true);
       try {
@@ -349,14 +355,15 @@ export function VirtualClipList({
       } finally {
         if (active) setArtifactLoading(false);
         firstRequest = false;
+        if (active) timer = window.setTimeout(() => void refreshArtifacts(), 2_000);
       }
     };
     setArtifacts(null);
+    setArtifactError(null);
     void refreshArtifacts();
-    const timer = window.setInterval(() => void refreshArtifacts(), 1_000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [selectedId]);
 
@@ -381,6 +388,12 @@ export function VirtualClipList({
 
   return (
     <div className="clip-table" role="table" aria-label="已扫描素材">
+      <div
+        className="clip-viewport"
+        style={{ height: viewportHeight }}
+        onScroll={handleScroll}
+        data-total-rows={clips.length}
+      >
       <div className="clip-table-head" role="row">
         <span role="columnheader">素材</span>
         <span role="columnheader">时长</span>
@@ -390,12 +403,6 @@ export function VirtualClipList({
         <span role="columnheader">L1 质量</span>
         <span role="columnheader">状态</span>
       </div>
-      <div
-        className="clip-viewport"
-        style={{ height: viewportHeight }}
-        onScroll={handleScroll}
-        data-total-rows={clips.length}
-      >
         <div className="clip-virtual-canvas" style={{ height: canvasHeight }}>
           {visibleClips.map((clip, visibleIndex) => {
             const index = startIndex + visibleIndex;
@@ -417,7 +424,8 @@ export function VirtualClipList({
                 onClick={() => selectClip(clip)}
                 onKeyDown={(event) => handleRowKey(event, clip)}
               >
-                <span className="clip-identity" role="cell">
+                <span className={`clip-identity${onCheck && clip.id !== null ? " selectable" : ""}`} role="cell">
+                  {onCheck && clip.id !== null ? <input type="checkbox" aria-label={`选择 ${clip.file_name}`} checked={checkedIds.includes(clip.id)} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={() => onCheck(clip.id!)} /> : null}
                   <LazyCover src={clip.cover_url} alt={`${clip.file_name} 封面`} />
                   <span className="clip-name" title={clip.path}>
                     <strong>{clip.file_name}</strong>
@@ -431,7 +439,7 @@ export function VirtualClipList({
                 </span>
                 <span role="cell">{formatCaptureDate(clip.captured_at)}</span>
                 <span className="clip-analysis-cell" role="cell">
-                  <AnalysisBadges clip={clip} />
+                  <AnalysisBadges clip={clip} compact />
                   {clip.analysis ? (
                     <small className="scene-count">{clip.analysis.scene_count} 片段</small>
                   ) : null}
@@ -491,32 +499,51 @@ export function ImportPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
+  const [checkedIds, setCheckedIds] = useState<number[]>([]);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const refreshRequest = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (isActive: () => boolean = () => true) => {
+    const request = ++refreshRequest.current;
     const [nextProgress, nextClips, currentEpisode] = await Promise.all([
       getImportProgress(),
       listClips(),
       getCurrentEpisode(),
     ]);
+    if (!isActive() || request !== refreshRequest.current) return;
     setProgress(nextProgress);
     setClips(nextClips.filter((clip) => clip.episode_id === currentEpisode.id));
   }, []);
 
   useEffect(() => {
     let active = true;
+    let timer: number | undefined;
+    let inFlight = false;
+    const pageVisible = () => document.visibilityState !== "hidden";
     const poll = async () => {
+      if (!active || inFlight || !pageVisible()) return;
+      inFlight = true;
       try {
-        await refresh();
-        if (active) setError(null);
+        await refresh(() => active);
+        if (active) setRefreshError(null);
       } catch (pollError) {
-        if (active) setError(String(pollError));
+        if (active) setRefreshError(String(pollError));
+      } finally {
+        inFlight = false;
+        if (active && pageVisible()) timer = window.setTimeout(() => void poll(), 1_500);
       }
     };
+    const onVisibility = () => {
+      window.clearTimeout(timer);
+      if (pageVisible()) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void poll();
-    const timer = window.setInterval(() => void poll(), 1_000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      ++refreshRequest.current;
+      window.clearTimeout(timer);
     };
   }, [refresh]);
 
@@ -537,7 +564,7 @@ export function ImportPage() {
       if (!selected) return;
       setFolder(selected);
       const started = await startImport(selected);
-      const duplicateNote = started.skipped > 0 ? `，${started.skipped} 项已在任务清单中` : "";
+      const duplicateNote = started.skipped > 0 ? `，跳过 ${started.skipped} 项已入库或已排队素材（可能属于其他集）` : "";
       setNotice(`已发现 ${started.total} 个视频，新增 ${started.enqueued} 项${duplicateNote}`);
       await refresh();
     } catch (importError) {
@@ -547,6 +574,9 @@ export function ImportPage() {
     }
   };
 
+  const readyClips = useMemo(() => clips.filter((clip) => clip.status === "ready"), [clips]);
+  const quality = analysisProgress(readyClips, "analysis");
+  const motion = analysisProgress(readyClips, "motion");
   const completed = progress.done + progress.failed;
   const percent = progress.total === 0 ? 0 : Math.round((completed / progress.total) * 100);
   const pending = Math.max(0, progress.total - completed - progress.running);
@@ -584,7 +614,9 @@ export function ImportPage() {
 
       {progress.total > 0 && progress.done + progress.failed === progress.total && progress.running === 0 ? (
         <div className="import-done-cta">
-          <span>本批素材已全部处理完成</span>
+          <span>{progress.failed > 0
+            ? `索引结束，${progress.failed} 项未能导入；可先筛选已就绪素材`
+            : "素材索引已完成，可开始筛片；后台分析进度见下方"}</span>
           <a href="#/review">进入筛片工作台 →</a>
         </div>
       ) : null}
@@ -624,7 +656,7 @@ export function ImportPage() {
                   checked={folder.auto_sync}
                   onChange={(event) => {
                     const next = event.currentTarget.checked;
-                    void setWatchedFolderSync(folder.id, next).then(refreshWatched);
+                    void setWatchedFolderSync(folder.id, next).then(refreshWatched).catch((error) => setWatchNotice(String(error)));
                   }}
                 />
                 <span aria-hidden="true" />
@@ -634,7 +666,7 @@ export function ImportPage() {
                 type="button"
                 className="watched-remove"
                 title="仅取消关注,已导入素材不受影响"
-                onClick={() => void removeWatchedFolder(folder.id).then(refreshWatched)}
+                onClick={() => void removeWatchedFolder(folder.id).then(refreshWatched).catch((error) => setWatchNotice(String(error)))}
               >移除</button>
             </div>
           ))}
@@ -666,11 +698,24 @@ export function ImportPage() {
         </div>
       </div>
 
-      {error ? <div className="import-message error">{error}</div> : null}
+      {readyClips.length > 0 ? (
+        <div className="analysis-progress-summary" aria-label="当前集分析进度">
+          <AnalysisStage label="画质分析" progress={quality} total={readyClips.length} />
+          <AnalysisStage label="运镜分析" progress={motion} total={readyClips.length} />
+          <p>封面出现后即可筛片。分析在后台继续；失败原因可点击素材查看。</p>
+        </div>
+      ) : null}
+      {refreshError ? <div className="import-message error" role="status">刷新暂时失败，正在重试：{refreshError}</div> : null}
+      {error ? <div className="import-message error" role="alert">{error}</div> : null}
       {!error && notice ? <div className="import-message">{notice}</div> : null}
 
+      <ImportManagement selectedIds={checkedIds.filter((id) => clips.some((clip) => clip.id === id))} onChanged={() => {
+        setCheckedIds([]);
+        void refresh().then(() => refreshWatched()).catch((e) => setError(String(e)));
+        window.dispatchEvent(new Event("tripcut:library-changed"));
+      }} />
       {clips.length > 0 ? (
-        <VirtualClipList clips={clips} />
+        <VirtualClipList clips={clips} checkedIds={checkedIds} onCheck={(id) => setCheckedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])} />
       ) : (
         <div className="import-empty">
           <span aria-hidden="true">01</span>
@@ -681,5 +726,34 @@ export function ImportPage() {
         </div>
       )}
     </section>
+  );
+}
+
+export function analysisProgress(clips: ClipListItem[], kind: "analysis" | "motion") {
+  let done = 0;
+  let running = 0;
+  let failed = 0;
+  for (const clip of clips) {
+    const status = kind === "analysis" ? clip.analysis_status : clip.motion_status;
+    if (status === "failed" || status === "blocked") failed += 1;
+    else if (status === "running") running += 1;
+    else if (status === "pending") continue;
+    else if (clip[kind]) done += 1;
+  }
+  return { done, running, failed, waiting: Math.max(0, clips.length - done - running - failed) };
+}
+
+function AnalysisStage({ label, progress, total }: {
+  label: string;
+  progress: ReturnType<typeof analysisProgress>;
+  total: number;
+}) {
+  return (
+    <div className="analysis-stage">
+      <strong>{label}</strong>
+      <span>{progress.done} / {total} 完成</span>
+      <span>{progress.running} 处理中 · {progress.waiting} 等待</span>
+      {progress.failed > 0 ? <span className="analysis-stage-failed">{progress.failed} 失败</span> : null}
+    </div>
   );
 }

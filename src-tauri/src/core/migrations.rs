@@ -1075,6 +1075,26 @@ DROP TABLE v28_stack_map;
 DROP TABLE v28_scene_map;
 "#;
 
+pub const MIGRATION_0029: &str = r#"
+CREATE TABLE import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL REFERENCES episodes(id),
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scanning' CHECK(status IN ('scanning','queued','failed','cancelled','removed')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+ALTER TABLE jobs ADD COLUMN import_batch_id INTEGER REFERENCES import_batches(id);
+ALTER TABLE jobs ADD COLUMN import_dismissed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE clips ADD COLUMN import_batch_id INTEGER REFERENCES import_batches(id);
+CREATE TABLE import_batch_clips (
+    batch_id INTEGER NOT NULL REFERENCES import_batches(id),
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    PRIMARY KEY(batch_id,clip_id)
+);
+CREATE INDEX jobs_import_batch_idx ON jobs(import_batch_id);
+CREATE INDEX clips_import_batch_idx ON clips(import_batch_id);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1204,6 +1224,7 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 28,
         sql: MIGRATION_0028,
     },
+    Migration { version: 29, sql: MIGRATION_0029 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 28;
+pub const LATEST_SCHEMA_VERSION: i64 = 29;

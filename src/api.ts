@@ -1072,3 +1072,24 @@ export interface RescanOutcome {
 export async function rescanWatchedFolders(): Promise<RescanOutcome> {
   return invoke<RescanOutcome>("rescan_watched_folders");
 }
+
+export interface LibraryRegistry {
+  active: string;
+  libraries: { id: string; name: string; hidden: boolean }[];
+}
+export const listLibraries = () => invoke<LibraryRegistry>("list_libraries");
+export const createLibrary = (name: string) => invoke<LibraryRegistry>("create_library", { name });
+export const setLibraryHidden = (id: string, hidden: boolean) => invoke<LibraryRegistry>("set_library_hidden", { id, hidden });
+export const switchLibrary = (id: string) => invoke<void>("switch_library", { id });
+
+export interface ImportBatch {
+  id: number; source: string; status: string; total: number; done: number;
+  running: number; failed: number; duplicates: number; imported: number;
+}
+export interface RemovalRequest { batch_id: number | null; clip_ids: number[]; all: boolean }
+export interface RemovalPreview { clips: number; favorites: number; selections: number; cache_entries: number }
+export const listImportBatches = () => invoke<ImportBatch[]>("list_import_batches");
+export const cancelImportBatch = (id: number) => invoke<void>("cancel_import_batch", { id });
+export const dismissImportNotices = () => invoke<number>("dismiss_import_notices");
+export const previewImportRemoval = (request: RemovalRequest) => invoke<RemovalPreview>("preview_import_removal", { request });
+export const removeImportedMaterial = (request: RemovalRequest) => invoke<number>("remove_imported_material", { request });

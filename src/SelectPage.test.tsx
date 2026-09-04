@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   SelectPage,
+  filmRowTop,
+  filmRowAtOffset,
   FILM_GRID_MIN_WIDTH,
   applyRatingAction,
   buildShotStackWallItems,
@@ -356,5 +358,20 @@ describe("selection workbench", () => {
     expect(markup).toContain("批量 AI 描述");
     expect(markup).not.toContain("DIRECTOR Q&amp;A");
     expect(markup.match(/type="search"/g)).toHaveLength(1);
+  });
+});
+
+describe("expanded candidate row virtualization", () => {
+  it("reserves space without displacing earlier rows", () => {
+    expect(filmRowTop(1, 1)).toBe(260);
+    expect(filmRowTop(2, 1)).toBe(820);
+    expect(filmRowTop(2, null)).toBe(520);
+  });
+  it("keeps the expanded card mounted across the entire detail range", () => {
+    expect(filmRowAtOffset(519, 1)).toBe(1);
+    expect(filmRowAtOffset(520, 1)).toBe(1);
+    expect(filmRowAtOffset(819, 1)).toBe(1);
+    expect(filmRowAtOffset(820, 1)).toBe(2);
+    expect(filmRowAtOffset(900, null)).toBe(3);
   });
 });

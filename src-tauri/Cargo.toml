@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.1.0"
+version = "0.1.1"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"

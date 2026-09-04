@@ -463,7 +463,7 @@ fn persist_transcript(
         .query_row(
             "SELECT 1 FROM jobs j
              JOIN clips c ON c.id = ?3
-             WHERE j.id = ?1 AND j.status = 'running' AND j.attempt = ?2
+             WHERE j.id = ?1 AND j.status = 'running' AND j.attempt = ?2 AND j.cancel_requested = 0
                AND c.quick_hash = ?4",
             params![job.id, job.attempt, source.clip_id, source.source_hash],
             |_| Ok(()),
@@ -530,9 +530,10 @@ fn persist_transcript(
     let changed = transaction.execute(
         "UPDATE jobs
          SET status = 'done', result_path = ?3, blocked_summary = NULL,
+             owner_id = NULL, lease_expires_at = NULL,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?1 AND status = 'running' AND attempt = ?2",
+         WHERE id = ?1 AND status = 'running' AND attempt = ?2 AND cancel_requested = 0",
         params![job.id, job.attempt, srt_final.to_string_lossy()],
     )?;
     if changed != 1 {
@@ -966,6 +967,53 @@ mod tests {
         assert_eq!(ticks, (1_000, 2_000));
         assert_eq!(artifact_count, 2);
         assert_eq!(jobs::get(&connection, job_id).unwrap().status, jobs::JobStatus::Done);
+    }
+
+    #[test]
+    fn cancelled_transcript_cannot_commit_artifacts_or_segments() {
+        let directory = TestDirectory::new();
+        let cache_root = directory.path().join("cache");
+        let clip_cache = cache_root.join("1");
+        std::fs::create_dir_all(&clip_cache).unwrap();
+        let json_temp = clip_cache.join("result.tmp.json");
+        let srt_temp = clip_cache.join("result.tmp.srt");
+        std::fs::write(&json_temp, b"{}").unwrap();
+        std::fs::write(&srt_temp, b"1\n00:00:01,000 --> 00:00:02,000\nhello\n").unwrap();
+
+        let mut connection = connection();
+        let clip_id = insert_clip(&connection, Path::new("voice.mov"), true, Some(-12.0));
+        let job_id = jobs::enqueue(&mut connection, "transcribe", "{}", "persist").unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(job.id, job_id);
+        let source = ClipSource {
+            clip_id,
+            path: PathBuf::from("voice.mov"),
+            source_hash: "source-hash".to_owned(),
+            tb_num: 1,
+            tb_den: 1_000,
+        };
+        let segments = parse_srt(
+            "1\n00:00:01,000 --> 00:00:02,000\nhello\n",
+        )
+        .unwrap();
+        jobs::request_cancel(&mut connection, job_id).unwrap();
+        let result = persist_transcript(
+            &mut connection,
+            &job,
+            &source,
+            &cache_root,
+            &json_temp,
+            &srt_temp,
+            &segments,
+        );
+        assert!(result.is_err());
+        assert!(!clip_cache.join(TRANSCRIPT_FILE).exists());
+        assert!(!clip_cache.join(SRT_FILE).exists());
+        for table in ["cache_artifacts", "transcript_segments"] {
+            let count: i64 = connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "{table} changed after cancellation");
+        }
+        assert_ne!(jobs::get(&connection, job_id).unwrap().status, jobs::JobStatus::Done);
     }
 
     #[test]

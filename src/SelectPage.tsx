@@ -94,6 +94,19 @@ const SUSPECT_BADGES = new Set<AnalysisBadgeKind>([
 const GRID_GAP = 14;
 export const FILM_GRID_MIN_WIDTH = 280;
 const GRID_ROW_HEIGHT = 260;
+const STACK_DETAIL_HEIGHT = 300;
+
+export function filmRowTop(row: number, expandedRow: number | null): number {
+  return row * GRID_ROW_HEIGHT + (expandedRow !== null && row > expandedRow ? STACK_DETAIL_HEIGHT : 0);
+}
+
+export function filmRowAtOffset(offset: number, expandedRow: number | null): number {
+  if (expandedRow === null || offset < (expandedRow + 1) * GRID_ROW_HEIGHT) {
+    return Math.max(0, Math.floor(offset / GRID_ROW_HEIGHT));
+  }
+  if (offset < (expandedRow + 1) * GRID_ROW_HEIGHT + STACK_DETAIL_HEIGHT) return expandedRow;
+  return Math.max(0, Math.floor((offset - STACK_DETAIL_HEIGHT) / GRID_ROW_HEIGHT));
+}
 const GRID_OVERSCAN_ROWS = 2;
 const GRID_HORIZONTAL_PADDING = 24;
 
@@ -562,14 +575,25 @@ function VirtualFilmGrid({
   }, []);
 
   const rowCount = Math.ceil(items.length / columns);
+  const expandedIndex = items.findIndex((item) => item.stack?.id === expandedStackId);
+  const expandedRow = expandedIndex < 0 ? null : Math.floor(expandedIndex / columns);
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || expandedRow === null) return;
+    const detailTop = filmRowTop(expandedRow, expandedRow) + GRID_ROW_HEIGHT;
+    if (detailTop + STACK_DETAIL_HEIGHT > viewport.scrollTop + viewport.clientHeight) {
+      viewport.scrollTop = detailTop;
+      setScrollTop(viewport.scrollTop);
+    }
+  }, [expandedRow, expandedStackId]);
   const startRow = Math.min(
     Math.max(0, rowCount - 1),
-    Math.max(0, Math.floor(scrollTop / GRID_ROW_HEIGHT) - GRID_OVERSCAN_ROWS),
+    Math.max(0, filmRowAtOffset(scrollTop, expandedRow) - GRID_OVERSCAN_ROWS),
   );
   const visibleRows = Math.ceil(viewportHeight / GRID_ROW_HEIGHT) + GRID_OVERSCAN_ROWS * 2;
   const endRow = Math.min(rowCount, startRow + visibleRows);
   const visible = items.slice(startRow * columns, endRow * columns);
-  const canvasHeight = rowCount * GRID_ROW_HEIGHT;
+  const canvasHeight = filmRowTop(rowCount, expandedRow);
 
   return (
     <div
@@ -592,10 +616,13 @@ function VirtualFilmGrid({
           className="film-grid-window"
           style={{
             gridTemplateColumns: `repeat(${columns}, minmax(${FILM_GRID_MIN_WIDTH}px, 1fr))`,
-            transform: `translateY(${startRow * GRID_ROW_HEIGHT}px)`,
+            gridTemplateRows: Array.from({ length: endRow - startRow }, (_, index) =>
+              `${GRID_ROW_HEIGHT - 14 + (startRow + index === expandedRow ? STACK_DETAIL_HEIGHT : 0)}px`,
+            ).join(" "),
+            transform: `translateY(${filmRowTop(startRow, expandedRow)}px)`,
           }}
         >
-          {visible.map((item) => {
+          {visible.map((item, visibleIndex) => {
             const stack = item.stack;
             const stackSelected =
               stack?.members.some((member) => member.clip_id === selectedId) ?? false;
@@ -633,10 +660,15 @@ function VirtualFilmGrid({
                 {stack && expanded ? (
                   <div
                     className="shot-stack-member-strip"
+                    style={{
+                      left: `calc(-${visibleIndex % columns} * (100% + 14px))`,
+                      width: `calc(${columns} * 100% + ${(columns - 1) * 14}px)`,
+                    }}
                     role="group"
                     aria-label={`${stackLabel}，${stack.members.length} 条候选`}
                   >
                     <header>
+                      <button type="button" onClick={() => onToggleStack(stack.id)} aria-label="收起候选组">收起候选 ↑</button>
                       <strong>{stack.scene_name}</strong>
                       <small>
                         {stack.subject_label} · {stack.function_label} · {stack.shot_size_label} · {stack.movement_label}
@@ -697,7 +729,7 @@ function VirtualFilmGrid({
                               type="button"
                               className={member.user_state === "hero" ? "active hero" : undefined}
                               onClick={() => onSetMemberState(stack.id, member, "hero")}
-                            >Promote Hero</button>
+                            >设为主镜头</button>
                           </div>
                         </div>
                       );
@@ -1062,13 +1094,16 @@ export function SelectPage() {
   const compositionRef = useRef(false);
   const searchRequestRef = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refreshRequest = useRef(0);
+  const refresh = useCallback(async (isActive: () => boolean = () => true) => {
+    const request = ++refreshRequest.current;
     const nextAssetSafety = await listAssetSafety();
     const [nextClips, nextDimensions, nextShotStacks] = await Promise.all([
       listClips(),
       listClipDimensions(),
       listShotStacks(),
     ]);
+    if (!isActive() || request !== refreshRequest.current) return nextClips;
     setClips(nextClips);
     setAssetSafety(nextAssetSafety);
     setDimensions(nextDimensions);
@@ -1088,21 +1123,36 @@ export function SelectPage() {
 
   useEffect(() => {
     let active = true;
+    let timer: number | undefined;
+    let inFlight = false;
+    const pageVisible = () => document.visibilityState !== "hidden";
     const load = async () => {
+      if (!active || inFlight || !pageVisible()) return;
+      inFlight = true;
       try {
-        await refresh();
+        await refresh(() => active);
         if (active) setError(null);
       } catch (loadError) {
         if (active) setError(String(loadError));
       } finally {
-        if (active) setLoading(false);
+        inFlight = false;
+        if (active) {
+          setLoading(false);
+          if (pageVisible()) timer = window.setTimeout(() => void load(), 2_000);
+        }
       }
     };
+    const onVisibility = () => {
+      window.clearTimeout(timer);
+      if (pageVisible()) void load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void load();
-    const timer = window.setInterval(() => void load(), 2_000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      ++refreshRequest.current;
+      window.clearTimeout(timer);
     };
   }, [refresh]);
 

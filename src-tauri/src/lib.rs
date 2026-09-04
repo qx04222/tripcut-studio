@@ -1,5 +1,6 @@
 pub mod core;
 mod app_paths;
+mod libraries;
 mod packaging;
 #[cfg(target_os = "macos")]
 pub mod player;
@@ -684,6 +685,7 @@ async fn start_import(
     path: String,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<ImportStart, String> {
+    if state.read_only { return Err("只读窗口不能导入素材".into()); }
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = core::db::open_project(&db_path)?;
@@ -692,6 +694,62 @@ async fn start_import(
     .await
     .map_err(|error| format!("导入扫描任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_import_batches(state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::import_control::ImportBatch>, String> {
+    core::db::open_project(&state.db_path).and_then(|c| core::import_control::list_batches(&c)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn cancel_import_batch(id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    if state.read_only { return Err("只读窗口不能取消导入".into()); }
+    let path = state.db_path.clone();
+    let control=state.worker_control.clone().ok_or("后台任务控制器不可用")?;
+    tauri::async_runtime::spawn_blocking(move || control.with_maintenance(
+        || core::db::open_project(&path).and_then(|mut c| core::import_control::cancel_batch(&mut c,id)),
+        || core::db::open_project(&path).and_then(|mut c| core::import_control::cancel_batch(&mut c,id))))
+        .await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn dismiss_import_notices(state: tauri::State<'_, RuntimeState>) -> std::result::Result<usize, String> {
+    if state.read_only { return Err("只读窗口不能清理记录".into()); }
+    core::db::open_project(&state.db_path).and_then(|c| core::import_control::dismiss_notices(&c)).map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn preview_import_removal(request: core::import_control::RemovalRequest, state: tauri::State<'_, RuntimeState>) -> std::result::Result<core::import_control::RemovalPreview, String> {
+    core::db::open_project(&state.db_path).and_then(|c| core::import_control::preview(&c,&request)).map_err(|e|e.to_string())
+}
+#[tauri::command]
+async fn remove_imported_material(request: core::import_control::RemovalRequest, state: tauri::State<'_, RuntimeState>) -> std::result::Result<usize, String> {
+    if state.read_only { return Err("只读窗口不能移除素材".into()); }
+    let control = state.worker_control.clone().ok_or("后台任务控制器不可用")?;
+    let path = state.db_path.clone();
+    let cache = state.cache_root.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize> {
+        let mut connection=core::db::open_project(&path)?;
+        // Stop scans before waiting for their gate, so a large NAS traversal
+        // cannot make the removal button wait for a complete directory walk.
+        core::import_control::prepare_removal(&mut connection,&request)?;
+        let gate=core::import::import_gate(&connection);
+        drop(connection);
+        let _import_guard=gate.lock().unwrap_or_else(|e|e.into_inner());
+        control.with_maintenance(
+            || { let mut c=core::db::open_project(&path)?; core::import_control::prepare_removal(&mut c,&request) },
+            || {
+                let mut c=core::db::open_project(&path)?;
+                core::db::create_snapshot(&c,&path.parent().unwrap().join("snapshots"))?;
+                let ids=core::import_control::removal_ids(&c,&request)?;
+                let count=core::import_control::remove_records(&mut c,&request)?;
+                for id in ids {
+                    let directory=cache.join(id.to_string());
+                    if directory.exists() {
+                        if let Err(error)=std::fs::remove_dir_all(&directory) { tracing::warn!(%error, clip_id=id,"removed clip cache cleanup deferred"); }
+                    }
+                }
+                Ok(count)
+            }
+        )
+    }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
 }
 
 #[tauri::command]
@@ -1198,18 +1256,51 @@ fn player_status(player: tauri::State<'_, PlayerManager>) -> PlayerStatus {
 }
 
 fn development_root() -> Result<PathBuf> {
-    let base = app_paths::app_support_root().ok_or_else(|| {
-        CoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "neither TRIPCUT_APP_SUPPORT_DIR nor HOME is set",
-        ))
-    })?;
-    // debug 构建(cargo dev/test)用 dev 库;release 打包版用独立 default 库,绝不共享开发夹具数据。
-    if cfg!(debug_assertions) {
-        Ok(base.join("dev"))
-    } else {
-        Ok(base.join("default"))
-    }
+    libraries::active_path(&libraries::base()?)
+}
+
+static LIBRARY_REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+#[tauri::command]
+fn list_libraries() -> std::result::Result<libraries::Registry, String> {
+    let _guard = LIBRARY_REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    libraries::base().and_then(|base| libraries::load(&base)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_library(name: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<libraries::Registry, String> {
+    if state.read_only { return Err("只读窗口不能管理素材库".into()); }
+    let _guard = LIBRARY_REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    libraries::base().and_then(|base| libraries::create(&base, &name)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_library_hidden(id: String, hidden: bool, state: tauri::State<'_, RuntimeState>) -> std::result::Result<libraries::Registry, String> {
+    if state.read_only { return Err("只读窗口不能管理素材库".into()); }
+    let _guard = LIBRARY_REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    libraries::base().and_then(|base| libraries::set_hidden(&base, &id, hidden)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn switch_library(id: String, app: tauri::AppHandle, state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    if state.read_only { return Err("只读窗口不能切换素材库".into()); }
+    let control = state.worker_control.clone().ok_or("后台任务控制器不可用")?;
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let connection=core::db::open_project(&db_path)?;
+        let gate=core::import::import_gate(&connection); drop(connection);
+        let _import_guard=gate.lock().unwrap_or_else(|e|e.into_inner());
+        control.with_maintenance(|| Ok(()), || {
+            let connection = core::db::open_project(&db_path)?;
+            core::db::create_snapshot(&connection, &db_path.parent().unwrap().join("snapshots"))?;
+            let _guard = LIBRARY_REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            libraries::select(&libraries::base()?, &id)?;
+            // This closure runs on spawn_blocking, never the main thread.
+            // restart() delivers Exit there and does not return: keep both
+            // maintenance and import gates closed until the process exits.
+            app.restart()
+        })
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1273,6 +1364,7 @@ pub fn run() {
                 core::db::register_project_read_only(&db_path);
             } else {
                 core::db::initialize(&db_path)?;
+                core::import_control::fail_scans(&mut core::db::open_project(&db_path)?,None)?;
             }
 
             let mut connection = core::db::open_project(&db_path)?;
@@ -1547,6 +1639,15 @@ pub fn run() {
             run_clip_self_check,
             pick_import_folder,
             pick_export_folder,
+            list_libraries,
+            create_library,
+            set_library_hidden,
+            switch_library,
+            list_import_batches,
+            cancel_import_batch,
+            dismiss_import_notices,
+            preview_import_removal,
+            remove_imported_material,
             start_import,
             get_import_progress,
             list_clips,

@@ -82,6 +82,8 @@ afterEach(async () => {
     current.container.remove();
   }
   vi.clearAllMocks();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("persisted AI description reload", () => {
@@ -226,5 +228,36 @@ describe("same-route archive keeps the active episode in sync", () => {
     expect(container.textContent).not.toContain("clip-7.mov");
     // 同一次广播也必须清掉任何遗留的历史只读查看状态。
     expect(container.textContent).not.toContain("正在只读查看已封存集");
+  });
+});
+
+describe("selection background refresh", () => {
+  it("serializes slow requests and resumes immediately after becoming visible", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    let resolve!: (clips: ClipListItem[]) => void;
+    apiMocks.listClips.mockReturnValueOnce(new Promise<ClipListItem[]>((done) => { resolve = done; })).mockResolvedValue([]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    await act(async () => root.render(<SelectPage />));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+    await act(async () => resolve([]));
+    visibility.mockReturnValue("hidden");
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(2);
   });
 });

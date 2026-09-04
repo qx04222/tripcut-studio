@@ -75,7 +75,7 @@ export function motionClassLabel(value: string): string {
   return MOTION_CLASS_LABELS[value] ?? value;
 }
 
-export function AnalysisBadges({ clip }: { clip: ClipListItem }) {
+export function AnalysisBadges({ clip, compact = false }: { clip: ClipListItem; compact?: boolean }) {
   const badges = analysisBadgeKinds(clip);
   if (badges.length === 0) {
     if (clip.analysis_status === "pending" || clip.analysis_status === "running") {
@@ -84,13 +84,21 @@ export function AnalysisBadges({ clip }: { clip: ClipListItem }) {
     return <span className="analysis-pending">—</span>;
   }
 
+  const priority: AnalysisBadgeKind[] = ["unanalyzed", "clipped", "out_of_focus", "overexposed", "underexposed", "dark", "soft_focus", "handheld_shake", "silent"];
+  const ordered = compact ? [...badges].sort((a, b) => priority.indexOf(a) - priority.indexOf(b)) : badges;
+  const summary = ordered.map((kind) => BADGE_LABELS[kind]).join("、");
   return (
-    <span className="analysis-badges" aria-label="质量分析角标">
-      {badges.map((kind) => (
+    <span className="analysis-badges" aria-label={`质量分析角标：${summary}`} title={summary}>
+      {(compact ? ordered.slice(0, 2) : ordered).map((kind) => (
         <span className={`analysis-badge ${kind}`} key={kind}>
           {BADGE_LABELS[kind]}
         </span>
       ))}
+      {compact && badges.length > 2 ? (
+        <span className="analysis-badge analysis-more" title={ordered.slice(2).map((kind) => BADGE_LABELS[kind]).join("、")} aria-label={`另有 ${badges.length - 2} 项：${ordered.slice(2).map((kind) => BADGE_LABELS[kind]).join("、")}`}>
+          +{badges.length - 2}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -146,7 +154,10 @@ export function AnalysisPanel({ clip, onClose }: { clip: ClipListItem; onClose: 
               value={formatScore(analysis.underexposed_ratio * 100, "%")}
             />
             <Metric label="动态范围" value={formatScore(analysis.dynamic_range)} />
-            <Metric label="模糊度均值" value={formatScore(analysis.blur_mean)} />
+            <Metric label="模糊度均值" value={formatScore(
+              (analysis.tool_versions.signals as { blur_valid_samples?: number } | undefined)?.blur_valid_samples === 0
+                ? null : analysis.blur_mean,
+            )} />
             <Metric label="纹理熵均值" value={formatScore(analysis.entropy_mean)} />
             <Metric label="运动能量均值" value={formatScore(analysis.motion_mean)} />
             <Metric

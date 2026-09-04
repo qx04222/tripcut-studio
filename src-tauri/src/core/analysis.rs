@@ -447,13 +447,14 @@ fn analyze_source(
             "audio_clip_peak_db": AUDIO_CLIP_PEAK_DB
         },
         "preprocess": {
-            "exposure_fps": 1,
+            "exposure_fps": 2,
             "focus_positions": [0.1, 0.5, 0.9],
             "focus_rgb_size": [FOCUS_WIDTH, FOCUS_HEIGHT],
             "focus_kernel": "3x3-laplacian-cross"
         },
         "signals": {
-            "audio_dynamic_range_db": signals.audio_dynamic_range_db
+            "audio_dynamic_range_db": signals.audio_dynamic_range_db,
+            "blur_valid_samples": values_after(&log, "lavfi.blur=").iter().filter(|value| value.is_finite()).count()
         }
     });
 
@@ -483,8 +484,13 @@ fn parse_signal_log(log: &str, has_audio: bool) -> Result<ParsedSignals> {
     let motion = values_after(log, "lavfi.vmafmotion.score=");
 
     let frames = yhigh.len();
+    // blurdetect emits NaN for frames without measurable edges. Keep the
+    // original arrays aligned for per-frame guards, but exclude undefined
+    // samples from means: SQLite represents NaN as NULL (NOT NULL violation).
     let mean = |values: &[f64]| -> f64 {
-        if values.is_empty() { 0.0 } else { values.iter().sum::<f64>() / values.len() as f64 }
+        let (sum, count) = values.iter().filter(|value| value.is_finite())
+            .fold((0.0, 0_usize), |(sum, count), value| (sum + value, count + 1));
+        if count == 0 { 0.0 } else { sum / count as f64 }
     };
     let exposure_yavg = mean(&yavg);
 
@@ -1109,6 +1115,40 @@ lavfi.signalstats.YHIGH=250
         assert_eq!(parsed.audio_peak_db, Some(-0.05));
         assert_eq!(parsed.audio_dynamic_range_db, Some(18.25));
         assert!(parsed.audio_clipped);
+    }
+
+    #[test]
+    fn undefined_flat_frame_blur_does_not_poison_analysis_storage() {
+        let mut connection = analysis_connection();
+        let source = insert_source(&connection, Path::new("flat.mov"), "flat");
+        let log = "lavfi.signalstats.YAVG=235\nlavfi.signalstats.YMIN=235\nlavfi.signalstats.YHIGH=235\nlavfi.blur=nan\nlavfi.entropy.entropy.normal.Y=0\nlavfi.vmafmotion.score=0\n";
+        let mut result = computation(Vec::new());
+        result.signals = parse_signal_log(log, false).unwrap();
+        persist_analysis(&mut connection, &source, &result).unwrap();
+        let stored = get_clip_analysis(&connection, source.clip_id).unwrap().unwrap();
+        assert!(stored.blur_mean.is_finite());
+        assert_eq!(stored.out_of_focus_ratio, 0.0);
+        assert_eq!(stored.overexposed_ratio, 1.0);
+    }
+
+    #[test]
+    fn real_ffmpeg_flat_4k_analysis_persists_without_retry() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return; };
+        let directory = TestDirectory::new();
+        let path = directory.path().join("flat-4k.mp4");
+        assert!(generate_fixture(&path, &[
+            "-f", "lavfi", "-i", "color=c=white:s=3840x2160:r=30:d=2",
+            "-c:v", "mpeg4", "-q:v", "2", "-an",
+        ]));
+        let mut connection = analysis_connection();
+        let source = insert_source(&connection, &path, "flat-4k");
+        let result = analyze_source(&source, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+        persist_analysis(&mut connection, &source, &result).unwrap();
+        let stored = get_clip_analysis(&connection, source.clip_id).unwrap().unwrap();
+        assert!(stored.blur_mean.is_finite());
+        assert_eq!(stored.overexposed_ratio, 1.0);
+        assert_eq!(stored.out_of_focus_ratio, 0.0);
+        assert_eq!(stored.tool_versions["signals"]["blur_valid_samples"], 0);
     }
 
     #[test]
