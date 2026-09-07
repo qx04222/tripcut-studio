@@ -80,7 +80,17 @@ const checks = [
   { id: "tool.npm", pass: commandAvailable("npm"), detail: run("npm", ["--version"]).stdout },
   { id: "tool.cargo", pass: commandAvailable("cargo"), detail: commandAvailable("cargo") ? run("cargo", ["--version"]).stdout : "not found" },
   { id: "tool.rustc", pass: commandAvailable("rustc"), detail: commandAvailable("rustc") ? run("rustc", ["--version"]).stdout : "not found" },
-  { id: "tool.xcode", pass: xcode.exitCode === 0, detail: xcode.stdout || xcode.stderr },
+  (() => {
+    // Full Xcode.app (not just Command Line Tools) is only required for release/
+    // pre-notary packaging — package-dmg.sh does not invoke xcodebuild for a plain
+    // dev/qa build. Fatal only in those packaging modes; otherwise a warn (F-R0-8).
+    const packageMode = process.env.TRIPCUT_PACKAGE_MODE;
+    const xcodeRequired = packageMode === "release" || packageMode === "pre-notary";
+    const detail = xcode.stdout || xcode.stderr;
+    if (xcode.exitCode === 0) return { id: "tool.xcode", pass: true, detail };
+    if (xcodeRequired) return { id: "tool.xcode", pass: false, detail };
+    return { id: "tool.xcode", pass: true, warn: true, detail: `${detail} (CLT only; required for release/pre-notary)` };
+  })(),
   { id: "tool.ffmpeg", pass: commandAvailable("ffmpeg"), detail: run("ffmpeg", ["-version"]).stdout.split("\n")[0] ?? "" },
   { id: "tool.ffprobe", pass: commandAvailable("ffprobe"), detail: run("ffprobe", ["-version"]).stdout.split("\n")[0] ?? "" },
   {

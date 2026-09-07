@@ -8,19 +8,23 @@ import {
 } from "react";
 
 import { HelpOverlay } from "./HelpOverlay";
+import type { Update } from "@tauri-apps/plugin-updater";
 import {
   clearCacheAndRebuild,
   getAppInfo,
+  getComponentStatuses,
   getLlmStatus,
   getSettings,
   getSettingsStatus,
   listDeviceClocks,
   listLlmLedger,
   openLogsDirectory,
+  rollbackComponent,
   runClipSelfCheck,
   setSetting,
   setDeviceClockOffset,
   type AppInfo,
+  type ComponentStatus,
   type LlmLedgerEntry,
   type LlmStatus,
   type SettingsMap,
@@ -30,12 +34,24 @@ import {
 } from "./api";
 import { HELP_FAQS, KEYBOARD_SHORTCUT_GROUPS, WORKFLOW_STEPS } from "./helpContent";
 import { GENERATED_LICENSES } from "./licenses.generated";
+import {
+  IDLE_UPDATER_VIEW,
+  checkForUpdate,
+  downloadAndInstall,
+  downloadProgressLabel,
+  restartApp,
+  updateFoundMessage,
+  updaterErrorMessage,
+  type UpdaterView,
+} from "./updaterClient";
+import type { SettingsSectionId } from "./settingsSections";
 
 export const DEFAULT_SETTINGS: SettingsMap = {
   "appearance.theme": "system",
   "appearance.ui_scale": "1.0",
   "performance.worker_count": "4",
   "performance.proxy_enabled": "true",
+  "performance.memory_profile": "auto",
   "tools.ffmpeg_path": "",
   "tools.ffprobe_path": "",
   "tools.whisper_path": "",
@@ -66,7 +82,6 @@ const KEYBOARD_SHORTCUT_COUNT = KEYBOARD_SHORTCUT_GROUPS.reduce(
   0,
 );
 
-type SettingsSectionId = "appearance" | "performance" | "timeline" | "tools" | "analysis" | "about" | "cache";
 type SettingsIconName = SettingsSectionId | "theme" | "scale" | "proxy" | "worker" | "model" | "clip" | "help";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -80,6 +95,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "timeline", label: "旅行时间", eyebrow: "JOURNEY TIME", description: "多设备时钟校正" },
   { id: "tools", label: "工具链", eyebrow: "TOOLCHAIN", description: "本地依赖与模型" },
   { id: "analysis", label: "分析与 AI", eyebrow: "ANALYSIS & AI", description: "阈值、预算与隐私" },
+  { id: "privacy", label: "隐私与诊断", eyebrow: "PRIVACY & DIAGNOSTICS", description: "本地优先、诊断日志与崩溃报告" },
   { id: "about", label: "帮助与关于", eyebrow: "HELP & ABOUT", description: "指南、版本与许可" },
   { id: "cache", label: "缓存与重建", eyebrow: "CACHE & REBUILD", description: "可重建数据管理" },
 ] as const;
@@ -91,6 +107,7 @@ function SettingsIcon({ name }: { name: SettingsIconName }) {
     timeline: <><circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" /><path d="M5 4v4H1" /></>,
     tools: <><path d="m14.5 6.5 3-3 3 3-3 3" /><path d="m16.5 8.5-9 9" /><path d="m8.5 15.5-2 5-3-3 5-2" /></>,
     analysis: <><path d="M4 18V9" /><path d="M10 18V5" /><path d="M16 18v-7" /><path d="M3 18h17" /></>,
+    privacy: <><path d="M12 3 4 6.5V11c0 4.6 3.2 8.9 8 10 4.8-1.1 8-5.4 8-10V6.5Z" /><path d="m9.5 12 1.8 1.8L15 10" /></>,
     about: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5" /><path d="M12 8h.01" /></>,
     cache: <><path d="M5 7c0-2 3-3 7-3s7 1 7 3-3 3-7 3-7-1-7-3Z" /><path d="M5 7v5c0 2 3 3 7 3s7-1 7-3V7" /><path d="M5 12v5c0 2 3 3 7 3s7-1 7-3v-5" /></>,
     theme: <><circle cx="12" cy="12" r="7" /><path d="M12 5v14" /></>,
@@ -227,6 +244,28 @@ function ToolReadout({ label, status }: { label: string; status: ToolStatus | un
   );
 }
 
+function RollbackControl({
+  componentStatus,
+  busy,
+  onRollback,
+}: {
+  componentStatus: ComponentStatus | undefined;
+  busy: boolean;
+  onRollback: () => void;
+}) {
+  if (!componentStatus?.has_previous) return null;
+  return (
+    <div className="tool-rollback">
+      <button type="button" disabled={busy} onClick={onRollback}>
+        回滚到上一版
+      </button>
+      {componentStatus.previous_version ? (
+        <small>上一版本：{componentStatus.previous_version}</small>
+      ) : null}
+    </div>
+  );
+}
+
 interface ThresholdRowProps {
   label: string;
   description: string;
@@ -307,15 +346,22 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<SettingsMap>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [status, setStatus] = useState<SettingsStatus | null>(null);
+  const [componentStatuses, setComponentStatuses] = useState<ComponentStatus[]>([]);
   const [llmStatus, setLlmStatus] = useState<LlmStatus | null>(null);
   const [llmLedger, setLlmLedger] = useState<LlmLedgerEntry[]>([]);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [deviceClocks, setDeviceClocks] = useState<DeviceClockSetting[]>([]);
   const [clockDrafts, setClockDrafts] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("正在读取本地设置…");
+  // R6 终审 P2:回滚的成败提示此前跟保存/日志/时钟/缓存共用同一个 `notice`——
+  // 回滚一开始就会把用户刚看到的保存结果提示顶掉,回滚完成后的提示又会被
+  // 紧接着的另一次保存悄悄盖掉。拆成独立状态,互不清除。
+  const [rollbackNotice, setRollbackNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cacheConfirm, setCacheConfirm] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [updater, setUpdater] = useState<UpdaterView>(IDLE_UPDATER_VIEW);
+  const pendingUpdateRef = useRef<Update | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("appearance");
   const settingsRef = useRef<SettingsMap>(DEFAULT_SETTINGS);
   const confirmedSettingsRef = useRef<SettingsMap>(DEFAULT_SETTINGS);
@@ -323,10 +369,104 @@ export function SettingsPage() {
   const saveVersionRef = useRef(new Map<string, number>());
   const closeHelp = useCallback(() => setHelpOpen(false), []);
 
+  // 检查/下载/重启三步各自独立:下载失败(比如签名对不上)时不能把「检查更新」也锁死,
+  // 否则用户只能重启应用才能再试一次。
+  const runUpdateCheck = useCallback(async () => {
+    pendingUpdateRef.current = null;
+    setUpdater({ ...IDLE_UPDATER_VIEW, phase: "checking", message: "正在检查更新…" });
+    try {
+      const found = await checkForUpdate();
+      if (!found) {
+        setUpdater({ ...IDLE_UPDATER_VIEW, phase: "up-to-date", message: "已是最新版本。" });
+        return;
+      }
+      pendingUpdateRef.current = found;
+      const notes = found.body ?? null;
+      setUpdater({
+        phase: "available",
+        version: found.version,
+        notes,
+        downloadedBytes: 0,
+        totalBytes: null,
+        message: updateFoundMessage(found.version, notes),
+      });
+    } catch (error) {
+      setUpdater({ ...IDLE_UPDATER_VIEW, phase: "error", message: updaterErrorMessage(error) });
+    }
+  }, []);
+
+  const runUpdateInstall = useCallback(async () => {
+    const pending = pendingUpdateRef.current;
+    if (!pending) return;
+    setUpdater((previous) => ({
+      ...previous,
+      phase: "downloading",
+      downloadedBytes: 0,
+      totalBytes: null,
+      message: "正在下载更新包…",
+    }));
+    try {
+      await downloadAndInstall(pending, (downloadedBytes, totalBytes) => {
+        setUpdater((previous) => ({
+          ...previous,
+          phase: "downloading",
+          downloadedBytes,
+          totalBytes,
+          message: downloadProgressLabel(downloadedBytes, totalBytes),
+        }));
+      });
+      setUpdater((previous) => ({
+        ...previous,
+        phase: "ready",
+        message: `新版本 ${pending.version} 已安装，重启后生效。`,
+      }));
+    } catch (error) {
+      // 装不上就必须回到「可以再试」的状态,并且如实说清是签名没过还是网络断了。
+      pendingUpdateRef.current = pending;
+      setUpdater((previous) => ({
+        ...previous,
+        phase: "error",
+        message: updaterErrorMessage(error),
+      }));
+    }
+  }, []);
+
+  const runRestart = useCallback(async () => {
+    try {
+      await restartApp();
+    } catch (error) {
+      setUpdater((previous) => ({ ...previous, phase: "error", message: updaterErrorMessage(error) }));
+    }
+  }, []);
+
   const refreshStatus = useCallback(async () => {
     const next = await getSettingsStatus();
     setStatus(next);
   }, []);
+
+  const refreshComponentStatuses = useCallback(async () => {
+    const next = await getComponentStatuses();
+    setComponentStatuses(next);
+  }, []);
+
+  const rollbackTool = useCallback(async (componentId: string) => {
+    setBusy(true);
+    setRollbackNotice("正在回滚到上一版…");
+    try {
+      const updated = await rollbackComponent(componentId);
+      setComponentStatuses((current) => {
+        const next = current.filter((entry) => entry.id !== updated.id);
+        next.push(updated);
+        return next;
+      });
+      await refreshStatus().catch(() => undefined);
+      setRollbackNotice(`${updated.title} 已回滚到上一版`);
+    } catch (error) {
+      setRollbackNotice(`回滚失败：${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshStatus]);
 
   const refreshLlm = useCallback(async () => {
     const [nextStatus, nextLedger] = await Promise.all([getLlmStatus(), listLlmLedger()]);
@@ -352,8 +492,9 @@ export function SettingsPage() {
       getLlmStatus(),
       listLlmLedger(),
       listDeviceClocks(),
+      getComponentStatuses(),
     ])
-      .then(([savedResult, statusResult, infoResult, llmStatusResult, ledgerResult, clocksResult]) => {
+      .then(([savedResult, statusResult, infoResult, llmStatusResult, ledgerResult, clocksResult, componentsResult]) => {
         if (!active) return;
         if (savedResult.status === "rejected") {
           setNotice(`核心设置读取失败：${String(savedResult.reason)}；编辑已停用`);
@@ -370,6 +511,7 @@ export function SettingsPage() {
         if (infoResult.status === "fulfilled") setAppInfo(infoResult.value);
         if (llmStatusResult.status === "fulfilled") setLlmStatus(llmStatusResult.value);
         if (ledgerResult.status === "fulfilled") setLlmLedger(ledgerResult.value);
+        if (componentsResult.status === "fulfilled") setComponentStatuses(componentsResult.value);
         if (clocksResult.status === "fulfilled") {
           const clocks = clocksResult.value;
           setDeviceClocks(clocks);
@@ -429,6 +571,7 @@ export function SettingsPage() {
   const savePath = async (key: string, event: ChangeEvent<HTMLInputElement>) => {
     await save(key, event.currentTarget.value.trim());
     await refreshStatus().catch((error) => setNotice(`工具检测失败：${String(error)}`));
+    await refreshComponentStatuses().catch(() => undefined);
   };
 
   const runSelfCheck = async () => {
@@ -618,6 +761,17 @@ export function SettingsPage() {
               <span className="switch-track" aria-hidden="true" />
             </label>
           </SettingsRow>
+          <SettingsRow icon="worker" title="内存档位" description="自动按本机内存选择；省内存档降低解码并发以避免大项目时被系统换出。">
+            <select
+              aria-label="内存档位"
+              value={settings["performance.memory_profile"]}
+              onChange={(event) => void save("performance.memory_profile", event.currentTarget.value)}
+            >
+              <option value="auto">自动</option>
+              <option value="standard">标准</option>
+              <option value="low">省内存</option>
+            </select>
+          </SettingsRow>
           </div>
         </section>
 
@@ -673,6 +827,11 @@ export function SettingsPage() {
             <span>03 / TOOLCHAIN</span>
             <h2>工具链</h2>
             <p>留空时自动搜索环境变量与 PATH；填写路径后，失焦即保存并重新检测。</p>
+            {rollbackNotice ? (
+              <p className="tool-rollback-notice" role="status" aria-live="polite">
+                {rollbackNotice}
+              </p>
+            ) : null}
           </header>
           <div className="tool-grid">
             <div className="tool-config" data-setting-row>
@@ -691,6 +850,11 @@ export function SettingsPage() {
                   onBlur={(event) => void savePath("tools.ffmpeg_path", event)}
                 />
                 <ToolReadout label="FFmpeg" status={status?.ffmpeg} />
+                <RollbackControl
+                  componentStatus={componentStatuses.find((entry) => entry.id === "ffmpeg")}
+                  busy={busy}
+                  onRollback={() => void rollbackTool("ffmpeg")}
+                />
               </div>
             </div>
             <div className="tool-config" data-setting-row>
@@ -709,6 +873,11 @@ export function SettingsPage() {
                   onBlur={(event) => void savePath("tools.ffprobe_path", event)}
                 />
                 <ToolReadout label="FFprobe" status={status?.ffprobe} />
+                <RollbackControl
+                  componentStatus={componentStatuses.find((entry) => entry.id === "ffprobe")}
+                  busy={busy}
+                  onRollback={() => void rollbackTool("ffprobe")}
+                />
               </div>
             </div>
             <div className="tool-config" data-setting-row>
@@ -727,6 +896,11 @@ export function SettingsPage() {
                   onBlur={(event) => void savePath("tools.whisper_path", event)}
                 />
                 <ToolReadout label="Whisper" status={status?.whisper.binary} />
+                <RollbackControl
+                  componentStatus={componentStatuses.find((entry) => entry.id === "whisper-cli")}
+                  busy={busy}
+                  onRollback={() => void rollbackTool("whisper-cli")}
+                />
               </div>
             </div>
             <div className="model-config" data-setting-row>
@@ -753,6 +927,11 @@ export function SettingsPage() {
                     当前版本不提供在线下载。需要转写时，请自行核验来源与 SHA-256 后放入
                     {status?.whisper.models_directory ?? "应用 models 目录"}；缺失不影响核心工作流。
                   </small>
+                  <RollbackControl
+                    componentStatus={componentStatuses.find((entry) => entry.id === "whisper-model")}
+                    busy={busy}
+                    onRollback={() => void rollbackTool("whisper-model")}
+                  />
                 </div>
               </div>
             </div>
@@ -948,14 +1127,6 @@ export function SettingsPage() {
               </div>
             ))}
           </div>
-          <div className="llm-privacy-note">
-            <strong>发送内容明细</strong>
-            <p>
-              AI 描述只发送时长/时间基准、尺寸、L1 质量数值与运镜数值；不发送文件名、封面帧、图片、视频、音频、绝对路径或 GPS。
-              导演问答只发送当前筛选统计、精选清单文字摘要和你的问题，不发送素材帧或转写。
-              叙事编排只发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值，不发送文件名、拍摄时间、GPS、转写或频道记忆。所有输入通过标准输入传给你锁定的 provider，不出现在进程参数中。
-            </p>
-          </div>
           <div className="llm-ledger">
             <div className="llm-ledger-heading">
               <strong>最近 20 条调用账本</strong>
@@ -983,9 +1154,51 @@ export function SettingsPage() {
           </div>
         </section>
 
+        <section className="settings-card privacy-card wide" id="settings-panel-privacy" data-settings-section="privacy">
+          <header>
+            <span>05 / PRIVACY &amp; DIAGNOSTICS</span>
+            <h2>隐私与诊断</h2>
+            <p>本地优先是默认状态，不是一个开关；这里列出确切留在本机的内容，以及诊断信息的去向。</p>
+          </header>
+          <div className="settings-group">
+            <SettingsRow
+              icon="privacy"
+              title="诊断日志"
+              description="panic 日志仅保留 7 天；素材路径脱敏为文件名。"
+            >
+              <button className="settings-action" type="button" disabled={busy} onClick={() => void openLogs()}>
+                打开日志目录
+                <span aria-hidden="true">↗</span>
+              </button>
+            </SettingsRow>
+            <SettingsRow
+              icon="privacy"
+              title="崩溃报告"
+              description="旅剪不内置崩溃上报；是否发送诊断数据由 macOS 系统设置的“隐私与安全性 › 分析与改进”控制。"
+            >
+              <span className="settings-static-value">由系统设置控制</span>
+            </SettingsRow>
+          </div>
+          <div className="llm-privacy-note">
+            <strong>始终留在本机，绝不上传</strong>
+            <p>
+              原片、缩略图、转写文本、GPS 坐标、素材绝对路径与完整项目内容不会离开本机；LLM 增强按调用类型只发送匿名统计量或文字摘要
+              (见下方本分区的发送内容明细)，导出包只在你主动交付时才会离开本机。
+            </p>
+          </div>
+          <div className="llm-privacy-note">
+            <strong>发送内容明细</strong>
+            <p>
+              AI 描述只发送时长/时间基准、尺寸、L1 质量数值与运镜数值；不发送文件名、封面帧、图片、视频、音频、绝对路径或 GPS。
+              导演问答只发送当前筛选统计、精选清单文字摘要和你的问题，不发送素材帧或转写。
+              叙事编排只发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值，不发送文件名、拍摄时间、GPS、转写或频道记忆。所有输入通过标准输入传给你锁定的 provider，不出现在进程参数中。
+            </p>
+          </div>
+        </section>
+
         <section className="settings-card help-card" id="settings-panel-about" data-settings-section="about">
           <header>
-            <span>05 / HELP &amp; ABOUT</span>
+            <span>06 / HELP &amp; ABOUT</span>
             <h2>帮助与关于</h2>
             <p>中文工作指南、应用状态与第三方许可集中在一个低频分区。</p>
           </header>
@@ -1008,15 +1221,44 @@ export function SettingsPage() {
               </button>
             </SettingsRow>
             <SettingsRow
-              icon="help"
-              title="诊断日志"
-              description="panic 日志仅保留 7 天；素材路径脱敏为文件名。"
+              icon="about"
+              title="应用更新"
+              description={`当前版本 ${appInfo?.version ?? "—"} · 更新包经 minisign 签名校验后才会安装`}
             >
-              <button className="settings-action" type="button" disabled={busy} onClick={() => void openLogs()}>
-                打开日志目录
-                <span aria-hidden="true">↗</span>
+              <button
+                className="settings-action"
+                type="button"
+                data-updater-action="check"
+                disabled={updater.phase === "checking" || updater.phase === "downloading"}
+                onClick={() => void runUpdateCheck()}
+              >
+                {updater.phase === "checking" ? "正在检查更新…" : "检查更新"}
               </button>
+              {(updater.phase === "available" || updater.phase === "downloading" || updater.phase === "error") && pendingUpdateRef.current ? (
+                <button
+                  className="settings-action"
+                  type="button"
+                  data-updater-action="install"
+                  disabled={updater.phase === "downloading"}
+                  onClick={() => void runUpdateInstall()}
+                >
+                  {updater.phase === "downloading" ? "正在下载并安装…" : "下载并安装"}
+                </button>
+              ) : null}
+              {updater.phase === "ready" ? (
+                <button
+                  className="settings-action"
+                  type="button"
+                  data-updater-action="restart"
+                  onClick={() => void runRestart()}
+                >
+                  立即重启
+                </button>
+              ) : null}
             </SettingsRow>
+            <p className="updater-status" data-updater-status={updater.phase}>
+              {updater.message}
+            </p>
           </div>
         </section>
 
@@ -1060,7 +1302,7 @@ export function SettingsPage() {
         </section>
         <section className="settings-card cache-card" id="settings-panel-cache" data-settings-section="cache">
           <header>
-            <span>06 / CACHE &amp; REBUILD</span>
+            <span>07 / CACHE &amp; REBUILD</span>
             <h2>缓存与重建</h2>
             <p>只管理可重建产物，不触碰原片、片段选择与评级。</p>
           </header>

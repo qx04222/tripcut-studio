@@ -21,6 +21,7 @@ import {
   type SelectSegment,
 } from "./api";
 import { PLAYER_SHORTCUTS } from "./helpContent";
+import { useFocusTrap } from "./useFocusTrap";
 import "./PlayerOverlay.css";
 
 const STATUS_INTERVAL_MS = 80;
@@ -117,6 +118,7 @@ export function PlayerOverlay({
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef<PlayerStatus | null>(null);
   const compositionRef = useRef(false);
   const closingRef = useRef(false);
@@ -130,6 +132,9 @@ export function PlayerOverlay({
   const [segmentNotice, setSegmentNotice] = useState<string | null>(null);
   const [savingSegment, setSavingSegment] = useState(false);
   const fps = clipFps(clip);
+
+  // O11:整个沉浸播放层是个模态,Tab 不能漏到背后的筛片页。
+  useFocusTrap(overlayRef, true);
 
   useEffect(() => {
     statusRef.current = status;
@@ -283,6 +288,15 @@ export function PlayerOverlay({
     }
   }, [clip.id, inPoint, onSegmentsChange, outPoint]);
 
+  const seekBySlider = useCallback(
+    (delta: number) => {
+      const current = statusRef.current;
+      if (!current || current.phase !== "ready" || current.duration <= 0) return;
+      void sendCommands([{ type: "seek_abs", seconds: Math.min(current.duration, Math.max(0, current.pos + delta)) }]);
+    },
+    [sendCommands],
+  );
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const imeActive = compositionRef.current || event.isComposing || event.keyCode === 229;
@@ -326,6 +340,12 @@ export function PlayerOverlay({
         if (!savingSegment) void saveSegment();
         return;
       }
+      // O11:进度条本身拿到焦点时,←/→ 由该元素自身的 onKeyDown(见下方
+      // player-progress,满足 jsx-a11y/click-events-have-key-events)处理 slider
+      // 语义的 1 秒定位——这里只负责不让它继续落到全局逐帧步进分支,避免重复触发。
+      if ((key === "arrowleft" || key === "arrowright") && document.activeElement === progressRef.current) {
+        return;
+      }
       const commands = playerCommandsForKey(
         key,
         current,
@@ -337,7 +357,7 @@ export function PlayerOverlay({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [error, leave, saveSegment, savingSegment, sendCommands]);
+  }, [error, leave, saveSegment, savingSegment, seekBySlider, sendCommands]);
 
   const beginComposition = (_event: CompositionEvent<HTMLDivElement>) => {
     compositionRef.current = true;
@@ -348,7 +368,7 @@ export function PlayerOverlay({
     setComposing(false);
   };
 
-  const seekFromPointer = (event: MouseEvent<HTMLButtonElement>) => {
+  const seekFromPointer = (event: MouseEvent<HTMLDivElement>) => {
     const current = statusRef.current;
     if (!current || current.phase !== "ready" || current.duration <= 0) return;
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -388,12 +408,26 @@ export function PlayerOverlay({
       ) : null}
 
       <div className="player-controlbar">
-        <button
+        <div
           className="player-progress"
-          type="button"
-          aria-label="点击定位播放位置"
+          ref={progressRef}
+          role="slider"
+          aria-label="播放进度"
+          aria-valuemin={0}
+          aria-valuemax={status?.duration ?? 0}
+          aria-valuenow={status?.pos ?? 0}
+          aria-disabled={!status || status.phase !== "ready" || status.duration <= 0}
+          tabIndex={0}
           onClick={seekFromPointer}
-          disabled={!status || status.phase !== "ready" || status.duration <= 0}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              seekBySlider(-1);
+            } else if (event.key === "ArrowRight") {
+              event.preventDefault();
+              seekBySlider(1);
+            }
+          }}
         >
           <span className="player-progress-fill" style={{ width: `${progress}%` }} />
           {status && status.duration > 0
@@ -418,7 +452,7 @@ export function PlayerOverlay({
               style={{ left: `${Math.min(100, inPoint / status.duration * 100)}%` }}
             />
           ) : null}
-        </button>
+        </div>
         <div className="player-transport">
           <button
             className="player-play-button"

@@ -101,9 +101,11 @@ fn ensure_confirmed(transaction: &Connection, episode_id: i64) -> Result<i64> {
         .optional()?
         .ok_or_else(|| CoreError::Story("该集还没有 AI 编排建议,无法进入人工编辑".to_owned()))?;
 
+    // 人工确认版继承它所基于的 suggested 的故事模板,免得编辑一次就丢了模板归属。
     transaction.execute(
-        "INSERT INTO narrative_revisions(episode_id, kind, based_on_revision_id, created_at)
-         VALUES (?1, 'confirmed', ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        "INSERT INTO narrative_revisions(episode_id, kind, based_on_revision_id, template, created_at)
+         SELECT ?1, 'confirmed', ?2, template, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         FROM narrative_revisions WHERE id = ?2",
         params![episode_id, suggested],
     )?;
     let confirmed = transaction.last_insert_rowid();

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tripcut.local/benchmark/observations.schema.json",
+  "title": "TripCut benchmark driver observations",
+  "type": "object",
+  "required": ["schema_version", "run", "workflow", "fixtures"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "required": ["app_version", "driver_version", "started_at", "finished_at"],
+      "properties": {
+        "app_version": { "type": "string" },
+        "driver_version": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["import", "analysis", "stack", "l3", "export"],
+      "properties": {
+        "import": { "enum": ["done", "failed"] },
+        "analysis": { "enum": ["done", "failed"] },
+        "stack": { "enum": ["done", "failed"] },
+        "l3": { "enum": ["done", "skipped", "failed"] },
+        "export": { "enum": ["done", "failed"] }
+      },
+      "additionalProperties": false
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id", "scene_boundaries_us", "stack_id", "recommended", "retained",
+          "rejected", "important_event_detected", "vfr_mappings",
+          "proxy_mappings", "routine_repeated_in_story"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-G]-[0-9]{3}$" },
+          "scene_boundaries_us": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+          "stack_id": { "type": ["string", "null"] },
+          "recommended": { "type": "boolean" },
+          "retained": { "type": "boolean" },
+          "rejected": { "type": "boolean" },
+          "important_event_detected": { "type": "boolean" },
+          "vfr_mappings": { "$ref": "#/$defs/mappings" },
+          "proxy_mappings": { "$ref": "#/$defs/mappings" },
+          "routine_repeated_in_story": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "mappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_pts_us", "mapped_source_pts_us"],
+        "properties": {
+          "source_pts_us": { "type": "integer" },
+          "mapped_source_pts_us": { "type": "integer" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
+

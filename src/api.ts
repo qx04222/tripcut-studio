@@ -132,6 +132,8 @@ export interface ImportProgress {
   done: number;
   failed: number;
   running: number;
+  waiting_for_permit: number;
+  paused_for_memory: boolean;
 }
 
 export interface ClipAnalysis {
@@ -199,6 +201,12 @@ export interface ClipListItem {
   rotation?: number | null;
   color_transfer?: string | null;
   hdr_flag?: boolean;
+  iso_value?: number | null;
+  shutter_speed?: string | null;
+  aperture?: string | null;
+  display_lut_path?: string | null;
+  selected_transcribe_track?: number | null;
+  selected_monitor_track?: number | null;
   tz_guess?: string | null;
   tz_conflict?: boolean;
   device_model?: string | null;
@@ -279,7 +287,15 @@ export type PlayerCommand =
   | { type: "pause" }
   | { type: "step_fwd" }
   | { type: "step_back" }
-  | { type: "seek_abs"; seconds: number };
+  | { type: "seek_abs"; seconds: number }
+  | { type: "apply_display_lut"; path: string }
+  | { type: "clear_display_lut" }
+  | { type: "select_audio_track"; stream_index: number }
+  | { type: "set_mute"; muted: boolean }
+  // Applied automatically by the backend on `player_open` (see
+  // `apply_stored_display_prefs` in src-tauri/src/lib.rs) — the frontend
+  // does not issue this itself.
+  | { type: "set_rotation"; degrees: number | null };
 
 export interface PlayerStatus {
   phase: "closed" | "loading" | "ready" | "error";
@@ -316,6 +332,17 @@ export interface ClipDimension {
   label: string;
   score: number;
   source: string;
+}
+
+export type AudioTrackRoleGuess = "onboard_mic" | "wireless_mic" | "backup" | "unknown";
+
+export interface ClipAudioTrack {
+  clip_id: number;
+  stream_index: number;
+  channels: number | null;
+  channel_layout: string | null;
+  sample_rate: number | null;
+  role_guess: AudioTrackRoleGuess | null;
 }
 
 export interface SimilarGroupMember {
@@ -431,10 +458,11 @@ export interface Storyboard {
   items: StoryItem[];
   candidates: StoryItem[];
   can_undo: boolean;
-  mode: "legacy" | "narrative";
+  mode: "legacy" | "narrative" | "template";
   mode_notice: string;
   narrative: NarrativeOverview | null;
   narration_job_status: "pending" | "running" | "done" | "failed" | "blocked" | null;
+  current_template: StoryTemplate | null;
 }
 
 export interface NarrativeOverview {
@@ -466,6 +494,7 @@ export interface NarrativeEpisode {
   title: string;
   theme: string;
   created_at: string;
+  template: StoryTemplate | null;
 }
 
 export interface NarrativeChapter {
@@ -608,6 +637,15 @@ export interface ExportStatus {
   items: ExportItemStatus[];
   output_path: string | null;
   error: string | null;
+  contact_sheet_glyph_fallbacks: number | null;
+  /** 联系表渲染成功时损坏/截断而退化成灰框占位的封面张数；联系表被关闭、尚未渲染或渲染失败时是 `null`。 */
+  contact_sheet_cover_failures: number | null;
+  /** R6 Task 6 G9：参考粗剪目标时长（30/60/180 秒）；`null` 表示完整长度。 */
+  rough_cut_target_seconds: number | null;
+  /** 参考粗剪实际拼出来的总时长，配合 tb_num/tb_den 换算成秒；粗剪转码完成前是 `null`。 */
+  rough_cut_actual_ticks: number | null;
+  rough_cut_actual_tb_num: number | null;
+  rough_cut_actual_tb_den: number | null;
 }
 
 export interface JianyingAvailability {
@@ -705,12 +743,48 @@ export function startImport(path: string): Promise<ImportStart> {
   return invoke<ImportStart>("start_import", { path });
 }
 
+export function importPaths(paths: string[]): Promise<ImportStart[]> {
+  return invoke<ImportStart[]>("import_paths", { paths });
+}
+
 export function getImportProgress(): Promise<ImportProgress> {
   return invoke<ImportProgress>("get_import_progress");
 }
 
+export interface MissingClip {
+  clip_id: number;
+  file_name: string;
+  volume_uuid: string;
+  volume_label: string | null;
+  rel_path: string;
+  missing_since: string;
+}
+
+export interface RelinkOutcome {
+  relinked: number;
+  rejected: string[];
+  still_missing: number;
+}
+
+export function listMissingClips(): Promise<MissingClip[]> {
+  return invoke<MissingClip[]>("list_missing_clips");
+}
+
+export function pickRelinkFolder(): Promise<string | null> {
+  return invoke<string | null>("pick_relink_folder");
+}
+
+export function relinkVolume(volumeUuid: string, newMount: string): Promise<RelinkOutcome> {
+  return invoke<RelinkOutcome>("relink_volume", { volumeUuid, newMount });
+}
+
 export function listClips(): Promise<ClipListItem[]> {
   return invoke<ClipListItem[]>("list_clips");
+}
+
+/** `listClips` 的廉价前哨:轮询前先比这个字符串,不变就跳过整表拉取。 */
+export function getClipsRevision(): Promise<string> {
+  return invoke<string>("get_clips_revision");
 }
 
 export function listDeviceClocks(): Promise<DeviceClockSetting[]> {
@@ -727,6 +801,45 @@ export function listClipDimensions(): Promise<ClipDimension[]> {
 
 export function setClipTimeStage(clipId: number, label: string): Promise<void> {
   return invoke<void>("set_clip_time_stage", { clipId, label });
+}
+
+export function probeAudioTracks(clipId: number): Promise<ClipAudioTrack[]> {
+  return invoke<ClipAudioTrack[]>("probe_audio_tracks", { clipId });
+}
+
+export function listAudioTracks(clipId: number): Promise<ClipAudioTrack[]> {
+  return invoke<ClipAudioTrack[]>("list_audio_tracks", { clipId });
+}
+
+export type DisplayLutScope = "clip" | "episode";
+
+/// Preview-only display LUT. `scope: "clip"` takes a clip id as `targetId`;
+/// `scope: "episode"` takes an episode id and writes every clip of it.
+/// Never affects proxy generation or exported/delivered files.
+export function setDisplayLut(
+  scope: DisplayLutScope,
+  targetId: number,
+  path: string,
+): Promise<void> {
+  return invoke<void>("set_display_lut", { scope, targetId, path });
+}
+
+export function clearDisplayLut(scope: DisplayLutScope, targetId: number): Promise<void> {
+  return invoke<void>("clear_display_lut", { scope, targetId });
+}
+
+export function setPlaybackTrack(clipId: number, streamIndex: number): Promise<void> {
+  return invoke<void>("set_playback_track", { clipId, streamIndex });
+}
+
+export function setTranscribeTrack(clipId: number, streamIndex: number): Promise<void> {
+  return invoke<void>("set_transcribe_track", { clipId, streamIndex });
+}
+
+/// Absolute paths of every `.cube` file under the app's `luts/` support
+/// directory (created on first call if missing).
+export function listDisplayLuts(): Promise<string[]> {
+  return invoke<string[]>("list_display_luts");
 }
 
 export function getClipAnalysis(clipId: number): Promise<ClipAnalysis | null> {
@@ -783,8 +896,43 @@ export function getStoryboard(): Promise<Storyboard> {
   return invoke<Storyboard>("get_storyboard");
 }
 
-export function enqueueNarrateEpisode(): Promise<number> {
-  return invoke<number>("enqueue_narrate_episode");
+export interface JourneyEntry {
+  kind: "clip" | "destination";
+  canonical_time: string;
+  undated: boolean;
+  clip_id: number | null;
+  file_name: string | null;
+  cover_url: string | null;
+  destination_id: number | null;
+  title: string | null;
+  place_name: string | null;
+}
+
+export function getJourneyTimeline(): Promise<JourneyEntry[]> {
+  return invoke<JourneyEntry[]>("get_journey_timeline");
+}
+
+export type StoryTemplate = "cinematic" | "fastcut" | "ambient" | "diary";
+
+export interface StoryTemplateInfo {
+  id: StoryTemplate;
+  name_zh: string;
+  blurb_zh: string;
+}
+
+export function listStoryTemplates(): Promise<StoryTemplateInfo[]> {
+  return invoke<StoryTemplateInfo[]>("list_story_templates");
+}
+
+/**
+ * job id 和 revision id 是两个不同的整数空间，不能互认——kind 就是用来区分它们的。
+ * 启用 LLM 时排队一个任务（kind: "job"）；未启用时后端同步跑模板兜底并落地一版
+ * suggested revision（kind: "revision"）。
+ */
+export type EnqueueOutcome = { kind: "job"; id: number } | { kind: "revision"; id: number };
+
+export function enqueueNarrateEpisode(template?: StoryTemplate): Promise<EnqueueOutcome> {
+  return invoke<EnqueueOutcome>("enqueue_narrate_episode", { template: template ?? null });
 }
 
 export function updateDestinationCard(card: DestinationCard): Promise<void> {
@@ -822,8 +970,21 @@ export function pickExportFolder(): Promise<string | null> {
   return invoke<string | null>("pick_export_folder");
 }
 
-export function startExport(dest: string): Promise<ExportStatus> {
-  return invoke<ExportStatus>("start_export", { dest });
+/** 参考粗剪目标时长，秒；`undefined`/省略表示完整长度。 */
+export type RoughCutTargetSeconds = 30 | 60 | 180;
+
+export function startExport(
+  dest: string,
+  overridePlatform?: TargetPlatform,
+  includeContactSheet = true,
+  targetSeconds?: RoughCutTargetSeconds,
+): Promise<ExportStatus> {
+  return invoke<ExportStatus>("start_export", {
+    dest,
+    overridePlatform,
+    includeContactSheet,
+    targetSeconds,
+  });
 }
 
 export function getExportStatus(jobId: number | null): Promise<ExportStatus> {
@@ -878,6 +1039,10 @@ export function deleteSelectSegment(segmentId: number): Promise<void> {
   return invoke<void>("delete_select_segment", { segmentId });
 }
 
+export function restoreSelectSegment(segmentId: number): Promise<void> {
+  return invoke<void>("restore_select_segment", { segmentId });
+}
+
 export function playerSetViewport(viewport: PlayerViewport): Promise<void> {
   return invoke<void>("player_set_viewport", { viewport });
 }
@@ -898,6 +1063,20 @@ export function playerStatus(): Promise<PlayerStatus> {
   return invoke<PlayerStatus>("player_status");
 }
 
+export type TargetPlatform = "douyin" | "xiaohongshu" | "bilibili" | "moments" | "family" | "general";
+export type CanvasOrientation = "landscape" | "portrait" | "both";
+
+export interface PlatformPreset {
+  platform: TargetPlatform;
+  display_name: string;
+  portrait: [number, number];
+  landscape: [number, number];
+  duration_budget_ticks: number;
+  tb_num: number;
+  tb_den: number;
+  subtitle_style: Record<string, unknown>;
+}
+
 export interface EpisodeSummary {
   id: number;
   title: string;
@@ -909,6 +1088,8 @@ export interface EpisodeSummary {
   clip_count: number;
   favorite_count: number;
   export_count: number;
+  target_platform: TargetPlatform;
+  canvas_orientation: CanvasOrientation;
 }
 
 export interface ArchiveOutcome {
@@ -928,8 +1109,28 @@ export async function renameCurrentEpisode(title: string, theme: string): Promis
   return invoke<EpisodeSummary>("rename_current_episode", { title, theme });
 }
 
-export async function archiveCurrentEpisode(nextTitle: string | null): Promise<ArchiveOutcome> {
-  return invoke<ArchiveOutcome>("archive_current_episode", { nextTitle });
+export async function archiveCurrentEpisode(
+  nextTitle: string | null,
+  nextPlatform?: TargetPlatform | null,
+  nextOrientation?: CanvasOrientation | null,
+): Promise<ArchiveOutcome> {
+  return invoke<ArchiveOutcome>("archive_current_episode", {
+    nextTitle,
+    nextPlatform: nextPlatform ?? null,
+    nextOrientation: nextOrientation ?? null,
+  });
+}
+
+export function listPlatformPresets(): Promise<PlatformPreset[]> {
+  return invoke<PlatformPreset[]>("list_platform_presets");
+}
+
+export function setEpisodePlatform(
+  episodeId: number,
+  platform: TargetPlatform,
+  orientation: CanvasOrientation,
+): Promise<void> {
+  return invoke<void>("set_episode_platform", { episodeId, platform, orientation });
 }
 
 export interface RevisionInfo {
@@ -986,14 +1187,32 @@ export async function getMemoryLens(): Promise<MemoryLensEntry[]> {
 }
 
 export interface GlobalSearchHit {
-  kind: "file" | "transcript" | "description" | "dimension";
+  kind: "file" | "transcript" | "description" | "dimension" | "ocr" | "pinyin";
   clip_id: number;
   file_name: string;
   excerpt: string;
+  episode_id: number | null;
 }
 
 export async function searchEverything(query: string): Promise<GlobalSearchHit[]> {
   return invoke<GlobalSearchHit[]>("search_everything", { query });
+}
+
+export interface OcrTextHit {
+  frame_tick: number;
+  tb_num: number;
+  tb_den: number;
+  text: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+}
+
+export function listOcrHits(clipId: number): Promise<OcrTextHit[]> {
+  return invoke<OcrTextHit[]>("list_ocr_hits", { clipId });
+}
+
+export function enqueueOcrForEpisode(): Promise<number> {
+  return invoke<number>("enqueue_ocr_for_episode");
 }
 
 
@@ -1012,6 +1231,9 @@ export interface ComponentStatus {
   detail: string;
   installable: boolean;
   approx_size_mb: number;
+  has_previous: boolean;
+  previous_version: string | null;
+  recovered_from_rolling: boolean;
 }
 
 export interface InstallProgress {
@@ -1033,6 +1255,10 @@ export async function startComponentInstall(component: string): Promise<void> {
 
 export async function getInstallProgress(component: string): Promise<InstallProgress> {
   return invoke<InstallProgress>("get_install_progress", { component });
+}
+
+export async function rollbackComponent(component: string): Promise<ComponentStatus> {
+  return invoke<ComponentStatus>("rollback_component", { component });
 }
 
 export async function cancelComponentInstall(component: string): Promise<void> {
@@ -1093,3 +1319,50 @@ export const cancelImportBatch = (id: number) => invoke<void>("cancel_import_bat
 export const dismissImportNotices = () => invoke<number>("dismiss_import_notices");
 export const previewImportRemoval = (request: RemovalRequest) => invoke<RemovalPreview>("preview_import_removal", { request });
 export const removeImportedMaterial = (request: RemovalRequest) => invoke<number>("remove_imported_material", { request });
+
+export type MusicSectionLabel = "intro" | "verse" | "build" | "climax" | "outro" | "other";
+
+export interface MusicTrackSummary {
+  id: number;
+  episode_id: number;
+  file_name: string;
+  rel_path: string;
+  quick_hash: string | null;
+  duration_ticks: number | null;
+  tb_num: number;
+  tb_den: number;
+  bpm: number | null;
+  analysis_status: "pending" | "running" | "done" | "failed";
+  blocked_summary?: string | null;
+  created_at: string;
+}
+
+export interface MusicBeat {
+  tick: number;
+  is_downbeat: boolean;
+  strength: number | null;
+}
+
+export interface MusicSection {
+  start_tick: number;
+  end_tick: number;
+  label: MusicSectionLabel;
+  energy: number | null;
+}
+
+export interface MusicAnalysis {
+  track: MusicTrackSummary;
+  beats: MusicBeat[];
+  sections: MusicSection[];
+  suggested_cut_ticks: number[];
+}
+
+export const pickMusicFile = () => invoke<string | null>("pick_music_file");
+export const importMusicTrack = (path: string) =>
+  invoke<MusicTrackSummary>("import_music_track", { path });
+export const listMusicTracks = (episodeId: number) =>
+  invoke<MusicTrackSummary[]>("list_music_tracks", { episodeId });
+export const getMusicAnalysis = (trackId: number) =>
+  invoke<MusicAnalysis>("get_music_analysis", { trackId });
+export const deleteMusicTrack = (trackId: number) =>
+  invoke<void>("delete_music_track", { trackId });

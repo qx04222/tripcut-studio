@@ -3,15 +3,63 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   cancelExport,
   generateJianyingDraft,
+  getCurrentEpisode,
   getExportStatus,
   getJianyingAvailability,
+  listPlatformPresets,
   pickExportFolder,
   revealExport,
   startExport,
   type ExportStatus,
   type JianyingAvailability,
   type JianyingDraftResult,
+  type PlatformPreset,
+  type RoughCutTargetSeconds,
+  type TargetPlatform,
 } from "./api";
+
+const PLATFORM_LABELS: Record<TargetPlatform, string> = {
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  bilibili: "B站",
+  moments: "朋友圈",
+  family: "家庭纪录",
+  general: "通用",
+};
+
+const PLATFORM_OPTIONS = Object.keys(PLATFORM_LABELS) as TargetPlatform[];
+
+/** R6 Task 6 G9：参考粗剪目标时长下拉——`null` 表示完整长度。 */
+type TargetSecondsOption = RoughCutTargetSeconds | null;
+
+const ROUGH_CUT_TARGET_OPTIONS: TargetSecondsOption[] = [null, 30, 60, 180];
+
+const ROUGH_CUT_TARGET_LABELS: Record<string, string> = {
+  full: "完整",
+  "30": "30 秒",
+  "60": "60 秒",
+  "180": "3 分钟",
+};
+
+function roughCutTargetKey(option: TargetSecondsOption): string {
+  return option === null ? "full" : String(option);
+}
+
+/** 平台预设的时长预算（ticks -> 秒，整数除法，`0`/负数一律按不限时长处理）。 */
+function presetBudgetSeconds(preset: PlatformPreset | undefined): number {
+  if (!preset || preset.duration_budget_ticks <= 0 || preset.tb_den <= 0) return 0;
+  return Math.floor((preset.duration_budget_ticks * preset.tb_num) / preset.tb_den);
+}
+
+/** 预算内能选的最大档位；没有任何档位 ≤ 预算（含不限时长）时回退到"完整"。 */
+function closestTargetWithinBudget(budgetSeconds: number): TargetSecondsOption {
+  if (budgetSeconds <= 0) return null;
+  const candidates = ROUGH_CUT_TARGET_OPTIONS.filter(
+    (option): option is RoughCutTargetSeconds => option !== null && option <= budgetSeconds,
+  );
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, option) => (option > best ? option : best));
+}
 
 const EMPTY_STATUS: ExportStatus = {
   job_id: null,
@@ -26,6 +74,12 @@ const EMPTY_STATUS: ExportStatus = {
   items: [],
   output_path: null,
   error: null,
+  contact_sheet_glyph_fallbacks: null,
+  contact_sheet_cover_failures: null,
+  rough_cut_target_seconds: null,
+  rough_cut_actual_ticks: null,
+  rough_cut_actual_tb_num: null,
+  rough_cut_actual_tb_den: null,
 };
 
 const CHECKING_JIANYING: JianyingAvailability = {
@@ -82,6 +136,13 @@ interface DeliverViewProps {
   nativeBusy: boolean;
   nativeResult: JianyingDraftResult | null;
   nativeNotice: string | null;
+  episodePlatform: TargetPlatform;
+  overridePlatform: TargetPlatform;
+  includeContactSheet: boolean;
+  targetSeconds: TargetSecondsOption;
+  onOverridePlatformChange: (platform: TargetPlatform) => void;
+  onIncludeContactSheetChange: (include: boolean) => void;
+  onTargetSecondsChange: (targetSeconds: TargetSecondsOption) => void;
   onGenerate: () => void;
   onGenerateNative: () => void;
   onCancel: () => void;
@@ -97,6 +158,13 @@ export function DeliverView({
   nativeBusy,
   nativeResult,
   nativeNotice,
+  episodePlatform,
+  overridePlatform,
+  includeContactSheet,
+  targetSeconds,
+  onOverridePlatformChange,
+  onIncludeContactSheetChange,
+  onTargetSecondsChange,
   onGenerate,
   onGenerateNative,
   onCancel,
@@ -150,6 +218,38 @@ export function DeliverView({
           </div>
         </div>
       </div>
+
+      <label className="deliver-platform-override" aria-label="本次交付平台">
+        本次交付平台
+        <select
+          value={overridePlatform}
+          onChange={(event) => onOverridePlatformChange(event.currentTarget.value as TargetPlatform)}
+        >
+          {PLATFORM_OPTIONS.map((platform) => (
+            <option key={platform} value={platform}>
+              {PLATFORM_LABELS[platform]}
+              {platform === episodePlatform ? "(本集设置)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="deliver-rough-cut-target" aria-label="参考粗剪时长">
+        参考粗剪时长
+        <select
+          value={roughCutTargetKey(targetSeconds)}
+          onChange={(event) => {
+            const key = event.currentTarget.value;
+            onTargetSecondsChange(key === "full" ? null : (Number(key) as RoughCutTargetSeconds));
+          }}
+        >
+          {ROUGH_CUT_TARGET_OPTIONS.map((option) => (
+            <option key={roughCutTargetKey(option)} value={roughCutTargetKey(option)}>
+              {ROUGH_CUT_TARGET_LABELS[roughCutTargetKey(option)]}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="jianying-draft-card" aria-label="剪映原生草稿实验功能">
         <div>
@@ -224,6 +324,20 @@ export function DeliverView({
           <PackagePart index="01" title="精选片段" body="打点片段帧精确重编码并回读 PTS；无片段的收藏素材整条 remux。" />
           <PackagePart index="02" title="参考粗剪" body="按拍摄时间顺序，统一生成 1080p H.264/AAC 文件。" />
           <PackagePart index="03" title="镜头表 CSV" body="UTF-8 BOM，含章节、故事顺序、画面参数、星级、L1 角标和失败备注。" />
+          <label className="deliver-content-card deliver-contact-sheet-toggle" aria-label="联系表.pdf">
+            <span>03</span>
+            <div>
+              <strong>
+                <input
+                  type="checkbox"
+                  checked={includeContactSheet}
+                  onChange={(event) => onIncludeContactSheetChange(event.currentTarget.checked)}
+                />
+                联系表.pdf
+              </strong>
+              <p>A4 网格联系表，封面缩略图 + 序号/入出点/章节，按本次交付平台的画布方向排横版或竖版。</p>
+            </div>
+          </label>
           <PackagePart index="04" title="交付说明" body="一屏中文说明，告诉你如何把稳定包带入剪映。" />
         </div>
       )}
@@ -253,6 +367,31 @@ export function DeliverPage() {
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeResult, setNativeResult] = useState<JianyingDraftResult | null>(null);
   const [nativeNotice, setNativeNotice] = useState<string | null>(null);
+  const [episodePlatform, setEpisodePlatform] = useState<TargetPlatform>("general");
+  const [overridePlatform, setOverridePlatform] = useState<TargetPlatform>("general");
+  const [includeContactSheet, setIncludeContactSheet] = useState(true);
+  const [targetSeconds, setTargetSeconds] = useState<TargetSecondsOption>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadEpisodePlatform = () => {
+      void Promise.all([getCurrentEpisode(), listPlatformPresets().catch(() => [])])
+        .then(([episode, presets]) => {
+          if (!active) return;
+          setEpisodePlatform(episode.target_platform);
+          setOverridePlatform(episode.target_platform);
+          const preset = presets.find((candidate) => candidate.platform === episode.target_platform);
+          setTargetSeconds(closestTargetWithinBudget(presetBudgetSeconds(preset)));
+        })
+        .catch(() => undefined);
+    };
+    loadEpisodePlatform();
+    window.addEventListener("tripcut:episode-changed", loadEpisodePlatform);
+    return () => {
+      active = false;
+      window.removeEventListener("tripcut:episode-changed", loadEpisodePlatform);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -353,7 +492,12 @@ export function DeliverPage() {
       const selected = await pickExportFolder();
       if (!selected) return;
       setDestination(selected);
-      const started = await startExport(selected);
+      const started = await startExport(
+        selected,
+        overridePlatform === episodePlatform ? undefined : overridePlatform,
+        includeContactSheet,
+        targetSeconds ?? undefined,
+      );
       setStatus(started);
       setJobId(started.job_id);
     } catch (startError) {
@@ -393,7 +537,12 @@ export function DeliverPage() {
           return;
         }
         setDestination(selected);
-        const started = await startExport(selected);
+        const started = await startExport(
+          selected,
+          overridePlatform === episodePlatform ? undefined : overridePlatform,
+          includeContactSheet,
+          targetSeconds ?? undefined,
+        );
         setStatus(started);
         setJobId(started.job_id);
         setNativeNotice(`原生草稿未通过自检，已降级并开始生成稳定交付包。原因：${reason}`);
@@ -416,13 +565,42 @@ export function DeliverPage() {
   };
 
   const view = useMemo(
-    () => ({ status, destination, busy, error, jianying, nativeBusy, nativeResult, nativeNotice }),
-    [status, destination, busy, error, jianying, nativeBusy, nativeResult, nativeNotice],
+    () => ({
+      status,
+      destination,
+      busy,
+      error,
+      jianying,
+      nativeBusy,
+      nativeResult,
+      nativeNotice,
+      episodePlatform,
+      overridePlatform,
+      includeContactSheet,
+      targetSeconds,
+    }),
+    [
+      status,
+      destination,
+      busy,
+      error,
+      jianying,
+      nativeBusy,
+      nativeResult,
+      nativeNotice,
+      episodePlatform,
+      overridePlatform,
+      includeContactSheet,
+      targetSeconds,
+    ],
   );
 
   return (
     <DeliverView
       {...view}
+      onOverridePlatformChange={setOverridePlatform}
+      onIncludeContactSheetChange={setIncludeContactSheet}
+      onTargetSecondsChange={setTargetSeconds}
       onGenerate={() => void generate()}
       onGenerateNative={() => void generateNative()}
       onCancel={() => void cancel()}

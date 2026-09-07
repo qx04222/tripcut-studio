@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "group": { "id": "A", "name": "景点与抵达", "source_kind": "seed" },
+  "defaults": {
+    "expected": {
+      "scene_boundaries_us": null,
+      "scene_tolerance_us": 250000,
+      "stack_label": null,
+      "important_event": false,
+      "recommend_or_retain": true,
+      "unique_event": false,
+      "narrative_critical": false
+    },
+    "timeline": { "vfr_checkpoints_us": [], "proxy_checkpoints_us": [] },
+    "routine": null
+  },
+  "fixtures": [
+    {
+      "id": "A-001",
+      "source": { "kind": "seed", "relative_path": "A/A-001.mov", "generation_command": null },
+      "scenario": "首次抵达地标的大全景",
+      "golden": true,
+      "expected": {
+        "scene_boundaries_us": null,
+        "scene_tolerance_us": 250000,
+        "stack_label": "A-landmark-wide",
+        "important_event": true,
+        "recommend_or_retain": true,
+        "unique_event": true,
+        "narrative_critical": true
+      }
+    },
+    { "id": "A-002", "source": { "kind": "seed", "relative_path": "A/A-002.mov", "generation_command": null }, "scenario": "地标大全景第二机位", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-wide", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-003", "source": { "kind": "seed", "relative_path": "A/A-003.mov", "generation_command": null }, "scenario": "地标大全景推镜", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-wide", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-004", "source": { "kind": "seed", "relative_path": "A/A-004.mov", "generation_command": null }, "scenario": "地标大全景无人机替代", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-wide", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-005", "source": { "kind": "seed", "relative_path": "A/A-005.mov", "generation_command": null }, "scenario": "地标铭牌细节", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-detail", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-006", "source": { "kind": "seed", "relative_path": "A/A-006.mov", "generation_command": null }, "scenario": "建筑纹理细节", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-detail", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-007", "source": { "kind": "seed", "relative_path": "A/A-007.mov", "generation_command": null }, "scenario": "纪念品与票据细节", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-detail", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-008", "source": { "kind": "seed", "relative_path": "A/A-008.mov", "generation_command": null }, "scenario": "环境声音与静态细节", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-landmark-detail", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-009", "source": { "kind": "seed", "relative_path": "A/A-009.mov", "generation_command": null }, "scenario": "游客第一反应", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-human-reaction", "important_event": true, "recommend_or_retain": true, "unique_event": true, "narrative_critical": true } },
+    { "id": "A-010", "source": { "kind": "seed", "relative_path": "A/A-010.mov", "generation_command": null }, "scenario": "同伴合影准备", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-human-reaction", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-011", "source": { "kind": "seed", "relative_path": "A/A-011.mov", "generation_command": null }, "scenario": "拥挤人流穿越", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-human-reaction", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-012", "source": { "kind": "seed", "relative_path": "A/A-012.mov", "generation_command": null }, "scenario": "人群散开后的反应", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-human-reaction", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-013", "source": { "kind": "seed", "relative_path": "A/A-013.mov", "generation_command": null }, "scenario": "停车场到入口的方向镜头", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-arrival-wayfinding", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-014", "source": { "kind": "seed", "relative_path": "A/A-014.mov", "generation_command": null }, "scenario": "入口标识方向镜头", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-arrival-wayfinding", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-015", "source": { "kind": "seed", "relative_path": "A/A-015.mov", "generation_command": null }, "scenario": "步行进入景区", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-arrival-wayfinding", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } },
+    { "id": "A-016", "source": { "kind": "seed", "relative_path": "A/A-016.mov", "generation_command": null }, "scenario": "离开景点的收束镜头", "golden": false, "expected": { "scene_boundaries_us": null, "scene_tolerance_us": 250000, "stack_label": "A-arrival-wayfinding", "important_event": false, "recommend_or_retain": true, "unique_event": false, "narrative_critical": false } }
+  ]
+}
+

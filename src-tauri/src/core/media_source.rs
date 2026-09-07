@@ -1,9 +1,190 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
 use super::error::{CoreError, Result};
+
+/// 一条缺失素材，供前端「重连」面板按卷分组展示。
+#[derive(Debug, Serialize)]
+pub struct MissingClip {
+    pub clip_id: i64,
+    pub file_name: String,
+    pub volume_uuid: String,
+    pub volume_label: Option<String>,
+    pub rel_path: String,
+    pub missing_since: String,
+}
+
+/// 重连一张卷下所有缺失素材后的结果：重绑数量、按哈希拒绝的文件名（同名不同内容）、仍未找到的数量。
+#[derive(Debug, Default, Serialize)]
+pub struct RelinkOutcome {
+    pub relinked: usize,
+    pub rejected: Vec<String>,
+    pub still_missing: usize,
+}
+
+fn file_name_of(rel_path: &str) -> String {
+    Path::new(rel_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rel_path.to_owned())
+}
+
+pub fn list_missing_clips(connection: &Connection) -> Result<Vec<MissingClip>> {
+    let mut statement = connection.prepare(
+        "SELECT c.id, c.rel_path, c.volume_uuid, v.label, c.missing_since
+         FROM clips c LEFT JOIN volumes v ON v.uuid = c.volume_uuid
+         WHERE c.missing_since IS NOT NULL
+         ORDER BY c.volume_uuid, c.rel_path",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let rel_path: String = row.get(1)?;
+        Ok(MissingClip {
+            clip_id: row.get(0)?,
+            file_name: file_name_of(&rel_path),
+            volume_uuid: row.get(2)?,
+            volume_label: row.get(3)?,
+            rel_path,
+            missing_since: row.get(4)?,
+        })
+    })?;
+    let mut clips = Vec::new();
+    for row in rows {
+        clips.push(row?);
+    }
+    Ok(clips)
+}
+
+/// 用户选了新挂载点：对该卷下所有缺失素材按 rel_path 在新位置查找文件，
+/// 只有完整哈希一致才重绑（清除 missing_since）；同名但内容不同一律拒绝并列出，
+/// 绝不静默猜测。从不移动或修改磁盘上的原始文件。
+pub fn relink_volume(
+    connection: &mut Connection,
+    volume_uuid: &str,
+    new_mount: &Path,
+) -> Result<RelinkOutcome> {
+    relink_volume_with(connection, volume_uuid, new_mount, |path| {
+        Ok(super::import::diskutil_volume_identity(path))
+    })
+}
+
+/// `relink_volume` 的可注入版本：`identity` 用于探测 `new_mount` 实际所在卷的身份
+/// （生产路径传真实 diskutil 探测，测试注入桩）。
+///
+/// 只清 `missing_since` 而不更新 `volume_uuid` 会让「换到新硬盘」的重连看起来成功，
+/// 但下一次播放仍按旧 UUID 走 `resolve_uuid_mount` 解析，从而失败——所以这里必须
+/// 先确定新位置真实所属的卷身份，再决定是否可以安全重绑。
+pub(crate) fn relink_volume_with(
+    connection: &mut Connection,
+    volume_uuid: &str,
+    new_mount: &Path,
+    identity: impl Fn(&Path) -> Result<Option<super::import::VolumeIdentity>>,
+) -> Result<RelinkOutcome> {
+    let (new_volume_uuid, new_volume_label) = match identity(new_mount)? {
+        Some(identity) => (identity.uuid, identity.label),
+        None => {
+            // 无法探测新位置的卷身份（例如测试里的普通文件夹）。只有当旧卷此刻仍能
+            // 解析时，才可以保守地认为用户没有换盘——否则必须拒绝整个重连，
+            // 绝不能把「无法确认卷身份」报告为成功。
+            if resolve_uuid_mount(volume_uuid).is_some() {
+                (volume_uuid.to_owned(), None)
+            } else {
+                return Err(CoreError::MediaSource(
+                    "无法识别所选位置所在的卷".to_owned(),
+                ));
+            }
+        }
+    };
+
+    struct Candidate {
+        clip_id: i64,
+        rel_path: String,
+        byte_size: Option<i64>,
+        quick_hash: Option<String>,
+        full_hash: Option<String>,
+    }
+    let candidates: Vec<Candidate> = {
+        let mut statement = connection.prepare(
+            "SELECT id, rel_path, byte_size, quick_hash, full_hash
+             FROM clips WHERE volume_uuid = ?1 AND missing_since IS NOT NULL",
+        )?;
+        let rows = statement.query_map([volume_uuid], |row| {
+            Ok(Candidate {
+                clip_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                byte_size: row.get(2)?,
+                quick_hash: row.get(3)?,
+                full_hash: row.get(4)?,
+            })
+        })?;
+        let mut collected = Vec::new();
+        for row in rows {
+            collected.push(row?);
+        }
+        collected
+    };
+
+    let mut outcome = RelinkOutcome::default();
+    let transaction = connection.transaction()?;
+    // 卷身份可能变了（换了新硬盘），下面的 UPDATE 会把 clips.volume_uuid 指向
+    // new_volume_uuid，而它必须先在 volumes 表里存在（外键约束）。
+    transaction.execute(
+        "INSERT INTO volumes(uuid, label) VALUES (?1, ?2)
+         ON CONFLICT(uuid) DO UPDATE SET label = COALESCE(excluded.label, volumes.label)",
+        rusqlite::params![new_volume_uuid, new_volume_label],
+    )?;
+    for candidate in candidates {
+        let file_name = file_name_of(&candidate.rel_path);
+        let found = new_mount.join(&candidate.rel_path);
+        if !found.is_file() {
+            outcome.still_missing += 1;
+            continue;
+        }
+        let actual_size = match found.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(_) => {
+                outcome.still_missing += 1;
+                continue;
+            }
+        };
+        if candidate
+            .byte_size
+            .is_some_and(|expected| expected < 0 || expected as u64 != actual_size)
+        {
+            outcome.rejected.push(file_name);
+            continue;
+        }
+        if let Some(expected) = candidate.quick_hash.as_deref() {
+            match super::import::quick_fingerprint(&found) {
+                Ok((actual, _)) if actual == expected => {}
+                _ => {
+                    outcome.rejected.push(file_name);
+                    continue;
+                }
+            }
+        }
+        let hash_matches = match candidate.full_hash.as_deref() {
+            Some(expected) => super::import::full_fingerprint(&found)
+                .map(|actual| actual == expected)
+                .unwrap_or(false),
+            // 没有完整哈希（素材尚未算出）时不能确认，保守拒绝而非静默重绑。
+            None => false,
+        };
+        if !hash_matches {
+            outcome.rejected.push(file_name);
+            continue;
+        }
+        transaction.execute(
+            "UPDATE clips SET volume_uuid = ?1, rel_path = ?2, missing_since = NULL WHERE id = ?3",
+            rusqlite::params![new_volume_uuid, candidate.rel_path, candidate.clip_id],
+        )?;
+        outcome.relinked += 1;
+    }
+    transaction.commit()?;
+    Ok(outcome)
+}
 
 #[derive(Debug)]
 struct StoredSource {
@@ -210,5 +391,221 @@ mod tests {
             verified_clip_path_with_mount(&connection, 1, |_| Some(mount.clone())).unwrap();
 
         assert_eq!(resolved, candidate.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn relink_volume_relinks_hash_matches_and_rejects_hash_mismatches() {
+        let directory = TestDirectory::new();
+        let new_mount = directory.path().join("relinked-card");
+        let relative_a = "DCIM/CLIP_A.MOV";
+        let relative_b = "DCIM/CLIP_B.MOV";
+        let path_a = new_mount.join(relative_a);
+        let path_b = new_mount.join(relative_b);
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+
+        // A: 新位置的文件内容和 clips 表记录的哈希不一致（同名不同内容）。
+        let original_a = vec![1_u8; 12 * 1024 * 1024];
+        let mut replaced_a = original_a.clone();
+        replaced_a[6 * 1024 * 1024] = 2;
+        std::fs::write(&path_a, &replaced_a).unwrap();
+        let stashed_a = directory.path().join("stashed_a.mov");
+        std::fs::write(&stashed_a, &original_a).unwrap();
+        let (quick_a, size_a) = import::quick_fingerprint(&stashed_a).unwrap();
+        let full_a = import::full_fingerprint(&stashed_a).unwrap();
+
+        // B: 新位置的文件内容与记录一致，应当重绑。
+        std::fs::write(&path_b, b"unchanged clip bytes for B").unwrap();
+        let (quick_b, size_b) = import::quick_fingerprint(&path_b).unwrap();
+        let full_b = import::full_fingerprint(&path_b).unwrap();
+
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid, label) VALUES ('vol-1', 'External Card')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, byte_size, quick_hash, full_hash, missing_since)
+                 VALUES (1, 'vol-1', ?1, ?2, ?3, ?4, '2026-09-01T00:00:00Z')",
+                rusqlite::params![relative_a, size_a as i64, quick_a, full_a],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, byte_size, quick_hash, full_hash, missing_since)
+                 VALUES (2, 'vol-1', ?1, ?2, ?3, ?4, '2026-09-01T00:00:00Z')",
+                rusqlite::params![relative_b, size_b as i64, quick_b, full_b],
+            )
+            .unwrap();
+
+        // 本测试关注哈希匹配/拒绝逻辑，不关注换盘场景，所以注入身份解析结果为同一块卷。
+        let outcome = relink_volume_with(&mut connection, "vol-1", &new_mount, |_| {
+            Ok(Some(import::VolumeIdentity {
+                uuid: "vol-1".to_owned(),
+                label: Some("External Card".to_owned()),
+                fs_type: None,
+                mount_point: Some(new_mount.clone()),
+            }))
+        })
+        .unwrap();
+
+        assert_eq!(outcome.relinked, 1);
+        assert_eq!(outcome.rejected, vec!["CLIP_A.MOV".to_string()]);
+        assert_eq!(outcome.still_missing, 0);
+
+        let missing_a: Option<String> = connection
+            .query_row("SELECT missing_since FROM clips WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let missing_b: Option<String> = connection
+            .query_row("SELECT missing_since FROM clips WHERE id = 2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(missing_a.is_some());
+        assert!(missing_b.is_none());
+    }
+
+    #[test]
+    fn relink_volume_writes_new_volume_uuid_when_identity_resolves() {
+        let directory = TestDirectory::new();
+        let new_mount = directory.path().join("new-ssd");
+        let relative = "DCIM/CLIP.MOV";
+        let candidate = new_mount.join(relative);
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, b"clip bytes surviving the move to a new disk").unwrap();
+        let (quick_hash, byte_size) = import::quick_fingerprint(&candidate).unwrap();
+        let full_hash = import::full_fingerprint(&candidate).unwrap();
+
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid, label) VALUES ('old-uuid', 'Old Card')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, byte_size, quick_hash, full_hash, missing_since)
+                 VALUES (1, 'old-uuid', ?1, ?2, ?3, ?4, '2026-09-01T00:00:00Z')",
+                rusqlite::params![relative, byte_size as i64, quick_hash, full_hash],
+            )
+            .unwrap();
+
+        let outcome = relink_volume_with(&mut connection, "old-uuid", &new_mount, |_| {
+            Ok(Some(import::VolumeIdentity {
+                uuid: "new-uuid".to_owned(),
+                label: Some("New SSD".to_owned()),
+                fs_type: None,
+                mount_point: Some(new_mount.clone()),
+            }))
+        })
+        .unwrap();
+
+        assert_eq!(outcome.relinked, 1);
+
+        let (stored_uuid, stored_rel_path, stored_missing): (String, String, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT volume_uuid, rel_path, missing_since FROM clips WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert_eq!(stored_uuid, "new-uuid");
+        assert_eq!(stored_rel_path, relative);
+        assert!(stored_missing.is_none());
+
+        // 重连写回的 volume_uuid/rel_path 正是 verified_clip_path 之后会用来解析的那对值：
+        // 只要 resolve_uuid_mount("new-uuid") 能解析出 new_mount，这条素材就能被找到。
+        let resolved_mount = new_mount.clone();
+        let resolved = verified_clip_path_with_mount(&connection, 1, move |uuid| {
+            assert_eq!(uuid, "new-uuid");
+            Some(resolved_mount)
+        })
+        .unwrap();
+        assert_eq!(resolved, candidate.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn relink_volume_rejects_when_identity_unresolvable_and_old_volume_gone() {
+        let directory = TestDirectory::new();
+        let new_mount = directory.path().join("mystery-folder");
+        let relative = "DCIM/CLIP.MOV";
+        let candidate = new_mount.join(relative);
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, b"clip bytes").unwrap();
+        let (quick_hash, byte_size) = import::quick_fingerprint(&candidate).unwrap();
+        let full_hash = import::full_fingerprint(&candidate).unwrap();
+
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid, label) VALUES ('gone-uuid', 'Gone Card')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, byte_size, quick_hash, full_hash, missing_since)
+                 VALUES (1, 'gone-uuid', ?1, ?2, ?3, ?4, '2026-09-01T00:00:00Z')",
+                rusqlite::params![relative, byte_size as i64, quick_hash, full_hash],
+            )
+            .unwrap();
+
+        // 'gone-uuid' 不是真实的 macOS 卷 UUID，所以生产用的 resolve_uuid_mount 也无法
+        // 解析它——用真实 diskutil 路径覆盖旧卷判定分支同样会拒绝，这里直接注入
+        // identity 探测失败来触发该分支。
+        let error = relink_volume_with(&mut connection, "gone-uuid", &new_mount, |_| Ok(None))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("无法识别"));
+
+        let (stored_uuid, stored_missing): (String, Option<String>) = connection
+            .query_row(
+                "SELECT volume_uuid, missing_since FROM clips WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_uuid, "gone-uuid");
+        assert!(stored_missing.is_some());
+    }
+
+    #[test]
+    fn list_missing_clips_returns_only_missing_grouped_by_volume() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid, label) VALUES ('vol-1', 'External Card')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, missing_since)
+                 VALUES (1, 'vol-1', 'DCIM/A.MOV', '2026-09-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, missing_since)
+                 VALUES (2, 'vol-1', 'DCIM/B.MOV', NULL)",
+                [],
+            )
+            .unwrap();
+
+        let missing = list_missing_clips(&connection).unwrap();
+
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].clip_id, 1);
+        assert_eq!(missing[0].file_name, "A.MOV");
+        assert_eq!(missing[0].volume_label.as_deref(), Some("External Card"));
     }
 }

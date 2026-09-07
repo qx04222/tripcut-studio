@@ -294,7 +294,7 @@ fn check_disk_space(report: &mut DoctorReport, root: &Path) {
     }
 }
 
-fn available_bytes(path: &Path) -> Result<u64> {
+pub(crate) fn available_bytes(path: &Path) -> Result<u64> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

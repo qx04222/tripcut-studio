@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "rule": "Every listed fixture must be recommended or retained. One miss makes Critical Recall lower than 100% and fails the release gate.",
+  "fixtures": [
+    { "id": "A-001", "reason": "首次抵达地标的不可重拍全景" },
+    { "id": "B-009", "reason": "首次遭遇雪路险情" },
+    { "id": "C-013", "reason": "日常流程突变为真实故障事件" },
+    { "id": "D-009", "reason": "口播被真实意外打断后的第一反应" },
+    { "id": "E-015", "reason": "数字人承担唯一安全说明而非装饰性重复" },
+    { "id": "F-014", "reason": "设备钟错误但内容是唯一边检事件" },
+    { "id": "G-001", "reason": "强抖动下的熊首次出现" },
+    { "id": "G-002", "reason": "欠曝陷车事件" },
+    { "id": "G-003", "reason": "竖拍冰雹突发" },
+    { "id": "G-004", "reason": "失焦但真实的即时反应" },
+    { "id": "G-005", "reason": "高噪点夜间故障" },
+    { "id": "G-006", "reason": "强风噪中的唯一口播记录" }
+  ]
+}

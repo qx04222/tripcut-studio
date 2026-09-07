@@ -13,18 +13,25 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::contact_sheet;
 use super::error::{CoreError, Result};
 use super::jobs::{self, Job};
+use super::platform;
 
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const PROJECT_NAME: &str = "旅剪项目";
 const PACKAGE_SUFFIX: &str = "剪映交付";
-const SELECTED_DIRECTORY: &str = "01_精选片段";
-const ROUGH_CUT_FILE: &str = "02_参考粗剪.mp4";
+const SELECTED_DIRECTORY: &str = "01_精选原片";
+const NARRATION_DIRECTORY: &str = "02_环境声与旁白"; // R2 G10 写旁白稿.txt 用
 const SUBTITLE_DIRECTORY: &str = "03_字幕";
-const SHOT_LIST_FILE: &str = "03_镜头表.csv";
-const DESTINATION_DIRECTORY: &str = "05_地点卡";
+const ROUGH_CUT_DIRECTORY: &str = "04_参考粗剪";
+const ROUGH_CUT_FILE: &str = "04_参考粗剪/参考粗剪.mp4";
+const SHOT_LIST_DIRECTORY: &str = "05_镜头表";
+const SHOT_LIST_FILE: &str = "05_镜头表/剪辑清单.csv";
+const CONTACT_SHEET_FILE: &str = "05_镜头表/联系表.pdf";
+const COLOR_NOTES_DIRECTORY: &str = "06_LUT与色彩说明"; // R3 Pocket 4 用
+const DESTINATION_DIRECTORY: &str = "07_地点卡";
 const README_FILE: &str = "交付说明.txt";
 const COMPLETION_MARKER_FILE: &str = ".tripcut-complete.json";
 
@@ -78,6 +85,41 @@ pub(crate) struct ExportClip {
     dialogue_summary: String,
     #[serde(default)]
     pub(crate) srt_rel_path: Option<String>,
+    /// R3 Task 6：转录实际用了哪一路音轨（`None` 表示未选择，回退到 0）。
+    #[serde(default)]
+    pub(crate) selected_transcribe_track: Option<i64>,
+    /// R3 Task 6：`clip_audio_tracks` 里这条素材全部音轨，按 `stream_index` 升序；
+    /// 用来在交付说明/剪辑清单/剪映草稿里还原音轨映射。少于 2 条时不认为素材是多轨。
+    #[serde(default)]
+    pub(crate) audio_tracks: Vec<ExportAudioTrack>,
+    /// R6 Task 7b：`clips.manual_rotation`——只在 rotate 标签兜底命中、且没有
+    /// side_data 显示矩阵时才非空（见 import.rs 对该列的注释）。粗剪转码与
+    /// 剪映草稿都要按它把画面转正，而不是像此前那样只在 App 内预览时生效。
+    #[serde(default)]
+    pub(crate) manual_rotation: Option<i64>,
+}
+
+/// `clip_audio_tracks` 一行的交付层投影，只留下渲染"音轨映射"用得到的字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub(crate) struct ExportAudioTrack {
+    pub(crate) stream_index: i64,
+    pub(crate) role_guess: Option<String>,
+}
+
+/// `role_guess` 的中文展示标签；未知或缺失一律显示"未知"，不猜测新分类。
+pub(crate) fn audio_role_label(role_guess: Option<&str>) -> &'static str {
+    match role_guess {
+        Some("onboard_mic") => "机内麦",
+        Some("wireless_mic") => "无线麦",
+        Some("backup") => "备份",
+        _ => "未知",
+    }
+}
+
+/// 这条素材转录实际用的音轨序号：显式选择优先，否则回退到 0
+/// （与 `transcribe::resolve_transcribe_track` 的默认值保持一致）。
+fn effective_transcribe_track(clip: &ExportClip) -> i64 {
+    clip.selected_transcribe_track.unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +130,49 @@ struct ExportProgress {
     cancel_requested: bool,
     message: Option<String>,
     items: Vec<ExportItemStatus>,
+}
+
+/// R3 Task 3:交付说明/镜头表要读的平台信息,在 `start_export` 时一次性解析并
+/// 冻结进任务负载——`交付说明.txt`/`剪辑清单.csv` 都是纯函数,不再回查 DB。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ExportPlatformInfo {
+    platform: String,
+    display_name: String,
+    /// 已把 `both` 折成 `landscape` 的实际画布朝向。
+    orientation: String,
+    canvas_width: i64,
+    canvas_height: i64,
+    /// 0 表示不限时长。
+    duration_budget_seconds: i64,
+}
+
+/// Mirrors the `general` row seeded by migration 0031; must be kept in sync.
+fn default_platform_info() -> ExportPlatformInfo {
+    // 兼容 R3 之前排队/未完成的旧交付任务:无平台信息时按"通用·横版"回退,
+    // 不阻塞任务恢复。
+    ExportPlatformInfo {
+        platform: "general".to_owned(),
+        display_name: "通用".to_owned(),
+        orientation: "landscape".to_owned(),
+        canvas_width: 1920,
+        canvas_height: 1080,
+        duration_budget_seconds: 0,
+    }
+}
+
+
+impl From<platform::ResolvedPlatform> for ExportPlatformInfo {
+    fn from(resolved: platform::ResolvedPlatform) -> Self {
+        let (canvas_width, canvas_height) = resolved.canvas();
+        ExportPlatformInfo {
+            platform: resolved.preset.platform.clone(),
+            display_name: resolved.preset.display_name.clone(),
+            orientation: resolved.orientation.clone(),
+            canvas_width,
+            canvas_height,
+            duration_budget_seconds: resolved.duration_budget_seconds(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +189,35 @@ struct ExportJobPayload {
     clips: Vec<ExportClip>,
     progress: ExportProgress,
     output_path: Option<String>,
+    #[serde(default = "default_platform_info")]
+    platform_info: ExportPlatformInfo,
+    /// R4 Task 3:是否写入 `05_镜头表/联系表.pdf`。旧任务负载(未带这个字段)
+    /// 一律按"是"回退,不能因为升级就悄悄少一份产物。
+    #[serde(default = "default_true")]
+    include_contact_sheet: bool,
+    /// 联系表渲染成功时,子集字体不含、被替换成「□」的字符数;联系表被关闭
+    /// 或渲染失败时保持 `None`,不能和"确实是 0 个缺字"混为一谈。
+    #[serde(default)]
+    contact_sheet_glyph_fallbacks: Option<u64>,
+    /// 联系表渲染成功时,损坏/截断而退化成灰框占位的封面张数;联系表被关闭
+    /// 或渲染失败时保持 `None`,不能和"确实是 0 张损坏封面"混为一谈。
+    #[serde(default)]
+    contact_sheet_cover_failures: Option<u64>,
+    /// R6 Task 6 G9：参考粗剪目标时长（30/60/180 秒）；`None` 表示完整长度。
+    /// 创建交付任务时校验并冻结，任务恢复/重跑都不会变。
+    #[serde(default)]
+    target_seconds: Option<u32>,
+    /// 参考粗剪实际拼出来的总时长，统一换算到毫秒 tick 记账；粗剪转码完成前是 `None`。
+    #[serde(default)]
+    rough_cut_actual_ticks: Option<i64>,
+    #[serde(default)]
+    rough_cut_actual_tb_num: Option<i64>,
+    #[serde(default)]
+    rough_cut_actual_tb_den: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +269,19 @@ pub struct ExportStatus {
     pub items: Vec<ExportItemStatus>,
     pub output_path: Option<String>,
     pub error: Option<String>,
+    /// 联系表渲染成功时子集字体不含、被替换成「□」的字符数;联系表被关闭、
+    /// 尚未渲染或渲染失败时是 `None`。
+    pub contact_sheet_glyph_fallbacks: Option<u64>,
+    /// 联系表渲染成功时损坏/截断而退化成灰框占位的封面张数;联系表被关闭、
+    /// 尚未渲染或渲染失败时是 `None`。
+    pub contact_sheet_cover_failures: Option<u64>,
+    /// R6 Task 6 G9：参考粗剪目标时长（30/60/180 秒）；`None` 表示完整长度。
+    pub rough_cut_target_seconds: Option<u32>,
+    /// 参考粗剪实际拼出来的总时长，配合 `rough_cut_actual_tb_num`/`_tb_den` 换算成秒；
+    /// 粗剪转码完成前是 `None`。
+    pub rough_cut_actual_ticks: Option<i64>,
+    pub rough_cut_actual_tb_num: Option<i64>,
+    pub rough_cut_actual_tb_den: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -216,7 +343,7 @@ impl Drop for StagingDirectory {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SuccessfulClip {
     clip: ExportClip,
     path: PathBuf,
@@ -275,6 +402,10 @@ fn canonical_payload_hash(payload: &ExportJobPayload) -> Result<String> {
                 clip.rel_path.as_str(),
                 clip.quick_hash.as_str(),
                 clip.source_byte_size,
+                // R6 6b：manual_rotation 会真的改变参考粗剪的画面朝向
+                // (rough_cut_rotation_prefix)，缺了它会把"只改某片段旋转"的
+                // 两次 start_export 去重成同一个任务，复用旧 payload 导出未转正的粗剪。
+                clip.manual_rotation,
             )
         })
         .collect::<Vec<_>>();
@@ -286,6 +417,14 @@ fn canonical_payload_hash(payload: &ExportJobPayload) -> Result<String> {
         &payload.project_name,
         &payload.date,
         payload.selected_bytes,
+        // 目标时长与是否附联系表都会改变实际产出的文件，缺了它们会把
+        // "只改目标秒数/联系表开关"的两次 start_export 去重成同一个任务。
+        payload.target_seconds,
+        payload.include_contact_sheet,
+        // override_platform 会改变联系表方向与交付说明的措辞，缺了它会把
+        // "只改导出平台"的两次 start_export 去重成同一个任务，第二次悄悄
+        // 拿到第一次那个平台的产物。
+        &payload.platform_info,
         selections,
     ))
     .map_err(|error| CoreError::Export(format!("无法规范化交付任务：{error}")))?;
@@ -320,7 +459,14 @@ fn read_completion_marker(directory: &Path) -> Result<Option<CompletionMarker>> 
         .map_err(|error| CoreError::Export(format!("交付完成标记损坏：{error}")))
 }
 
-pub fn start_export(connection: &mut Connection, destination: &Path) -> Result<ExportStatus> {
+pub fn start_export(
+    connection: &mut Connection,
+    destination: &Path,
+    override_platform: Option<&str>,
+    include_contact_sheet: bool,
+    target_seconds: Option<u32>,
+) -> Result<ExportStatus> {
+    validate_rough_cut_target(target_seconds)?;
     let destination = destination.canonicalize().map_err(|error| {
         CoreError::Export(format!(
             "无法打开交付目标目录 {}：{error}",
@@ -344,6 +490,8 @@ pub fn start_export(connection: &mut Connection, destination: &Path) -> Result<E
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| CoreError::Export("没有进行中的 Episode，无法创建交付任务".to_owned()))?;
+    let platform_info: ExportPlatformInfo =
+        platform::resolve_platform(&transaction, episode_id, override_platform)?.into();
     let clips = selected_clips(&transaction)?;
     if clips.is_empty() {
         return Err(CoreError::Export(
@@ -373,7 +521,7 @@ pub fn start_export(connection: &mut Connection, destination: &Path) -> Result<E
         })
         .collect();
     let payload = ExportJobPayload {
-        version: 4,
+        version: 5,
         episode_id: Some(episode_id),
         episode_memory_id: Some(episode_memory_id),
         destination: destination.to_string_lossy().into_owned(),
@@ -381,6 +529,7 @@ pub fn start_export(connection: &mut Connection, destination: &Path) -> Result<E
         date,
         selected_bytes,
         clips,
+        platform_info,
         progress: ExportProgress {
             stage: "queued".to_owned(),
             completed_items: 0,
@@ -390,6 +539,13 @@ pub fn start_export(connection: &mut Connection, destination: &Path) -> Result<E
             items,
         },
         output_path: None,
+        include_contact_sheet,
+        contact_sheet_glyph_fallbacks: None,
+        contact_sheet_cover_failures: None,
+        target_seconds,
+        rough_cut_actual_ticks: None,
+        rough_cut_actual_tb_num: None,
+        rough_cut_actual_tb_den: None,
     };
     let payload_json = serialize_payload(&payload)?;
     let payload_hash = canonical_payload_hash(&payload)?;
@@ -478,6 +634,12 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
             items: Vec::new(),
             output_path: None,
             error: None,
+            contact_sheet_glyph_fallbacks: None,
+            contact_sheet_cover_failures: None,
+            rough_cut_target_seconds: None,
+            rough_cut_actual_ticks: None,
+            rough_cut_actual_tb_num: None,
+            rough_cut_actual_tb_den: None,
         });
     };
     let payload = parse_payload(&payload_json)?;
@@ -495,6 +657,12 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
         items: payload.progress.items,
         output_path: result_path.or(payload.output_path),
         error,
+        contact_sheet_glyph_fallbacks: payload.contact_sheet_glyph_fallbacks,
+        contact_sheet_cover_failures: payload.contact_sheet_cover_failures,
+        rough_cut_target_seconds: payload.target_seconds,
+        rough_cut_actual_ticks: payload.rough_cut_actual_ticks,
+        rough_cut_actual_tb_num: payload.rough_cut_actual_tb_num,
+        rough_cut_actual_tb_den: payload.rough_cut_actual_tb_den,
     })
 }
 
@@ -550,6 +718,45 @@ pub fn cancel_export(connection: &mut Connection, job_id: i64) -> Result<()> {
     }
     jobs::request_cancel(connection, job_id)?;
     Ok(())
+}
+
+/// R6 Task 4:一次 `export_package` 任务成功落地(`status='done'`)时该发的
+/// 系统通知——标题固定,正文是交付目标文件夹名(取自 `result_path`,与
+/// `run_export_package_with` 里写进 `jobs.result_path` 的 `final_path` 同源)。
+/// 调用点在 `jobs::run_one_with_executor` 里、`execute()` 返回之后重新读一次
+/// 这条 job 行——不是在导出流程内部直接发通知,这样导出逻辑不必知道通知长
+/// 什么样,也不会因为通知失败而拖累已经落地的交付包。
+pub(crate) fn export_completion_notice(
+    connection: &Connection,
+    job: &Job,
+) -> Result<Option<(String, String)>> {
+    if job.kind != "export_package" {
+        return Ok(None);
+    }
+    let row: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT status, result_path FROM jobs WHERE id = ?1",
+            [job.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((status, result_path)) = row else {
+        return Ok(None);
+    };
+    if status != "done" {
+        return Ok(None);
+    }
+    let Some(result_path) = result_path else {
+        return Ok(None);
+    };
+    let folder_name = Path::new(&result_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or(result_path);
+    Ok(Some((
+        crate::notify::EXPORT_COMPLETE_TITLE.to_owned(),
+        folder_name,
+    )))
 }
 
 pub fn run_export_package(connection: &mut Connection, job: &Job) -> Result<()> {
@@ -697,6 +904,14 @@ fn run_export_package_with(
     std::fs::create_dir(&staging_path)?;
     let mut staging = StagingDirectory::new(staging_path.clone());
     std::fs::create_dir(staging_path.join(SELECTED_DIRECTORY))?;
+    for directory in [
+        NARRATION_DIRECTORY,
+        ROUGH_CUT_DIRECTORY,
+        SHOT_LIST_DIRECTORY,
+        COLOR_NOTES_DIRECTORY,
+    ] {
+        std::fs::create_dir(staging_path.join(directory))?;
+    }
 
     payload.output_path = Some(final_path.to_string_lossy().into_owned());
     payload.progress.stage = "remuxing".to_owned();
@@ -766,14 +981,18 @@ fn run_export_package_with(
     let rough_cut_path = staging_path.join(ROUGH_CUT_FILE);
     let rough_cut_temporary = jobs::temporary_output_path(&rough_cut_path, job.attempt);
     remove_file_if_exists(&rough_cut_temporary)?;
+    let (rough_cut_clips, rough_cut_summary) = select_rough_cut(&successful, payload.target_seconds)?;
     transcode_rough_cut(
         ffmpeg,
         ffprobe,
-        &successful,
+        &rough_cut_clips,
         &rough_cut_temporary,
         &cancellation.flag,
     )?;
     std::fs::rename(&rough_cut_temporary, &rough_cut_path)?;
+    payload.rough_cut_actual_ticks = Some(rough_cut_summary.actual_ticks);
+    payload.rough_cut_actual_tb_num = Some(rough_cut_summary.actual_tb_num);
+    payload.rough_cut_actual_tb_den = Some(rough_cut_summary.actual_tb_den);
 
     check_cancelled(&cancellation.flag)?;
     payload.progress.stage = "documents".to_owned();
@@ -785,13 +1004,40 @@ fn run_export_package_with(
         &payload.progress.items,
         &staging_path,
     )?;
-    let csv = build_shot_list_csv(&payload.clips, &payload.progress.items);
+    let csv = build_shot_list_csv(&payload.clips, &payload.progress.items, &payload.platform_info);
     write_synced(&staging_path.join(SHOT_LIST_FILE), csv.as_bytes())?;
     let episode_id = payload
         .episode_id
         .ok_or_else(|| CoreError::Export("交付任务缺少 Episode 归属".to_owned()))?;
+    let contact_sheet_outcome = if payload.include_contact_sheet {
+        match write_contact_sheet(connection, &staging_path, episode_id, &payload) {
+            Ok(stats) => {
+                payload.contact_sheet_glyph_fallbacks = Some(stats.glyph_fallbacks as u64);
+                payload.contact_sheet_cover_failures = Some(stats.cover_failures as u64);
+                ContactSheetOutcome::Written {
+                    glyph_fallbacks: stats.glyph_fallbacks,
+                    cover_failures: stats.cover_failures,
+                }
+            }
+            Err(error) => {
+                // 联系表只是镜头表之外的锦上添花；渲染失败绝不能拖垮整份已经
+                // remux 成功的交付包——镜头表仍是权威产物。
+                tracing::warn!(job_id = job.id, %error, "联系表生成失败");
+                ContactSheetOutcome::Failed { message: error.to_string() }
+            }
+        }
+    } else {
+        ContactSheetOutcome::Disabled
+    };
     let destination_count = write_destination_cards(connection, &staging_path, episode_id)?;
-    let instructions = build_instructions(&payload, subtitle_count, destination_count);
+    let narration_outcome = write_narration_script(connection, &staging_path, episode_id)?;
+    let instructions = build_instructions(
+        &payload,
+        subtitle_count,
+        destination_count,
+        narration_outcome,
+        &contact_sheet_outcome,
+    );
     write_synced(&staging_path.join(README_FILE), instructions.as_bytes())?;
 
     check_cancelled(&cancellation.flag)?;
@@ -1142,7 +1388,8 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
                    AND artifact.source_hash = c.quick_hash
                  LIMIT 1) AS srt_rel_path,
                 selected_segment.id, selected_segment.in_ticks, selected_segment.out_ticks,
-                c.volume_uuid, c.quick_hash, c.full_hash
+                c.volume_uuid, c.quick_hash, c.full_hash, c.selected_transcribe_track,
+                c.manual_rotation
          FROM clips c
          LEFT JOIN live_selects selected_segment ON selected_segment.clip_id = c.id
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
@@ -1259,10 +1506,63 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
             has_audio,
             dialogue_summary: dialogue_summary(transcript_text.as_deref()),
             srt_rel_path: row.get(23)?,
+            selected_transcribe_track: row.get(30)?,
+            manual_rotation: row.get(31)?,
+            audio_tracks: Vec::new(),
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CoreError::from)
+    let mut clips = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CoreError::from)?;
+    attach_audio_tracks(connection, &mut clips)?;
+    Ok(clips)
+}
+
+/// R3 Task 6：`clip_audio_tracks` 是独立表，主查询已经很宽了，不再往里塞
+/// `group_concat` 拼接——单独一次查询把每条素材的音轨列表挂回去，按 `clip_id`
+/// 分组、`stream_index` 升序。素材数量以本次交付选中的为界，不是全库扫描。
+fn attach_audio_tracks(connection: &Connection, clips: &mut [ExportClip]) -> Result<()> {
+    if clips.is_empty() {
+        return Ok(());
+    }
+    let mut by_clip: HashMap<i64, Vec<ExportAudioTrack>> = HashMap::new();
+    {
+        let selected_clip_ids: Vec<i64> = clips.iter().map(|clip| clip.clip_id).collect();
+        let placeholders = std::iter::repeat_n("?", selected_clip_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT clip_id, stream_index, role_guess
+             FROM clip_audio_tracks
+             WHERE clip_id IN ({})
+             ORDER BY clip_id, stream_index",
+            placeholders
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(selected_clip_ids.len());
+        for clip_id in &selected_clip_ids {
+            values.push(clip_id);
+        }
+        let rows = statement.query_map(values.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ExportAudioTrack {
+                    stream_index: row.get(1)?,
+                    role_guess: row.get(2)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (clip_id, track) = row?;
+            by_clip.entry(clip_id).or_default().push(track);
+        }
+    }
+    for clip in clips.iter_mut() {
+        if let Some(tracks) = by_clip.remove(&clip.clip_id) {
+            clip.audio_tracks = tracks;
+        }
+    }
+    Ok(())
 }
 
 fn dialogue_summary(text: Option<&str>) -> String {
@@ -1466,12 +1766,10 @@ fn whole_vfr_args(
     args
 }
 
-fn transcode_select_segment(
-    ffmpeg: &OsStr,
-    clip: &ExportClip,
-    output_path: &Path,
-    cancellation: &AtomicBool,
-) -> Result<()> {
+/// Pure arg builder for the frame-accurate select-segment transcode, pulled
+/// out of `transcode_select_segment` so the negative LUT assertion (and any
+/// other arg-shape test) doesn't need to spawn a real ffmpeg.
+fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<Vec<OsString>> {
     let start = clip_start_seconds(clip)?;
     let duration = clip_duration_seconds(clip);
     if duration <= 0.0 {
@@ -1480,7 +1778,7 @@ fn transcode_select_segment(
             clip.segment_id.unwrap_or_default()
         )));
     }
-    let args = vec![
+    Ok(vec![
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
         OsString::from("error"),
@@ -1518,7 +1816,16 @@ fn transcode_select_segment(
         OsString::from("mp4"),
         OsString::from("-y"),
         output_path.as_os_str().to_owned(),
-    ];
+    ])
+}
+
+fn transcode_select_segment(
+    ffmpeg: &OsStr,
+    clip: &ExportClip,
+    output_path: &Path,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    let args = select_segment_ffmpeg_args(clip, output_path)?;
     run_media_command(
         ffmpeg,
         &args,
@@ -1936,6 +2243,202 @@ fn clip_frame_seconds(clip: &ExportClip) -> f64 {
     }
 }
 
+/// R6 Task 6 G9：参考粗剪允许的目标时长——其它值一律拒绝，不猜测最接近值。
+const ALLOWED_ROUGH_CUT_TARGETS: [u32; 3] = [30, 60, 180];
+
+/// `rough_cut_actual_ticks`/`RoughCutSelectionSummary::actual_ticks` 的统一记账时基：
+/// 毫秒（1/1000），只用于跨素材求和与展示，不参与实际裁切（裁切都在各素材原生
+/// tb_num/tb_den 上用整数完成）。
+const ROUGH_CUT_SUMMARY_TB_NUM: i64 = 1;
+const ROUGH_CUT_SUMMARY_TB_DEN: i64 = 1000;
+
+fn validate_rough_cut_target(target_seconds: Option<u32>) -> Result<()> {
+    match target_seconds {
+        None => Ok(()),
+        Some(value) if ALLOWED_ROUGH_CUT_TARGETS.contains(&value) => Ok(()),
+        Some(value) => Err(CoreError::Export(format!(
+            "参考粗剪目标时长只能是 30/60/180 秒，收到 {value}"
+        ))),
+    }
+}
+
+/// 素材自己 time_base 下的完整选段区间；缺 ticks/tb（老数据或整条收藏走了别的
+/// 兜底路径）时返回 `None`，调用方按"整条保留、不参与预算裁切"处理。
+fn native_ticks(clip: &ExportClip) -> Option<(i64, i64, i64, i64)> {
+    match (clip.in_ticks, clip.out_ticks, clip.tb_num, clip.tb_den) {
+        (Some(start), Some(end), Some(num), Some(den)) if end >= start && num > 0 && den > 0 => {
+            Some((start, end, num, den))
+        }
+        _ => None,
+    }
+}
+
+/// `ticks`（该素材原生 tb）换算成毫秒，向下取整；只用于预算记账，不落地成
+/// 裁切边界本身（裁切边界永远是整数 ticks）。
+fn ticks_to_millis(ticks: i64, tb_num: i64, tb_den: i64) -> i64 {
+    if tb_den <= 0 {
+        return 0;
+    }
+    ((ticks as i128) * (tb_num as i128) * 1_000 / (tb_den as i128)) as i64
+}
+
+/// `seconds` 换算成该素材原生 tb 下的 ticks 数（整数除法，向下取整）。
+fn seconds_to_ticks(seconds: i64, tb_num: i64, tb_den: i64) -> i64 {
+    if tb_num <= 0 {
+        return 0;
+    }
+    ((seconds as i128) * (tb_den as i128) / (tb_num as i128)) as i64
+}
+
+/// `millis` 换算成该素材原生 tb 下的 ticks 数（整数除法，向下取整）——
+/// `ticks_to_millis` 的逆运算。第二轮延展把"剩余预算（毫秒）"换算回正在
+/// 延展的这条素材自己的 tb 时用它，不能直接把别的素材算出来的 ticks 套用。
+fn millis_to_ticks(millis: i64, tb_num: i64, tb_den: i64) -> i64 {
+    if tb_num <= 0 {
+        return 0;
+    }
+    ((millis as i128) * (tb_den as i128) / (tb_num as i128 * 1_000)) as i64
+}
+
+fn ticks_to_millis_for_clip(clip: &ExportClip) -> i64 {
+    match native_ticks(clip) {
+        Some((start, end, num, den)) => ticks_to_millis(end - start, num, den),
+        None => (clip_duration_seconds(clip) * 1_000.0).round() as i64,
+    }
+}
+
+/// 参考粗剪目标时长选段的汇总——全部按 ticks 记账，不落地浮点秒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoughCutSelectionSummary {
+    actual_ticks: i64,
+    actual_tb_num: i64,
+    actual_tb_den: i64,
+}
+
+/// 按 beat 顺序（即 `clips` 本身的顺序）与预算截取参考粗剪要用到的素材：
+/// - `cap = max(2s, target / clip_count)`（在每条素材自己的 tb 下用整数算出），
+///   每条素材最多贡献这么多；
+/// - 按顺序累计，一旦达到目标秒数就停止——后面的素材整条不出现在粗剪里；
+/// - 单条素材的裁切结果不低于 1 秒，除非它本来就比 1 秒短（这时保留原长）；
+/// - 第一遍跑完仍不够目标时，按素材原长从长到短把已选的素材补到全长，直到
+///   用满预算或全部都已经是全长。
+///
+/// `target_seconds` 为 `None` 时原样返回全部素材（保持 G9 之前的行为）。
+fn select_rough_cut(
+    clips: &[SuccessfulClip],
+    target_seconds: Option<u32>,
+) -> Result<(Vec<SuccessfulClip>, RoughCutSelectionSummary)> {
+    validate_rough_cut_target(target_seconds)?;
+
+    let Some(target_seconds) = target_seconds else {
+        let actual_ticks = clips.iter().map(|clip| ticks_to_millis_for_clip(&clip.clip)).sum();
+        return Ok((
+            clips.to_vec(),
+            RoughCutSelectionSummary {
+                actual_ticks,
+                actual_tb_num: ROUGH_CUT_SUMMARY_TB_NUM,
+                actual_tb_den: ROUGH_CUT_SUMMARY_TB_DEN,
+            },
+        ));
+    };
+
+    let clip_count = (clips.len() as i64).max(1);
+    let target_millis = (target_seconds as i64) * 1_000;
+
+    // 每条素材贡献多少 ticks（原生 tb）；`i64::MAX` 是哨兵值，表示"没有可用
+    // ticks，整条保留、不参与预算裁切"。
+    const KEEP_WHOLE: i64 = i64::MAX;
+    let mut contributions: Vec<i64> = Vec::with_capacity(clips.len());
+    let mut accumulated_millis: i64 = 0;
+    let mut reached_budget = false;
+
+    for clip in clips {
+        if reached_budget {
+            contributions.push(0);
+            continue;
+        }
+        let Some((in_ticks, out_ticks, tb_num, tb_den)) = native_ticks(&clip.clip) else {
+            accumulated_millis += ticks_to_millis_for_clip(&clip.clip);
+            contributions.push(KEEP_WHOLE);
+            reached_budget = accumulated_millis >= target_millis;
+            continue;
+        };
+        let segment_ticks = out_ticks - in_ticks;
+        let one_second_ticks = seconds_to_ticks(1, tb_num, tb_den);
+        let two_second_ticks = seconds_to_ticks(2, tb_num, tb_den);
+        let per_clip_budget_ticks = seconds_to_ticks(target_seconds as i64, tb_num, tb_den) / clip_count;
+        let cap_ticks = two_second_ticks.max(per_clip_budget_ticks);
+        let mut contribution_ticks = segment_ticks.min(cap_ticks).max(0);
+        if contribution_ticks < one_second_ticks {
+            contribution_ticks = segment_ticks.min(one_second_ticks).max(0);
+        }
+        contributions.push(contribution_ticks);
+        accumulated_millis += ticks_to_millis(contribution_ticks, tb_num, tb_den);
+        reached_budget = accumulated_millis >= target_millis;
+    }
+
+    if accumulated_millis < target_millis {
+        let mut extendable: Vec<usize> = (0..clips.len())
+            .filter(|&index| contributions[index] != KEEP_WHOLE)
+            .collect();
+        extendable.sort_by_key(|&index| {
+            let (in_ticks, out_ticks, _, _) = native_ticks(&clips[index].clip).unwrap();
+            std::cmp::Reverse(out_ticks - in_ticks)
+        });
+        for index in extendable {
+            if accumulated_millis >= target_millis {
+                break;
+            }
+            let (in_ticks, out_ticks, tb_num, tb_den) = native_ticks(&clips[index].clip).unwrap();
+            let segment_ticks = out_ticks - in_ticks;
+            if contributions[index] >= segment_ticks {
+                continue;
+            }
+            // 只把这条素材延展到"用满剩余预算"或"到它自己的全长"为止，
+            // 谁先到就停在谁那——不能像旧代码那样直接跳到全长，那会把
+            // 30 秒的预算撑成 60 秒。剩余预算是毫秒记账，换算回这条素材
+            // 自己的 tb 才能跟它的 ticks 相加减。
+            let remaining_budget_millis = (target_millis - accumulated_millis).max(0);
+            let remaining_budget_ticks = millis_to_ticks(remaining_budget_millis, tb_num, tb_den);
+            let extend_by_ticks = remaining_budget_ticks
+                .min(segment_ticks - contributions[index])
+                .max(0);
+            if extend_by_ticks == 0 {
+                continue;
+            }
+            let old_millis = ticks_to_millis(contributions[index], tb_num, tb_den);
+            contributions[index] += extend_by_ticks;
+            accumulated_millis += ticks_to_millis(contributions[index], tb_num, tb_den) - old_millis;
+        }
+    }
+
+    let mut selected = Vec::with_capacity(clips.len());
+    for (clip, &contribution) in clips.iter().zip(contributions.iter()) {
+        if contribution == 0 {
+            continue;
+        }
+        if contribution == KEEP_WHOLE {
+            selected.push(clip.clone());
+            continue;
+        }
+        let (in_ticks, _, _, _) = native_ticks(&clip.clip).unwrap();
+        let mut adjusted = clip.clone();
+        adjusted.clip.out_ticks = Some(in_ticks + contribution);
+        selected.push(adjusted);
+    }
+
+    let actual_ticks = selected.iter().map(|clip| ticks_to_millis_for_clip(&clip.clip)).sum();
+
+    Ok((
+        selected,
+        RoughCutSelectionSummary {
+            actual_ticks,
+            actual_tb_num: ROUGH_CUT_SUMMARY_TB_NUM,
+            actual_tb_den: ROUGH_CUT_SUMMARY_TB_DEN,
+        },
+    ))
+}
+
 fn transcode_rough_cut(
     ffmpeg: &OsStr,
     ffprobe: &OsStr,
@@ -1964,6 +2467,21 @@ fn transcode_rough_cut(
         ))
     })?;
     validate_nonempty(output_path, "参考粗剪")
+}
+
+/// R6 Task 7b:粗剪转码里 `clips.manual_rotation` 的 `vf` 前缀——只在 rotate
+/// 标签兜底命中(没有 side_data 显示矩阵)时非空,插在 scale 之前才能让缩放
+/// 按转正后的宽高比走,不然横竖颠倒的画面会被硬塞进 16:9。90°/270° 各转一次
+/// `transpose`;180° 用 `hflip,vflip`(两次 transpose 与之等价,这里按任务卡
+/// 指定的写法,和 `core::artifacts` 里另一套缩略图/预览用的 `transpose,transpose`
+/// 写法不是同一处代码,不必统一)。
+fn rough_cut_rotation_prefix(manual_rotation: Option<i64>) -> Option<&'static str> {
+    match manual_rotation {
+        Some(90) => Some("transpose=1,"),
+        Some(180) => Some("hflip,vflip,"),
+        Some(270) => Some("transpose=2,"),
+        _ => None,
+    }
 }
 
 fn rough_cut_args(
@@ -2006,8 +2524,9 @@ fn rough_cut_args(
     let mut concat_inputs = String::new();
     for (index, clip) in clips.iter().enumerate() {
         let duration = clip_duration_seconds(&clip.clip).max(0.001);
+        let rotate_prefix = rough_cut_rotation_prefix(clip.clip.manual_rotation).unwrap_or("");
         filters.push(format!(
-            "[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
+            "[{index}:v:0]{rotate_prefix}scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
         ));
         if audio_presence[index] {
             filters.push(format!(
@@ -2245,10 +2764,120 @@ fn copy_subtitles(
     Ok(copied)
 }
 
-fn build_shot_list_csv(clips: &[ExportClip], items: &[ExportItemStatus]) -> String {
+/// R4 Task 3:一条素材的封面 JPEG,原样按 `cache_artifacts` 的产物有效性规则
+/// 核对(`kind='cover'` 且 `source_hash` 命中当前 `quick_hash`,rel_path 与
+/// 期望路径一致)——和 `artifacts::cover_urls` 同一套判定,只是这里要的是文件
+/// 字节而不是签名 URL。查不到、hash 不匹配或文件缺失都返回 `None`,联系表
+/// 那一格退回灰色占位,不让一张坏封面炸掉整份 PDF。
+fn resolve_cover_jpeg(connection: &Connection, cache_root: &Path, clip: &ExportClip) -> Option<Vec<u8>> {
+    let rel_path: String = connection
+        .query_row(
+            "SELECT rel_path FROM cache_artifacts
+             WHERE clip_id = ?1 AND kind = 'cover' AND source_hash = ?2",
+            params![clip.clip_id, clip.quick_hash],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let expected = super::artifacts::artifact_relative_path(clip.clip_id, super::artifacts::COVER_FILE);
+    if Path::new(&rel_path) != expected.as_path() {
+        return None;
+    }
+    std::fs::read(cache_root.join(&expected)).ok()
+}
+
+/// 联系表条目严格按 CSV 那一份顺序构建(同一个 `clips` 切片,同一次遍历)——
+/// 剪辑师拿着两份纸对照时,序号必须一一对应。
+fn build_contact_sheet_items(
+    connection: &Connection,
+    cache_root: &Path,
+    clips: &[ExportClip],
+) -> Vec<contact_sheet::ContactSheetItem> {
+    clips
+        .iter()
+        .enumerate()
+        .map(|(index, clip)| {
+            let start_seconds = clip_start_seconds(clip).unwrap_or(0.0);
+            let end_seconds = start_seconds + clip_duration_seconds(clip);
+            contact_sheet::ContactSheetItem {
+                order: index + 1,
+                file_name: clip.file_name.clone(),
+                in_clock: format_clock(start_seconds),
+                out_clock: format_clock(end_seconds),
+                chapter_title: (!clip.chapter_title.is_empty()).then(|| clip.chapter_title.clone()),
+                cover_jpeg: resolve_cover_jpeg(connection, cache_root, clip),
+            }
+        })
+        .collect()
+}
+
+/// R4 Task 3:渲染 `05_镜头表/联系表.pdf`。先渲染到一个同目录的临时文件,再
+/// 整体读回、走 `write_synced` 落到最终路径——和 CSV/字幕同一套 fsync 纪律,
+/// 不能因为这份产物是"锦上添花"就少一层落盘保证。渲染失败或临时文件读取
+/// 失败都原样把错误往上抛,调用方负责把它降级成交付说明里的一句话而不是
+/// 让整个导出失败。
+/// R4 Task 3 复审:`render_contact_sheet` 成功之后,`fs::read` 或
+/// `write_synced` 任何一步失败都不能把 `联系表.pdf.rendering` 这份临时文件
+/// 留在 `05_镜头表/` 里被打包——它一进包就是一份剪辑师看不懂的杂物。用
+/// `Drop` 兜底,不管返回路径是哪一条(`?` 提前返回也算),守卫离开作用域
+/// 时都会尝试删除;文件已经被正常挪走(重命名/删除)后再删一次是
+/// `NotFound`,原样忽略。
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %self.0.display(), %error, "清理联系表临时文件失败");
+            }
+        }
+    }
+}
+
+fn write_contact_sheet(
+    connection: &Connection,
+    staging_path: &Path,
+    episode_id: i64,
+    payload: &ExportJobPayload,
+) -> Result<contact_sheet::ContactSheetStats> {
+    let episode_title: String = connection.query_row(
+        "SELECT title FROM episodes WHERE id = ?1",
+        [episode_id],
+        |row| row.get(0),
+    )?;
+    let db_path = connection
+        .path()
+        .ok_or_else(|| CoreError::ContactSheet("无法定位素材缓存目录".to_owned()))?;
+    let cache_root = super::artifacts::cache_root_for_db(Path::new(db_path));
+    let items = build_contact_sheet_items(connection, &cache_root, &payload.clips);
+    let portrait = payload.platform_info.orientation == "portrait";
+    let options = contact_sheet::ContactSheetOptions {
+        title: format!("{episode_title} 联系表"),
+        portrait,
+        columns: if portrait { 3 } else { 4 },
+    };
+    let final_path = staging_path.join(CONTACT_SHEET_FILE);
+    let temporary_path = final_path.with_extension("pdf.rendering");
+    let stats = contact_sheet::render_contact_sheet(&items, &options, &temporary_path)?;
+    let _guard = TempFileGuard(temporary_path.clone());
+    let bytes = std::fs::read(&temporary_path)?;
+    write_synced(&final_path, &bytes)?;
+    Ok(stats)
+}
+
+fn build_shot_list_csv(
+    clips: &[ExportClip],
+    items: &[ExportItemStatus],
+    platform_info: &ExportPlatformInfo,
+) -> String {
     let mut csv = String::from(
-        "\u{feff}顺序号,文件名,包内路径,入点,出点,段时长,分辨率,编码,FPS,VFR,拍摄时间,Chapter,Beat,星级,L1角标摘要,对白摘要,备注\r\n",
+        "\u{feff}顺序号,文件名,包内路径,入点,出点,段时长,分辨率,编码,FPS,VFR,拍摄时间,Chapter,Beat,星级,L1角标摘要,对白摘要,平台,画布,转录音轨,备注\r\n",
     );
+    let platform_column = platform_info.display_name.clone();
+    let canvas_column = format!("{}x{}", platform_info.canvas_width, platform_info.canvas_height);
     for (index, (clip, item)) in clips.iter().zip(items).enumerate() {
         let resolution = match (clip.width, clip.height) {
             (Some(width), Some(height)) => format!("{width}×{height}"),
@@ -2266,6 +2895,15 @@ fn build_shot_list_csv(clips: &[ExportClip], items: &[ExportItemStatus]) -> Stri
         let start_seconds = clip_start_seconds(clip).unwrap_or(0.0);
         let duration_seconds = clip_duration_seconds(clip);
         let end_seconds = start_seconds + duration_seconds;
+        // 只有明确选择过、或探测到过音轨的素材才写序号；从没探测过音轨的
+        // 旧素材留空，不能让空表也显示误导性的"0"。
+        let transcribe_track_column = if clip.selected_transcribe_track.is_some()
+            || !clip.audio_tracks.is_empty()
+        {
+            effective_transcribe_track(clip).to_string()
+        } else {
+            String::new()
+        };
         let fields = [
             (index + 1).to_string(),
             clip.file_name.clone(),
@@ -2283,6 +2921,9 @@ fn build_shot_list_csv(clips: &[ExportClip], items: &[ExportItemStatus]) -> Stri
             clip.stars.map(|value| value.to_string()).unwrap_or_default(),
             clip.l1_summary.clone(),
             clip.dialogue_summary.clone(),
+            platform_column.clone(),
+            canvas_column.clone(),
+            transcribe_track_column,
             note.to_owned(),
         ];
         csv.push_str(&fields.map(|field| csv_escape(&field)).join(","));
@@ -2321,35 +2962,159 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
+/// R3 Task 6：只要有素材探测到 ≥2 路音轨，就在交付说明里留一句人话映射，
+/// 说清楚哪一路被转录用了、其余是什么角色——不然剪辑师打开草稿只看到一条
+/// 混好的音轨，看不出转录字幕对应的是哪一路麦。最多列 3 条素材，超出的
+/// 折成"等 N 条"（N 是列表之外还剩多少条，不含已展示的 3 条）。
+fn audio_track_mapping_step(clips: &[ExportClip]) -> Option<String> {
+    const MAX_LISTED: usize = 3;
+    let multi_track_clips: Vec<&ExportClip> = clips
+        .iter()
+        .filter(|clip| clip.audio_tracks.len() >= 2)
+        .collect();
+    if multi_track_clips.is_empty() {
+        return None;
+    }
+    let entries = multi_track_clips
+        .iter()
+        .take(MAX_LISTED)
+        .map(|clip| {
+            let transcribe_track = effective_transcribe_track(clip);
+            let tracks = clip
+                .audio_tracks
+                .iter()
+                .map(|track| {
+                    let label = audio_role_label(track.role_guess.as_deref());
+                    if track.stream_index == transcribe_track {
+                        format!("{}={label}（转录）", track.stream_index)
+                    } else {
+                        format!("{}={label}", track.stream_index)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("{} {tracks}", clip.file_name)
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    let remaining = multi_track_clips.len().saturating_sub(MAX_LISTED);
+    let suffix = if remaining > 0 {
+        format!("；等 {remaining} 条")
+    } else {
+        String::new()
+    };
+    Some(format!("音轨映射：{entries}{suffix}"))
+}
+
+/// R4 Task 3:联系表这一步是否真的落地了 PDF,以及给交付说明追加什么话——
+/// 关闭/失败两种情况都不能让 05 步的说明句提到一份并不存在的文件。
+enum ContactSheetOutcome {
+    Disabled,
+    Written { glyph_fallbacks: usize, cover_failures: usize },
+    Failed { message: String },
+}
+
 fn build_instructions(
     payload: &ExportJobPayload,
     subtitle_count: u64,
     destination_count: u64,
+    narration_outcome: NarrationOutcome,
+    contact_sheet: &ContactSheetOutcome,
 ) -> String {
-    let subtitle_note = if subtitle_count > 0 {
+    let subtitle_step = if subtitle_count > 0 {
         format!(
-            "4. “{SUBTITLE_DIRECTORY}/”含 {subtitle_count} 条与精选素材同序号的标准 SRT；请在当前剪映版本导入并核对时间轴。\n\
-             5. “{SHOT_LIST_FILE}”含包内路径、画面参数、VFR、星级、L1 角标和对白摘要。"
+            "“{SUBTITLE_DIRECTORY}/”含 {subtitle_count} 条与精选素材同序号的标准 SRT；请在当前剪映版本导入并核对时间轴。"
         )
     } else {
-        format!(
-            "4. 本次没有可用转写，未创建“{SUBTITLE_DIRECTORY}/”；这不会阻塞素材交付。\n\
-             5. “{SHOT_LIST_FILE}”含包内路径、画面参数、VFR、星级、L1 角标和对白摘要。"
-        )
+        format!("本次没有可用转写，未创建“{SUBTITLE_DIRECTORY}/”；这不会阻塞素材交付。")
     };
-    let destination_note = if destination_count > 0 {
+    let narration_step = match narration_outcome {
+        NarrationOutcome::WrittenConfirmed => format!(
+            "“{NARRATION_DIRECTORY}/旁白稿.txt”按已确认的叙事分章与 beat 理由生成草稿，可直接改写后配音。旁白稿：已确认。"
+        ),
+        NarrationOutcome::WrittenSuggested => format!(
+            "“{NARRATION_DIRECTORY}/旁白稿.txt”按 AI 建议(未经人工确认)的叙事分章与 beat 理由生成草稿，请人工核实后再配音。旁白稿：AI 建议稿（未确认）。"
+        ),
+        NarrationOutcome::NotWritten => format!(
+            "本次无旁白稿，未在“{NARRATION_DIRECTORY}/”写入草稿；请在旅剪工作台确认叙事分章后重新生成交付包。"
+        ),
+    };
+    let shot_list_step = if matches!(contact_sheet, ContactSheetOutcome::Written { .. }) {
         format!(
-            "\n6. “{DESTINATION_DIRECTORY}/”含 {destination_count} 张地点卡；待核实卡只导出状态占位，不会把模型草稿写入交付说明。"
+            "“{SHOT_LIST_FILE}”含包内路径、画面参数、VFR、星级、L1 角标和对白摘要，以及联系表 PDF（“{CONTACT_SHEET_FILE}”）。"
         )
     } else {
-        String::new()
+        format!("“{SHOT_LIST_FILE}”含包内路径、画面参数、VFR、星级、L1 角标和对白摘要。")
     };
+    let mut steps: Vec<String> = vec![
+        "打开剪映专业版，新建草稿。".to_owned(),
+        format!("将“{SELECTED_DIRECTORY}”拖入素材区；文件名前三位就是推荐顺序。"),
+        format!("“{ROUGH_CUT_FILE}”是 1080p H.264/AAC 参考粗剪，可直接预览故事顺序。"),
+        subtitle_step,
+        shot_list_step,
+        narration_step,
+        format!("“{COLOR_NOTES_DIRECTORY}/”本版本为空目录，后续版本填充色彩说明。"),
+    ];
+    if let Some(target_seconds) = payload.target_seconds {
+        let actual_seconds = payload.rough_cut_actual_ticks.map(|ticks| {
+            let tb_num = payload.rough_cut_actual_tb_num.unwrap_or(1).max(1);
+            let tb_den = payload.rough_cut_actual_tb_den.unwrap_or(1).max(1);
+            ticks as f64 * tb_num as f64 / tb_den as f64
+        });
+        steps.push(match actual_seconds {
+            Some(actual_seconds) => {
+                format!("参考粗剪：目标 {target_seconds} 秒，实际 {actual_seconds:.1} 秒。")
+            }
+            None => format!("参考粗剪：目标 {target_seconds} 秒。"),
+        });
+    }
+    match contact_sheet {
+        ContactSheetOutcome::Written { glyph_fallbacks, cover_failures } => {
+            if *glyph_fallbacks > 0 {
+                steps.push(format!("联系表中 {glyph_fallbacks} 个字符字体不含，已用 □ 替代"));
+            }
+            if *cover_failures > 0 {
+                steps.push(format!("联系表：{cover_failures} 张封面无法解码，已用灰框占位"));
+            }
+        }
+        ContactSheetOutcome::Failed { message } => {
+            steps.push(format!("联系表生成失败：{message}"));
+        }
+        _ => {}
+    }
+    if destination_count > 0 {
+        steps.push(format!(
+            "“{DESTINATION_DIRECTORY}/”含 {destination_count} 张地点卡；待核实卡只导出状态占位，不会把模型草稿写入交付说明。"
+        ));
+    }
+    if let Some(mapping_step) = audio_track_mapping_step(&payload.clips) {
+        steps.push(mapping_step);
+    }
+    let orientation_label = if payload.platform_info.orientation == "portrait" {
+        "竖版"
+    } else {
+        "横版"
+    };
+    let budget_label = if payload.platform_info.duration_budget_seconds > 0 {
+        format!("建议时长 ≤ {} s", payload.platform_info.duration_budget_seconds)
+    } else {
+        "不限时长".to_owned()
+    };
+    steps.push(format!(
+        "目标平台：{}（{orientation_label} {}×{}，{budget_label}）",
+        payload.platform_info.display_name,
+        payload.platform_info.canvas_width,
+        payload.platform_info.canvas_height,
+    ));
+    let numbered_steps = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| format!("{}. {step}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "旅剪工作台 · 稳定交付包\n\n\
-         1. 打开剪映专业版，新建草稿。\n\
-         2. 将“{SELECTED_DIRECTORY}”拖入素材区；文件名前三位就是推荐顺序。\n\
-         3. “{ROUGH_CUT_FILE}”是 1080p H.264/AAC 参考粗剪，可直接预览故事顺序。\n\
-         {subtitle_note}{destination_note}\n\n\
+         {numbered_steps}\n\n\
          本包不会修改原片。用户打点的精选段按源 time_base 入出点重编码，并回读首尾 PTS；超过 1 帧的偏差会在镜头表中以“⚠ 黄标”注明。没有精选段但用 F 收藏的素材仍按整条 remux。\n\
          参考粗剪统一为 30fps 1080p，使用 macOS VideoToolbox，并允许系统提供的软件编码路径。\n\
          本次精选 {} 条，成功 {} 条，失败 {} 条。失败原因见镜头表“备注”列。\n",
@@ -2424,6 +3189,112 @@ fn write_destination_cards(
         write_synced(&directory.join(file_name), body.as_bytes())?;
     }
     Ok(overview.destination_cards.len() as u64)
+}
+
+const NARRATION_SCRIPT_FILE_NAME: &str = "旁白稿.txt";
+const NARRATION_AI_DRAFT_HEADER: &str = "（AI 建议稿，未经人工确认）";
+
+/// R6 Task 7b:交付包写入旁白稿草稿是否落地，以及信任等级——与
+/// `write_destination_cards`（07_地点卡）和 beat order 对齐后，已确认
+/// (confirmed) 与 AI 建议(suggested) 两种叙事修订都写，只是建议版会在文件
+/// 与交付说明里标注“未经人工确认”，不让模型草稿被当成定稿直接配音。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarrationOutcome {
+    NotWritten,
+    WrittenConfirmed,
+    WrittenSuggested,
+}
+
+/// R2 G10 / R6 Task 7b:交付包写入旁白稿草稿——存在“已确认(confirmed)”或
+/// “AI 建议(suggested)”叙事修订且至少一章时写入，来自该版本的章节标题与
+/// beat rationale（旁白提示）。建议版会在文件头与交付说明里标注未经人工确认。
+fn write_narration_script(
+    connection: &Connection,
+    staging_path: &Path,
+    episode_id: i64,
+) -> Result<NarrationOutcome> {
+    if super::settings::string_value(connection, super::settings::LLM_ENABLED_KEY, "false")?
+        != "true"
+    {
+        return Ok(NarrationOutcome::NotWritten);
+    }
+    let Some(revision) = super::narrative_revision::revision_info(connection, episode_id)? else {
+        return Ok(NarrationOutcome::NotWritten);
+    };
+    let is_confirmed = match revision.kind.as_str() {
+        "confirmed" => true,
+        "suggested" => false,
+        _ => return Ok(NarrationOutcome::NotWritten),
+    };
+    let Some(overview) = super::narrative::load_overview_for_episode(connection, episode_id)?
+    else {
+        return Ok(NarrationOutcome::NotWritten);
+    };
+    if overview.chapters.is_empty() {
+        return Ok(NarrationOutcome::NotWritten);
+    }
+
+    let mut body = String::from("# 旁白稿（草稿，按需改写）\n");
+    if !is_confirmed {
+        body.push_str(NARRATION_AI_DRAFT_HEADER);
+        body.push('\n');
+    }
+    for (index, chapter) in overview.chapters.iter().enumerate() {
+        body.push_str(&format!("\n## 第 {} 章 {}\n", index + 1, chapter.title));
+        for beat in &chapter.beats {
+            let (file_name, in_ticks, out_ticks, tb_num, tb_den) =
+                narration_beat_clip(connection, beat.clip_id, beat.segment_id)?;
+            let start = format_clock(ticks_to_seconds(in_ticks, tb_num, tb_den));
+            let end = format_clock(ticks_to_seconds(out_ticks, tb_num, tb_den));
+            body.push_str(&format!("[{start}–{end}] {file_name} — {}\n", beat.rationale));
+        }
+    }
+    write_synced(
+        &staging_path.join(NARRATION_DIRECTORY).join(NARRATION_SCRIPT_FILE_NAME),
+        body.as_bytes(),
+    )?;
+    Ok(if is_confirmed {
+        NarrationOutcome::WrittenConfirmed
+    } else {
+        NarrationOutcome::WrittenSuggested
+    })
+}
+
+/// beat 只存 clip_id/segment_id;旁白稿要落地时码与文件名，回查素材的
+/// time_base 与（若有）精选段入出点——没有 segment 时按整条素材时长。
+fn narration_beat_clip(
+    connection: &Connection,
+    clip_id: i64,
+    segment_id: Option<i64>,
+) -> Result<(String, i64, i64, i64, i64)> {
+    let (rel_path, tb_num, tb_den, duration_ticks): (String, i64, i64, i64) = connection
+        .query_row(
+            "SELECT rel_path, COALESCE(tb_num, 0), COALESCE(tb_den, 0), COALESCE(duration_ticks, 0)
+             FROM clips WHERE id = ?1",
+            [clip_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let (in_ticks, out_ticks) = match segment_id {
+        Some(id) => connection.query_row(
+            "SELECT in_ticks, out_ticks FROM segments WHERE id = ?1",
+            [id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?,
+        None => (0, duration_ticks),
+    };
+    let file_name = Path::new(&rel_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or(rel_path);
+    Ok((file_name, in_ticks, out_ticks, tb_num, tb_den))
+}
+
+fn ticks_to_seconds(ticks: i64, tb_num: i64, tb_den: i64) -> f64 {
+    // 复用 canonical_time 的取整语义(四舍五入到微秒)而不是重复一份换算——
+    // 与 canonical_time::ticks_to_micros 保持同一份实现。
+    super::canonical_time::ticks_to_micros(ticks, tb_num, tb_den)
+        .map(|micros| micros as f64 / 1_000_000.0)
+        .unwrap_or(0.0)
 }
 
 fn destination_card_file_name(id: i64, name: &str) -> String {
@@ -2677,12 +3548,15 @@ mod tests {
             has_audio: Some(true),
             dialogue_summary: String::new(),
             srt_rel_path: None,
+            selected_transcribe_track: None,
+            audio_tracks: Vec::new(),
+            manual_rotation: None,
         }
     }
 
     fn export_payload_fixture(clips: Vec<ExportClip>) -> ExportJobPayload {
         ExportJobPayload {
-            version: 4,
+            version: 5,
             episode_id: Some(1),
             episode_memory_id: Some("test-episode".to_owned()),
             destination: "/tmp".to_owned(),
@@ -2699,7 +3573,255 @@ mod tests {
             },
             clips,
             output_path: None,
+            platform_info: default_platform_info(),
+            include_contact_sheet: true,
+            contact_sheet_glyph_fallbacks: None,
+            contact_sheet_cover_failures: None,
+            target_seconds: None,
+            rough_cut_actual_ticks: None,
+            rough_cut_actual_tb_num: None,
+            rough_cut_actual_tb_den: None,
         }
+    }
+
+    fn numbered_step_lines(text: &str) -> Vec<u32> {
+        text.lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, ". ");
+                let number = parts.next()?;
+                parts.next()?;
+                number.parse::<u32>().ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_instructions_numbers_steps_sequentially_with_subtitles_and_destinations() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let text = build_instructions(&payload, 3, 2, NarrationOutcome::WrittenConfirmed, &ContactSheetOutcome::Disabled);
+        let numbers = numbered_step_lines(&text);
+        let expected = (1..=numbers.len() as u32).collect::<Vec<_>>();
+        assert_eq!(numbers, expected, "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_numbers_steps_sequentially_without_subtitles_or_destinations() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        let numbers = numbered_step_lines(&text);
+        let expected = (1..=numbers.len() as u32).collect::<Vec<_>>();
+        assert_eq!(numbers, expected, "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_omits_audio_track_mapping_when_every_clip_is_single_track() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(!text.contains("音轨映射"), "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_states_audio_track_mapping_for_multi_track_clip() {
+        let mut clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        clip.selected_transcribe_track = Some(1);
+        clip.audio_tracks = vec![
+            ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+            ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+        ];
+        let payload = export_payload_fixture(vec![clip]);
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(
+            text.contains("音轨映射：clip.mov 0=机内麦/1=无线麦（转录）"),
+            "rendered instructions:\n{text}"
+        );
+        let numbers = numbered_step_lines(&text);
+        let expected = (1..=numbers.len() as u32).collect::<Vec<_>>();
+        assert_eq!(numbers, expected, "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_audio_track_mapping_lists_at_most_three_clips() {
+        let mut clips = Vec::new();
+        for index in 0..5 {
+            let mut clip =
+                export_clip_fixture(&format!("clip-{index}.mov"), 0, 1_000, 1, 1_000);
+            clip.audio_tracks = vec![
+                ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+                ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+            ];
+            clips.push(clip);
+        }
+        let payload = export_payload_fixture(clips);
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(text.contains("clip-0.mov"), "rendered instructions:\n{text}");
+        assert!(text.contains("clip-2.mov"), "rendered instructions:\n{text}");
+        assert!(!text.contains("clip-3.mov"), "rendered instructions:\n{text}");
+        assert!(text.contains("等 2 条"), "rendered instructions:\n{text}");
+    }
+
+    fn douyin_portrait_platform_info() -> ExportPlatformInfo {
+        ExportPlatformInfo {
+            platform: "douyin".to_owned(),
+            display_name: "抖音".to_owned(),
+            orientation: "portrait".to_owned(),
+            canvas_width: 1080,
+            canvas_height: 1920,
+            duration_budget_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn build_instructions_states_douyin_portrait_platform_and_canvas() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = ExportJobPayload {
+            platform_info: douyin_portrait_platform_info(),
+            ..export_payload_fixture(vec![clip])
+        };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(text.contains("抖音"), "rendered instructions:\n{text}");
+        assert!(text.contains("1080×1920"), "rendered instructions:\n{text}");
+        assert!(text.contains("竖版"), "rendered instructions:\n{text}");
+        assert!(text.contains("≤ 60 s"), "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_zero_budget_reads_unbounded() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]); // default_platform_info: budget 0
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(text.contains("不限时长"), "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn build_instructions_reports_contact_sheet_failure() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let outcome = ContactSheetOutcome::Failed {
+            message: "磁盘空间不足".to_owned(),
+        };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &outcome);
+        assert!(
+            text.contains("联系表生成失败：磁盘空间不足"),
+            "rendered instructions:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_reports_contact_sheet_glyph_fallbacks() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let outcome = ContactSheetOutcome::Written { glyph_fallbacks: 3, cover_failures: 0 };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &outcome);
+        assert!(
+            text.contains("3 个字符字体不含"),
+            "rendered instructions:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_reports_contact_sheet_cover_failures() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let outcome = ContactSheetOutcome::Written { glyph_fallbacks: 0, cover_failures: 2 };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &outcome);
+        assert!(
+            text.contains("联系表：2 张封面无法解码，已用灰框占位"),
+            "rendered instructions:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_omits_cover_failures_sentence_when_zero() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+        let outcome = ContactSheetOutcome::Written { glyph_fallbacks: 0, cover_failures: 0 };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &outcome);
+        assert!(
+            !text.contains("封面无法解码"),
+            "rendered instructions:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_instructions_override_platform_states_bilibili_without_touching_episode() {
+        // Simulates a payload frozen with an override_platform ("bilibili") applied at
+        // start_export time — the episode's own target_platform/canvas_orientation is
+        // untouched; only the delivered instructions reflect the override.
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = ExportJobPayload {
+            platform_info: ExportPlatformInfo {
+                platform: "bilibili".to_owned(),
+                display_name: "B站".to_owned(),
+                orientation: "landscape".to_owned(),
+                canvas_width: 1920,
+                canvas_height: 1080,
+                duration_budget_seconds: 600,
+            },
+            ..export_payload_fixture(vec![clip])
+        };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(text.contains("B站"), "rendered instructions:\n{text}");
+    }
+
+    #[test]
+    fn shot_list_csv_has_platform_and_canvas_columns() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let item = ExportItemStatus {
+            clip_id: clip.clip_id,
+            file_name: clip.file_name.clone(),
+            output_name: "001_clip.mp4".to_owned(),
+            status: "done".to_owned(),
+            note: None,
+            warning: false,
+        };
+        let csv = build_shot_list_csv(&[clip], &[item], &douyin_portrait_platform_info());
+        assert!(csv.contains("平台,画布"));
+        assert!(csv.contains("抖音"));
+        assert!(csv.contains("1080x1920"));
+    }
+
+    #[test]
+    fn shot_list_csv_leaves_transcribe_track_column_empty_without_audio_track_data() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let item = ExportItemStatus {
+            clip_id: clip.clip_id,
+            file_name: clip.file_name.clone(),
+            output_name: "001_clip.mp4".to_owned(),
+            status: "done".to_owned(),
+            note: None,
+            warning: false,
+        };
+        let csv = build_shot_list_csv(&[clip], &[item], &douyin_portrait_platform_info());
+        let data_row = csv.lines().nth(1).unwrap();
+        // 平台,画布,转录音轨,备注 → 转录音轨 is the second-to-last column.
+        let fields: Vec<&str> = data_row.split(',').collect();
+        assert_eq!(fields[fields.len() - 2], "");
+    }
+
+    #[test]
+    fn shot_list_csv_states_selected_transcribe_track_index() {
+        let mut clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        clip.selected_transcribe_track = Some(1);
+        clip.audio_tracks = vec![
+            ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+            ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+        ];
+        let item = ExportItemStatus {
+            clip_id: clip.clip_id,
+            file_name: clip.file_name.clone(),
+            output_name: "001_clip.mp4".to_owned(),
+            status: "done".to_owned(),
+            note: None,
+            warning: false,
+        };
+        let csv = build_shot_list_csv(&[clip], &[item], &douyin_portrait_platform_info());
+        assert!(csv.contains("转录音轨"));
+        let data_row = csv.lines().nth(1).unwrap();
+        let fields: Vec<&str> = data_row.split(',').collect();
+        assert_eq!(fields[fields.len() - 2], "1");
     }
 
     fn insert_select_segment(
@@ -3107,14 +4229,14 @@ mod tests {
             warning: false,
         };
 
-        let csv = build_shot_list_csv(&[clip], &[item]);
+        let csv = build_shot_list_csv(&[clip], &[item], &default_platform_info());
         assert!(csv.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
         assert!(csv.contains("\"A,\"\"B\"\".mov\""));
         assert!(csv.contains("\"bad, \"\"packet\"\"\""));
         assert!(csv.contains(",是,"));
-        assert!(csv.contains("L1角标摘要,对白摘要,备注"));
+        assert!(csv.contains("L1角标摘要,对白摘要,平台,画布,转录音轨,备注"));
         assert!(csv.contains("包内路径,入点,出点,段时长"));
-        assert!(csv.contains("01_精选片段/001_A.mp4"));
+        assert!(csv.contains("01_精选原片/001_A.mp4"));
         assert!(!csv.contains("/素材/"));
         assert!(csv.contains("拍摄时间,Chapter,Beat,星级"));
         assert!(csv.contains("清晨出发"));
@@ -3188,6 +4310,215 @@ mod tests {
         ).unwrap();
         assert!(output.contains("核实状态：待核实"));
         assert!(!output.contains("未核实地理草稿"));
+    }
+
+    #[test]
+    fn confirmed_narrative_revision_writes_narration_script_with_chapters_and_beat_rationale() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        super::super::settings::set_setting(
+            &connection,
+            super::super::settings::LLM_ENABLED_KEY,
+            "true",
+        )
+        .unwrap();
+        let active: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        connection.execute(
+            "INSERT INTO narrative_revisions(episode_id, kind, title, theme, created_at)
+             VALUES (?1, 'confirmed', '旅程', '测试', 'now')",
+            [active],
+        ).unwrap();
+        let revision_id = connection.last_insert_rowid();
+
+        let clip_a = insert_clip(&connection, Path::new("a.mov"), "2026-09-01T00:00:00Z", &[], None);
+        let segment_a = insert_select_segment(&connection, clip_a, 0, 250, 0);
+        let clip_b = insert_clip(&connection, Path::new("b.mov"), "2026-09-01T01:00:00Z", &[], None);
+        let segment_b = insert_select_segment(&connection, clip_b, 100, 400, 0);
+        let clip_c = insert_clip(&connection, Path::new("c.mov"), "2026-09-01T02:00:00Z", &[], None);
+        let segment_c = insert_select_segment(&connection, clip_c, 0, 2_000, 0);
+
+        connection.execute(
+            "INSERT INTO narrative_chapters(
+                episode_id, revision_id, kind, title, \"order\", promoted, score, rationale,
+                promotion_reason, story_slots_json, missing_slots_json, dh_plan_json
+             ) VALUES (?1, ?2, 'journey', '启程日', 0, 0, 0.8, '开篇', '', '[]', '[]', 'null')",
+            params![active, revision_id],
+        ).unwrap();
+        let chapter_1 = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO narrative_chapters(
+                episode_id, revision_id, kind, title, \"order\", promoted, score, rationale,
+                promotion_reason, story_slots_json, missing_slots_json, dh_plan_json
+             ) VALUES (?1, ?2, 'destination', '抵达营地', 1, 0, 0.8, '收尾', '', '[]', '[]', 'null')",
+            params![active, revision_id],
+        ).unwrap();
+        let chapter_2 = connection.last_insert_rowid();
+
+        connection.execute(
+            "INSERT INTO narrative_beats(chapter_id, clip_id, segment_id, role, \"order\", score, rationale)
+             VALUES (?1, ?2, ?3, 'beat', 0, 0.8, '出发前的整备')",
+            params![chapter_1, clip_a, segment_a],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO narrative_beats(chapter_id, clip_id, segment_id, role, \"order\", score, rationale)
+             VALUES (?1, ?2, ?3, 'beat', 1, 0.8, '公路上的风景')",
+            params![chapter_1, clip_b, segment_b],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO narrative_beats(chapter_id, clip_id, segment_id, role, \"order\", score, rationale)
+             VALUES (?1, ?2, ?3, 'beat', 0, 0.8, '营地夜话')",
+            params![chapter_2, clip_c, segment_c],
+        ).unwrap();
+        // segment_id = NULL(整条素材)且 rationale 为空——不能因此拒绝旁白提示或
+        // panic,应回退到素材整条时长并留下 "— " 结尾的空理由行。
+        // 需要一条正向 binary 评分,整条素材才会出现在"当前已选"集合里
+        // (narrative.rs::selected_item_refs),否则 load_overview_for_episode
+        // 会因 current_refs != narrative_refs 判定叙事已过期而返回 None。
+        let clip_d = insert_clip(&connection, Path::new("d.mov"), "2026-09-01T03:00:00Z", &[1], None);
+        connection.execute(
+            "INSERT INTO narrative_beats(chapter_id, clip_id, segment_id, role, \"order\", score, rationale)
+             VALUES (?1, ?2, NULL, 'beat', 1, 0.8, '')",
+            params![chapter_2, clip_d],
+        ).unwrap();
+
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(staging.join(NARRATION_DIRECTORY)).unwrap();
+
+        assert_eq!(
+            write_narration_script(&connection, &staging, active).unwrap(),
+            NarrationOutcome::WrittenConfirmed
+        );
+        let output = std::fs::read_to_string(
+            staging.join(NARRATION_DIRECTORY).join("旁白稿.txt"),
+        ).unwrap();
+        assert!(output.starts_with("# 旁白稿（草稿，按需改写）\n"));
+        // 已确认版本不带 AI 建议稿标记。
+        assert!(!output.contains(NARRATION_AI_DRAFT_HEADER));
+        assert!(output.contains("## 第 1 章 启程日"));
+        assert!(output.contains("## 第 2 章 抵达营地"));
+        assert!(output.contains("[00:00:00.000–00:00:00.250] a.mov — 出发前的整备"));
+        assert!(output.contains("[00:00:00.100–00:00:00.400] b.mov — 公路上的风景"));
+        assert!(output.contains("[00:00:00.000–00:00:02.000] c.mov — 营地夜话"));
+        // 整条素材(segment_id = NULL)用 [00:00:00.000–素材时长] 与文件名;空理由不 panic,
+        // 行以 "— " 结尾。
+        assert!(output.contains("[00:00:00.000–00:00:02.000] d.mov — \n"));
+
+        let payload = export_payload_fixture(vec![export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000)]);
+        let instructions = build_instructions(
+            &payload,
+            0,
+            0,
+            NarrationOutcome::WrittenConfirmed,
+            &ContactSheetOutcome::Disabled,
+        );
+        assert!(instructions.contains("旁白稿"));
+        assert!(instructions.contains("旁白稿：已确认"));
+        assert!(!instructions.contains("本次无旁白稿"));
+    }
+
+    #[test]
+    fn suggested_narrative_revision_writes_narration_script_with_ai_draft_marker() {
+        // R6 Task 7b:与 07_地点卡/beat order 对齐——AI 建议版(suggested)
+        // 未经人工确认也要写旁白稿，但文件头与交付说明都要标注未确认。
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        super::super::settings::set_setting(
+            &connection,
+            super::super::settings::LLM_ENABLED_KEY,
+            "true",
+        )
+        .unwrap();
+        let active: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        connection.execute(
+            "INSERT INTO narrative_revisions(episode_id, kind, title, theme, created_at)
+             VALUES (?1, 'suggested', '旅程', '测试', 'now')",
+            [active],
+        ).unwrap();
+        let revision_id = connection.last_insert_rowid();
+
+        let clip_a = insert_clip(&connection, Path::new("a.mov"), "2026-09-01T00:00:00Z", &[], None);
+        let segment_a = insert_select_segment(&connection, clip_a, 0, 250, 0);
+
+        connection.execute(
+            "INSERT INTO narrative_chapters(
+                episode_id, revision_id, kind, title, \"order\", promoted, score, rationale,
+                promotion_reason, story_slots_json, missing_slots_json, dh_plan_json
+             ) VALUES (?1, ?2, 'journey', '启程日', 0, 0, 0.8, '开篇', '', '[]', '[]', 'null')",
+            params![active, revision_id],
+        ).unwrap();
+        let chapter_1 = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO narrative_beats(chapter_id, clip_id, segment_id, role, \"order\", score, rationale)
+             VALUES (?1, ?2, ?3, 'beat', 0, 0.8, '出发前的整备')",
+            params![chapter_1, clip_a, segment_a],
+        ).unwrap();
+
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(staging.join(NARRATION_DIRECTORY)).unwrap();
+
+        assert_eq!(
+            write_narration_script(&connection, &staging, active).unwrap(),
+            NarrationOutcome::WrittenSuggested
+        );
+        let output = std::fs::read_to_string(
+            staging.join(NARRATION_DIRECTORY).join("旁白稿.txt"),
+        ).unwrap();
+        assert!(output.starts_with("# 旁白稿（草稿，按需改写）\n"));
+        assert!(output.contains(NARRATION_AI_DRAFT_HEADER));
+        assert!(output.contains("## 第 1 章 启程日"));
+
+        let payload = export_payload_fixture(vec![export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000)]);
+        let instructions = build_instructions(
+            &payload,
+            0,
+            0,
+            NarrationOutcome::WrittenSuggested,
+            &ContactSheetOutcome::Disabled,
+        );
+        assert!(instructions.contains("旁白稿：AI 建议稿（未确认）"));
+        assert!(!instructions.contains("本次无旁白稿"));
+    }
+
+    #[test]
+    fn no_narrative_revision_writes_no_narration_script() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        super::super::settings::set_setting(
+            &connection,
+            super::super::settings::LLM_ENABLED_KEY,
+            "true",
+        )
+        .unwrap();
+        let active: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        // 没有任何叙事修订——现有行为不变:不写旁白稿。
+
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(staging.join(NARRATION_DIRECTORY)).unwrap();
+
+        assert_eq!(
+            write_narration_script(&connection, &staging, active).unwrap(),
+            NarrationOutcome::NotWritten
+        );
+        assert!(!staging.join(NARRATION_DIRECTORY).join("旁白稿.txt").exists());
+
+        let payload = export_payload_fixture(vec![export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000)]);
+        let instructions = build_instructions(
+            &payload,
+            0,
+            0,
+            NarrationOutcome::NotWritten,
+            &ContactSheetOutcome::Disabled,
+        );
+        assert!(instructions.contains("本次无旁白稿"));
     }
 
     #[test]
@@ -3371,6 +4702,245 @@ esac
         assert!(!rough.contains("libx264"));
     }
 
+    fn successful_clip_fixture(name: &str, duration_seconds: i64) -> SuccessfulClip {
+        SuccessfulClip {
+            clip: export_clip_fixture(name, 0, duration_seconds * 1_000, 1, 1_000),
+            path: PathBuf::from(format!("{name}.mp4")),
+        }
+    }
+
+    /// R6 Task 7b:`clips.manual_rotation`（rotate 标签兜底命中）必须在粗剪转码
+    /// 的 vf 链里，插在 scale 之前——不然缩放会按未转正的宽高比走，横竖颠倒。
+    #[test]
+    fn rough_cut_args_inserts_transpose_before_scale_for_manual_rotation_90() {
+        let mut rotated = successful_clip_fixture("rotated90.mp4", 4);
+        rotated.clip.manual_rotation = Some(90);
+        let clips = [rotated];
+
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let joined = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            joined.contains("[0:v:0]transpose=1,scale=1920:1080"),
+            "90° 应在 scale 前插入 transpose=1,：{joined}"
+        );
+    }
+
+    #[test]
+    fn rough_cut_args_inserts_hflip_vflip_before_scale_for_manual_rotation_180() {
+        let mut rotated = successful_clip_fixture("rotated180.mp4", 4);
+        rotated.clip.manual_rotation = Some(180);
+        let clips = [rotated];
+
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let joined = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            joined.contains("[0:v:0]hflip,vflip,scale=1920:1080"),
+            "180° 应在 scale 前插入 hflip,vflip,：{joined}"
+        );
+    }
+
+    #[test]
+    fn rough_cut_args_inserts_transpose_2_before_scale_for_manual_rotation_270() {
+        let mut rotated = successful_clip_fixture("rotated270.mp4", 4);
+        rotated.clip.manual_rotation = Some(270);
+        let clips = [rotated];
+
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let joined = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            joined.contains("[0:v:0]transpose=2,scale=1920:1080"),
+            "270° 应在 scale 前插入 transpose=2,：{joined}"
+        );
+    }
+
+    /// side_data 显示矩阵旋转的素材 `manual_rotation` 必须是 NULL（见
+    /// `import.rs` 对该列的注释）——不能在这条路径上多转一次。这是回归 pin：
+    /// 确认没有 manual_rotation 时不插入任何 transpose/flip 前缀。
+    #[test]
+    fn rough_cut_args_pins_no_transpose_for_side_data_rotated_clip() {
+        let clip = successful_clip_fixture("side-data-rotated.mp4", 4);
+        assert_eq!(clip.clip.manual_rotation, None);
+        let clips = [clip];
+
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let joined = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            joined.contains("[0:v:0]scale=1920:1080"),
+            "无 manual_rotation 时应直接 scale，无 transpose/flip 前缀：{joined}"
+        );
+        assert!(!joined.contains("transpose"));
+        assert!(!joined.contains("hflip"));
+        assert!(!joined.contains("vflip"));
+    }
+
+    /// R6 Task 6 G9：5 条 20 秒素材、目标 60 秒——cap = max(2, 60/5) = 12 秒，
+    /// 每条都按 12 秒截取，累计正好落在 [55, 60] 秒区间，且每条都不低于 1 秒。
+    #[test]
+    fn select_rough_cut_caps_each_clip_and_lands_within_the_target_window() {
+        let clips: Vec<SuccessfulClip> = (0..5)
+            .map(|index| successful_clip_fixture(&format!("clip{index}.mov"), 20))
+            .collect();
+
+        let (selected, summary) = select_rough_cut(&clips, Some(60)).unwrap();
+
+        assert_eq!(selected.len(), 5, "60 秒预算下 5 条素材应该全部入选");
+        let total_seconds = summary.actual_ticks as f64 / 1_000.0;
+        assert!(
+            (55.0..=60.0).contains(&total_seconds),
+            "总时长应落在 [55, 60] 秒：实际 {total_seconds}"
+        );
+        for clip in &selected {
+            let (in_ticks, out_ticks, tb_num, tb_den) = native_ticks(&clip.clip).unwrap();
+            let seconds = (out_ticks - in_ticks) as f64 * tb_num as f64 / tb_den as f64;
+            assert!(seconds >= 1.0, "每条素材裁切后不应低于 1 秒：{seconds}");
+        }
+    }
+
+    /// 目标 30 秒、2 条 5 秒素材：cap = max(2, 30/2) = 15 秒 > 素材原长，
+    /// 两条都应该保留全长（5 秒），不报错、也不会被截短。
+    #[test]
+    fn select_rough_cut_keeps_short_clips_whole_when_target_exceeds_total_length() {
+        let clips = vec![
+            successful_clip_fixture("a.mov", 5),
+            successful_clip_fixture("b.mov", 5),
+        ];
+
+        let (selected, summary) = select_rough_cut(&clips, Some(30)).unwrap();
+
+        assert_eq!(selected.len(), 2);
+        for clip in &selected {
+            let (in_ticks, out_ticks, _, _) = native_ticks(&clip.clip).unwrap();
+            assert_eq!(out_ticks - in_ticks, 5_000, "两条素材都应该保留原长 5 秒");
+        }
+        assert_eq!(summary.actual_ticks, 10_000);
+    }
+
+    /// 3 条素材 5s/5s/50s、目标 30 秒：第一轮每条 cap=max(2,10)=10s，
+    /// 累计 5+5+10=20s，仍差 10s 预算。第二轮按原长从长到短延展——50s 的
+    /// 那条不能被直接撑到全长（那会把总时长顶到 60s），只能吃掉剩下的
+    /// 10s 预算，延展到约 20s，总时长落回 [29,30] 秒。
+    #[test]
+    fn select_rough_cut_second_pass_extends_only_by_remaining_budget_not_to_full_length() {
+        let clips = vec![
+            successful_clip_fixture("a.mov", 5),
+            successful_clip_fixture("b.mov", 5),
+            successful_clip_fixture("c.mov", 50),
+        ];
+
+        let (selected, summary) = select_rough_cut(&clips, Some(30)).unwrap();
+
+        let total_seconds = summary.actual_ticks as f64 / 1_000.0;
+        assert!(
+            (29.0..=30.0).contains(&total_seconds),
+            "第二轮延展后总时长应落在 [29, 30] 秒，不能被撑到 60 秒：实际 {total_seconds}"
+        );
+        let fifty_second_clip = selected
+            .iter()
+            .find(|clip| clip.clip.rel_path == "c.mov")
+            .expect("50 秒那条素材应该入选");
+        let (in_ticks, out_ticks, _, _) = native_ticks(&fifty_second_clip.clip).unwrap();
+        let trimmed_seconds = (out_ticks - in_ticks) as f64 / 1_000.0;
+        assert!(
+            (19.0..=21.0).contains(&trimmed_seconds),
+            "50 秒素材应该只被延展到约 20 秒，而不是全长 50 秒：实际 {trimmed_seconds}"
+        );
+    }
+
+    #[test]
+    fn select_rough_cut_rejects_targets_outside_the_allowed_set() {
+        let clips = vec![successful_clip_fixture("a.mov", 20)];
+        let error = select_rough_cut(&clips, Some(45)).unwrap_err();
+        assert!(error.to_string().contains("30/60/180"), "{error}");
+    }
+
+    #[test]
+    fn start_export_rejects_invalid_rough_cut_target() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+        let error =
+            start_export(&mut connection, directory.path(), None, true, Some(45)).unwrap_err();
+        assert!(error.to_string().contains("30/60/180"), "{error}");
+    }
+
+    #[test]
+    fn build_instructions_reports_rough_cut_target_and_actual_duration() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let mut payload = export_payload_fixture(vec![clip]);
+        payload.target_seconds = Some(60);
+        payload.rough_cut_actual_ticks = Some(58_400);
+        payload.rough_cut_actual_tb_num = Some(1);
+        payload.rough_cut_actual_tb_den = Some(1_000);
+
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+
+        assert!(
+            text.contains("参考粗剪：目标 60 秒，实际 58.4 秒"),
+            "交付说明应记录目标与实际粗剪时长：{text}"
+        );
+    }
+
+    /// 显示 LUT 是播放器预览专用的 `vf` 滤镜(见 `player::mpv_calls_for`),
+    /// 绝不应该烧进任何交付产物——整片转码、精选段帧精确转码、粗剪拼接三条
+    /// 路径都要钉住。烧录后不可逆,业主拿到的成片必须是未套 LUT 的原始分级。
+    #[test]
+    fn deliver_export_paths_never_carry_the_preview_display_lut() {
+        let whole_clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
+        let whole = whole_vfr_args(&whole_clip, Path::new("whole.mp4"));
+        let whole_joined = whole
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!whole_joined.contains("lut3d"), "整片转码不应包含 lut3d：{whole_joined}");
+        assert!(!whole_joined.contains("tripcut-lut"));
+
+        let select_clip = export_clip_fixture("select.mov", 0, 3_000, 1, 1_000);
+        let select_args = select_segment_ffmpeg_args(&select_clip, Path::new("select.mp4")).unwrap();
+        let select_joined = select_args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!select_joined.contains("lut3d"), "精选段转码不应包含 lut3d：{select_joined}");
+        assert!(!select_joined.contains("tripcut-lut"));
+
+        let rough_clips = [SuccessfulClip {
+            clip: export_clip_fixture("rough.mov", 0, 3_000, 1, 1_000),
+            path: PathBuf::from("selected.mp4"),
+        }];
+        let rough = rough_cut_args(&rough_clips, &[true], Path::new("rough.mp4"));
+        let rough_joined = rough
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!rough_joined.contains("lut3d"), "粗剪拼接不应包含 lut3d：{rough_joined}");
+        assert!(!rough_joined.contains("tripcut-lut"));
+    }
+
     #[test]
     fn srt_is_copied_to_delivery_package_with_ordered_clip_name() {
         let directory = TestDirectory::new();
@@ -3433,7 +5003,7 @@ esac
             &[1],
             None,
         );
-        let status = start_export(&mut connection, directory.path()).unwrap();
+        let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
         let job = jobs::claim_next(&mut connection).unwrap().unwrap();
         run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
 
@@ -3456,6 +5026,260 @@ esac
     }
 
     #[test]
+    fn export_with_contact_sheet_enabled_writes_pdf_with_cjk_file_name() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("旅拍010.mov");
+        if !generate_fixture(&ffmpeg, &source) {
+            eprintln!("skipping contact sheet export fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T10:00:00Z", &[1], None);
+
+        let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+
+        let finished = get_export_status(&connection, status.job_id).unwrap();
+        assert_eq!(finished.status, "done");
+        let output = PathBuf::from(finished.output_path.unwrap());
+        let pdf_path = output.join(CONTACT_SHEET_FILE);
+        assert!(pdf_path.is_file(), "联系表 PDF 应存在：{}", pdf_path.display());
+
+        let text = contact_sheet::tests::extract_visible_text(&pdf_path);
+        assert!(
+            text.contains("旅拍010.mov"),
+            "联系表文本流应含文件名「旅拍010.mov」: {text:?}"
+        );
+
+        let instructions =
+            std::fs::read_to_string(output.join(README_FILE)).unwrap();
+        assert!(instructions.contains("联系表 PDF"), "交付说明应提及联系表 PDF");
+    }
+
+    #[test]
+    fn export_with_corrupted_cover_counts_cover_failure_in_status_and_readme() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("旅拍010.mov");
+        if !generate_fixture(&ffmpeg, &source) {
+            eprintln!("skipping corrupted cover export fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let clip_id = insert_clip(&connection, &source, "2026-08-31T10:00:00Z", &[1], None);
+        let quick_hash: String = connection
+            .query_row("SELECT quick_hash FROM clips WHERE id = ?1", [clip_id], |row| row.get(0))
+            .unwrap();
+
+        // 注册一份损坏的封面 artifact:合法 JPEG SOI 后接垃圾字节,解码必然
+        // 失败——联系表应退化成灰框占位,而不是让整个导出失败。
+        let cache_root = crate::core::artifacts::cache_root_for_db(&directory.db_path());
+        let cover_relative = crate::core::artifacts::artifact_relative_path(
+            clip_id,
+            crate::core::artifacts::COVER_FILE,
+        );
+        let cover_path = cache_root.join(&cover_relative);
+        std::fs::create_dir_all(cover_path.parent().unwrap()).unwrap();
+        let mut garbage = vec![0xFFu8, 0xD8];
+        garbage.extend(std::iter::repeat_n(0x5Au8, 198));
+        std::fs::write(&cover_path, &garbage).unwrap();
+        connection
+            .execute(
+                "INSERT INTO cache_artifacts(clip_id, kind, rel_path, source_hash, bytes, created_at)
+                 VALUES (?1, 'cover', ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    clip_id,
+                    cover_relative.to_string_lossy().replace('\\', "/"),
+                    quick_hash,
+                    garbage.len() as i64,
+                ],
+            )
+            .unwrap();
+
+        let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+
+        let finished = get_export_status(&connection, status.job_id).unwrap();
+        assert_eq!(finished.status, "done");
+        assert_eq!(
+            finished.contact_sheet_cover_failures,
+            Some(1),
+            "唯一一张损坏封面应计入 contact_sheet_cover_failures = 1"
+        );
+
+        let output = PathBuf::from(finished.output_path.unwrap());
+        let instructions = std::fs::read_to_string(output.join(README_FILE)).unwrap();
+        assert!(
+            instructions.contains("联系表：1 张封面无法解码，已用灰框占位"),
+            "交付说明应提及损坏封面计数: {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn export_with_contact_sheet_disabled_omits_pdf_and_readme_mention() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("旅拍010.mov");
+        if !generate_fixture(&ffmpeg, &source) {
+            eprintln!("skipping contact sheet export fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T10:00:00Z", &[1], None);
+
+        let status = start_export(&mut connection, directory.path(), None, false, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+
+        let finished = get_export_status(&connection, status.job_id).unwrap();
+        assert_eq!(finished.status, "done");
+        let output = PathBuf::from(finished.output_path.unwrap());
+        assert!(
+            !output.join(CONTACT_SHEET_FILE).exists(),
+            "关闭联系表时不应写入 PDF"
+        );
+
+        let instructions =
+            std::fs::read_to_string(output.join(README_FILE)).unwrap();
+        assert!(!instructions.contains("联系表"), "关闭联系表时交付说明不应提及联系表");
+    }
+
+    /// 复审 Task 3 第 1 点:`render_contact_sheet` 成功之后,`write_synced`
+    /// 落到最终路径这一步失败——用"最终路径本身就是一个目录"来制造这个
+    /// 失败,不依赖真实 ffmpeg。`TempFileGuard` 应该在 `write_contact_sheet`
+    /// 返回 Err 的同时,把 `联系表.pdf.rendering` 这份临时文件清理掉。
+    #[test]
+    fn write_contact_sheet_cleans_up_temp_file_when_final_write_fails() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO episodes(title, theme, created_at) VALUES ('旅程', '主题', 'now')",
+                [],
+            )
+            .unwrap();
+        let episode_id = connection.last_insert_rowid();
+
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::create_dir(staging.join(SHOT_LIST_DIRECTORY)).unwrap();
+        // 让联系表的最终路径本身就是一个目录,`write_synced` 里的
+        // `File::create` 必然报错。
+        std::fs::create_dir(staging.join(CONTACT_SHEET_FILE)).unwrap();
+
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = export_payload_fixture(vec![clip]);
+
+        let result = write_contact_sheet(&connection, &staging, episode_id, &payload);
+        assert!(result.is_err(), "final_path 是目录时 write_contact_sheet 应报错");
+
+        let temporary_path = staging
+            .join(CONTACT_SHEET_FILE)
+            .with_extension("pdf.rendering");
+        assert!(
+            !temporary_path.exists(),
+            "失败后不应残留 .rendering 临时文件: {}",
+            temporary_path.display()
+        );
+    }
+
+    /// 复审 Task 3 第 3 点:联系表这一步真的失败时(不是靠字符串伪造,而是
+    /// 真的让 `write_synced` 摔在目录冲突上),交付包其余部分——包括
+    /// `.tripcut-complete.json` 完成标记——必须照常写出。`05_镜头表`
+    /// 目录在流水线一开始(remux/转码之前)就已创建,给了一个足够宽裕的
+    /// 窗口:后台线程一看到这个目录出现,立刻把「联系表.pdf」这个文件名
+    /// 抢占成一个目录,当真正的渲染流程走到 `write_synced` 时必然撞见
+    /// "Is a directory"。
+    #[test]
+    fn export_survives_contact_sheet_failure_and_still_writes_completion_marker() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("旅拍010.mov");
+        if !generate_fixture(&ffmpeg, &source) {
+            eprintln!("skipping contact sheet failure fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T10:00:00Z", &[1], None);
+
+        let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        let queued_payload = parse_payload(&job.payload).unwrap();
+        let final_path = unique_package_path(
+            Path::new(&queued_payload.destination),
+            &queued_payload.project_name,
+            &queued_payload.date,
+        );
+        let staging = staging_path(&final_path, job.id, job.attempt);
+        let shot_list_dir = staging.join(SHOT_LIST_DIRECTORY);
+        let hijacked_pdf_path = staging.join(CONTACT_SHEET_FILE);
+
+        let watcher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if shot_list_dir.is_dir() {
+                    let _ = std::fs::create_dir(&hijacked_pdf_path);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+        watcher.join().unwrap();
+
+        let finished = get_export_status(&connection, status.job_id).unwrap();
+        assert_eq!(finished.status, "done");
+        let output = PathBuf::from(finished.output_path.unwrap());
+        assert!(
+            output.join(COMPLETION_MARKER_FILE).is_file(),
+            "联系表失败不应阻止完成标记落盘"
+        );
+        assert!(
+            output.join(CONTACT_SHEET_FILE).is_dir(),
+            "本用例故意抢占了这个文件名,证明失败确实发生在这一步"
+        );
+        assert!(
+            !output
+                .join(CONTACT_SHEET_FILE)
+                .with_extension("pdf.rendering")
+                .exists(),
+            "失败后不应残留联系表的 .rendering 临时文件"
+        );
+
+        let instructions = std::fs::read_to_string(output.join(README_FILE)).unwrap();
+        assert!(
+            instructions.contains("联系表生成失败："),
+            "交付说明应记录联系表失败原因：{instructions}"
+        );
+    }
+
+    #[test]
+    fn legacy_export_payload_without_contact_sheet_fields_defaults_to_enabled() {
+        // 模拟 R4 Task 3 之前排队/未完成的旧交付任务:没有 include_contact_sheet /
+        // contact_sheet_glyph_fallbacks 这两个字段,反序列化必须成功,且按"启用"
+        // 回退——不能让升级悄悄关掉一份此前一直会生成的产物。
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let current_payload = export_payload_fixture(vec![clip]);
+        let mut json_value: Value = serde_json::to_value(&current_payload).unwrap();
+
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("include_contact_sheet");
+            obj.remove("contact_sheet_glyph_fallbacks");
+        }
+
+        let json_str = serde_json::to_string(&json_value).unwrap();
+        let parsed: ExportJobPayload = serde_json::from_str(&json_str)
+            .expect("旧负载缺少 include_contact_sheet 字段时应仍能反序列化");
+
+        assert!(parsed.include_contact_sheet);
+        assert_eq!(parsed.contact_sheet_glyph_fallbacks, None);
+    }
+
+    #[test]
     fn all_corrupt_sources_leave_no_final_or_staging_directory() {
         let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
         let directory = TestDirectory::new();
@@ -3469,7 +5293,7 @@ esac
             &[1],
             None,
         );
-        start_export(&mut connection, directory.path()).unwrap();
+        start_export(&mut connection, directory.path(), None, true, None).unwrap();
         let job = jobs::claim_next(&mut connection).unwrap().unwrap();
         let error = run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe)
             .unwrap_err();
@@ -3499,7 +5323,7 @@ esac
             &[1],
             None,
         );
-        let started = start_export(&mut connection, directory.path()).unwrap();
+        let started = start_export(&mut connection, directory.path(), None, true, None).unwrap();
         let job_id = started.job_id.unwrap();
         cancel_export(&mut connection, job_id).unwrap();
 
@@ -3511,6 +5335,80 @@ esac
             .query_row("SELECT COUNT(*) FROM channel_memory_outbox", [], |row| row.get(0))
             .unwrap();
         assert_eq!(outbox_count, 0);
+    }
+
+    #[test]
+    fn start_export_rejects_invalid_override_platform() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+        let error = start_export(&mut connection, directory.path(), Some("youtube"), true, None).unwrap_err();
+        assert!(error.to_string().contains("目标平台"));
+    }
+
+    #[test]
+    fn start_export_freezes_episode_platform_into_payload() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let current = crate::core::episode::current_episode(&connection).unwrap();
+        platform::set_episode_platform(
+            &mut connection,
+            current.id,
+            "douyin",
+            "portrait",
+        )
+        .unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+
+        let started = start_export(&mut connection, directory.path(), None, true, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        let payload = parse_payload(&job.payload).unwrap();
+        assert_eq!(payload.platform_info.platform, "douyin");
+        assert_eq!(payload.platform_info.orientation, "portrait");
+        assert_eq!(payload.platform_info.canvas_width, 1080);
+        assert_eq!(payload.platform_info.canvas_height, 1920);
+        assert_eq!(payload.platform_info.duration_budget_seconds, 60);
+        assert!(started.job_id.is_some());
+    }
+
+    #[test]
+    fn start_export_override_leaves_episode_record_untouched() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let current = crate::core::episode::current_episode(&connection).unwrap();
+        platform::set_episode_platform(
+            &mut connection,
+            current.id,
+            "douyin",
+            "portrait",
+        )
+        .unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+
+        start_export(&mut connection, directory.path(), Some("bilibili"), true, None).unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        let payload = parse_payload(&job.payload).unwrap();
+        assert_eq!(payload.platform_info.platform, "bilibili");
+        assert_eq!(payload.platform_info.display_name, "B站");
+        // orientation still comes from the episode record ("portrait"), the override
+        // only swaps the platform preset — never the episode's own columns.
+        assert_eq!(payload.platform_info.orientation, "portrait");
+
+        let (platform, orientation): (String, String) = connection
+            .query_row(
+                "SELECT target_platform, canvas_orientation FROM episodes WHERE id = ?1",
+                [current.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(platform, "douyin");
+        assert_eq!(orientation, "portrait");
     }
 
     #[test]
@@ -3661,5 +5559,196 @@ esac
         .unwrap();
 
         assert_eq!(first, duplicate);
+    }
+
+    /// target_seconds 和 include_contact_sheet 都改变实际产出的文件，不能被
+    /// canonical_payload_hash 忽略掉——否则"只改目标时长/联系表开关再导出一
+    /// 次"会去重成同一条排队任务，第二次请求悄悄拿到第一次的 job。
+    #[test]
+    fn canonical_hash_distinguishes_target_seconds_and_contact_sheet_choice() {
+        let base = export_payload_fixture(vec![export_clip_fixture(
+            "same-clips.mov",
+            0,
+            500,
+            1,
+            1_000,
+        )]);
+        let mut different_target = base.clone();
+        different_target.target_seconds = Some(60);
+        let mut different_contact_sheet = base.clone();
+        different_contact_sheet.include_contact_sheet = !base.include_contact_sheet;
+
+        let base_hash = canonical_payload_hash(&base).unwrap();
+        let target_hash = canonical_payload_hash(&different_target).unwrap();
+        let contact_sheet_hash = canonical_payload_hash(&different_contact_sheet).unwrap();
+
+        assert_ne!(
+            base_hash, target_hash,
+            "target_seconds 不同必须产生不同的 payload hash"
+        );
+        assert_ne!(
+            base_hash, contact_sheet_hash,
+            "include_contact_sheet 不同必须产生不同的 payload hash"
+        );
+    }
+
+    /// override_platform 会改变联系表方向与交付说明的措辞(见
+    /// `build_instructions` 读 `payload.platform_info`),但 `canonical_payload_hash`
+    /// 此前没有把它纳入哈希输入——两次只差平台的 `start_export` 会被去重成
+    /// 同一个排队任务,第二次请求悄悄拿到第一次那个平台的产物。
+    #[test]
+    fn canonical_hash_distinguishes_platform_info() {
+        let base = export_payload_fixture(vec![export_clip_fixture(
+            "same-clips.mov",
+            0,
+            500,
+            1,
+            1_000,
+        )]);
+        let mut different_platform = base.clone();
+        different_platform.platform_info = douyin_portrait_platform_info();
+
+        let base_hash = canonical_payload_hash(&base).unwrap();
+        let platform_hash = canonical_payload_hash(&different_platform).unwrap();
+
+        assert_ne!(
+            base_hash, platform_hash,
+            "override_platform 不同必须产生不同的 payload hash"
+        );
+    }
+
+    /// R6 6b 落地后 `manual_rotation` 会真的改变参考粗剪的画面朝向
+    /// (`rough_cut_rotation_prefix`),但它此前不在 `selections` 元组里:
+    /// 任务 pending 期间改了某片段的旋转,复用的仍是旧 payload,导出的
+    /// 粗剪不会转。
+    #[test]
+    fn canonical_hash_distinguishes_manual_rotation() {
+        let mut rotated_clip = export_clip_fixture("same-clips.mov", 0, 500, 1, 1_000);
+        rotated_clip.manual_rotation = Some(90);
+        let mut unrotated_clip = export_clip_fixture("same-clips.mov", 0, 500, 1, 1_000);
+        unrotated_clip.manual_rotation = None;
+
+        let base = export_payload_fixture(vec![unrotated_clip]);
+        let rotated = export_payload_fixture(vec![rotated_clip]);
+
+        let base_hash = canonical_payload_hash(&base).unwrap();
+        let rotated_hash = canonical_payload_hash(&rotated).unwrap();
+
+        assert_ne!(
+            base_hash, rotated_hash,
+            "manual_rotation 不同必须产生不同的 payload hash"
+        );
+    }
+
+    /// 同一批精选素材，只改 target_seconds（30 → 60）再各调用一次
+    /// `start_export`：两次必须各自排出一条独立任务，不能被当成重复请求
+    /// 合并成同一条——否则第二次拿到的是第一次那条 30 秒任务的 job_id。
+    #[test]
+    fn start_export_with_different_target_seconds_creates_two_jobs() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+
+        let first =
+            start_export(&mut connection, directory.path(), None, true, Some(30)).unwrap();
+        let second =
+            start_export(&mut connection, directory.path(), None, true, Some(60)).unwrap();
+
+        assert_ne!(
+            first.job_id, second.job_id,
+            "不同 target_seconds 的两次 start_export 必须产出两条不同的任务"
+        );
+    }
+
+    #[test]
+    fn package_layout_follows_owner_numbering() {
+        assert_eq!(SELECTED_DIRECTORY, "01_精选原片");
+        assert_eq!(NARRATION_DIRECTORY, "02_环境声与旁白");
+        assert_eq!(SUBTITLE_DIRECTORY, "03_字幕");
+        assert_eq!(ROUGH_CUT_FILE, "04_参考粗剪/参考粗剪.mp4");
+        assert_eq!(SHOT_LIST_FILE, "05_镜头表/剪辑清单.csv");
+        assert_eq!(CONTACT_SHEET_FILE, "05_镜头表/联系表.pdf");
+        assert_eq!(COLOR_NOTES_DIRECTORY, "06_LUT与色彩说明");
+        assert_eq!(DESTINATION_DIRECTORY, "07_地点卡");
+    }
+
+    #[test]
+    fn legacy_v4_export_payload_without_platform_info_still_parses() {
+        // Create a v4 payload JSON (before platform_info was added) by starting with
+        // a current payload and removing the platform_info key and setting version to 4.
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let current_payload = export_payload_fixture(vec![clip]);
+        let mut json_value: Value = serde_json::to_value(&current_payload).unwrap();
+
+        // Remove platform_info and set version to 4
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("platform_info");
+            obj.insert("version".to_owned(), Value::from(4_u8));
+        }
+
+        let json_str = serde_json::to_string(&json_value).unwrap();
+        let parsed: ExportJobPayload = serde_json::from_str(&json_str)
+            .expect("v4 payload without platform_info should deserialize");
+
+        assert_eq!(parsed.platform_info, default_platform_info());
+    }
+
+    #[test]
+    fn attach_audio_tracks_excludes_tracks_for_unselected_clips() {
+        // Verify that the query filters by the delivery's selected clip ids,
+        // not a full table scan. A track from an unselected clip should not appear
+        // in the audio_tracks list.
+        let test_dir = TestDirectory::new();
+        let connection = db::open_project(&test_dir.db_path()).unwrap();
+
+        // Create two clips (insert_clip will manage the episode)
+        let clip1 = insert_clip(&connection, Path::new("clip1.mov"), "2026-08-31T00:00:00Z", &[1], None);
+        let clip2 = insert_clip(&connection, Path::new("clip2.mov"), "2026-08-31T00:01:00Z", &[1], None);
+
+        // Insert audio tracks for clip1
+        connection
+            .execute(
+                "INSERT INTO clip_audio_tracks(clip_id, stream_index, role_guess)
+                 VALUES (?1, 0, 'onboard_mic')",
+                [clip1],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_audio_tracks(clip_id, stream_index, role_guess)
+                 VALUES (?1, 1, 'wireless_mic')",
+                [clip1],
+            )
+            .unwrap();
+
+        // Insert audio tracks for clip2 (which will NOT be in the delivery)
+        connection
+            .execute(
+                "INSERT INTO clip_audio_tracks(clip_id, stream_index, role_guess)
+                 VALUES (?1, 0, 'backup')",
+                [clip2],
+            )
+            .unwrap();
+
+        // Create export clips for only clip1 (not clip2)
+        let mut export_clip1 = export_clip_fixture("clip1.mov", 0, 2000, 1, 1000);
+        export_clip1.clip_id = clip1;
+
+        let mut clips = vec![export_clip1];
+
+        // Call attach_audio_tracks with only clip1
+        attach_audio_tracks(&connection, &mut clips).unwrap();
+
+        // Verify that clip1 has its two tracks
+        assert_eq!(clips[0].audio_tracks.len(), 2);
+        assert_eq!(clips[0].audio_tracks[0].stream_index, 0);
+        assert_eq!(clips[0].audio_tracks[0].role_guess.as_deref(), Some("onboard_mic"));
+        assert_eq!(clips[0].audio_tracks[1].stream_index, 1);
+        assert_eq!(clips[0].audio_tracks[1].role_guess.as_deref(), Some("wireless_mic"));
+
+        // Verify that clip2's tracks are NOT included (the key assertion)
+        assert!(!clips[0].audio_tracks.iter().any(|track| track.role_guess.as_deref() == Some("backup")));
     }
 }

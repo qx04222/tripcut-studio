@@ -1,0 +1,37 @@
+{
+  "CoreMLExecutionProvider_load_time_s": 2.747434139251709,
+  "CoreMLExecutionProvider_actual_providers": [
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "CoreMLExecutionProvider_runtime_error": "[ONNXRuntimeError] : 1 : FAIL : Non-zero status code returned while running 14484543273735579340_CoreML_14484543273735579340_6 node. Name:'CoreMLExecutionProvider_14484543273735579340_CoreML_14484543273735579340_6_6' Status Message: Error executing model: Unable to compute the prediction using a neural network model. It can be an invalid input data or broken/unsupported model (error code: -1).",
+  "CPUExecutionProvider_load_time_s": 0.09789896011352539,
+  "CPUExecutionProvider_actual_providers": [
+    "CPUExecutionProvider"
+  ],
+  "CPUExecutionProvider_batch1_p50_ms": 31.945466995239258,
+  "CPUExecutionProvider_batch1_p95_ms": 36.44782304763794,
+  "CPUExecutionProvider_batch1_total_s": 3.280036687850952,
+  "CPUExecutionProvider_batch8_p50_ms_per_frame": 33.782750368118286,
+  "CPUExecutionProvider_batch8_p95_ms_per_frame": 98.74939918518066,
+  "CPUExecutionProvider_batch8_total_s": 4.366498708724976,
+  "text_CoreMLExecutionProvider_load_time_s": 1.4497921466827393,
+  "text_CoreMLExecutionProvider_actual_providers": [
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "text_CoreMLExecutionProvider_p50_ms": 29.303431510925293,
+  "text_CoreMLExecutionProvider_p95_ms": 35.086655616760275,
+  "text_CPUExecutionProvider_load_time_s": 0.11690497398376465,
+  "text_CPUExecutionProvider_actual_providers": [
+    "CPUExecutionProvider"
+  ],
+  "text_CPUExecutionProvider_p50_ms": 10.952591896057129,
+  "text_CPUExecutionProvider_p95_ms": 12.97942399978638,
+  "sanity_has_nan": false,
+  "sanity_sim_min": 0.2266736775636673,
+  "sanity_sim_max": 0.36579430103302,
+  "sanity_sim_std": 0.024963555857539177,
+  "sanity_row_argmax_unique_count": 13,
+  "peak_rss_mb": 4564.53125
+}

@@ -50,8 +50,10 @@ const FOCUS_WIDTH: usize = 320;
 const FOCUS_HEIGHT: usize = 180;
 // v3:过曝判据从 YMAX(整帧最亮单像素,误判率近 100%)换成 YHIGH+YAVG 联合;
 // 新增欠曝/动态范围/虚焦(blurdetect+运动+纹理三重守卫)。
+// v4:场景检测挪到 2fps/640 降采样之后(此前 select 跑在全分辨率原始流上,
+// 是分析阶段 CPU 的大头);解码阶段开硬解(VideoToolbox),失败自动软解重跑。
 // 版本号变化会让旧结果被 enqueue_missing 重新排队重算。
-const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v3";
+const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v4";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipAnalysis {
@@ -358,28 +360,30 @@ fn load_source(connection: &Connection, payload: &AnalyzeL1Payload) -> Result<Cl
         })
 }
 
-fn analyze_source(
-    source: &ClipSource,
-    ffmpeg: &OsStr,
-    ffprobe: &OsStr,
+/// 一次解码拿全部粗筛信号:曝光(含 BRNG 溢出占比)、模糊度、纹理熵、运动能量、场景切点。
+/// 先降采样到 2fps/640 宽再堆滤镜(含场景检测)——滤镜串联代价是相加的,
+/// 全帧率堆滤镜会慢两个数量级,而筛素材这个任务对降采样后的统计精度不敏感
+/// (实测 30s 4K 素材:v3 全分辨率跑场景检测 CPU 19.6s → v4 降采样后跑 <3s)。
+/// `hardware_decode` 为真时在 `-i` 前插入 VideoToolbox 硬解前缀。
+fn analysis_args(
+    path: &Path,
     scene_threshold: f64,
-) -> Result<AnalysisComputation> {
-    let has_audio = probe_has_audio(&source.path, ffprobe)?;
-    // 一次解码拿全部粗筛信号:曝光(含 BRNG 溢出占比)、模糊度、纹理熵、运动能量。
-    // 先降采样到 2fps/640 宽再堆滤镜——滤镜串联代价是相加的,全帧率堆滤镜会慢两个数量级,
-    // 而筛素材这个任务对降采样后的统计精度不敏感(实测 20s 素材 0.55 秒跑完)。
+    has_audio: bool,
+    hardware_decode: bool,
+) -> Vec<OsString> {
     let filter = format!(
-        "[0:v:0]split=2[scene_src][stats_src];\
+        "[0:v:0]fps=2,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
          [scene_src]select='eq(n,0)+gt(scene,{scene_threshold})',showinfo[scene_out];\
-         [stats_src]fps=2,scale=640:-2,format=yuv420p,\
-         signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
+         [stats_src]signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
          metadata=mode=print[stats_out]"
     );
-    let mut args = vec![
-        OsString::from("-hide_banner"),
-        OsString::from("-nostdin"),
+    let mut args = vec![OsString::from("-hide_banner"), OsString::from("-nostdin")];
+    if hardware_decode {
+        args.extend(super::artifacts::hardware_decode_prefix());
+    }
+    args.extend([
         OsString::from("-i"),
-        source.path.as_os_str().to_owned(),
+        path.as_os_str().to_owned(),
         OsString::from("-filter_complex"),
         OsString::from(filter),
         OsString::from("-map"),
@@ -394,7 +398,7 @@ fn analyze_source(
         OsString::from("-f"),
         OsString::from("null"),
         OsString::from("-"),
-    ];
+    ]);
     if has_audio {
         args.extend([
             OsString::from("-map"),
@@ -409,17 +413,74 @@ fn analyze_source(
             OsString::from("-"),
         ]);
     }
+    args
+}
 
-    let output = execute_with_timeout(ffmpeg, &args, ANALYSIS_TIMEOUT).map_err(|error| {
-        CoreError::Analysis(format!("ffmpeg 分析 {} 失败：{error}", source.path.display()))
-    })?;
-    if !output.success {
-        return Err(command_failure("ffmpeg L1 分析", &output));
+/// 先硬解后软解:硬解失败(进程报错或非零退出)就用软解重跑一次;
+/// 两次都失败时合并两条错误信息(`run_ffmpeg_file_with_fallback` 是产物文件导向的,
+/// 分析阶段要解析 ffmpeg 的日志输出而非产物文件,故在此内联实现重试)。
+fn run_analysis_ffmpeg(
+    ffmpeg: &OsStr,
+    path: &Path,
+    scene_threshold: f64,
+    has_audio: bool,
+) -> Result<String> {
+    run_analysis_ffmpeg_with_args(
+        ffmpeg,
+        path,
+        &analysis_args(path, scene_threshold, has_audio, true),
+        &analysis_args(path, scene_threshold, has_audio, false),
+    )
+}
+
+/// 承载实际的先硬解后软解重试;拆出来是为了让测试能各自喂给硬解/软解不同的
+/// (故意会失败的)参数，而不用依赖真的 VideoToolbox 失败场景。
+fn run_analysis_ffmpeg_with_args(
+    ffmpeg: &OsStr,
+    path: &Path,
+    hardware_args: &[OsString],
+    software_args: &[OsString],
+) -> Result<String> {
+    let hardware_error = match execute_with_timeout(ffmpeg, hardware_args, ANALYSIS_TIMEOUT) {
+        Ok(output) if output.success => return Ok(combined_log(&output)),
+        Ok(output) => command_failure("ffmpeg L1 分析（VideoToolbox 硬解）", &output),
+        Err(error) => CoreError::Analysis(format!(
+            "ffmpeg 分析 {}（VideoToolbox 硬解）失败：{error}",
+            path.display()
+        )),
+    };
+
+    match execute_with_timeout(ffmpeg, software_args, ANALYSIS_TIMEOUT) {
+        Ok(output) if output.success => Ok(combined_log(&output)),
+        Ok(output) => {
+            let software_error = command_failure("ffmpeg L1 分析（CPU 软解）", &output);
+            Err(CoreError::Analysis(format!(
+                "VideoToolbox 硬解：{hardware_error}；CPU 解码：{software_error}"
+            )))
+        }
+        Err(error) => Err(CoreError::Analysis(format!(
+            "VideoToolbox 硬解：{hardware_error}；CPU 解码：ffmpeg 分析 {} 失败：{error}",
+            path.display()
+        ))),
     }
+}
+
+fn combined_log(output: &CommandOutput) -> String {
     let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
     log.push('\n');
     log.push_str(&String::from_utf8_lossy(&output.stdout));
-    let signals = parse_signal_log(&log, has_audio)?;
+    log
+}
+
+fn analyze_source(
+    source: &ClipSource,
+    ffmpeg: &OsStr,
+    ffprobe: &OsStr,
+    scene_threshold: f64,
+) -> Result<AnalysisComputation> {
+    let has_audio = probe_has_audio(&source.path, ffprobe)?;
+    let log = run_analysis_ffmpeg(ffmpeg, &source.path, scene_threshold, has_audio)?;
+    let signals = parse_signal_log(&log, has_audio, source.tb_num, source.tb_den)?;
 
     let duration_seconds = ticks_to_seconds(
         source.duration_ticks,
@@ -465,7 +526,12 @@ fn analyze_source(
     })
 }
 
-fn parse_signal_log(log: &str, has_audio: bool) -> Result<ParsedSignals> {
+fn parse_signal_log(
+    log: &str,
+    has_audio: bool,
+    tb_num: i64,
+    tb_den: i64,
+) -> Result<ParsedSignals> {
     let yavg = values_after(log, "lavfi.signalstats.YAVG=");
     let ymin = values_after(log, "lavfi.signalstats.YMIN=");
     let yhigh = values_after(log, "lavfi.signalstats.YHIGH=");
@@ -547,11 +613,16 @@ fn parse_signal_log(log: &str, has_audio: bool) -> Result<ParsedSignals> {
     };
     let out_of_focus_ratio = out_of_focus_frames as f64 / frames.max(1) as f64;
 
+    // v4:场景检测挪到 fps=2 降采样之后,showinfo 报告的 raw `pts:` 落在 fps 滤镜
+    // 自己选的输出时基里(实测 time_base=1/2,pts=2 表示 t=1s),不再等于源流的
+    // tb_num/tb_den。改用 `pts_time:`(滤镜链任何一段都以秒为单位、与源时基无关)
+    // 再乘回源 tb_den/tb_num 换算成素材自己的 tick。
     let mut scene_cuts = log
         .lines()
         .filter(|line| line.contains("showinfo") && line.contains("pts_time:"))
-        .filter_map(|line| token_i64(line, "pts:"))
-        .filter(|pts| *pts > 0)
+        .filter_map(|line| token_prefixed_f64(line, "pts_time:"))
+        .filter(|seconds| *seconds > 0.0)
+        .map(|seconds| seconds_to_ticks(seconds, tb_num, tb_den))
         .collect::<Vec<_>>();
     scene_cuts.sort_unstable();
     scene_cuts.dedup();
@@ -836,14 +907,18 @@ fn values_after_colon(log: &str, marker: &str) -> Vec<f64> {
         .collect()
 }
 
-fn token_i64(line: &str, marker: &str) -> Option<i64> {
-    let mut tokens = line.split_whitespace();
-    while let Some(token) = tokens.next() {
-        if token == marker {
-            return tokens.next()?.parse().ok();
-        }
+/// 取形如 `pts_time:1.5` 的单个 token(前缀与值中间没有空格)。
+fn token_prefixed_f64(line: &str, prefix: &str) -> Option<f64> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(prefix).and_then(|value| value.parse::<f64>().ok()))
+}
+
+/// `ticks_to_seconds` 的反函数:把滤镜链自己时基下的秒数换算回素材自己的 tick。
+fn seconds_to_ticks(seconds: f64, tb_num: i64, tb_den: i64) -> i64 {
+    if tb_num <= 0 || tb_den <= 0 || !seconds.is_finite() {
+        return 0;
     }
-    None
+    (seconds * tb_den as f64 / tb_num as f64).round() as i64
 }
 
 fn command_failure(label: &str, output: &CommandOutput) -> CoreError {
@@ -1053,6 +1128,17 @@ mod tests {
     }
 
     #[test]
+    fn analysis_filter_runs_scene_detection_after_downscale_and_bumps_pipeline_version() {
+        assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v4");
+        let args = analysis_args(Path::new("/x.mp4"), 0.35, false, true);
+        let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.starts_with("-hide_banner -nostdin -hwaccel videotoolbox -i"));
+        let filter = args.iter().position(|a| a == "-filter_complex").map(|i| args[i + 1].to_string_lossy().into_owned()).unwrap();
+        assert!(filter.starts_with("[0:v:0]fps=2,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src]"));
+        assert!(filter.contains("[scene_src]select='eq(n,0)+gt(scene,0.35)',showinfo[scene_out]"));
+    }
+
+    #[test]
     fn outdated_pipeline_version_is_requeued_for_reanalysis() {
         // 回归:算法换代(如过曝判据从 YMAX 换成 YHIGH)后,已导入素材必须重算,
         // 否则界面上一直显示旧算法的误判结果。
@@ -1107,7 +1193,7 @@ lavfi.signalstats.YHIGH=250
 [Parsed_astats_5] Peak count: 4
 [Parsed_astats_5] Dynamic range: 18.25
 ";
-        let parsed = parse_signal_log(log, true).unwrap();
+        let parsed = parse_signal_log(log, true, 1, 90_000).unwrap();
 
         assert_eq!(parsed.scene_cuts, vec![90_000]);
         assert_eq!(parsed.exposure_yavg, 110.0);
@@ -1123,7 +1209,7 @@ lavfi.signalstats.YHIGH=250
         let source = insert_source(&connection, Path::new("flat.mov"), "flat");
         let log = "lavfi.signalstats.YAVG=235\nlavfi.signalstats.YMIN=235\nlavfi.signalstats.YHIGH=235\nlavfi.blur=nan\nlavfi.entropy.entropy.normal.Y=0\nlavfi.vmafmotion.score=0\n";
         let mut result = computation(Vec::new());
-        result.signals = parse_signal_log(log, false).unwrap();
+        result.signals = parse_signal_log(log, false, 1, 1000).unwrap();
         persist_analysis(&mut connection, &source, &result).unwrap();
         let stored = get_clip_analysis(&connection, source.clip_id).unwrap().unwrap();
         assert!(stored.blur_mean.is_finite());
@@ -1152,8 +1238,47 @@ lavfi.signalstats.YHIGH=250
     }
 
     #[test]
+    fn hardware_decode_failure_retries_with_software_decode() {
+        // 硬解参数指向一个不存在的输入,必然非零退出;软解参数指向真实的
+        // lavfi 生成素材。只有当软解重试真的执行了,才能拿到完整的滤镜输出
+        // (含 signalstats 标记),证明重试不是摆设。
+        let Some((ffmpeg, _)) = ffmpeg_tools() else { return; };
+        let directory = TestDirectory::new();
+        let good_path = directory.path().join("ok.mp4");
+        assert!(generate_fixture(&good_path, &[
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:r=2:d=1",
+        ]));
+        let bogus_path = directory.path().join("does-not-exist.mp4");
+        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true);
+        let software_args = analysis_args(&good_path, SCENE_THRESHOLD, false, false);
+
+        let log = run_analysis_ffmpeg_with_args(&ffmpeg, &good_path, &hardware_args, &software_args)
+            .expect("software fallback must succeed after the deliberately-broken hardware attempt");
+        assert!(
+            log.contains("lavfi.signalstats.YAVG="),
+            "log must carry the real filter output, proving the software retry actually ran: {log}"
+        );
+    }
+
+    #[test]
+    fn hardware_and_software_decode_both_failing_reports_both_errors() {
+        let Some((ffmpeg, _)) = ffmpeg_tools() else { return; };
+        let directory = TestDirectory::new();
+        let bogus_path = directory.path().join("does-not-exist.mp4");
+        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true);
+        let software_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, false);
+
+        let error =
+            run_analysis_ffmpeg_with_args(&ffmpeg, &bogus_path, &hardware_args, &software_args)
+                .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("VideoToolbox 硬解"), "{message}");
+        assert!(message.contains("CPU 解码"), "{message}");
+    }
+
+    #[test]
     fn signal_parser_rejects_incomplete_exposure_output() {
-        let error = parse_signal_log("lavfi.signalstats.YAVG=42", false).unwrap_err();
+        let error = parse_signal_log("lavfi.signalstats.YAVG=42", false, 1, 1000).unwrap_err();
         assert!(error.to_string().contains("signalstats 输出不完整"));
     }
 

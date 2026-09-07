@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { LazyCover, VirtualClipList, formatDuration } from "./ImportPage";
+import { LazyCover, PermitWaitingHint, VirtualClipList, formatDuration } from "./ImportPage";
 import type { ClipListItem } from "./api";
 
 function clip(index: number): ClipListItem {
@@ -52,6 +52,23 @@ describe("import clip list", () => {
     expect(markup).toContain('data-cache-src="http://127.0.0.1/cache/1/cover.jpg?expires=9999999999&amp;signature=test"');
     expect(markup).not.toContain("<img");
     expect(markup).toContain("clip-cover skeleton");
+  });
+
+  it("names how many clips are queued behind a saturated decode permit", () => {
+    expect(renderToStaticMarkup(<PermitWaitingHint waiting={7} />)).toContain("「7 等待解码许可」");
+    expect(renderToStaticMarkup(<PermitWaitingHint waiting={0} />)).toBe("");
+  });
+
+  it("names memory pressure as the reason instead of the permit queue when paused", () => {
+    const paused = renderToStaticMarkup(<PermitWaitingHint waiting={7} pausedForMemory />);
+    expect(paused).toContain("「内存不足，已暂停解码与模型任务」");
+    expect(paused).not.toContain("等待解码许可");
+  });
+
+  it("still shows the memory pause even when nothing is queued for a decode permit", () => {
+    expect(renderToStaticMarkup(<PermitWaitingHint waiting={0} pausedForMemory />)).toContain(
+      "「内存不足，已暂停解码与模型任务」",
+    );
   });
 
   it("renders only the virtual window for more than one thousand clips", () => {

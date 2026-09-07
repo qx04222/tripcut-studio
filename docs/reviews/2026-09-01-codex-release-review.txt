@@ -1,0 +1,80 @@
+
+10. 🟡 工具路径设置与核心任务断连
+
+   - 证据：[SettingsPage.tsx:354](../../src/SettingsPage.tsx:354) 允许设置并检测 FFmpeg/FFprobe；但导入只读环境变量/PATH：[import.rs:885](../../src-tauri/src/core/import.rs:885)，运镜同样忽略设置：[motion.rs:510](../../src-tauri/src/core/motion.rs:510)，交付也只读环境变量：[deliver.rs:1660](../../src-tauri/src/core/deliver.rs:1660)。
+   - 修法：所有媒体任务统一调用 `settings::configured_executable`，禁止各模块维护自己的 resolver。
+
+11. 🟡 “抖动阈值”设置实际不影响判定
+
+   - 证据：[SettingsPage.tsx:464](../../src/SettingsPage.tsx:464) 暴露可修改阈值；[analysis.rs:170](../../src-tauri/src/core/analysis.rs:170) 虽然读取，但[analysis.rs:348](../../src-tauri/src/core/analysis.rs:348)只把它写入工具元数据，没有参与抖动评分或角标判断。
+   - 修法：在抖动分类路径真正使用该阈值，或在实现前将控件改为不可编辑并明确“尚未生效”。
+
+12. 🟡 import/export 绕过“三次重试后 blocked”，取消协议也只覆盖导出
+
+   - 证据：[jobs.rs:524](../../src-tauri/src/core/jobs.rs:524) import 失败只 `mark_failed`；[jobs.rs:605](../../src-tauri/src/core/jobs.rs:605) export 同样不调用 `retry_or_block`，而其他任务会执行重试；唯一取消入口是[deliver.rs:363](../../src-tauri/src/core/deliver.rs:363)，导入、分析、转写没有持久化取消令牌。
+   - 修法：所有 job kind 使用统一失败状态机和持久化 cancel token，并保证子进程能被取消、清理及按 attempt 重试。
+hook: Stop
+hook: Stop
+hook: Stop Completed
+hook: Stop Completed
+tokens used
+8,002
+1. 🔴 多实例会把仍在运行的任务错误“恢复”并重复执行
+
+   - 证据：[lib.rs:571](../../src-tauri/src/lib.rs:571) 启动时直接打开同一 `project.db`、回收任务并启动 worker；[jobs.rs:283](../../src-tauri/src/core/jobs.rs:283) 无条件把所有 `running` 改回 `pending`；[jobs.rs:388](../../src-tauri/src/core/jobs.rs:388) 的协调器仅为进程内 Mutex，违反[规格:45](../../docs/specs/2026-08-31-tripcut-design.md:45)单实例独占要求。
+   - 修法：启动迁移/恢复前取得项目级 OS 文件锁，第二实例只读，同时给任务加入持久化 owner/lease 后再按过期租约恢复。
+
+2. 🔴 “清缓存并重建”会与活跃 worker 竞争并破坏 attempt 协议
+
+   - 证据：[lib.rs:148](../../src-tauri/src/lib.rs:148) 命令未经过 worker 协调器；[settings.rs:472](../../src-tauri/src/core/settings.rs:472) 在事务中把包括 `running` 在内的缓存任务重置为 `pending/attempt=0`，随后递归删除缓存目录。
+   - 修法：进入全局维护屏障，停止领取、取消并等待相关任务退出后，以缓存目录原子换代方式重建，禁止重置运行中 attempt。
+
+3. 🔴 入出点并非真实 PTS，VFR 帧精确承诺不成立
+
+   - 证据：[migrations.rs:14](../../src-tauri/src/core/migrations.rs:14) 只保存 time_base、时长和平均帧率，没有 PTS/DTS 采样、代理映射或音漂字段；[PlayerOverlay.tsx:204](../../src/PlayerOverlay.tsx:204) 从 mpv 浮点 `pos` 保存入出点；[lib.rs:477](../../src-tauri/src/lib.rs:477) 接口接收 `f64` 秒；[ratings.rs:50](../../src-tauri/src/core/ratings.rs:50) 只是将秒数乘 time_base 后四舍五入。帧显示还使用平均 FPS 计算的时间码及 mpv `estimated-frame-number`：[PlayerOverlay.tsx:28](../../src/PlayerOverlay.tsx:28)、[player/mod.rs:713](../../src-tauri/src/player/mod.rs:713)。
+   - 修法：导入时落真实关键 PTS/DTS 映射，播放器返回 source PTS，前后端全程传整数 tick/PTS，浮点秒仅限显示。
+
+4. 🔴 导出把浮点秒持久化，并且所谓 PTS 回读没有校验源片边界
+
+   - 证据：[deliver.rs:45](../../src-tauri/src/core/deliver.rs:45) 的持久化 job payload 包含逐片及总计 `f64 duration_seconds`；[deliver.rs:942](../../src-tauri/src/core/deliver.rs:942) 用格式化秒数执行 seek；[deliver.rs:1005](../../src-tauri/src/core/deliver.rs:1005) 只检查已 `make_zero` 的输出从零开始且时长接近预期，没有把输出首尾帧对应回源素材 PTS。
+   - 修法：job payload 只保存源 ticks/PTS，并逐帧验证输出首尾内容对应预期源 PTS，而非只比较输出自身时间轴。
+
+5. 🔴 外置盘重连可能静默绑定同名盘上的错误文件
+
+   - 证据：[migrations.rs:7](../../src-tauri/src/core/migrations.rs:7) volume 表不保存当前 mount 映射；[player/mod.rs:329](../../src-tauri/src/player/mod.rs:329) 仅按 volume label 拼 `/Volumes/<label>/<rel_path>`，找到文件即接受，没有 UUID/大小/哈希复验；[deliver.rs:664](../../src-tauri/src/core/deliver.rs:664) 导出甚至优先使用旧 job payload 中的绝对路径，也没有取出 `quick_hash/full_hash` 校验。
+   - 修法：按 UUID 解析当前挂载点，并在播放、分析和导出前进行大小加多段/完整哈希确认，任何歧义必须要求人工重连。
+
+6. 🔴 E.1 Narrative Override 未实现，技术质量能够压制不可重拍素材
+
+   - 证据：[SelectPage.tsx:63](../../src/SelectPage.tsx:63) 将任意过暗、过曝、削波或失焦折叠成“疑似废片”布尔值；[SelectPage.tsx:108](../../src/SelectPage.tsx:108) 可据此排除；[similar.rs:387](../../src-tauri/src/core/similar.rs:387) 又把多维缺陷压成单一 badge 数；[similar.rs:480](../../src-tauri/src/core/similar.rs:480) 自动主镜头排序只看星级、缺陷数和时间，没有 Narrative/Unique Event/Rescue Candidate。
+   - 修法：保留 Image/Motion/Audio/Narrative 独立维度，为高叙事或未知叙事素材设置不可被技术分压制的 rescue/unique-event 路径。
+
+7. 🔴 E.3 发布门禁尚不存在
+
+   - 证据：[similar.rs:14](../../src-tauri/src/core/similar.rs:14) 明示相似阈值仍未用 97 条真机素材校准；[P5-F4:3](../../docs/tasks/P5-F4-travel-benchmark.md:3) Benchmark 仍为“排队”；要求的 Golden Moments、原片前后哈希、VFR/Proxy 指标和 `Critical Recall=100%` runner 尚未落地：[P5-F4:6](../../docs/tasks/P5-F4-travel-benchmark.md:6)。
+   - 修法：在发布前实现可重复运行的七组旅行夹具及红色门禁，Critical Recall、原片删除数和时间映射任一不达标即失败。
+
+8. 🟡 导出完成缺少可恢复的完成标记，崩溃后可能生成重复交付包
+
+   - 证据：[jobs.rs:90](../../src-tauri/src/core/jobs.rs:90) enqueue 没有幂等查询或唯一约束；[deliver.rs:280](../../src-tauri/src/core/deliver.rs:280) hash 只混入 payload JSON 长度；[deliver.rs:598](../../src-tauri/src/core/deliver.rs:598) 先 rename 最终目录，直到[deliver.rs:616](../../src-tauri/src/core/deliver.rs:616)才提交数据库，进程崩溃时 Drop 清理不会执行。
+   - 修法：使用完整规范化 payload 哈希加唯一约束，并在最终目录写持久化 attempt/completion marker，使恢复任务能够收养已完成产物。
+
+9. 🟡 L3 出境清单只是提示，没有进程级数据边界
+
+   - 证据：[SettingsPage.tsx:571](../../src/SettingsPage.tsx:571) 承诺只发送列出的结构化数据；但[llm.rs:468](../../src-tauri/src/core/llm.rs:468) 直接启动订阅 CLI，继承工作目录、环境和 provider 配置，未清空环境、隔离 cwd 或禁止工具/MCP/文件读取；prompt 还作为 argv 传递。
+   - 修法：在空临时目录、环境白名单和明确无工具/无文件访问模式下运行 CLI，prompt 改走 stdin，并记录实际出境请求摘要。
+
+10. 🟡 工具路径设置与核心任务断连
+
+   - 证据：[SettingsPage.tsx:354](../../src/SettingsPage.tsx:354) 允许设置并检测 FFmpeg/FFprobe；但导入只读环境变量/PATH：[import.rs:885](../../src-tauri/src/core/import.rs:885)，运镜同样忽略设置：[motion.rs:510](../../src-tauri/src/core/motion.rs:510)，交付也只读环境变量：[deliver.rs:1660](../../src-tauri/src/core/deliver.rs:1660)。
+   - 修法：所有媒体任务统一调用 `settings::configured_executable`，禁止各模块维护自己的 resolver。
+
+11. 🟡 “抖动阈值”设置实际不影响判定
+
+   - 证据：[SettingsPage.tsx:464](../../src/SettingsPage.tsx:464) 暴露可修改阈值；[analysis.rs:170](../../src-tauri/src/core/analysis.rs:170) 虽然读取，但[analysis.rs:348](../../src-tauri/src/core/analysis.rs:348)只把它写入工具元数据，没有参与抖动评分或角标判断。
+   - 修法：在抖动分类路径真正使用该阈值，或在实现前将控件改为不可编辑并明确“尚未生效”。
+
+12. 🟡 import/export 绕过“三次重试后 blocked”，取消协议也只覆盖导出
+
+   - 证据：[jobs.rs:524](../../src-tauri/src/core/jobs.rs:524) import 失败只 `mark_failed`；[jobs.rs:605](../../src-tauri/src/core/jobs.rs:605) export 同样不调用 `retry_or_block`，而其他任务会执行重试；唯一取消入口是[deliver.rs:363](../../src-tauri/src/core/deliver.rs:363)，导入、分析、转写没有持久化取消令牌。
+   - 修法：所有 job kind 使用统一失败状态机和持久化 cancel token，并保证子进程能被取消、清理及按 attempt 重试。

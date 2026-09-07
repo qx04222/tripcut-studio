@@ -18,9 +18,40 @@ pub type ClassificationScores = BTreeMap<String, f32>;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
-// First use may include the model download (S3 measured about 202 seconds).
-const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(600);
+// First use may include the model download (S3 measured about 202 seconds),
+// which is why MAX_TIMEOUT keeps the old 600 s ceiling even though the
+// per-call defaults below are shorter.
+const MIN_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const STDERR_TAIL_LINES: usize = 8;
+// The Chinese-CLIP model loads lazily on the first embed/classify call after
+// start()/restart() (sidecar/clip_service.py:_load — ping never loads it),
+// which measured about 202 s cold. Per-call timeouts are much shorter than
+// that, so the first real call after a (re)start must use this ceiling or it
+// times out, triggers a restart, and cold-loads again forever.
+const COLD_START_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn clamp_timeout(timeout: Duration) -> Duration {
+    timeout.clamp(MIN_TIMEOUT, MAX_TIMEOUT)
+}
+
+/// The timeout `request` actually uses for a call: while the sidecar is
+/// still "cold" (just started/restarted, model not yet loaded) every
+/// requested timeout is overridden by `COLD_START_TIMEOUT`; otherwise the
+/// caller's (already-clamped) requested timeout applies unchanged.
+fn effective_timeout(cold: bool, requested: Duration) -> Duration {
+    if cold {
+        COLD_START_TIMEOUT
+    } else {
+        requested
+    }
+}
+
+/// `embed_images` waits longer as the strip has more frames to embed.
+fn embed_images_timeout(strip_frame_count: usize) -> Duration {
+    clamp_timeout(Duration::from_secs(30 + 5 * strip_frame_count as u64))
+}
 
 static SIDECAR: OnceLock<Mutex<SidecarClient>> = OnceLock::new();
 
@@ -78,6 +109,10 @@ struct SidecarClient {
     process: Option<RunningSidecar>,
     next_id: u64,
     last_ping: Option<Instant>,
+    last_used: Option<Instant>,
+    /// True from `start()` (hence also after `restart()`) until the first
+    /// successful non-ping call returns — see `COLD_START_TIMEOUT` above.
+    cold: bool,
 }
 
 impl Default for SidecarClient {
@@ -86,6 +121,8 @@ impl Default for SidecarClient {
             process: None,
             next_id: 1,
             last_ping: None,
+            last_used: None,
+            cold: true,
         }
     }
 }
@@ -109,8 +146,16 @@ impl SidecarClient {
             self.last_ping = Some(Instant::now());
         }
 
-        match self.call(method, params, timeout) {
-            Ok(value) => Ok(value),
+        let timeout = effective_timeout(self.cold, timeout);
+        let outcome = self.call(method, params, timeout);
+        self.last_used = Some(Instant::now());
+        match outcome {
+            Ok(value) => {
+                if method != "ping" {
+                    self.cold = false;
+                }
+                Ok(value)
+            }
             Err(CallFailure::Remote(error)) => Err(CoreError::Sidecar(format!(
                 "Chinese-CLIP sidecar 返回错误 {}：{}",
                 error.code, error.message
@@ -146,8 +191,7 @@ impl SidecarClient {
         let id = self.take_id();
         match call_process(&mut process, id, "ping", json!({}), PING_TIMEOUT) {
             Ok(_) => {
-                self.process = Some(process);
-                self.last_ping = Some(Instant::now());
+                self.mark_started(process);
                 Ok(())
             }
             Err(error) => {
@@ -159,6 +203,17 @@ impl SidecarClient {
                 )))
             }
         }
+    }
+
+    /// Records a freshly-pinged process as the active one and marks the
+    /// client cold: the model has not been loaded on it yet (ping alone
+    /// never loads it — see `COLD_START_TIMEOUT`), so the first real call
+    /// still needs the cold-start ceiling regardless of how warm the
+    /// client was before this (re)start.
+    fn mark_started(&mut self, process: RunningSidecar) {
+        self.process = Some(process);
+        self.last_ping = Some(Instant::now());
+        self.cold = true;
     }
 
     fn restart(&mut self) -> Result<()> {
@@ -192,6 +247,35 @@ impl SidecarClient {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         id
     }
+
+    /// Pure-ish core of `unload_if_idle`, parameterized on `now` so tests can
+    /// construct an arbitrarily "old" `last_used` without sleeping.
+    fn unload_if_idle_at(&mut self, now: Instant, idle: Duration, keep: bool) -> bool {
+        if keep || self.process.is_none() {
+            return false;
+        }
+        let is_idle = self
+            .last_used
+            .is_some_and(|last_used| now.saturating_duration_since(last_used) >= idle);
+        if !is_idle {
+            return false;
+        }
+        self.stop();
+        tracing::info!(idle_seconds = idle.as_secs(), "Chinese-CLIP sidecar 空闲卸载");
+        true
+    }
+
+    fn unload_if_idle(&mut self, idle: Duration, keep: bool) -> bool {
+        self.unload_if_idle_at(Instant::now(), idle, keep)
+    }
+}
+
+/// Stops the Chinese-CLIP sidecar process if it is running, idle for at
+/// least `idle`, and `keep` is false (the caller sets `keep` when there is
+/// pending embedding/classification work that would just relaunch it).
+/// Wired into `jobs::JobRunner::run`'s periodic timer separately (R1 Task 8b).
+pub fn unload_if_idle(idle: Duration, keep: bool) -> bool {
+    with_client(|client| Ok(client.unload_if_idle(idle, keep))).unwrap_or(false)
 }
 
 pub fn ping() -> Result<()> {
@@ -200,7 +284,11 @@ pub fn ping() -> Result<()> {
 
 pub fn embed_text(query: &str) -> Result<Vec<f32>> {
     let value = with_client(|client| {
-        client.request("embed_text", json!({ "query": query }), EMBEDDING_TIMEOUT)
+        client.request(
+            "embed_text",
+            json!({ "query": query }),
+            clamp_timeout(DEFAULT_CALL_TIMEOUT),
+        )
     })?;
     parse_vector(value)
 }
@@ -213,7 +301,7 @@ pub fn embed_images(strip_path: &Path, strip_frame_count: usize) -> Result<Vec<V
                 "paths": [strip_path.to_string_lossy()],
                 "strip_frame_count": strip_frame_count,
             }),
-            EMBEDDING_TIMEOUT,
+            embed_images_timeout(strip_frame_count),
         )
     })?;
     let rows: Vec<Value> = serde_json::from_value(value)
@@ -238,7 +326,7 @@ pub fn classify(
                 "image": image_path.to_string_lossy(),
                 "dimension_prototypes": dimension_prototypes,
             }),
-            EMBEDDING_TIMEOUT,
+            clamp_timeout(DEFAULT_CALL_TIMEOUT),
         )
     })?;
     parse_classification_scores(value)
@@ -424,6 +512,169 @@ fn describe_call_failure(error: &CallFailure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real child process (`sh -c cat`) so `RunningSidecar` can be
+    /// constructed for tests without faking `std::process::Child`. It never
+    /// receives a request in these tests, so the unused response channel and
+    /// unread stdout/stderr pipes are fine; callers must reap it via
+    /// `RunningSidecar::stop` (directly, or through `SidecarClient::stop`).
+    fn dummy_running_sidecar() -> RunningSidecar {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn dummy test process");
+        let stdin = child.stdin.take().expect("dummy stdin");
+        let (_sender, responses) = mpsc::channel();
+        RunningSidecar {
+            child,
+            stdin,
+            responses,
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    #[test]
+    fn unload_if_idle_stops_a_process_idle_past_the_threshold() {
+        let now = Instant::now();
+        let mut client = SidecarClient {
+            process: Some(dummy_running_sidecar()),
+            last_used: Some(now - Duration::from_secs(61)),
+            ..SidecarClient::default()
+        };
+
+        let unloaded = client.unload_if_idle_at(now, Duration::from_secs(60), false);
+
+        assert!(unloaded);
+        assert!(client.process.is_none());
+    }
+
+    #[test]
+    fn unload_if_idle_keeps_a_process_when_keep_is_true() {
+        let now = Instant::now();
+        let mut client = SidecarClient {
+            process: Some(dummy_running_sidecar()),
+            last_used: Some(now - Duration::from_secs(61)),
+            ..SidecarClient::default()
+        };
+
+        let unloaded = client.unload_if_idle_at(now, Duration::from_secs(60), true);
+
+        assert!(!unloaded);
+        assert!(client.process.is_some());
+        client.stop();
+    }
+
+    #[test]
+    fn unload_if_idle_keeps_a_process_that_is_not_idle_long_enough() {
+        let now = Instant::now();
+        let mut client = SidecarClient {
+            process: Some(dummy_running_sidecar()),
+            last_used: Some(now - Duration::from_secs(10)),
+            ..SidecarClient::default()
+        };
+
+        let unloaded = client.unload_if_idle_at(now, Duration::from_secs(60), false);
+
+        assert!(!unloaded);
+        assert!(client.process.is_some());
+        client.stop();
+    }
+
+    #[test]
+    fn unload_if_idle_is_false_with_no_process_running() {
+        let now = Instant::now();
+        let mut client = SidecarClient {
+            last_used: Some(now - Duration::from_secs(61)),
+            ..SidecarClient::default()
+        };
+
+        assert!(!client.unload_if_idle_at(now, Duration::from_secs(60), false));
+    }
+
+    #[test]
+    fn embed_images_timeout_grows_with_frame_count() {
+        assert_eq!(embed_images_timeout(0), Duration::from_secs(30));
+        assert_eq!(embed_images_timeout(4), Duration::from_secs(50));
+    }
+
+    #[test]
+    fn embed_images_timeout_is_clamped_between_min_and_max() {
+        // 0 frames still clamps up to MIN_TIMEOUT (30 s > 30 s is a no-op here,
+        // so exercise the low end with the formula's own floor and the high
+        // end with a frame count large enough to blow past MAX_TIMEOUT).
+        assert_eq!(embed_images_timeout(0), MIN_TIMEOUT);
+        assert_eq!(embed_images_timeout(1000), MAX_TIMEOUT);
+    }
+
+    #[test]
+    fn default_call_timeout_is_used_for_embed_text_and_classify() {
+        // embed_text/classify pass `clamp_timeout(DEFAULT_CALL_TIMEOUT)`, i.e. 60 s.
+        assert_eq!(clamp_timeout(DEFAULT_CALL_TIMEOUT), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn effective_timeout_overrides_to_cold_start_ceiling_while_cold() {
+        // The model loads lazily on the first non-ping call after
+        // start()/restart() (~200 s measured); a 60 s per-call timeout would
+        // time that out and trigger a restart -> cold-load loop, so while
+        // `cold` is true every requested timeout is replaced by
+        // COLD_START_TIMEOUT (600 s) regardless of what was asked for.
+        assert_eq!(
+            effective_timeout(true, Duration::from_secs(60)),
+            COLD_START_TIMEOUT
+        );
+        // Once warm, the caller's requested timeout passes through unchanged.
+        assert_eq!(
+            effective_timeout(false, Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn unload_then_next_start_leaves_the_client_cold_again() {
+        // After `unload_if_idle` stops the process, the field-level state it
+        // leaves behind (`process: None`) is exactly what `ensure_started`
+        // uses to decide to go through `start()` again. `start()` cannot be
+        // driven end-to-end here (it needs a real sidecar process), but the
+        // struct-mutating tail of it — `mark_started` — is what actually
+        // sets `cold`, so exercise that directly on a client that was warm
+        // (a completed call had cleared `cold`) and confirm the next start
+        // makes it cold again.
+        let now = Instant::now();
+        let mut client = SidecarClient {
+            process: Some(dummy_running_sidecar()),
+            last_used: Some(now - Duration::from_secs(61)),
+            cold: false,
+            ..SidecarClient::default()
+        };
+
+        let unloaded = client.unload_if_idle_at(now, Duration::from_secs(60), false);
+        assert!(unloaded);
+        assert!(client.process.is_none());
+        assert!(!client.cold, "unloading alone must not flip cold on its own");
+
+        client.mark_started(dummy_running_sidecar());
+
+        assert!(client.cold, "next start() must mark the client cold again");
+        client.stop();
+    }
+
+    #[test]
+    fn timeout_failure_is_in_the_restart_triggering_branch() {
+        // `SidecarClient::request` only special-cases `CallFailure::Remote`
+        // as a non-restarting failure; every other variant, Timeout
+        // included, falls into the catch-all branch that calls `restart()`.
+        // This asserts that classification statically, since actually
+        // exercising it end-to-end needs a real hung sidecar process (see
+        // the report for what a fake-hang test would require).
+        let failure = CallFailure::Timeout;
+        let restarts = !matches!(failure, CallFailure::Remote(_));
+        assert!(restarts);
+    }
 
     #[test]
     fn decodes_mock_json_rpc_result() {

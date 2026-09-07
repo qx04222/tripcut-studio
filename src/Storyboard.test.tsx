@@ -1,5 +1,25 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type * as ApiModule from "./api";
+
+vi.mock("./JourneyTimeline", () => ({
+  JourneyTimeline: () => <div data-testid="journey-timeline-mock" />,
+}));
+
+vi.mock("./api", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof ApiModule;
+  return {
+    ...actual,
+    getStoryboard: vi.fn(),
+    listShotStacks: vi.fn(),
+    listStoryTemplates: vi.fn(),
+    getNarrativeRevision: vi.fn(),
+  };
+});
 
 import {
   StoryboardView,
@@ -13,7 +33,30 @@ import {
   storyOrderRefs,
   routineTreatmentLabel,
 } from "./Storyboard";
-import type { Chapter, NarrativeBeat, StoryItem } from "./api";
+import {
+  getNarrativeRevision,
+  getStoryboard,
+  listShotStacks,
+  listStoryTemplates,
+  type Chapter,
+  type NarrativeBeat,
+  type Storyboard as StoryboardData,
+  type StoryItem,
+} from "./api";
+
+function emptyBoard(): StoryboardData {
+  return {
+    chapters: [],
+    items: [],
+    candidates: [],
+    can_undo: false,
+    mode: "legacy",
+    mode_notice: "",
+    narrative: null,
+    narration_job_status: null,
+    current_template: null,
+  };
+}
 
 const chapters: Chapter[] = [
   { id: 1, title: "第1段·09:00-09:30", start_at: "09:00", end_at: "09:30", clip_count: 2 },
@@ -137,5 +180,48 @@ describe("storyboard", () => {
     const neverSuggestedBeat: NarrativeBeat = { ...clearedBeat, routine_cleared: false };
     const untouched = renderToStaticMarkup(<NarrativeBeatCard beat={neverSuggestedBeat} />);
     expect(untouched).not.toContain("恢复 AI 建议");
+  });
+});
+
+describe("storyboard journey timeline tab", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.mocked(getStoryboard).mockResolvedValue(emptyBoard());
+    vi.mocked(listShotStacks).mockResolvedValue([]);
+    vi.mocked(listStoryTemplates).mockResolvedValue([]);
+    vi.mocked(getNarrativeRevision).mockResolvedValue(null as never);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("offers a 「旅程时间线」 tab and mounts the read-only view only once selected", async () => {
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const tab = Array.from(container.querySelectorAll('[role="tab"]')).find((button) =>
+      button.textContent?.includes("旅程时间线"),
+    );
+    expect(tab).toBeTruthy();
+    expect(container.querySelector('[data-testid="journey-timeline-mock"]')).toBeNull();
+
+    await act(async () => {
+      (tab as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="journey-timeline-mock"]')).not.toBeNull();
   });
 });

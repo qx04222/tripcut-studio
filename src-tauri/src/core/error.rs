@@ -50,6 +50,14 @@ pub enum CoreError {
     AssetSafety(String),
     #[error("channel memory failed: {0}")]
     ChannelMemory(String),
+    #[error("player preference failed: {0}")]
+    Player(String),
+    #[error("contact sheet generation failed: {0}")]
+    ContactSheet(String),
+    #[error("OCR failed: {0}")]
+    Ocr(String),
+    #[error("music analysis failed: {0}")]
+    Music(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

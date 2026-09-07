@@ -6,3 +6,11 @@ sidecar/.venv/
 *.log
 sidecar/__pycache__/
 sidecar/.venv/
+
+qa/runs/
+.superpowers/
+
+# 更新签名私钥。绝不入库:泄露即等于任何人都能给旅剪工作台推自制"更新"。
+# 真正的私钥住在 ~/.tauri/tripcut-updater.key(口令在钥匙串 tripcut-updater),
+# 这条只是防止有人把它复制进仓库。
+*.key

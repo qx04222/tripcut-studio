@@ -1,8 +1,24 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DeliverView } from "./DeliverPage";
-import type { ExportStatus } from "./api";
+const apiMock = vi.hoisted(() => ({
+  cancelExport: vi.fn(),
+  generateJianyingDraft: vi.fn(),
+  getCurrentEpisode: vi.fn(),
+  getExportStatus: vi.fn(),
+  getJianyingAvailability: vi.fn(),
+  listPlatformPresets: vi.fn(),
+  pickExportFolder: vi.fn(),
+  revealExport: vi.fn(),
+  startExport: vi.fn(),
+}));
+vi.mock("./api", () => apiMock);
+
+import { DeliverPage, DeliverView } from "./DeliverPage";
+import type { EpisodeSummary, ExportStatus, PlatformPreset } from "./api";
 
 const idleStatus: ExportStatus = {
   job_id: null,
@@ -17,7 +33,77 @@ const idleStatus: ExportStatus = {
   items: [],
   output_path: null,
   error: null,
+  contact_sheet_glyph_fallbacks: null,
+  contact_sheet_cover_failures: null,
+  rough_cut_target_seconds: null,
+  rough_cut_actual_ticks: null,
+  rough_cut_actual_tb_num: null,
+  rough_cut_actual_tb_den: null,
 };
+
+/** 与 migration 0031 的种子数据保持一致——tb 统一 1/1_000_000。 */
+const platformPresets: PlatformPreset[] = [
+  {
+    platform: "douyin",
+    display_name: "抖音",
+    portrait: [1080, 1920],
+    landscape: [1920, 1080],
+    duration_budget_ticks: 60_000_000,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+  {
+    platform: "xiaohongshu",
+    display_name: "小红书",
+    portrait: [1080, 1440],
+    landscape: [1920, 1080],
+    duration_budget_ticks: 90_000_000,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+  {
+    platform: "bilibili",
+    display_name: "B站",
+    portrait: [1080, 1920],
+    landscape: [1920, 1080],
+    duration_budget_ticks: 600_000_000,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+  {
+    platform: "moments",
+    display_name: "朋友圈",
+    portrait: [1080, 1920],
+    landscape: [1920, 1080],
+    duration_budget_ticks: 15_000_000,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+  {
+    platform: "family",
+    display_name: "家庭纪录",
+    portrait: [1080, 1920],
+    landscape: [3840, 2160],
+    duration_budget_ticks: 0,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+  {
+    platform: "general",
+    display_name: "通用",
+    portrait: [1080, 1920],
+    landscape: [1920, 1080],
+    duration_budget_ticks: 0,
+    tb_num: 1,
+    tb_den: 1_000_000,
+    subtitle_style: {},
+  },
+];
 
 const supportedJianying = {
   installed_version: "11.3.0",
@@ -31,6 +117,13 @@ const nativeProps = {
   nativeResult: null,
   nativeNotice: null,
   onGenerateNative: () => undefined,
+  episodePlatform: "general" as const,
+  overridePlatform: "general" as const,
+  onOverridePlatformChange: () => undefined,
+  includeContactSheet: true,
+  onIncludeContactSheetChange: () => undefined,
+  targetSeconds: null,
+  onTargetSecondsChange: () => undefined,
 };
 
 describe("stable delivery view", () => {
@@ -197,5 +290,212 @@ describe("stable delivery view", () => {
     expect(markup).toContain("草稿已生成；请回到剪映首页打开并核对");
     expect(markup).toContain("com.lveditor.draft/旅剪项目");
     expect(markup).not.toContain("已自动打开剪映");
+  });
+});
+
+const episode: EpisodeSummary = {
+  id: 5,
+  title: "EP05",
+  theme: "",
+  episode_number: 5,
+  status: "active",
+  created_at: "2026-09-01T00:00:00Z",
+  archived_at: null,
+  clip_count: 4,
+  favorite_count: 2,
+  export_count: 0,
+  target_platform: "xiaohongshu",
+  canvas_orientation: "portrait",
+};
+
+describe("DeliverPage per-export platform override", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    apiMock.getCurrentEpisode.mockResolvedValue(episode);
+    apiMock.listPlatformPresets.mockResolvedValue(platformPresets);
+    apiMock.getJianyingAvailability.mockResolvedValue({
+      installed_version: null,
+      supported: false,
+      reason: "未检测",
+    });
+    apiMock.getExportStatus.mockResolvedValue(idleStatus);
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    apiMock.startExport.mockResolvedValue(idleStatus);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("defaults the override select to the current episode's platform", async () => {
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const select = container.querySelector<HTMLSelectElement>('select');
+    expect(select?.value).toBe("xiaohongshu");
+  });
+
+  it("passes overridePlatform to startExport only when it differs from the episode setting", async () => {
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "生成交付包",
+    );
+    await act(async () => {
+      generateButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiMock.startExport).toHaveBeenLastCalledWith("/Volumes/DELIVERY", undefined, true, 60);
+
+    const select = container.querySelector<HTMLSelectElement>('select');
+    await act(async () => {
+      if (select) {
+        select.value = "bilibili";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    await act(async () => {
+      generateButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiMock.startExport).toHaveBeenLastCalledWith("/Volumes/DELIVERY", "bilibili", true, 60);
+  });
+
+  it("defaults the contact sheet checkbox to checked and includes it in the package preview", async () => {
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'label[aria-label="联系表.pdf"] input[type="checkbox"]',
+    );
+    expect(checkbox).not.toBeNull();
+    expect(checkbox?.checked).toBe(true);
+  });
+
+  it("passes includeContactSheet=false to startExport once the checkbox is unchecked", async () => {
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'label[aria-label="联系表.pdf"] input[type="checkbox"]',
+    );
+    await act(async () => {
+      checkbox?.click();
+    });
+    expect(checkbox?.checked).toBe(false);
+
+    const generateButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "生成交付包",
+    );
+    await act(async () => {
+      generateButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiMock.startExport).toHaveBeenLastCalledWith("/Volumes/DELIVERY", undefined, false, 60);
+  });
+});
+
+describe("DeliverPage rough cut target duration", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    apiMock.listPlatformPresets.mockResolvedValue(platformPresets);
+    apiMock.getJianyingAvailability.mockResolvedValue({
+      installed_version: null,
+      supported: false,
+      reason: "未检测",
+    });
+    apiMock.getExportStatus.mockResolvedValue(idleStatus);
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    apiMock.startExport.mockResolvedValue(idleStatus);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  function targetSelect(): HTMLSelectElement | null {
+    return container.querySelector<HTMLSelectElement>('label[aria-label="参考粗剪时长"] select');
+  }
+
+  it('defaults to "完整" when the platform preset has no duration budget', async () => {
+    apiMock.getCurrentEpisode.mockResolvedValue({ ...episode, target_platform: "general" });
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(targetSelect()?.value).toBe("full");
+  });
+
+  it("preselects the closest option at or below the episode platform's duration budget", async () => {
+    // xiaohongshu 的种子预算是 90 秒；30/60/180 里不超过 90 的最大档是 60。
+    apiMock.getCurrentEpisode.mockResolvedValue(episode);
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(targetSelect()?.value).toBe("60");
+  });
+
+  it("passes the chosen target seconds through to startExport", async () => {
+    apiMock.getCurrentEpisode.mockResolvedValue(episode);
+    await act(async () => {
+      root.render(<DeliverPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const select = targetSelect();
+    await act(async () => {
+      if (select) {
+        select.value = "180";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    const generateButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "生成交付包",
+    );
+    await act(async () => {
+      generateButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMock.startExport).toHaveBeenLastCalledWith("/Volumes/DELIVERY", undefined, true, 180);
   });
 });

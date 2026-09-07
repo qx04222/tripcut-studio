@@ -275,7 +275,8 @@ pub fn ask_director(
 pub fn run_narrate_episode(connection: &mut Connection, job: &Job) -> Result<()> {
     ensure_enabled(connection)?;
     let input = narrative::validate_job_input(connection, &job.payload)?;
-    let prompt = narration_prompt(&input)?;
+    let template = narrative::job_template(&job.payload)?;
+    let prompt = narration_prompt(&input, template)?;
     let estimated_tokens = estimate_tokens(&prompt, NARRATIVE_OUTPUT_ALLOWANCE);
     let parse_input = input.clone();
     let (draft, _provider) = route(
@@ -716,12 +717,16 @@ fn director_prompt(question: &str, context: &DirectorContext) -> Result<String> 
     ))
 }
 
-fn narration_prompt(input: &Value) -> Result<String> {
+pub(crate) const NARRATION_CONTRACT: &str = r#"{"episode_title":string,"episode_theme":string,"chapters":[{"kind":string,"title":string,"promoted":boolean,"promotion_reason":string,"score":0..1,"rationale":string,"beats":[{"clip_id":integer,"segment_id":integer|null,"role":"beat"|"montage"|"transition","score":0..1,"rationale":string}],"story_slots":[string],"missing_slots":[string],"digital_human_plan":null|{"mode":"A"|"B"|"C"|"D"|"E","reason":string,"planned_slots":[string]}}],"downgrades":[{"clip_id":integer,"segment_id":integer|null,"role":"montage"|"transition","reason":string}],"destination_cards":[{"chapter_order":integer,"name":string,"geo_context":string,"highlights":string,"why_visit":string,"personal_note":string,"sources":[{"label":string,"basis":string}],"coverage":[{"item":string,"covered":boolean,"evidence":string,"suggestion":string}]}]}"#;
+
+fn narration_prompt(input: &Value, template: Option<narrative::StoryTemplate>) -> Result<String> {
     let input = serde_json::to_string(input)
         .map_err(|error| CoreError::Llm(format!("叙事输入序列化失败：{error}")))?;
-    let contract = r#"{"episode_title":string,"episode_theme":string,"chapters":[{"kind":string,"title":string,"promoted":boolean,"promotion_reason":string,"score":0..1,"rationale":string,"beats":[{"clip_id":integer,"segment_id":integer|null,"role":"beat"|"montage"|"transition","score":0..1,"rationale":string}],"story_slots":[string],"missing_slots":[string],"digital_human_plan":null|{"mode":"A"|"B"|"C"|"D"|"E","reason":string,"planned_slots":[string]}}],"downgrades":[{"clip_id":integer,"segment_id":integer|null,"role":"montage"|"transition","reason":string}],"destination_cards":[{"chapter_order":integer,"name":string,"geo_context":string,"highlights":string,"why_visit":string,"personal_note":string,"sources":[{"label":string,"basis":string}],"coverage":[{"item":string,"covered":boolean,"evidence":string,"suggestion":string}]}]}"#;
+    let contract = NARRATION_CONTRACT;
+    // 模板预设只加在最前面；下面的契约文本必须逐字不变。
+    let preamble = narrative::prompt_preamble(template);
     Ok(format!(
-        "你是长期旅行与房车 Vlog 的叙事编导。候选边界只是信号，绝不能按时间或 GPS 机械分章；先识别本集核心目的地、主题与关键事件。\n\
+        "{preamble}你是长期旅行与房车 Vlog 的叙事编导。候选边界只是信号，绝不能按时间或 GPS 机械分章；先识别本集核心目的地、主题与关键事件。\n\
          只输出 JSON 对象，不要 Markdown、代码围栏或额外文字。任何未知字段都会被拒绝。\n\
          输出字段必须严格为：{contract}\n\
          必须完整且不重复覆盖输入中的每个 clip_id+segment_id。10 类 kind、9 类槽位和 Coverage 精确枚举均已在输入给出。\n\
@@ -904,6 +909,55 @@ mod tests {
         let directory = TestDirectory::new();
         let connection = db::open_project(&directory.db_path()).unwrap();
         (directory, connection)
+    }
+
+    #[test]
+    fn story_template_prefixes_are_non_empty_and_pairwise_distinct() {
+        use crate::core::narrative::StoryTemplate;
+        let templates = [
+            StoryTemplate::Cinematic,
+            StoryTemplate::Fastcut,
+            StoryTemplate::Ambient,
+            StoryTemplate::Diary,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for template in templates {
+            let prefix = crate::core::narrative::prompt_prefix(template);
+            assert!(!prefix.trim().is_empty(), "{} 的 prompt 前缀不能为空", template.as_str());
+            assert!(seen.insert(prefix), "{} 的 prompt 前缀与别的模板重复", template.as_str());
+        }
+    }
+
+    #[test]
+    fn narration_prompt_prepends_template_preset_and_keeps_the_contract_verbatim() {
+        use crate::core::narrative::StoryTemplate;
+        let input = json!({"clips": []});
+        let plain = narration_prompt(&input, None).unwrap();
+        assert!(plain.contains(NARRATION_CONTRACT));
+        assert!(plain.starts_with("你是长期旅行与房车 Vlog 的叙事编导。"));
+
+        for template in [
+            StoryTemplate::Cinematic,
+            StoryTemplate::Fastcut,
+            StoryTemplate::Ambient,
+            StoryTemplate::Diary,
+        ] {
+            let prompt = narration_prompt(&input, Some(template)).unwrap();
+            let prefix = crate::core::narrative::prompt_prefix(template);
+            assert!(prompt.starts_with(prefix), "{} 的预设必须前置", template.as_str());
+            // 契约文本逐字不变。
+            assert!(
+                prompt.contains(NARRATION_CONTRACT),
+                "{} 的 prompt 丢了契约 JSON 原文",
+                template.as_str()
+            );
+            let params = crate::core::narrative::template_params(template);
+            assert!(
+                prompt.contains(&format!("{:.0}–{:.0} 秒", params.beat_min_s, params.beat_max_s)),
+                "{} 的数值参数没进 prompt",
+                template.as_str()
+            );
+        }
     }
 
     #[test]

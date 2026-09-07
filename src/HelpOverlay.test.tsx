@@ -7,6 +7,7 @@ import {
   KEYBOARD_SHORTCUT_GROUPS,
   PLAYER_SHORTCUTS,
   SELECTION_SHORTCUTS,
+  SETTINGS_HELP_TOPICS,
   WORKFLOW_STEPS,
 } from "./helpContent";
 import { GENERATED_LICENSES } from "./licenses.generated";
@@ -41,7 +42,17 @@ describe("P5-F3 Chinese help and polish", () => {
     expect(markup).toContain('aria-modal="true"');
     expect(markup).toContain("五步工作流");
     expect(markup).toContain("快捷键总表");
+    expect(markup).toContain("设置页导览");
     expect(markup).toContain("常见问题");
+  });
+
+  it("includes a settings topic and a privacy topic in the settings help section", () => {
+    const markup = renderToStaticMarkup(<HelpOverlay open onClose={() => undefined} />);
+    expect(SETTINGS_HELP_TOPICS.map((topic) => topic.id)).toEqual(["settings", "privacy"]);
+    expect(markup).toContain('data-help-topic="settings"');
+    expect(markup).toContain('data-help-topic="privacy"');
+    expect(markup).toContain("隐私与诊断怎么读");
+    expect(markup).toContain("崩溃报告");
   });
 
   it("ships a static direct-dependency license manifest for both ecosystems", () => {

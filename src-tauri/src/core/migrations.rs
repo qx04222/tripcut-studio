@@ -1095,6 +1095,162 @@ CREATE INDEX jobs_import_batch_idx ON jobs(import_batch_id);
 CREATE INDEX clips_import_batch_idx ON clips(import_batch_id);
 "#;
 
+pub const MIGRATION_0030: &str = r#"
+ALTER TABLE segments
+ADD COLUMN deleted_at TEXT;
+"#;
+
+pub const MIGRATION_0031: &str = r#"
+ALTER TABLE episodes ADD COLUMN target_platform TEXT NOT NULL DEFAULT 'general'
+  CHECK(target_platform IN ('douyin','xiaohongshu','bilibili','moments','family','general'));
+ALTER TABLE episodes ADD COLUMN canvas_orientation TEXT NOT NULL DEFAULT 'both'
+  CHECK(canvas_orientation IN ('landscape','portrait','both'));
+CREATE TABLE platform_presets (
+  platform TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+  portrait_w INTEGER, portrait_h INTEGER, landscape_w INTEGER, landscape_h INTEGER,
+  duration_budget_ticks INTEGER, tb_num INTEGER NOT NULL, tb_den INTEGER NOT NULL,
+  subtitle_style_json TEXT NOT NULL);
+INSERT OR IGNORE INTO platform_presets VALUES
+ ('douyin','抖音',1080,1920,1920,1080,60000000,1,1000000,'{"font_px":64,"safe_bottom_pct":18}'),
+ ('xiaohongshu','小红书',1080,1440,1920,1080,90000000,1,1000000,'{"font_px":56,"safe_bottom_pct":14}'),
+ ('bilibili','B站',1080,1920,1920,1080,600000000,1,1000000,'{"font_px":48,"safe_bottom_pct":10}'),
+ ('moments','朋友圈',1080,1920,1920,1080,15000000,1,1000000,'{"font_px":64,"safe_bottom_pct":20}'),
+ ('family','家庭纪录',1080,1920,3840,2160,0,1,1000000,'{"font_px":48,"safe_bottom_pct":10}'),
+ ('general','通用',1080,1920,1920,1080,0,1,1000000,'{"font_px":52,"safe_bottom_pct":12}');
+"#;
+
+// R3 Task 4：每素材多声道音轨表 + 选中转录/监听轨 + 显示 LUT 路径 + 拍摄参数列。
+pub const MIGRATION_0032: &str = r#"
+CREATE TABLE clip_audio_tracks (
+  clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  stream_index INTEGER NOT NULL, channels INTEGER, channel_layout TEXT, sample_rate INTEGER,
+  role_guess TEXT CHECK(role_guess IN ('onboard_mic','wireless_mic','backup','unknown')),
+  PRIMARY KEY(clip_id, stream_index));
+ALTER TABLE clips ADD COLUMN selected_transcribe_track INTEGER;
+ALTER TABLE clips ADD COLUMN selected_monitor_track INTEGER;
+ALTER TABLE clips ADD COLUMN display_lut_path TEXT;
+ALTER TABLE clips ADD COLUMN iso_value INTEGER;
+ALTER TABLE clips ADD COLUMN shutter_speed TEXT;
+ALTER TABLE clips ADD COLUMN aperture TEXT;
+"#;
+
+// R4 Task 4：故事模板——revision 记录它是按哪套模板生成的。
+pub const MIGRATION_0033: &str = r#"
+ALTER TABLE narrative_revisions ADD COLUMN template TEXT
+  CHECK(template IN ('cinematic','fastcut','ambient','diary') OR template IS NULL);
+"#;
+
+// R5 Task 1：音乐数据层——每集的配乐轨、节拍网格与段落划分。
+// tb 固定 1/1000000（微秒），与工程内其它 ticks 同源。
+pub const MIGRATION_0034: &str = r#"
+CREATE TABLE music_tracks (
+  id INTEGER PRIMARY KEY,
+  episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  file_name TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  quick_hash TEXT,
+  duration_ticks INTEGER,
+  tb_num INTEGER NOT NULL DEFAULT 1,
+  tb_den INTEGER NOT NULL DEFAULT 1000000,
+  bpm REAL,
+  analysis_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK(analysis_status IN ('pending','running','done','failed')),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE music_beats (
+  track_id INTEGER NOT NULL REFERENCES music_tracks(id) ON DELETE CASCADE,
+  tick INTEGER NOT NULL,
+  is_downbeat INTEGER NOT NULL DEFAULT 0 CHECK(is_downbeat IN (0,1)),
+  strength REAL
+);
+CREATE TABLE music_sections (
+  track_id INTEGER NOT NULL REFERENCES music_tracks(id) ON DELETE CASCADE,
+  start_tick INTEGER NOT NULL,
+  end_tick INTEGER NOT NULL,
+  label TEXT NOT NULL
+    CHECK(label IN ('intro','verse','build','climax','outro','other')),
+  energy REAL,
+  CHECK(end_tick >= start_tick)
+);
+CREATE INDEX music_beats_track_idx ON music_beats(track_id, tick);
+CREATE INDEX music_sections_track_idx ON music_sections(track_id, start_tick);
+"#;
+
+// R5 Task 4：Vision OCR 识别的画面文字，按帧落库以支持后续按文字检索片段。
+// version 34 是音乐数据层(R5 Task 1),OCR 顺延为 35/36。
+pub const MIGRATION_0035: &str = r#"
+CREATE TABLE clip_ocr_texts (
+    id INTEGER PRIMARY KEY,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    frame_tick INTEGER NOT NULL CHECK(frame_tick >= 0),
+    tb_num INTEGER NOT NULL,
+    tb_den INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    bbox_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX clip_ocr_texts_clip_frame_idx
+ON clip_ocr_texts(clip_id, frame_tick);
+"#;
+
+// R5 Task 5：ocr_scan 任务的幂等入队——与 export_package 同一模式,同一
+// (kind, payload_hash) 在 pending/running 期间只允许一条,避免胶片条完成后
+// `enqueue_after_thumbnail` 被并发/重跑重复排队。
+pub const MIGRATION_0036: &str = r#"
+CREATE UNIQUE INDEX jobs_active_ocr_scan_payload_unique_idx
+ON jobs(kind, payload_hash)
+WHERE kind = 'ocr_scan' AND status IN ('pending', 'running');
+"#;
+
+// R6 Task 6/G4：`rotation` 落地。ffmpeg 的隐式 autorotate 和 mpv 默认行为都只认
+// side_data 里的 display matrix，不认旧式 metadata `rotate` tag——见
+// `import::parse_probe_json` 里 side_data 优先、tag 兜底的合并逻辑。`rotation`
+// 列继续存合并后的值（给「竖屏」过滤用，只关心最终朝向，不关心来源）；
+// `manual_rotation` 只在 tag 兜底命中、且没有 side_data 时才非空——只有这个值
+// 才需要播放器 video-rotate / 封面 transpose 主动纠正，否则会跟已经生效的
+// autorotate 叠加，把画面转成两倍角度。
+pub const MIGRATION_0037: &str = r#"
+ALTER TABLE clips ADD COLUMN manual_rotation INTEGER;
+"#;
+
+// R6 Task 7a/1：区分“没做过旋转矫正”和“探测过、确实不需要矫正”。`manual_
+// rotation = NULL` 本身有歧义——既可能是从没探测过，也可能是探测到 side_data
+// 但没有 tag-only 矫正需求。`rotation_source` 记录 `rotation` 这个合并值到底
+// 来自 side_data 还是 legacy `rotate` tag；`rotation` 非空但 `rotation_source`
+// 仍为空，就是 R6 之前导入、从未跑过这条新逻辑的历史素材，回填必须能选中它们。
+// R6 Task 7a fix：`clip_audio_tracks` 用 NOT EXISTS 判断"是否已探测过音轨"，
+// 但一个正确探测过、媒体本身没有任何音轨的素材同样零行——每次启动都会被
+// 误判为待回填，重新排队重探。`audio_probed` 把"探测过"这件事直接落成一
+// 个标志位，跟音轨行数是否为零无关；写入音轨的三个路径（导入、回填重探、
+// 手动重新探测音轨）在同一事务里把它置 1。
+pub const MIGRATION_0038: &str = r#"
+ALTER TABLE clips ADD COLUMN rotation_source TEXT
+    CHECK(rotation_source IN ('side_data', 'tag') OR rotation_source IS NULL);
+
+ALTER TABLE clips ADD COLUMN audio_probed INTEGER NOT NULL DEFAULT 0
+    CHECK(audio_probed IN (0, 1));
+"#;
+
+// R6 wake follow-up: import_batch_clips only had PK (batch_id, clip_id), so
+// `SELECT batch_id FROM import_batch_clips WHERE clip_id=?` (import.rs) had no
+// usable index and forced a full table scan.
+pub const MIGRATION_0039: &str = r#"
+CREATE INDEX import_batch_clips_clip_idx ON import_batch_clips(clip_id);
+"#;
+
+// R6 Task 7d/F-R1-8：`thumbnail` 拆成封面(cover)与胶片条(strip)两个任务,
+// 封面先行以够到 30 秒首屏目标。`strip` 由 `thumbnail` 完成后入队,与
+// `ocr_scan`(mig0036)同一个幂等模式——同一 (kind, payload_hash) 在
+// pending/running 期间只允许一条,避免封面完成后 `enqueue_strip` 被并发/
+// 重跑重复排队。
+pub const MIGRATION_0040: &str = r#"
+CREATE UNIQUE INDEX jobs_active_strip_payload_unique_idx
+ON jobs(kind, payload_hash)
+WHERE kind = 'strip' AND status IN ('pending', 'running');
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1225,6 +1381,288 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: MIGRATION_0028,
     },
     Migration { version: 29, sql: MIGRATION_0029 },
+    Migration { version: 30, sql: MIGRATION_0030 },
+    Migration { version: 31, sql: MIGRATION_0031 },
+    Migration { version: 32, sql: MIGRATION_0032 },
+    Migration { version: 33, sql: MIGRATION_0033 },
+    Migration { version: 34, sql: MIGRATION_0034 },
+    Migration { version: 35, sql: MIGRATION_0035 },
+    Migration { version: 36, sql: MIGRATION_0036 },
+    Migration { version: 37, sql: MIGRATION_0037 },
+    Migration { version: 38, sql: MIGRATION_0038 },
+    Migration { version: 39, sql: MIGRATION_0039 },
+    Migration { version: 40, sql: MIGRATION_0040 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 29;
+pub const LATEST_SCHEMA_VERSION: i64 = 40;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{db, test_support::TestDirectory};
+
+    #[test]
+    fn migrations_are_sequential_and_reach_the_latest_version() {
+        for (index, migration) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(migration.version, index as i64 + 1);
+        }
+        assert_eq!(
+            MIGRATIONS.last().expect("至少一条迁移").version,
+            LATEST_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn migration_0033_adds_template_column_to_narrative_revisions() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('narrative_revisions') WHERE name = 'template'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "0033 必须给 narrative_revisions 加 template 列");
+
+        connection
+            .execute(
+                "INSERT INTO narrative_revisions(episode_id, kind, template, created_at)
+                 SELECT id, 'suggested', 'ambient', '2026-09-06T00:00:00Z' FROM episodes LIMIT 1",
+                [],
+            )
+            .unwrap();
+        let rejected = connection.execute(
+            "INSERT INTO narrative_revisions(episode_id, kind, template, created_at)
+             SELECT id, 'suggested', 'nope', '2026-09-06T00:00:00Z' FROM episodes LIMIT 1",
+            [],
+        );
+        assert!(rejected.is_err(), "CHECK 必须拒绝未知模板");
+    }
+
+    #[test]
+    fn migration_0038_adds_rotation_source_column() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = 'rotation_source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "0038 必须给 clips 加 rotation_source 列");
+
+        connection
+            .execute("INSERT INTO volumes(uuid) VALUES ('v38')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path, rotation, rotation_source)
+                 VALUES ('v38', 'clip.mov', 90, 'tag')",
+                [],
+            )
+            .unwrap();
+        let rejected = connection.execute(
+            "INSERT INTO clips(volume_uuid, rel_path, rotation, rotation_source)
+             VALUES ('v38', 'clip2.mov', 90, 'bogus')",
+            [],
+        );
+        assert!(rejected.is_err(), "CHECK 必须拒绝未知 rotation_source");
+    }
+
+    #[test]
+    fn migration_0038_adds_audio_probed_column() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = 'audio_probed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "0038 必须给 clips 加 audio_probed 列");
+
+        connection
+            .execute("INSERT INTO volumes(uuid) VALUES ('v38b')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path) VALUES ('v38b', 'clip.mov')",
+                [],
+            )
+            .unwrap();
+        let default_value: i64 = connection
+            .query_row(
+                "SELECT audio_probed FROM clips WHERE rel_path = 'clip.mov'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_value, 0, "audio_probed 默认必须是 0");
+
+        let rejected = connection.execute(
+            "INSERT INTO clips(volume_uuid, rel_path, audio_probed)
+             VALUES ('v38b', 'clip2.mov', 2)",
+            [],
+        );
+        assert!(rejected.is_err(), "CHECK 必须拒绝 0/1 以外的值");
+    }
+
+    #[test]
+    fn migration_0035_adds_clip_ocr_texts_table() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid, label) VALUES ('v', 'vol')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, tb_num, tb_den, duration_ticks)
+                 VALUES (1, 'v', 'clip.mov', 1, 1000, 10000)",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO clip_ocr_texts(
+                    clip_id, frame_tick, tb_num, tb_den, text, confidence, bbox_json, created_at
+                 ) VALUES (1, 500, 1, 1000, 'TripCut', 0.92, '[0.1,0.2,0.3,0.4]', '2026-09-06T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        let stored_text: String = connection
+            .query_row(
+                "SELECT text FROM clip_ocr_texts WHERE clip_id = 1 AND frame_tick = 500",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_text, "TripCut");
+
+        let rejected = connection.execute(
+            "INSERT INTO clip_ocr_texts(
+                clip_id, frame_tick, tb_num, tb_den, text, confidence, bbox_json, created_at
+             ) VALUES (1, -1, 1, 1000, 'bad', 0.5, '[]', '2026-09-06T00:00:00Z')",
+            [],
+        );
+        assert!(rejected.is_err(), "CHECK 必须拒绝负的 frame_tick");
+
+        // 级联删除：clip 被删后其 OCR 文字行必须一并清除，不留孤儿行。
+        connection.execute("DELETE FROM clips WHERE id = 1", []).unwrap();
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM clip_ocr_texts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "clip 删除必须级联清空 clip_ocr_texts");
+    }
+
+    #[test]
+    fn migration_0034_creates_music_tables_with_checked_enums() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        for table in ["music_tracks", "music_beats", "music_sections"] {
+            let found: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "0034 必须建表 {table}");
+        }
+        for index in ["music_beats_track_idx", "music_sections_track_idx"] {
+            let found: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "0034 必须建索引 {index}");
+        }
+
+        connection
+            .execute(
+                "INSERT INTO music_tracks(id, episode_id, file_name, rel_path, duration_ticks, created_at)
+                 SELECT 1, id, 'bgm.m4a', 'music/bgm.m4a', 60000000, '2026-09-06T00:00:00Z'
+                 FROM episodes LIMIT 1",
+                [],
+            )
+            .unwrap();
+        let default_status: String = connection
+            .query_row("SELECT analysis_status FROM music_tracks WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(default_status, "pending", "新轨默认待分析");
+
+        assert!(
+            connection
+                .execute("UPDATE music_tracks SET analysis_status = 'halfway' WHERE id = 1", [])
+                .is_err(),
+            "CHECK 必须拒绝未知分析状态"
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO music_sections(track_id, start_tick, end_tick, label, energy)
+                     VALUES(1, 0, 1000, 'chorus', 0.5)",
+                    [],
+                )
+                .is_err(),
+            "CHECK 必须拒绝未知段落标签"
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO music_sections(track_id, start_tick, end_tick, label, energy)
+                     VALUES(1, 1000, 0, 'verse', 0.5)",
+                    [],
+                )
+                .is_err(),
+            "CHECK 必须拒绝倒挂的段落区间"
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO music_beats(track_id, tick, is_downbeat, strength) VALUES(1, 0, 2, 0.5)",
+                    [],
+                )
+                .is_err(),
+            "CHECK 必须拒绝非 0/1 的下拍标志"
+        );
+    }
+
+    #[test]
+    fn migration_0039_adds_import_batch_clips_clip_index() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let found: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'import_batch_clips_clip_idx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "0039 必须给 import_batch_clips(clip_id) 建索引");
+    }
+
+    #[test]
+    fn migration_0040_adds_strip_payload_unique_index() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let found: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'jobs_active_strip_payload_unique_idx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "0040 必须给 strip 任务建部分唯一索引");
+    }
+}

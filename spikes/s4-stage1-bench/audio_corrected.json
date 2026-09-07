@@ -1,0 +1,778 @@
+{
+  "toxaway_clip__h264_8bit_native_30fps_cfr_001.mp4": {
+    "elapsed_s": 17.3013,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toxaway_clip__h264_8bit_1080p_30fps_cfr_002.mp4": {
+    "elapsed_s": 4.1074,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toxaway_clip__hevc_8bit_native_30fps_cfr_003.mp4": {
+    "elapsed_s": 23.5687,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toxaway_clip__hevc_10bit_native_25fps_cfr_004.mov": {
+    "elapsed_s": 38.1591,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toxaway_clip__hevc_10bit_4k_30fps_cfr_005.mov": {
+    "elapsed_s": 64.3019,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toxaway_clip__h264_8bit_native_30fps_cfr_006.mp4": {
+    "elapsed_s": 14.2842,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__h264_8bit_native_24fps_cfr_007.mp4": {
+    "elapsed_s": 8.1243,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__h264_8bit_1080p_30fps_cfr_008.mp4": {
+    "elapsed_s": 3.2465,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__hevc_8bit_native_24fps_cfr_009.mp4": {
+    "elapsed_s": 7.9683,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__hevc_10bit_native_25fps_cfr_010.mov": {
+    "elapsed_s": 14.7003,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__hevc_10bit_4k_30fps_cfr_011.mov": {
+    "elapsed_s": 53.4565,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "tybee_beach_drone_clip__h264_8bit_native_24fps_cfr_012.mp4": {
+    "elapsed_s": 5.1633,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__h264_8bit_native_30fps_cfr_013.mp4": {
+    "elapsed_s": 14.0144,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__h264_8bit_1080p_30fps_cfr_014.mp4": {
+    "elapsed_s": 3.4238,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__hevc_8bit_native_30fps_cfr_015.mp4": {
+    "elapsed_s": 17.3155,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__hevc_10bit_native_25fps_cfr_016.mov": {
+    "elapsed_s": 27.6768,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__hevc_10bit_4k_30fps_cfr_017.mov": {
+    "elapsed_s": 39.0426,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "cherokee_falls_drone_clip__h264_8bit_native_30fps_cfr_018.mp4": {
+    "elapsed_s": 12.4265,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__h264_8bit_native_30fps_cfr_019.mp4": {
+    "elapsed_s": 10.7242,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__h264_8bit_1080p_30fps_cfr_020.mp4": {
+    "elapsed_s": 1.7674,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__hevc_8bit_native_30fps_cfr_021.mp4": {
+    "elapsed_s": 11.1349,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__hevc_10bit_native_25fps_cfr_022.mov": {
+    "elapsed_s": 23.2807,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__hevc_10bit_4k_30fps_cfr_023.mov": {
+    "elapsed_s": 33.5271,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "whitewater_falls_drone_clip__h264_8bit_native_30fps_cfr_024.mp4": {
+    "elapsed_s": 8.3476,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__h264_8bit_native_30fps_cfr_025.mp4": {
+    "elapsed_s": 5.6262,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.79,
+    "peak_level_db_last": -6.79,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__h264_8bit_1080p_30fps_cfr_026.mp4": {
+    "elapsed_s": 1.8362,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.32,
+    "peak_level_db_last": -6.32,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__hevc_8bit_native_30fps_cfr_027.mp4": {
+    "elapsed_s": 8.5414,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.79,
+    "peak_level_db_last": -6.79,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__hevc_10bit_native_25fps_cfr_028.mov": {
+    "elapsed_s": 19.3914,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.32,
+    "peak_level_db_last": -6.32,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__hevc_10bit_4k_30fps_cfr_029.mov": {
+    "elapsed_s": 25.3362,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.79,
+    "peak_level_db_last": -6.79,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__h264_8bit_native_30fps_cfr_030.mp4": {
+    "elapsed_s": 6.5685,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.32,
+    "peak_level_db_last": -6.32,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__h264_8bit_native_60fps_cfr_032.mp4": {
+    "elapsed_s": 11.8091,
+    "has_audio_stream": true,
+    "peak_level_db_max": -16.2,
+    "peak_level_db_last": -16.2,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__h264_8bit_1080p_30fps_cfr_033.mp4": {
+    "elapsed_s": 5.2335,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.01,
+    "peak_level_db_last": -21.01,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__hevc_8bit_native_60fps_cfr_034.mp4": {
+    "elapsed_s": 15.6074,
+    "has_audio_stream": true,
+    "peak_level_db_max": -16.2,
+    "peak_level_db_last": -16.2,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__hevc_10bit_native_25fps_cfr_035.mov": {
+    "elapsed_s": 11.9183,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.01,
+    "peak_level_db_last": -21.01,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__hevc_10bit_4k_30fps_cfr_036.mov": {
+    "elapsed_s": 65.4436,
+    "has_audio_stream": true,
+    "peak_level_db_max": -16.2,
+    "peak_level_db_last": -16.2,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__h264_8bit_native_60fps_cfr_037.mp4": {
+    "elapsed_s": 7.8754,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.01,
+    "peak_level_db_last": -21.01,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__h264_8bit_native_60fps_cfr_039.mp4": {
+    "elapsed_s": 9.4288,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.92,
+    "peak_level_db_last": -19.92,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__h264_8bit_1080p_30fps_cfr_040.mp4": {
+    "elapsed_s": 2.9167,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.13,
+    "peak_level_db_last": -15.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__hevc_8bit_native_60fps_cfr_041.mp4": {
+    "elapsed_s": 11.5913,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.92,
+    "peak_level_db_last": -19.92,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__hevc_10bit_native_25fps_cfr_042.mov": {
+    "elapsed_s": 11.5546,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.13,
+    "peak_level_db_last": -15.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__hevc_10bit_4k_30fps_cfr_043.mov": {
+    "elapsed_s": 34.721,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.92,
+    "peak_level_db_last": -19.92,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__h264_8bit_native_60fps_cfr_044.mp4": {
+    "elapsed_s": 7.7839,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.13,
+    "peak_level_db_last": -15.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__h264_8bit_native_60fps_cfr_046.mp4": {
+    "elapsed_s": 30.9789,
+    "has_audio_stream": true,
+    "peak_level_db_max": -14.16,
+    "peak_level_db_last": -14.16,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__h264_8bit_1080p_30fps_cfr_047.mp4": {
+    "elapsed_s": 2.7384,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.96,
+    "peak_level_db_last": -19.96,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__hevc_8bit_native_60fps_cfr_048.mp4": {
+    "elapsed_s": 39.2804,
+    "has_audio_stream": true,
+    "peak_level_db_max": -14.16,
+    "peak_level_db_last": -14.16,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__hevc_10bit_native_25fps_cfr_049.mov": {
+    "elapsed_s": 32.6548,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.96,
+    "peak_level_db_last": -19.96,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__hevc_10bit_4k_30fps_cfr_050.mov": {
+    "elapsed_s": 55.3072,
+    "has_audio_stream": true,
+    "peak_level_db_max": -14.16,
+    "peak_level_db_last": -14.16,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "xian_walk_hdr_clip__h264_8bit_native_60fps_cfr_051.mp4": {
+    "elapsed_s": 7.378,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.96,
+    "peak_level_db_last": -19.96,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__h264_8bit_native_60fps_cfr_052.mp4": {
+    "elapsed_s": 36.5725,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.4,
+    "peak_level_db_last": -19.4,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__h264_8bit_1080p_30fps_cfr_053.mp4": {
+    "elapsed_s": 4.6034,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.05,
+    "peak_level_db_last": -25.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__hevc_8bit_native_60fps_cfr_054.mp4": {
+    "elapsed_s": 45.0856,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.4,
+    "peak_level_db_last": -19.4,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__hevc_10bit_native_25fps_cfr_055.mov": {
+    "elapsed_s": 29.9372,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.05,
+    "peak_level_db_last": -25.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__hevc_10bit_4k_30fps_cfr_056.mov": {
+    "elapsed_s": 66.5156,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.4,
+    "peak_level_db_last": -19.4,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__h264_8bit_native_60fps_cfr_057.mp4": {
+    "elapsed_s": 22.4081,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.05,
+    "peak_level_db_last": -25.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "kassel_walk_clip__h264_8bit_native_60fps_cfr_058.mp4": {
+    "elapsed_s": 0.028,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__h264_8bit_native_60fps_cfr_059.mp4": {
+    "elapsed_s": 7.839,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.91,
+    "peak_level_db_last": -15.91,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__h264_8bit_1080p_30fps_cfr_060.mp4": {
+    "elapsed_s": 3.8496,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.98,
+    "peak_level_db_last": -25.98,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__hevc_8bit_native_60fps_cfr_061.mp4": {
+    "elapsed_s": 11.0504,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.91,
+    "peak_level_db_last": -15.91,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__hevc_10bit_native_25fps_cfr_062.mov": {
+    "elapsed_s": 10.9998,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.98,
+    "peak_level_db_last": -25.98,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__hevc_10bit_4k_30fps_cfr_063.mov": {
+    "elapsed_s": 58.5033,
+    "has_audio_stream": true,
+    "peak_level_db_max": -15.91,
+    "peak_level_db_last": -15.91,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__h264_8bit_native_60fps_cfr_064.mp4": {
+    "elapsed_s": 5.4092,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.98,
+    "peak_level_db_last": -25.98,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "toledo_walk_rain_clip__h264_8bit_native_60fps_cfr_065.mp4": {
+    "elapsed_s": 0.0309,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__h264_8bit_native_60fps_cfr_066.mp4": {
+    "elapsed_s": 7.2982,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.87,
+    "peak_level_db_last": -21.87,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__h264_8bit_1080p_30fps_cfr_067.mp4": {
+    "elapsed_s": 3.101,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.45,
+    "peak_level_db_last": -25.45,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__hevc_8bit_native_60fps_cfr_068.mp4": {
+    "elapsed_s": 10.5016,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.87,
+    "peak_level_db_last": -21.87,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__hevc_10bit_native_25fps_cfr_069.mov": {
+    "elapsed_s": 9.4848,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.45,
+    "peak_level_db_last": -25.45,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__hevc_10bit_4k_30fps_cfr_070.mov": {
+    "elapsed_s": 57.2844,
+    "has_audio_stream": true,
+    "peak_level_db_max": -21.87,
+    "peak_level_db_last": -21.87,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "bangkok_walk_clip__h264_8bit_native_60fps_cfr_071.mp4": {
+    "elapsed_s": 5.1225,
+    "has_audio_stream": true,
+    "peak_level_db_max": -25.45,
+    "peak_level_db_last": -25.45,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__h264_8bit_native_50fps_cfr_072.mp4": {
+    "elapsed_s": 7.7071,
+    "has_audio_stream": true,
+    "peak_level_db_max": -7.13,
+    "peak_level_db_last": -7.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__h264_8bit_1080p_30fps_cfr_073.mp4": {
+    "elapsed_s": 3.6749,
+    "has_audio_stream": true,
+    "peak_level_db_max": -13.63,
+    "peak_level_db_last": -13.63,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__hevc_8bit_native_50fps_cfr_074.mp4": {
+    "elapsed_s": 9.7611,
+    "has_audio_stream": true,
+    "peak_level_db_max": -7.13,
+    "peak_level_db_last": -7.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__hevc_10bit_native_25fps_cfr_075.mov": {
+    "elapsed_s": 13.3753,
+    "has_audio_stream": true,
+    "peak_level_db_max": -13.63,
+    "peak_level_db_last": -13.63,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__hevc_10bit_4k_30fps_cfr_076.mov": {
+    "elapsed_s": 58.4621,
+    "has_audio_stream": true,
+    "peak_level_db_max": -7.13,
+    "peak_level_db_last": -7.13,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "ljubljana_market__h264_8bit_native_50fps_cfr_077.mp4": {
+    "elapsed_s": 2.2161,
+    "has_audio_stream": true,
+    "peak_level_db_max": -13.63,
+    "peak_level_db_last": -13.63,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__h264_8bit_native_24fps_cfr_078.mp4": {
+    "elapsed_s": 0.3563,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.19,
+    "peak_level_db_last": -11.19,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__h264_8bit_1080p_30fps_cfr_079.mp4": {
+    "elapsed_s": 0.2292,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.05,
+    "peak_level_db_last": -11.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__hevc_8bit_native_24fps_cfr_080.mp4": {
+    "elapsed_s": 1.175,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.19,
+    "peak_level_db_last": -11.19,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__hevc_10bit_native_25fps_cfr_081.mov": {
+    "elapsed_s": 3.6662,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.05,
+    "peak_level_db_last": -11.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__hevc_10bit_4k_30fps_cfr_082.mov": {
+    "elapsed_s": 29.9822,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.19,
+    "peak_level_db_last": -11.19,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__h264_8bit_native_24fps_cfr_083.mp4": {
+    "elapsed_s": 0.8857,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.05,
+    "peak_level_db_last": -11.05,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__h264_8bit_native_24fps_cfr_085.mp4": {
+    "elapsed_s": 9.3772,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__h264_8bit_1080p_30fps_cfr_086.mp4": {
+    "elapsed_s": 5.9443,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__hevc_8bit_native_24fps_cfr_087.mp4": {
+    "elapsed_s": 11.6625,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__hevc_10bit_native_25fps_cfr_088.mov": {
+    "elapsed_s": 16.3448,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__hevc_10bit_4k_30fps_cfr_089.mov": {
+    "elapsed_s": 36.8305,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "nairobi_timelapse__h264_8bit_native_24fps_cfr_090.mp4": {
+    "elapsed_s": 0.8895,
+    "has_audio_stream": false,
+    "peak_level_db_max": null,
+    "peak_level_db_last": null,
+    "flat_factor_max": null,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__h264_8bit_native_30fps_cfr_091.mp4": {
+    "elapsed_s": 0.1714,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__h264_8bit_1080p_30fps_cfr_092.mp4": {
+    "elapsed_s": 0.1521,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__hevc_8bit_native_30fps_cfr_093.mp4": {
+    "elapsed_s": 0.8044,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__hevc_10bit_native_25fps_cfr_094.mov": {
+    "elapsed_s": 2.5388,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__hevc_10bit_4k_30fps_cfr_095.mov": {
+    "elapsed_s": 8.0893,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__h264_8bit_native_30fps_cfr_096.mp4": {
+    "elapsed_s": 0.5123,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "mykonos_walk_clip__h264_8bit_native_30fps_vfr_031.mp4": {
+    "elapsed_s": 7.1158,
+    "has_audio_stream": true,
+    "peak_level_db_max": -6.79,
+    "peak_level_db_last": -6.79,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "dubai_walk_clip__h264_8bit_native_60fps_vfr_038.mp4": {
+    "elapsed_s": 9.0492,
+    "has_audio_stream": true,
+    "peak_level_db_max": -16.2,
+    "peak_level_db_last": -16.2,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "tehran_walk_pocket3_clip__h264_8bit_native_60fps_vfr_045.mp4": {
+    "elapsed_s": 5.37,
+    "has_audio_stream": true,
+    "peak_level_db_max": -19.92,
+    "peak_level_db_last": -19.92,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "madrid_calle_preciados__h264_8bit_native_24fps_vfr_084.mp4": {
+    "elapsed_s": 0.4097,
+    "has_audio_stream": true,
+    "peak_level_db_max": -11.19,
+    "peak_level_db_last": -11.19,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  },
+  "newdelhi_park_phone__h264_8bit_native_30fps_vfr_097.mp4": {
+    "elapsed_s": 0.5969,
+    "has_audio_stream": true,
+    "peak_level_db_max": -26.25,
+    "peak_level_db_last": -26.25,
+    "flat_factor_max": 0.0,
+    "likely_clipping": false
+  }
+}

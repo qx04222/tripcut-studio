@@ -17,6 +17,8 @@ import {
   motionClassLabel,
   type AnalysisBadgeKind,
 } from "./AnalysisPanel";
+import { SimilarGroupsPanel } from "./SimilarGroupsPanel";
+import { TechCheckPanel } from "./TechCheckPanel";
 import { formatTimecode, PlayerOverlay } from "./PlayerOverlay";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { StoryboardView } from "./Storyboard";
@@ -28,6 +30,7 @@ import {
   describeClipWithAi,
   getAiDescription,
   getClipArtifacts,
+  getClipsRevision,
   listClipDimensions,
   listAssetSafety,
   getLlmStatus,
@@ -37,6 +40,7 @@ import {
   listShotStacks,
   clearClipRating,
   rateClip,
+  restoreSelectSegment,
   searchClips,
   searchTranscripts,
   setClipTimeStage,
@@ -57,6 +61,8 @@ import {
   getMemoryLens,
   type MemoryLensEntry,
   getCurrentEpisode,
+  listOcrHits,
+  type OcrTextHit,
 } from "./api";
 
 export type SelectionFilter = "all" | "favorite" | "unrated" | "rejected";
@@ -186,6 +192,25 @@ export function filterClipsByDimension(
       .map((item) => item.clip_id),
   );
   return clips.filter((clip) => clip.id !== null && matchingIds.has(clip.id));
+}
+
+export type OrientationFilter = "all" | "portrait" | "landscape";
+
+// G4：rotation 与 width/height 都是 ffprobe 探测出的解码前（旋转前）尺寸——
+// 90/270 会把 landscape 的解码尺寸转成竖屏画面，反之亦然。用 XOR：
+// 已经是竖屏尺寸 且 旋转不是 90/270 → 仍是竖屏；反之同理。
+export function isPortraitClip(clip: Pick<ClipListItem, "rotation" | "width" | "height">): boolean {
+  const rotatesQuarterTurn = clip.rotation === 90 || clip.rotation === 270;
+  const tallerThanWide = (clip.height ?? 0) > (clip.width ?? 0);
+  return rotatesQuarterTurn !== tallerThanWide;
+}
+
+export function filterClipsByOrientation(
+  clips: ClipListItem[],
+  orientation: OrientationFilter,
+): ClipListItem[] {
+  if (orientation === "all") return clips;
+  return clips.filter((clip) => isPortraitClip(clip) === (orientation === "portrait"));
 }
 
 export function replaceShotStackMemberState(
@@ -751,12 +776,15 @@ function SelectionInspector({
   dimensions,
   stackMember,
   segments,
+  ocrHits,
   deletingSegmentId,
   rescueBusy,
   llmEnabled,
   llmBudgetExhausted,
   aiDescription,
   aiBusy,
+  readOnlyEpisode,
+  clipsById,
   onDeleteSegment,
   onApplyRescueRange,
   onTimeStageChange,
@@ -767,12 +795,15 @@ function SelectionInspector({
   dimensions: ClipDimension[];
   stackMember: ShotStackMember | null;
   segments: SelectSegment[];
+  ocrHits: OcrTextHit[];
   deletingSegmentId: number | null;
   rescueBusy: boolean;
   llmEnabled: boolean;
   llmBudgetExhausted: boolean;
   aiDescription: AiDescriptionResult | null;
   aiBusy: boolean;
+  readOnlyEpisode: boolean;
+  clipsById: ReadonlyMap<number, ClipListItem>;
   onDeleteSegment: (segmentId: number) => void;
   onApplyRescueRange: () => void;
   onTimeStageChange: (label: string) => void;
@@ -810,6 +841,14 @@ function SelectionInspector({
         <span>L1 质量角标</span>
         <AnalysisBadges clip={clip} />
       </div>
+      {ocrHits.length > 0 ? (
+        <div className="inspector-section ocr-badge" aria-label="画面文字识别结果">
+          <span>画面文字</span>
+          <strong>
+            画面文字：{ocrHits.slice(0, 2).map((hit) => hit.text).join("、")}
+          </strong>
+        </div>
+      ) : null}
       {safety && safety.safety_flag !== "normal" ? (
         <div className={`inspector-section asset-safety ${safety.safety_flag}`}>
           <span>
@@ -988,6 +1027,8 @@ function SelectionInspector({
           </ol>
         )}
       </div>
+      <SimilarGroupsPanel clipId={clip.id} readOnly={readOnlyEpisode} clipsById={clipsById} />
+      <TechCheckPanel clip={clip} readOnly={readOnlyEpisode} />
       <dl className="inspector-metadata">
         <div><dt>时长</dt><dd>{durationLabel(clip)}</dd></div>
         <div><dt>尺寸</dt><dd>{clip.width && clip.height ? `${clip.width} × ${clip.height}` : "—"}</dd></div>
@@ -1017,6 +1058,7 @@ export function SelectPage() {
   const [excludeSuspect, setExcludeSuspect] = useState(false);
   const [hideDuplicates, setHideDuplicates] = useState(false);
   const [avoidCrossEpisodeReuse, setAvoidCrossEpisodeReuse] = useState(false);
+  const [orientationFilter, setOrientationFilter] = useState<OrientationFilter>("all");
   const [folderFilter, setFolderFilter] = useState("");
   const [memoryLens, setMemoryLens] = useState<Map<number, MemoryLensEntry>>(new Map());
   const [activeEpisodeId, setActiveEpisodeId] = useState<number | null>(null);
@@ -1055,17 +1097,36 @@ export function SelectPage() {
   useEffect(() => {
     const onJump = (event: Event) => {
       const clipId = (event as CustomEvent<number>).detail;
-      if (typeof clipId === "number") setSelectedId(clipId);
+      if (typeof clipId !== "number") return;
+      // R6 终审 P1-8:可见列表按 `viewingEpisode?.id ?? activeEpisodeId` 取景。
+      // 历史集只读视图开着时,若跳转目标其实属于"当前集",不先清掉
+      // viewingEpisode 就只设 selectedId 会立刻被下面那条
+      // "selectedId 不在可见列表里就回退到第一项"的 effect 悄悄纠正回
+      // 历史集的某个片段——用户表现为点了没反应。目标属于正在查看的
+      // 历史集本身时,保持 viewingEpisode 不动(那条路径本来就是对的)。
+      const targetClip = clips.find((clip) => clip.id === clipId);
+      const targetEpisodeId = targetClip?.episode_id ?? activeEpisodeId;
+      if (viewingEpisode !== null && targetEpisodeId === activeEpisodeId) {
+        setViewingEpisode(null);
+      }
+      setSelectedId(clipId);
     };
     window.addEventListener("tripcut:select-clip", onJump);
     return () => window.removeEventListener("tripcut:select-clip", onJump);
-  }, []);
+  }, [activeEpisodeId, clips, viewingEpisode]);
   const [dimensionFilter, setDimensionFilter] = useState<ClipDimensionKey | "">("");
   const [dimensionLabelFilter, setDimensionLabelFilter] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [ratingNotice, setRatingNotice] = useState<string | null>(null);
+  const [undoSegmentId, setUndoSegmentId] = useState<number | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current !== null) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [searchHits, setSearchHits] = useState<ClipSearchHit[]>([]);
@@ -1077,6 +1138,7 @@ export function SelectPage() {
   const [composing, setComposing] = useState(false);
   const [immersiveClip, setImmersiveClip] = useState<ClipListItem | null>(null);
   const [selectSegments, setSelectSegments] = useState<SelectSegment[]>([]);
+  const [ocrHits, setOcrHits] = useState<OcrTextHit[]>([]);
   const [deletingSegmentId, setDeletingSegmentId] = useState<number | null>(null);
   const [rescueBusy, setRescueBusy] = useState(false);
   const [viewMode, setViewMode] = useState<"film" | "story">("film");
@@ -1095,19 +1157,44 @@ export function SelectPage() {
   const searchRequestRef = useRef(0);
 
   const refreshRequest = useRef(0);
+  const lastClipsRevision = useRef<string | undefined>(undefined);
+  const cachedClips = useRef<ClipListItem[]>([]);
   const refresh = useCallback(async (isActive: () => boolean = () => true) => {
     const request = ++refreshRequest.current;
+
+    // 轮询先问一句「变了吗」——没变就跳过 listClips 整表拉取,别的元数据照旧刷新。
+    // 拿修订号本身失败(命令报错)就当作「变了」,退回全量拉取,不能卡死轮询。
+    let nextRevision: string | undefined;
+    let shouldFetchClips: boolean;
+    try {
+      nextRevision = await getClipsRevision();
+      shouldFetchClips = nextRevision !== lastClipsRevision.current;
+    } catch {
+      shouldFetchClips = true;
+    }
+
     const nextAssetSafety = await listAssetSafety();
-    const [nextClips, nextDimensions, nextShotStacks] = await Promise.all([
-      listClips(),
+    const [nextDimensions, nextShotStacks] = await Promise.all([
       listClipDimensions(),
       listShotStacks(),
     ]);
+
+    if (!shouldFetchClips) {
+      if (!isActive() || request !== refreshRequest.current) return cachedClips.current;
+      setAssetSafety(nextAssetSafety);
+      setDimensions(nextDimensions);
+      setShotStacks(nextShotStacks);
+      return cachedClips.current;
+    }
+
+    const nextClips = await listClips();
     if (!isActive() || request !== refreshRequest.current) return nextClips;
     setClips(nextClips);
     setAssetSafety(nextAssetSafety);
     setDimensions(nextDimensions);
     setShotStacks(nextShotStacks);
+    cachedClips.current = nextClips;
+    lastClipsRevision.current = nextRevision;
     return nextClips;
   }, []);
 
@@ -1233,6 +1320,10 @@ export function SelectPage() {
     () => filterClipsByDimension(ratingFiltered, dimensions, dimensionFilter, dimensionLabelFilter),
     [dimensionFilter, dimensionLabelFilter, dimensions, ratingFiltered],
   );
+  const orientationFiltered = useMemo(
+    () => filterClipsByOrientation(dimensionFiltered, orientationFilter),
+    [dimensionFiltered, orientationFilter],
+  );
   const dimensionLabelOptions = useMemo(
     () =>
       dimensionFilter
@@ -1257,12 +1348,12 @@ export function SelectPage() {
   const filtered = useMemo(() => {
     // G3:跨集避重(新语境素材豁免——Novelty 恢复候选是规格 D.8 的硬约定)
     const base = avoidCrossEpisodeReuse
-      ? dimensionFiltered.filter((clip) => {
+      ? orientationFiltered.filter((clip) => {
           const lens = clip.id === null ? undefined : memoryLens.get(clip.id);
           if (!lens) return true;
           return lens.used_episode_badges.length === 0 || lens.novelty_context;
         })
-      : dimensionFiltered;
+      : orientationFiltered;
     if (!submittedQuery) return base;
     return base
       .filter(
@@ -1276,15 +1367,17 @@ export function SelectPage() {
           (semanticScores.get(left.id as number) ?? -Infinity);
         return scoreDifference || (left.id as number) - (right.id as number);
       });
-  }, [avoidCrossEpisodeReuse, dimensionFiltered, memoryLens, semanticScores, submittedQuery, transcriptClipIds]);
+  }, [avoidCrossEpisodeReuse, orientationFiltered, memoryLens, semanticScores, submittedQuery, transcriptClipIds]);
+  // O14:头部计数必须只统计当前显示范围(当前集,或只读查看中的历史集),
+  // 不能像原来那样吃 clips 全量——否则往集的收藏/拒绝会混进当前集的计数。
   const counts = useMemo(
     () => ({
-      all: filterSelectionClips(clips, "all", excludeSuspect, qualityExemptClipIds).length,
-      favorite: filterSelectionClips(clips, "favorite", excludeSuspect, qualityExemptClipIds).length,
-      unrated: filterSelectionClips(clips, "unrated", excludeSuspect, qualityExemptClipIds).length,
-      rejected: filterSelectionClips(clips, "rejected", excludeSuspect, qualityExemptClipIds).length,
+      all: filterSelectionClips(episodeScopedClips, "all", excludeSuspect, qualityExemptClipIds).length,
+      favorite: filterSelectionClips(episodeScopedClips, "favorite", excludeSuspect, qualityExemptClipIds).length,
+      unrated: filterSelectionClips(episodeScopedClips, "unrated", excludeSuspect, qualityExemptClipIds).length,
+      rejected: filterSelectionClips(episodeScopedClips, "rejected", excludeSuspect, qualityExemptClipIds).length,
     }),
-    [clips, excludeSuspect, qualityExemptClipIds],
+    [episodeScopedClips, excludeSuspect, qualityExemptClipIds],
   );
 
   const selectedClip = selectedId === null
@@ -1310,6 +1403,26 @@ export function SelectPage() {
       })
       .catch((segmentError) => {
         if (active) setError(`精选段未载入：${String(segmentError)}`);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedId]);
+
+  useEffect(() => {
+    let active = true;
+    if (selectedId === null) {
+      setOcrHits([]);
+      return () => {
+        active = false;
+      };
+    }
+    void listOcrHits(selectedId)
+      .then((hits) => {
+        if (active) setOcrHits(hits);
+      })
+      .catch(() => {
+        if (active) setOcrHits([]);
       });
     return () => {
       active = false;
@@ -1491,13 +1604,36 @@ export function SelectPage() {
     try {
       await deleteSelectSegment(segmentId);
       await Promise.all([refreshSegments(selectedId), refresh()]);
-      setRatingNotice("精选段已删除");
+      setRatingNotice("已删除精选段，撤销");
+      if (undoTimerRef.current !== null) clearTimeout(undoTimerRef.current);
+      setUndoSegmentId(segmentId);
+      undoTimerRef.current = setTimeout(() => {
+        setUndoSegmentId(null);
+        undoTimerRef.current = null;
+      }, 10000);
     } catch (segmentError) {
       setError(`精选段未删除：${String(segmentError)}`);
     } finally {
       setDeletingSegmentId(null);
     }
   }, [deletingSegmentId, refresh, refreshSegments, selectedId, readOnlyEpisode]);
+
+  const restoreDeletedSegment = useCallback(async () => {
+    if (undoSegmentId === null) return;
+    const segmentId = undoSegmentId;
+    if (undoTimerRef.current !== null) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    setUndoSegmentId(null);
+    try {
+      await restoreSelectSegment(segmentId);
+      if (selectedId !== null) await Promise.all([refreshSegments(selectedId), refresh()]);
+      setRatingNotice("已撤销删除");
+    } catch (restoreError) {
+      setError(`撤销失败：${String(restoreError)}`);
+    }
+  }, [undoSegmentId, refresh, refreshSegments, selectedId]);
 
   const useSuggestedRescueRange = useCallback(async () => {
     if (selectedId === null || rescueBusy) return;
@@ -1817,8 +1953,8 @@ export function SelectPage() {
 
   const searching = searchingClips || searchingTranscripts;
   const activeFilteredClipIds = useMemo(
-    () => new Set(dimensionFiltered.flatMap((clip) => clip.id === null ? [] : [clip.id])),
-    [dimensionFiltered],
+    () => new Set(orientationFiltered.flatMap((clip) => clip.id === null ? [] : [clip.id])),
+    [orientationFiltered],
   );
   const visibleSearchHits = useMemo(
     () => filterSearchHitsToVisibleClips(searchHits, activeFilteredClipIds),
@@ -1889,7 +2025,7 @@ export function SelectPage() {
           <small>ROUGH CUT</small>
         </button>
       </div>
-      {viewMode === "story" ? <StoryboardView /> : (
+      {viewMode === "story" ? <StoryboardView readOnly={readOnlyEpisode} /> : (
         <Group orientation="horizontal" className="select-layout">
           <Panel minSize={420} className="select-layout-main">
           <div className="film-wall">
@@ -2027,6 +2163,15 @@ export function SelectPage() {
               <span aria-hidden="true" />
               本集避免重复
             </label>
+            <label className="suspect-filter portrait-filter" title="只看竖屏素材(按 rotation 与画面比例判定)">
+              <input
+                type="checkbox"
+                checked={orientationFilter === "portrait"}
+                onChange={(event) => setOrientationFilter(event.currentTarget.checked ? "portrait" : "all")}
+              />
+              <span aria-hidden="true" />
+              竖屏
+            </label>
             <button
               className="llm-batch-action"
               type="button"
@@ -2064,6 +2209,15 @@ export function SelectPage() {
                     ? `画面与对白：${submittedQuery}`
                     : "L1 角标只作筛选辅助，原片只读")}
               </span>
+              {undoSegmentId !== null ? (
+                <button
+                  type="button"
+                  className="undo-delete-segment-button"
+                  onClick={() => void restoreDeletedSegment()}
+                >
+                  撤销
+                </button>
+              ) : null}
             </div>
           </div>
           {llmEnabled ? (
@@ -2258,12 +2412,15 @@ export function SelectPage() {
           dimensions={selectedDimensions}
           stackMember={selectedStackMember}
           segments={selectSegments}
+          ocrHits={ocrHits}
           deletingSegmentId={deletingSegmentId}
           rescueBusy={rescueBusy}
           llmEnabled={llmEnabled}
           llmBudgetExhausted={llmStatus?.budget_exhausted ?? false}
           aiDescription={selectedId === null ? null : aiDescriptions.get(selectedId) ?? null}
           aiBusy={batchDescribing || (selectedId !== null && describingIds.has(selectedId))}
+          readOnlyEpisode={readOnlyEpisode}
+          clipsById={clipsById}
           onDeleteSegment={(segmentId) => void removeSelectSegment(segmentId)}
           onApplyRescueRange={() => void useSuggestedRescueRange()}
           onTimeStageChange={(label) => void persistTimeStage(label)}

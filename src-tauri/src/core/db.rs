@@ -133,16 +133,12 @@ fn create_pre_migration_snapshot_if_needed(connection: &Connection, db_path: &Pa
     Ok(())
 }
 
+// 只读窗口(见 lib.rs 的 register_project_read_only)必须绝不触发迁移:另一个
+// 实例可能正持有写锁并处于升级中途,或本窗口打开的是一个尚未升级到最新版本的
+// 旧库。这里只在库比本应用版本更新时才报错(见 open_read_only_for_snapshot_
+// validation),否则原样只读打开——不改 schema_version,不写一个字节。
 pub fn open_project_read_only(path: &Path) -> Result<Connection> {
-    let connection = open_read_only_for_snapshot_validation(path)?;
-    let version = schema_version(&connection)?;
-    if version != LATEST_SCHEMA_VERSION {
-        return Err(CoreError::UnsupportedSchema {
-            found: version,
-            supported: LATEST_SCHEMA_VERSION,
-        });
-    }
-    Ok(connection)
+    open_read_only_for_snapshot_validation(path)
 }
 
 fn open_read_only_for_snapshot_validation(path: &Path) -> Result<Connection> {
@@ -799,6 +795,39 @@ mod tests {
         let connection = open_project_read_only(&db_path).unwrap();
 
         assert_eq!(schema_version(&connection).unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(connection
+            .execute("INSERT INTO volumes(uuid) VALUES ('forbidden')", [])
+            .is_err());
+    }
+
+    // O17: 只读窗口打开一个尚未升级到最新版本的旧库时,不得触发迁移,也不得报错——
+    // 另一个实例可能正握着写锁处于升级中途。用 migrate_with 手工把库钉在
+    // LATEST-3,验证 open_project_read_only 原样只读打开且 schema_version 不变。
+    #[test]
+    fn read_only_open_of_an_older_schema_does_not_migrate_or_error() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let older_version = LATEST_SCHEMA_VERSION - 3;
+
+        {
+            let mut connection = Connection::open(&db_path).unwrap();
+            configure_connection(&connection).unwrap();
+            prepare_version_table(&mut connection).unwrap();
+            let migrations_through_older_version = MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= older_version)
+                .map(|migration| Migration {
+                    version: migration.version,
+                    sql: migration.sql,
+                })
+                .collect::<Vec<_>>();
+            migrate_with(&mut connection, &migrations_through_older_version).unwrap();
+            assert_eq!(schema_version(&connection).unwrap(), older_version);
+        }
+
+        let connection = open_project_read_only(&db_path).unwrap();
+
+        assert_eq!(schema_version(&connection).unwrap(), older_version);
         assert!(connection
             .execute("INSERT INTO volumes(uuid) VALUES ('forbidden')", [])
             .is_err());

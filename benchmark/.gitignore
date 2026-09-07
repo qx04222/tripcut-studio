@@ -1,0 +1,21 @@
+# Runtime output and machine-local media mappings.
+metrics.json
+local/
+_work/
+__pycache__/
+results/*.json
+!results/.gitignore
+
+# Media must never be committed under benchmark/.
+*.3gp
+*.aiff
+*.avi
+*.m4a
+*.mkv
+*.mov
+*.mp3
+*.mp4
+*.mts
+*.mxf
+*.wav
+*.webm

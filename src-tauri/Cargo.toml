@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.1.1"
+version = "0.2.0"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -14,12 +14,29 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 tauri-plugin-dialog = "2"
+# 应用内自动更新(R6 Task 1)。=2.11.0 是与 tauri =2.11.5 兼容的最新版
+# (2.10+ 要求 tauri ^2.10);process 用于更新装好后重启进程(=2.3.1 要求 tauri ^2.8.2)。
+tauri-plugin-process = "=2.3.1"
+tauri-plugin-updater = "=2.11.0"
 axum = { version = "=0.8.9", features = ["http1", "tokio"] }
 blake3 = "=1.8.7"
 libc = "=0.2.189"
 libmpv2 = "=6.0.0"
+lopdf = "=0.44.0"
 objc2 = "=0.6.4"
-objc2-foundation = { version = "=0.3.2", features = ["objc2-core-foundation"] }
+# block2 pinned alongside objc2/objc2-foundation: R6 Task 4 睡眠唤醒订阅用
+# `NSNotificationCenter addObserverForName:object:queue:usingBlock:`,该
+# selector 的 usingBlock 参数是一个 Objective-C block,由 block2::RcBlock
+# 从闭包构造。已经是 objc2-foundation 的可选依赖(见下面 "block2" feature),
+# 这里显式声明成直接依赖,便于在 lib.rs 里直接 `use block2::RcBlock`。
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", features = [
+    "objc2-core-foundation",
+    "NSNotification",
+    "NSOperation",
+    "NSString",
+    "block2",
+] }
 objc2-app-kit = { version = "=0.3.2", features = [
     "NSWindow",
     "NSView",
@@ -27,17 +44,39 @@ objc2-app-kit = { version = "=0.3.2", features = [
     "NSGraphics",
     "NSOpenGL",
     "NSOpenGLView",
+    "NSWorkspace",
 ] }
+# R4 Task 2 联系表 PDF。既非 brief 举例的 0.7.x 也非 0.8.x——详见
+# core/contact_sheet.rs 头部注释,这里只记结论:0.7.0 的字体嵌入路径硬编码
+# FontFile2/CIDFontType2(TrueType glyf 专属组合),对我们 CFF 内核的
+# SourceHanSansSC OTF 子集不生成 ToUnicode CMap(实测 lopdf::Document::
+# extract_text 只吐乱码,poppler 全靠自己探测内嵌 cmap 兜底,不可依赖);0.8.2
+# 用 allsorts-subset-browser 正确识别 CFF、正确写出 ToUnicode bfchar CMap,但
+# 它绑定的 lopdf ^0.35.0 命中 RUSTSEC-2026-0187(栈溢出,7.5/high),cargo
+# audit 会拦。0.11.0 起 printpdf 把内部 lopdf 换成 ^0.44.0(已修复该漏洞),
+# 代价是 Op 枚举改了字段形状(SetFontSize/WriteText{font,..} 变成
+# SetFont{font:PdfFontHandle,..}/ShowText{items});0.12.8 是写这段注释时最新
+# 且未被 yank 的版本。default-features=false 关掉默认的 html(→ text_layout/
+# azul-*/resvg/usvg/svg2pdf/rust-fontconfig/kuchiki)——本任务不渲染 HTML/SVG,
+# 只需 jpeg 解码 + 字体/文本 Op。
+printpdf = { version = "=0.12.8", default-features = false, features = ["jpeg"] }
 rfd = "=0.17.2"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
+# R5 Task 1 音乐节拍分析：纯 Rust FFT，无 C 依赖、无 RUSTSEC 通告。
+rustfft = "=6.4.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tauri = { version = "=2.11.5", features = [] }
 thiserror = "=2.0.17"
-tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "=0.1.41"
+ttf-parser = "=0.25.1"
+# 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
+# url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
+url = "=2.5.8"
 uuid = { version = "=1.26.0", features = ["v4"] }
 walkdir = "=2.5.0"
+tauri-plugin-notification = "=2.4.0"
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }

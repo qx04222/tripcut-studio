@@ -11,11 +11,14 @@ import {
   type ReactNode,
 } from "react";
 
+import { JourneyTimeline } from "./JourneyTimeline";
+import { MusicPanel } from "./MusicPanel";
 import {
   enqueueNarrateEpisode,
   getLlmStatus,
   getStoryboard,
   listShotStacks,
+  listStoryTemplates,
   mergeChapters,
   renameChapter,
   setDestinationCardVerified,
@@ -31,6 +34,8 @@ import {
   type StoryItem,
   type StoryOrderRef,
   type Storyboard as StoryboardData,
+  type StoryTemplate,
+  type StoryTemplateInfo,
   type ShotStack,
   type ShotStackMember,
   type ShotStackUserState,
@@ -80,8 +85,10 @@ export function routineTreatmentLabel(treatment: string): string {
   }
 }
 
-export function storyboardModeCopy(mode: "legacy" | "narrative"): string {
-  return mode === "narrative" ? "Episode / Chapter / Beat" : "D2 本地故事板";
+export function storyboardModeCopy(mode: "legacy" | "narrative" | "template"): string {
+  if (mode === "narrative") return "Episode / Chapter / Beat";
+  if (mode === "template") return "按模板生成（未启用 AI）";
+  return "D2 本地故事板";
 }
 
 function narrativeBeatKey(beat: NarrativeBeat): string {
@@ -545,15 +552,24 @@ function DestinationCardEditor({
   );
 }
 
-export function StoryboardView() {
+export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}) {
   const [board, setBoard] = useState<StoryboardData | null>(null);
   const [shotStacks, setShotStacks] = useState<ShotStack[]>([]);
+  const [templates, setTemplates] = useState<StoryTemplateInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragged, setDragged] = useState<StoryItem | null>(null);
   const [titleDrafts, setTitleDrafts] = useState<Record<number, string>>({});
   const titleCompositionRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    void listStoryTemplates()
+      .then((next) => { if (active) setTemplates(next); })
+      .catch(() => { /* 模板卡片是锦上添花;取不到就不渲染,不阻塞故事板本身 */ });
+    return () => { active = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     const [next, nextShotStacks] = await Promise.all([getStoryboard(), listShotStacks()]);
@@ -612,7 +628,7 @@ export function StoryboardView() {
 
   const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const [draggingBeatId, setDraggingBeatId] = useState<number | null>(null);
-  const [sidePanel, setSidePanel] = useState<"candidates" | "destinations" | "dh">("candidates");
+  const [sidePanel, setSidePanel] = useState<"candidates" | "destinations" | "dh" | "music" | "journey">("candidates");
   const onBeatDragStart = useCallback((event: DragStartEvent) => {
     const data = event.active.data.current as { beatId: number } | undefined;
     setDraggingBeatId(data?.beatId ?? null);
@@ -842,32 +858,37 @@ export function StoryboardView() {
     }
   };
 
-  const narrate = async () => {
-    if (busy || ["pending", "running"].includes(board?.narration_job_status ?? "")) return;
+  const narrate = async (template?: StoryTemplate) => {
+    if (readOnly || busy || ["pending", "running"].includes(board?.narration_job_status ?? "")) return;
     setBusy(true);
     try {
       const status = await getLlmStatus();
-      if (!status.enabled) {
-        setNotice("L3 增强默认关闭；当前继续使用 D2 本地故事板。请先在设置页明确开启。");
-        return;
+      // L3 关闭不再是死路——enqueueNarrateEpisode 会同步跑确定性模板兜底
+      // 并返回一版 revision；只有 LLM 真正要跑时才需要下面这几道 provider/
+      // 预算/知情同意关卡。
+      if (status.enabled) {
+        if (status.provider === "none" || status.provider === "auto") {
+          setNotice(status.provider === "none"
+            ? "尚未选择 LLM provider；请先在设置页锁定单一 provider。"
+            : "旧版自动回退已禁用；请先在设置页锁定单一 provider。");
+          return;
+        }
+        if (status.budget_exhausted || status.remaining_calls < 1) {
+          setNotice("L3 月度预算已用尽；未创建任务，当前继续使用 D2/上一版故事板。");
+          return;
+        }
+        const confirmed = window.confirm(
+          `重新编排会向已锁定的 ${status.provider} 发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值；不发送文件名、拍摄时间、GPS、转写或频道记忆。预计 1 次调用，不自动回退，并写入 E2 账本。当前剩余 ${status.remaining_calls} 次。继续吗？`,
+        );
+        if (!confirmed) return;
       }
-      if (status.provider === "none" || status.provider === "auto") {
-        setNotice(status.provider === "none"
-          ? "尚未选择 LLM provider；请先在设置页锁定单一 provider。"
-          : "旧版自动回退已禁用；请先在设置页锁定单一 provider。");
-        return;
-      }
-      if (status.budget_exhausted || status.remaining_calls < 1) {
-        setNotice("L3 月度预算已用尽；未创建任务，当前继续使用 D2/上一版故事板。");
-        return;
-      }
-      const confirmed = window.confirm(
-        `重新编排会向已锁定的 ${status.provider} 发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值；不发送文件名、拍摄时间、GPS、转写或频道记忆。预计 1 次调用，不自动回退，并写入 E2 账本。当前剩余 ${status.remaining_calls} 次。继续吗？`,
-      );
-      if (!confirmed) return;
-      const jobId = await enqueueNarrateEpisode();
+      const outcome = await enqueueNarrateEpisode(template);
       await refresh();
-      setNotice(`叙事编排任务 #${jobId} 已排队；完成前继续显示当前故事板。`);
+      setNotice(
+        outcome.kind === "job"
+          ? `叙事编排任务 #${outcome.id} 已排队；完成前继续显示当前故事板。`
+          : "已按模板生成（未启用 AI）",
+      );
     } catch (error) {
       setNotice(`未创建叙事编排任务：${String(error)}`);
     } finally {
@@ -1076,11 +1097,40 @@ export function StoryboardView() {
   };
 
   const hasUnchaptered = allItems.some((item) => item.chapter_id === null);
-  const narrativeActive = board.mode === "narrative" && board.narrative !== null;
+  const narrativeActive =
+    (board.mode === "narrative" || board.mode === "template") && board.narrative !== null;
   const narrationBusy = ["pending", "running"].includes(board.narration_job_status ?? "");
+  const templateControlsDisabled = readOnly || busy || narrationBusy;
 
   return (
     <div className="storyboard-workbench">
+      <section className="story-template-cards" aria-label="故事模板">
+        <button
+          type="button"
+          className={board.current_template === null ? "active" : undefined}
+          aria-pressed={board.current_template === null}
+          disabled={templateControlsDisabled}
+          onClick={() => void narrate(undefined)}
+        >
+          不使用模板
+        </button>
+        {templates.map((info) => (
+          <button
+            type="button"
+            key={info.id}
+            className={board.current_template === info.id ? "active" : undefined}
+            aria-pressed={board.current_template === info.id}
+            disabled={templateControlsDisabled}
+            onClick={() => void narrate(info.id)}
+          >
+            <strong>{info.name_zh}</strong>
+            <span>{info.blurb_zh}</span>
+          </button>
+        ))}
+      </section>
+      {readOnly ? (
+        <p className="read-only-notice">历史集为只读档案；回到当前集才能按模板重新生成叙事</p>
+      ) : null}
       <div className="storyboard-toolbar">
         <span>ROUGH CUT / {storyboardModeCopy(board.mode)}</span>
         <strong>
@@ -1089,10 +1139,10 @@ export function StoryboardView() {
             ? `${board.narrative?.chapters.reduce((sum, chapter) => sum + chapter.beats.length, 0) ?? 0} Beats`
             : `${board.items.length} 条已编排 · ${board.candidates.length} 条候选`}
         </strong>
-        <button type="button" disabled={busy || narrationBusy} onClick={() => void narrate()}>
+        <button type="button" disabled={templateControlsDisabled} onClick={() => void narrate()}>
           {narrationBusy ? "编排中…" : "重新编排"}
         </button>
-        <button type="button" disabled={!board.can_undo || busy} onClick={() => void undo()}>
+        <button type="button" disabled={!board.can_undo || busy || readOnly} onClick={() => void undo()}>
           撤销上一步
         </button>
         {revision ? (
@@ -1178,6 +1228,8 @@ export function StoryboardView() {
               <button type="button" role="tab" aria-selected={sidePanel === "dh"} className={sidePanel === "dh" ? "active" : ""} onClick={() => setSidePanel("dh")}>DH 计划{(board.narrative?.dh_guard.warnings.length ?? 0) > 0 ? " ⚠" : ""}</button>
             </>
           ) : null}
+          <button type="button" role="tab" aria-selected={sidePanel === "music"} className={sidePanel === "music" ? "active" : ""} onClick={() => setSidePanel("music")}>音乐与节奏</button>
+          <button type="button" role="tab" aria-selected={sidePanel === "journey"} className={sidePanel === "journey" ? "active" : ""} onClick={() => setSidePanel("journey")}>旅程时间线</button>
         </div>
         <aside
           className="story-candidates"
@@ -1287,6 +1339,16 @@ export function StoryboardView() {
               ))}
             </div>
             <p className="dh-planner-note">仅规划与节奏守卫;数字人不在本工具生成。历史出现频率随交付入账,重复过密会在此警示。</p>
+          </aside>
+        ) : null}
+        {sidePanel === "music" ? (
+          <aside className="music-sidebar" aria-label="音乐与节奏">
+            <MusicPanel readOnly={readOnly} />
+          </aside>
+        ) : null}
+        {sidePanel === "journey" ? (
+          <aside className="journey-sidebar" aria-label="旅程时间线">
+            <JourneyTimeline />
           </aside>
         ) : null}
         </div>

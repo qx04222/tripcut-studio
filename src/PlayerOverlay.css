@@ -51,7 +51,7 @@
   cursor: pointer;
 }
 
-.player-progress:disabled {
+.player-progress[aria-disabled="true"] {
   cursor: wait;
 }
 

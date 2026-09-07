@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   cancelComponentInstall,
@@ -9,6 +9,7 @@ import {
   startComponentInstall,
   type ComponentStatus,
 } from "./api";
+import { useFocusTrap } from "./useFocusTrap";
 
 interface SetupWizardProps {
   onClose: () => void;
@@ -30,6 +31,8 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
   const [installing, setInstalling] = useState<Map<string, number>>(new Map());
   const [notices, setNotices] = useState<Map<string, string>>(new Map());
   const [providers, setProviders] = useState<Array<{ provider: string; available: boolean }>>([]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true);
 
   const refresh = useCallback(async () => {
     setComponents(await getComponentStatuses().catch(() => []));
@@ -83,7 +86,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
 
   return (
     <div className="setup-wizard-backdrop">
-      <div className="setup-wizard" role="dialog" aria-modal="true" aria-label="安装向导">
+      <div className="setup-wizard" role="dialog" aria-modal="true" aria-label="安装向导" ref={dialogRef}>
         <header>
           <h2>欢迎使用旅剪工作台</h2>
           <p>三步准备好一切:补齐组件 → (可选)连接 AI → 开始导入素材。原片永远只读,任何一步都可以以后再做。</p>

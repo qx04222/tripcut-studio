@@ -56,6 +56,16 @@ TRIPCUT_BUILD_STAMP=github-preview-r1 \
 
 `scripts/build-dmg.sh` 只是兼容入口，直接转发到唯一发行入口 `scripts/package-dmg.sh`。正式签名发布不得使用 `TRIPCUT_ALLOW_ADHOC=1`；公开未签名 Preview 必须带明确风险标签和完整源码附件。
 
+**不要绕开 `package-dmg.sh` 直接跑 `npm run tauri build`。** `src-tauri/tauri.conf.json` 里
+`bundle.createUpdaterArtifacts` 是 `true`（R6 自动更新需要它才能生成 `latest.json` 与
+`.tar.gz.sig`），这会让 tauri-cli 的 `sign_updaters` 步骤强制要求
+`TAURI_SIGNING_PRIVATE_KEY`（外加 `_PATH`/`_PASSWORD`）——没有这把私钥的人跑一句裸的
+`npm run tauri build` 会直接构建失败。`package-dmg.sh` 是唯一支持的构建入口：它会先临时把
+`createUpdaterArtifacts` 关掉打出应用 bundle（见脚本内 `npm run tauri build -- --bundles app
+--config '{"bundle":{"createUpdaterArtifacts":false}}'` 那一步），再单独用
+`TRIPCUT_UPDATER_KEY`（默认 `~/.tauri/tripcut-updater.key`）+ 钥匙串口令对更新包做 minisign
+签名，因此没有更新私钥的人照样能打出可安装的 QA/Preview DMG，只是拿不到更新产物。
+
 默认产物目录：
 
 ```text

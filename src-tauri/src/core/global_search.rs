@@ -14,6 +14,10 @@ pub struct GlobalSearchHit {
     pub clip_id: i64,
     pub file_name: String,
     pub excerpt: String,
+    /// 命中素材所属的集;未归集的旧素材为 None。前端用它判断命中是否落在
+    /// 当前正在编辑的集之外——不在,点击应打开该历史集的只读视图,而不是
+    /// 套用到当前集的筛片过滤器上(R6 Task 5)。
+    pub episode_id: Option<i64>,
 }
 
 const PER_KIND_LIMIT: usize = 20;
@@ -61,15 +65,17 @@ pub fn search_everything(connection: &Connection, query: &str) -> Result<Vec<Glo
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?;
         for row in rows {
-            let (clip_id, file_name, source_text) = row?;
+            let (clip_id, file_name, source_text, episode_id) = row?;
             hits.push(GlobalSearchHit {
                 kind: kind.to_owned(),
                 clip_id,
                 file_name,
                 excerpt: excerpt_around(&source_text, query, 18),
+                episode_id,
             });
         }
         Ok(())
@@ -77,7 +83,7 @@ pub fn search_everything(connection: &Connection, query: &str) -> Result<Vec<Glo
 
     push_rows(
         &format!(
-            "SELECT c.id, c.rel_path, c.rel_path FROM clips c
+            "SELECT c.id, c.rel_path, c.rel_path, c.episode_id FROM clips c
               WHERE c.missing_since IS NULL AND c.rel_path LIKE ?1 ESCAPE '\\'
               ORDER BY c.id LIMIT {PER_KIND_LIMIT}"
         ),
@@ -86,7 +92,7 @@ pub fn search_everything(connection: &Connection, query: &str) -> Result<Vec<Glo
     )?;
     push_rows(
         &format!(
-            "SELECT c.id, c.rel_path, t.text FROM transcript_segments t
+            "SELECT c.id, c.rel_path, t.text, c.episode_id FROM transcript_segments t
               JOIN clips c ON c.id = t.clip_id
              WHERE c.missing_since IS NULL AND t.text LIKE ?1 ESCAPE '\\'
              GROUP BY c.id ORDER BY c.id LIMIT {PER_KIND_LIMIT}"
@@ -96,7 +102,7 @@ pub fn search_everything(connection: &Connection, query: &str) -> Result<Vec<Glo
     )?;
     push_rows(
         &format!(
-            "SELECT c.id, c.rel_path, d.description FROM ai_descriptions d
+            "SELECT c.id, c.rel_path, d.description, c.episode_id FROM ai_descriptions d
               JOIN clips c ON c.id = d.clip_id
              WHERE c.missing_since IS NULL AND d.description LIKE ?1 ESCAPE '\\'
              ORDER BY c.id LIMIT {PER_KIND_LIMIT}"
@@ -106,12 +112,22 @@ pub fn search_everything(connection: &Connection, query: &str) -> Result<Vec<Glo
     )?;
     push_rows(
         &format!(
-            "SELECT c.id, c.rel_path, cd.dimension || ':' || cd.label FROM clip_dimensions cd
+            "SELECT c.id, c.rel_path, cd.dimension || ':' || cd.label, c.episode_id FROM clip_dimensions cd
               JOIN clips c ON c.id = cd.clip_id
              WHERE c.missing_since IS NULL AND cd.label LIKE ?1 ESCAPE '\\'
              GROUP BY c.id ORDER BY c.id LIMIT {PER_KIND_LIMIT}"
         ),
         "dimension",
+        &mut hits,
+    )?;
+    push_rows(
+        &format!(
+            "SELECT c.id, c.rel_path, t.text, c.episode_id FROM clip_ocr_texts t
+              JOIN clips c ON c.id = t.clip_id
+             WHERE c.missing_since IS NULL AND t.text LIKE ?1 ESCAPE '\\'
+             GROUP BY c.id ORDER BY c.id LIMIT {PER_KIND_LIMIT}"
+        ),
+        "ocr",
         &mut hits,
     )?;
     Ok(hits)
@@ -128,8 +144,9 @@ mod tests {
         connection.execute("INSERT INTO volumes(uuid) VALUES ('gs')", []).unwrap();
         connection
             .execute(
-                "INSERT INTO clips(id, volume_uuid, rel_path, duration_ticks, tb_num, tb_den)
-                 VALUES (1, 'gs', 'bangkok_walk.mp4', 1000, 1, 1000)",
+                "INSERT INTO clips(id, volume_uuid, rel_path, duration_ticks, tb_num, tb_den, episode_id)
+                 VALUES (1, 'gs', 'bangkok_walk.mp4', 1000, 1, 1000,
+                         (SELECT id FROM episodes WHERE status = 'active'))",
                 [],
             )
             .unwrap();
@@ -154,18 +171,32 @@ mod tests {
                 [],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clip_ocr_texts(clip_id, frame_tick, tb_num, tb_den, text, confidence, bbox_json, created_at)
+                 VALUES (1, 0, 1, 1000, 'TripCut 旅剪', 0.9, '[0.0,0.0,0.2,0.2]', 'now')",
+                [],
+            )
+            .unwrap();
         (directory, connection)
     }
 
     #[test]
-    fn finds_hits_across_all_four_sources() {
+    fn finds_hits_across_all_five_sources() {
         let (_d, connection) = setup();
-        assert_eq!(search_everything(&connection, "bangkok").unwrap()[0].kind, "file");
+        let file = search_everything(&connection, "bangkok").unwrap();
+        assert_eq!(file[0].kind, "file");
+        // 迁移0020把既有素材全部归入自动建立的 EP01 active 集,episode_id 应有值。
+        assert!(file[0].episode_id.is_some());
         let transcript = search_everything(&connection, "唐人街").unwrap();
         assert_eq!(transcript[0].kind, "transcript");
         assert!(transcript[0].excerpt.contains("唐人街"));
+        assert_eq!(transcript[0].episode_id, file[0].episode_id);
         assert_eq!(search_everything(&connection, "霓虹").unwrap()[0].kind, "description");
         assert_eq!(search_everything(&connection, "人群").unwrap()[0].kind, "dimension");
+        let ocr = search_everything(&connection, "TripCut").unwrap();
+        assert_eq!(ocr[0].kind, "ocr");
+        assert!(ocr[0].excerpt.contains("TripCut"));
     }
 
     #[test]

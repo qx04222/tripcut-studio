@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "release_gates": {
+    "critical_recall_min": 1.0,
+    "source_deleted_max": 0,
+    "source_modified_max": 0,
+    "source_added_max": 0,
+    "scene_precision_min": 0.8,
+    "scene_recall_min": 0.8,
+    "stack_precision_min": 0.9,
+    "important_event_recall_min": 0.95,
+    "unique_event_false_reject_rate_max": 0.0,
+    "narrative_critical_suppression_rate_max": 0.0,
+    "vfr_max_error_us_max": 33367,
+    "proxy_max_error_us_max": 33367,
+    "routine_repetition_rate_max": 0.4
+  },
+  "comparison": {
+    "ratio_epsilon": 0.000001,
+    "time_error_epsilon_us": 1
+  }
+}
+

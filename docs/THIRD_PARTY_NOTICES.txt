@@ -33,6 +33,21 @@ whisper.cpp
   License: MIT
   Source: https://github.com/ggml-org/whisper.cpp
 
+TripCut Han Sans SC (Modified Version of Source Han Sans SC, subset)
+  License: SIL Open Font License, Version 1.1. Full text bundled at
+  src-tauri/assets/fonts/LICENSE-SourceHanSans.txt (also mirrored at
+  docs/third_party/SourceHanSans-OFL.txt).
+  Source: https://github.com/adobe-fonts/source-han-sans (release 2.005R)
+  A glyph subset (Latin, CJK punctuation, CJK Unified Ideographs,
+  halfwidth/fullwidth forms) is embedded at build time as the CJK font for the
+  contact-sheet PDF export. The upstream OFL declares Reserved Font Name
+  'Source' (see the license text); because this is a Modified Version (glyph
+  subset + renamed `name` table), it is shipped and referenced under the name
+  "TripCut Han Sans SC" instead, per OFL §3. Bundled file:
+  src-tauri/assets/fonts/TripCutHanSansSC-Regular.otf. Provenance,
+  original/subset sha256, the exact pyftsubset command, and the rename step
+  are recorded in src-tauri/assets/fonts/README.md.
+
 Application dependencies
 ------------------------
 

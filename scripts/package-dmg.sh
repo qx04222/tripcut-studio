@@ -136,10 +136,26 @@ fi
 if rg -a -q '/opt/homebrew/Cellar/ggml|GGML_BACKEND_PATH' "$WHISPER_SRC"; then
   echo "ERROR: whisper-cli 仍可发现外部 ggml backend，拒绝打包"; exit 1
 fi
+
+# sidecar-ocr(Apache-2.0，TripCut 自有代码；Vision OCR，见 scripts/build-sidecar-ocr.sh)
+SIDECAR_OCR="${SIDECAR_OCR:-$HOME/Library/Caches/tripcut-build/sidecar-ocr/out/sidecar-ocr}"
+SIDECAR_OCR_BUILD_MANIFEST="${SIDECAR_OCR_BUILD_MANIFEST:-$(dirname "$SIDECAR_OCR")/build-manifest.json}"
+if [ -z "$SIDECAR_OCR" ] || [ ! -x "$SIDECAR_OCR" ]; then
+  echo "ERROR: 缺少发行所需的 sidecar-ocr；请先运行 scripts/build-sidecar-ocr.sh"
+  exit 1
+fi
+[ -s "$SIDECAR_OCR_BUILD_MANIFEST" ] || { echo "ERROR: 缺少 sidecar-ocr 构建清单：$SIDECAR_OCR_BUILD_MANIFEST"; exit 1; }
+if otool -L "$SIDECAR_OCR" | grep -qE '/opt/homebrew|/usr/local'; then
+  echo "ERROR: sidecar-ocr 仍链接构建机路径，拒绝打包"; exit 1
+fi
+
 for LEGAL_SOURCE in \
   "$ROOT/LICENSE" \
   "$ROOT/docs/THIRD_PARTY_NOTICES.txt" \
   "$ROOT/docs/third_party/whisper.cpp-LICENSE" \
+  "$ROOT/docs/third_party/SourceHanSans-OFL.txt" \
+  "$ROOT/src-tauri/assets/fonts/TripCutHanSansSC-Regular.otf" \
+  "$ROOT/sidecar-ocr/main.swift" \
   "$MPV_SOURCE_ROOT/LICENSE.LGPL" \
   "$MPV_SOURCE_ROOT/Copyright" \
   "$FFMPEG_SOURCE_ROOT/LICENSE.md" \
@@ -152,7 +168,15 @@ cd "$ROOT"
 # 让主二进制链到 LGPL libmpv(而非 Homebrew 的 GPL 版);build.rs 读这个变量。
 export LGPL_MPV_LIB="$LGPL_MPV/lib"
 echo "    链接 LGPL libmpv:$LGPL_MPV_LIB"
-npm run tauri build -- --bundles app
+# createUpdaterArtifacts 在 tauri.conf.json 里是 true(生产的 `tauri build` 需要它),
+# 但这里必须临时关掉,有两个独立的理由:
+#  1. tauri 的 updater 产物是在 bundler 跑完的那一刻打的包,而本脚本后面还要做
+#     dylibbundler 内嵌、LC_RPATH 去重、ffmpeg/whisper 就位、重签名——tauri 打出来的
+#     那个 .app.tar.gz 缺掉全部这些,装上去就是 alpha.3 那种"没有 Homebrew 就启动即崩"。
+#     真正可分发的 tar 由下面的 TRIPCUT_UPDATER_SIGN 分支在重签名之后自己打。
+#  2. 只要产出 PackageType::Updater,tauri-cli 的 sign_updaters 就会强制要求
+#     TAURI_SIGNING_PRIVATE_KEY,不设就直接构建失败——没有签名钥匙的人将再也打不出 QA 包。
+npm run tauri build -- --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
 echo "==> staging bundled executables (LGPL ffmpeg / whisper-cli)"
 mkdir -p "$FRAMEWORKS"
@@ -166,9 +190,17 @@ echo "    LGPL ffmpeg/ffprobe 已就位"
 cp "$WHISPER_SRC" "$APP/Contents/MacOS/whisper-cli"
 echo "    whisper-cli 已就位：$WHISPER_SRC"
 
+# sidecar-ocr(Apache-2.0，TripCut 自有代码)
+cp "$SIDECAR_OCR" "$APP/Contents/MacOS/sidecar-ocr"
+echo "    sidecar-ocr 已就位：$SIDECAR_OCR"
+
 echo "==> staging license materials"
 LEGAL_DIR="$APP/Contents/Resources/legal"
-mkdir -p "$LEGAL_DIR/mpv" "$LEGAL_DIR/ffmpeg" "$LEGAL_DIR/whisper.cpp" "$LEGAL_DIR/libplacebo" "$LEGAL_DIR/native"
+mkdir -p "$LEGAL_DIR/mpv" "$LEGAL_DIR/ffmpeg" "$LEGAL_DIR/whisper.cpp" "$LEGAL_DIR/libplacebo" "$LEGAL_DIR/native" "$LEGAL_DIR/source-han-sans" "$LEGAL_DIR/sidecar-ocr"
+# sidecar-ocr 是 TripCut 自有代码，选定 Apache-2.0：随包留源文件 + 构建清单作为
+# provenance，而不是一份独立的第三方 LICENSE 文本。
+cp "$ROOT/sidecar-ocr/main.swift" "$LEGAL_DIR/sidecar-ocr/main.swift"
+cp "$SIDECAR_OCR_BUILD_MANIFEST" "$LEGAL_DIR/sidecar-ocr/build-manifest.json"
 cp "$ROOT/LICENSE" "$LEGAL_DIR/TRIPCUT-LICENSE.txt"
 cp "$ROOT/docs/THIRD_PARTY_NOTICES.txt" "$LEGAL_DIR/THIRD_PARTY_NOTICES.txt"
 cp "$MPV_SOURCE_ROOT/LICENSE.LGPL" "$LEGAL_DIR/mpv/LICENSE.LGPL"
@@ -178,6 +210,11 @@ cp "$FFMPEG_SOURCE_ROOT/COPYING.LGPLv2.1" "$LEGAL_DIR/ffmpeg/COPYING.LGPLv2.1"
 cp "$ROOT/docs/third_party/whisper.cpp-LICENSE" "$LEGAL_DIR/whisper.cpp/LICENSE"
 cp "$LIBPLACEBO_OUT/LICENSE" "$LEGAL_DIR/libplacebo/LICENSE"
 cp "$LIBPLACEBO_OUT/build-manifest.txt" "$LEGAL_DIR/libplacebo/build-manifest.txt"
+# Source Han Sans SC (OFL-1.1): embedded via include_bytes! into the main
+# executable at compile time (contact-sheet PDF CJK font), not a separate
+# dylib, so it is not a native-sbom Mach-O entry — the license text still
+# ships alongside the other bundled third-party materials.
+cp "$ROOT/docs/third_party/SourceHanSans-OFL.txt" "$LEGAL_DIR/source-han-sans/LICENSE"
 
 # Homebrew 提供每个 bottle 的 SPDX 文件；同时复制所选许可证全文/署名材料。
 # 未知新增 dylib 会在下方 native-sbom 生成时直接红灯，不能靠黑名单静默放行。
@@ -226,7 +263,7 @@ echo "==> bundling all dependency trees in one pass"
 # 必须一次处理全部可执行文件:libmpv 与 ffmpeg 共享 libav*/SDL2 等库,
 # 分多次调用时后一次会撞上前一次的产物直接报错中止(dylibbundler 不覆盖)。
 BUNDLE_TARGETS=(-x "$BIN")
-for EXE in ffmpeg ffprobe whisper-cli; do
+for EXE in ffmpeg ffprobe whisper-cli sidecar-ocr; do
   [ -f "$APP/Contents/MacOS/$EXE" ] && BUNDLE_TARGETS+=(-x "$APP/Contents/MacOS/$EXE")
 done
 BUNDLE_LOG="$(mktemp -t tripcut-dylibbundler.XXXXXX)"
@@ -243,7 +280,7 @@ dylibbundler -od -b \
 echo "    $(ls "$FRAMEWORKS"/*.dylib | wc -l | tr -d ' ') 个依赖库已内嵌"
 
 echo "==> deduplicating LC_RPATH (tauri already ships @executable_path/../Frameworks/)"
-for EXE in "$BIN" "$APP/Contents/MacOS/whisper-cli" "$APP/Contents/MacOS/ffmpeg" "$APP/Contents/MacOS/ffprobe"; do
+for EXE in "$BIN" "$APP/Contents/MacOS/whisper-cli" "$APP/Contents/MacOS/ffmpeg" "$APP/Contents/MacOS/ffprobe" "$APP/Contents/MacOS/sidecar-ocr"; do
   [ -f "$EXE" ] || continue
   RPATH_COUNT=$(otool -l "$EXE" | grep -A2 LC_RPATH | grep -c "@executable_path/../Frameworks/" || true)
   while [ "$RPATH_COUNT" -gt 1 ]; do
@@ -282,7 +319,7 @@ if [ "$SIGNING_IDENTITY" != "-" ]; then
 fi
 find "$FRAMEWORKS" -name "*.dylib" -exec codesign "${NESTED_SIGN_ARGS[@]}" {} \;
 codesign "${NESTED_SIGN_ARGS[@]}" "$BIN"
-for EXE in whisper-cli ffmpeg ffprobe; do
+for EXE in whisper-cli ffmpeg ffprobe sidecar-ocr; do
   [ -f "$APP/Contents/MacOS/$EXE" ] && codesign "${NESTED_SIGN_ARGS[@]}" "$APP/Contents/MacOS/$EXE"
 done
 
@@ -291,12 +328,14 @@ python3 - "$LEGAL_DIR/build-provenance.json" "$MPV_TAG" "$FFMPEG_VERSION_ACTUAL"
   "$APP/Contents/Frameworks/libmpv.2.dylib" "$APP/Contents/MacOS/ffmpeg" \
   "$APP/Contents/MacOS/ffprobe" "$APP/Contents/MacOS/whisper-cli" \
   "$FFMPEG_CONFIGURATION" "$FFMPEG_SOURCE_SHA256" \
-  "$APP/Contents/Frameworks/libplacebo.360.dylib" "$LIBPLACEBO_OUT/build-manifest.txt" <<'PY'
+  "$APP/Contents/Frameworks/libplacebo.360.dylib" "$LIBPLACEBO_OUT/build-manifest.txt" \
+  "$APP/Contents/MacOS/sidecar-ocr" "$SIDECAR_OCR_BUILD_MANIFEST" <<'PY'
 import hashlib, json, pathlib, sys
-output, mpv_tag, ffmpeg_version, whisper_manifest, mpv, ffmpeg, ffprobe, whisper, configuration, ffmpeg_source_sha256, libplacebo, libplacebo_manifest = sys.argv[1:]
+output, mpv_tag, ffmpeg_version, whisper_manifest, mpv, ffmpeg, ffprobe, whisper, configuration, ffmpeg_source_sha256, libplacebo, libplacebo_manifest, sidecar_ocr, sidecar_ocr_manifest = sys.argv[1:]
 def digest(path):
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 whisper_build = json.loads(pathlib.Path(whisper_manifest).read_text())
+sidecar_ocr_build = json.loads(pathlib.Path(sidecar_ocr_manifest).read_text())
 payload = {
     "schemaVersion": 2,
     "hashScope": "final-packaged-files-after-rewrite-and-nested-signing",
@@ -324,6 +363,13 @@ payload = {
         "license": "LGPL-2.1-or-later",
         "unusedBackendsDisabled": ["vulkan", "shaderc", "glslang"]
     },
+    "sidecarOcr": {
+        "path": "Contents/MacOS/sidecar-ocr", "sha256": digest(sidecar_ocr),
+        "sourcePath": "sidecar-ocr/main.swift",
+        "swiftcVersion": sidecar_ocr_build["swiftcVersion"],
+        "builtAt": sidecar_ocr_build["builtAt"],
+        "license": "Apache-2.0"
+    },
 }
 pathlib.Path(output).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 PY
@@ -340,6 +386,7 @@ components = [
     ("FFmpeg", "LGPL-2.1-or-later", ["ffmpeg", "ffprobe", "libavcodec.", "libavfilter.", "libavformat.", "libavutil.", "libswresample.", "libswscale."], ["ffmpeg/LICENSE.md", "ffmpeg/COPYING.LGPLv2.1"]),
     ("mpv", "LGPL-2.1-or-later", ["libmpv."], ["mpv/LICENSE.LGPL", "mpv/Copyright"]),
     ("whisper.cpp", "MIT", ["whisper-cli"], ["whisper.cpp/LICENSE"]),
+    ("sidecar-ocr", "Apache-2.0", ["sidecar-ocr"], ["sidecar-ocr/main.swift", "sidecar-ocr/build-manifest.json"]),
     ("libplacebo", "LGPL-2.1-or-later", ["libplacebo."], ["libplacebo/LICENSE", "libplacebo/build-manifest.txt"]),
     ("libass", "ISC", ["libass."], ["native/libass/COPYING", "native/libass/homebrew-sbom.spdx.json"]),
     ("FreeType", "FTL", ["libfreetype."], ["native/freetype/LICENSE.TXT", "native/freetype/homebrew-sbom.spdx.json"]),
@@ -356,7 +403,7 @@ components = [
     ("libunibreak", "Zlib", ["libunibreak."], ["native/libunibreak/LICENCE", "native/libunibreak/homebrew-sbom.spdx.json"]),
 ]
 
-files = [macos / name for name in ["tripcut-studio", "ffmpeg", "ffprobe", "whisper-cli"]]
+files = [macos / name for name in ["tripcut-studio", "ffmpeg", "ffprobe", "whisper-cli", "sidecar-ocr"]]
 files += sorted(frameworks.glob("*.dylib"))
 entries, unknown = [], []
 for path in files:
@@ -400,6 +447,7 @@ for MUST in \
   "$APP/Contents/MacOS/ffmpeg" \
   "$APP/Contents/MacOS/ffprobe" \
   "$APP/Contents/MacOS/whisper-cli" \
+  "$APP/Contents/MacOS/sidecar-ocr" \
   "$APP/Contents/Resources/sidecar/clip_service.py" \
   "$APP/Contents/Resources/sidecar/self_test.py"; do
   if [ ! -f "$MUST" ]; then
@@ -412,6 +460,9 @@ for LEGAL_PAYLOAD in \
   "$LEGAL_DIR/ffmpeg/COPYING.LGPLv2.1" \
   "$LEGAL_DIR/whisper.cpp/LICENSE" \
   "$LEGAL_DIR/libplacebo/LICENSE" \
+  "$LEGAL_DIR/source-han-sans/LICENSE" \
+  "$LEGAL_DIR/sidecar-ocr/main.swift" \
+  "$LEGAL_DIR/sidecar-ocr/build-manifest.json" \
   "$LEGAL_DIR/native-sbom.json" \
   "$LEGAL_DIR/build-provenance.json"; do
   [ -s "$LEGAL_PAYLOAD" ] || { echo "ERROR: missing legal payload: $LEGAL_PAYLOAD"; exit 1; }
@@ -460,6 +511,71 @@ fi
 mv "$DMG_TMP" "$DMG_OUT"
 DMG_TMP=""
 shasum -a 256 "$DMG_OUT"
+
+if [ "${TRIPCUT_UPDATER_SIGN:-0}" = "1" ]; then
+  echo "==> signing updater artifact (minisign)"
+  # tar 的第一层目录会被 tauri-plugin-updater 解包时丢掉(updater.rs 里
+  # `entry.path()?.iter().skip(1)`),所以归档里必须正好是 `<名字>.app/Contents/...`
+  # 这一种形状——.app 这一层叫什么无所谓,内容会直接落进目标 .app。
+  # --no-mac-metadata:否则 bsdtar 会把扩展属性写成 AppleDouble 的 `._xxx` 伴生文件,
+  # 解包后它们会出现在 .app 里,破坏 _CodeSignature 的资源封印。
+  UPDATER_TAR="$DMG_DIR/$(basename "$DMG_OUT" .dmg).app.tar.gz"
+  [ ! -e "$UPDATER_TAR" ] || { echo "ERROR: 更新包已存在，拒绝覆盖：$UPDATER_TAR"; exit 1; }
+  COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$UPDATER_TAR" \
+    -C "$(dirname "$APP")" "$(basename "$APP")"
+  # 自证归档形状:顶层必须是唯一一个目录,且里面有主可执行文件,且没有 AppleDouble 伴生文件。
+  UPDATER_TAR_TOP="$(tar -tzf "$UPDATER_TAR" | awk -F/ '{print $1}' | sort -u)"
+  [ "$(echo "$UPDATER_TAR_TOP" | wc -l | tr -d ' ')" = "1" ] || {
+    echo "ERROR: 更新包顶层不是单一目录：$UPDATER_TAR_TOP"; exit 1; }
+  tar -tzf "$UPDATER_TAR" | grep -q "^$UPDATER_TAR_TOP/Contents/MacOS/tripcut-studio$" || {
+    echo "ERROR: 更新包里找不到 $UPDATER_TAR_TOP/Contents/MacOS/tripcut-studio"; exit 1; }
+  # 这里必须写成 if:`cmd | grep -q X && { exit 1; }` 在 set -e 下会在"没匹配到"
+  # 也就是检查通过的那条路径上让整条 AND 列表返回非零,直接把脚本掐死。
+  if tar -tzf "$UPDATER_TAR" | grep -q "/\._"; then
+    echo "ERROR: 更新包含 AppleDouble 伴生文件，解包会破坏签名封印"
+    exit 1
+  fi
+
+  UPDATER_KEY="${TRIPCUT_UPDATER_KEY:-$HOME/.tauri/tripcut-updater.key}"
+  [ -f "$UPDATER_KEY" ] || { echo "ERROR: 找不到更新签名私钥：$UPDATER_KEY"; exit 1; }
+  # 口令走环境变量而不是 -p 参数:参数会出现在 ps 输出里,同机任何进程都能读到。
+  TAURI_SIGNING_PRIVATE_KEY_PATH="$UPDATER_KEY" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(security find-generic-password -a tripcut -s tripcut-updater -w)" \
+    npx tauri signer sign "$UPDATER_TAR" > /dev/null || {
+      echo "ERROR: 更新包签名失败（钥匙串条目 tripcut-updater 是否存在？）"; exit 1; }
+  [ -s "$UPDATER_TAR.sig" ] || { echo "ERROR: 未生成签名文件：$UPDATER_TAR.sig"; exit 1; }
+
+  if [ "${TRIPCUT_UPDATER_LOCAL:-0}" = "1" ]; then
+    UPDATER_URL="http://127.0.0.1:${TRIPCUT_UPDATER_PORT:-8765}/$(basename "$UPDATER_TAR")"
+  else
+    UPDATER_URL="https://github.com/qx04222/tripcut-studio/releases/download/v${VERSION}/$(basename "$UPDATER_TAR")"
+  fi
+  LATEST_JSON="$DMG_DIR/latest.json"
+  python3 - "$LATEST_JSON" "$VERSION" "$UPDATER_TAR.sig" "$UPDATER_URL" "${TRIPCUT_UPDATER_NOTES:-}" <<'UPDATER_MANIFEST'
+import datetime, json, pathlib, sys
+output, version, signature_path, url, notes = sys.argv[1:]
+payload = {
+    "version": version,
+    "notes": notes or f"旅剪工作台 {version}",
+    "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "platforms": {
+        # 发行基线只有 arm64 macOS。插件找不到 darwin-aarch64 时直接报 TargetsNotFound,
+        # 不会静默回落到别的键——少写一个键是响的,不是哑的。
+        "darwin-aarch64": {
+            "signature": pathlib.Path(signature_path).read_text().strip(),
+            "url": url,
+        }
+    },
+}
+pathlib.Path(output).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+UPDATER_MANIFEST
+  echo "    更新包：$UPDATER_TAR"
+  echo "    签名：  $UPDATER_TAR.sig"
+  echo "    清单：  $LATEST_JSON ($UPDATER_URL)"
+  shasum -a 256 "$UPDATER_TAR"
+  echo "UPDATER_TAR=$UPDATER_TAR"
+  echo "UPDATER_LATEST_JSON=$LATEST_JSON"
+fi
 if [ "$PACKAGE_MODE" = "qa" ]; then
   echo "==> QA candidate only: ad-hoc signed, not notarized"
 elif [ "$PACKAGE_MODE" = "preview" ]; then

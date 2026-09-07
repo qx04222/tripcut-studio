@@ -12,6 +12,7 @@ pub const THEME_KEY: &str = "appearance.theme";
 pub const UI_SCALE_KEY: &str = "appearance.ui_scale";
 pub const WORKER_COUNT_KEY: &str = "performance.worker_count";
 pub const PROXY_ENABLED_KEY: &str = "performance.proxy_enabled";
+pub const MEMORY_PROFILE_KEY: &str = "performance.memory_profile";
 pub const FFMPEG_PATH_KEY: &str = "tools.ffmpeg_path";
 pub const FFPROBE_PATH_KEY: &str = "tools.ffprobe_path";
 pub const WHISPER_PATH_KEY: &str = "tools.whisper_path";
@@ -117,6 +118,7 @@ fn defaults() -> BTreeMap<String, String> {
         (UI_SCALE_KEY.to_owned(), "1.0".to_owned()),
         (WORKER_COUNT_KEY.to_owned(), DEFAULT_WORKER_COUNT.to_string()),
         (PROXY_ENABLED_KEY.to_owned(), "true".to_owned()),
+        (MEMORY_PROFILE_KEY.to_owned(), "auto".to_owned()),
         (FFMPEG_PATH_KEY.to_owned(), String::new()),
         (FFPROBE_PATH_KEY.to_owned(), String::new()),
         (WHISPER_PATH_KEY.to_owned(), String::new()),
@@ -218,6 +220,7 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         UI_SCALE_KEY => matches!(value, "0.9" | "1.0" | "1.15" | "1.3"),
         WORKER_COUNT_KEY => value.parse::<usize>().is_ok_and(|count| (1..=8).contains(&count)),
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
+        MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
         FFMPEG_PATH_KEY | FFPROBE_PATH_KEY | WHISPER_PATH_KEY => value.len() <= 4_096,
         WHISPER_MODEL_TIER_KEY => matches!(value, "large-v3-turbo" | "small"),
         SCENE_THRESHOLD_KEY | SIMILARITY_THRESHOLD_KEY => value
@@ -634,6 +637,17 @@ pub fn clear_cache_and_rebuild(
     transaction.execute("DELETE FROM proxy_time_map", [])?;
     transaction.execute("DELETE FROM clip_embeddings", [])?;
     transaction.execute("DELETE FROM clip_dimensions", [])?;
+    // R6 Task 7d 修复 Medium:`strip`(胶片条)此前不在这份名单里——它的
+    // `cache_artifacts` 行和磁盘文件跟 `thumbnail`/`waveform`/`proxy` 一样被
+    // 上面的 `DELETE FROM cache_artifacts` 清空,job 却仍是 'done',于是重建
+    // 后只能等下次真正被读取时才「惰性」发现产物不在了(如果有这样的路径的
+    // 话)——不像其余几种那样立刻重新入队。
+    //
+    // `ocr_scan` 决定不加进来:OCR 的结果是识别出的文字,落在独立的表里,
+    // 不受这次重建的任一条 DELETE 影响(不像 `clip_embed` 的向量存在
+    // `clip_embeddings`——那张表被上面显式清空了,所以 `clip_embed` 必须重
+    // 置)。`ocr_scan` 扫描时读的胶片条文件只是一次性输入,扫完文字就已经落
+    // 库,文件后续被清掉不影响已经产出的结果,不必重跑。
     let reset_jobs = transaction.execute(
         "UPDATE jobs
          SET status = 'pending', attempt = 0, blocked_summary = NULL,
@@ -641,7 +655,7 @@ pub fn clear_cache_and_rebuild(
              owner_id = NULL, lease_expires_at = NULL, cancel_requested = 0,
              next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE kind IN ('thumbnail', 'waveform', 'proxy', 'clip_embed')
+         WHERE kind IN ('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')
            AND status != 'running'",
         [],
     )?;
@@ -897,6 +911,49 @@ mod tests {
         assert_eq!(transcribe_status, "done");
         assert!(cache_root.is_dir());
         assert_eq!(directory_bytes(&cache_root).unwrap(), 0);
+    }
+
+    /// R6 Task 7d 修复 Medium:`strip` 的 `cache_artifacts` 行和磁盘文件跟
+    /// `thumbnail`/`waveform`/`proxy` 一样被重建清空,job 也必须一起重置成
+    /// pending,否则界面永远拿不回胶片条(此前只惰性依赖别的路径重新入队,
+    /// 而那条路径此前根本不存在——见 `enqueue_missing_strips`)。
+    #[test]
+    fn cache_rebuild_resets_strip_jobs_too() {
+        let (directory, mut connection) = connection_with_settings();
+        connection
+            .execute("INSERT INTO volumes(uuid) VALUES ('volume-a')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, quick_hash)
+                 VALUES (1, 'volume-a', 'clip.mov', 'source-a')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO jobs(
+                    kind, payload, payload_hash, status, attempt,
+                    created_at, updated_at, finished_at
+                 ) VALUES ('strip', '{}', 'hash-strip', 'done', 1, 'now', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+
+        let cache_root = directory.path().join("cache");
+        std::fs::create_dir_all(&cache_root).unwrap();
+
+        clear_cache_and_rebuild(&mut connection, &cache_root).unwrap();
+
+        let (status, attempt): (String, i64) = connection
+            .query_row(
+                "SELECT status, attempt FROM jobs WHERE kind = 'strip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "重建后 strip 任务应重新变为 pending");
+        assert_eq!(attempt, 0);
     }
 
     #[test]

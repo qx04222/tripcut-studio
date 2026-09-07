@@ -86,6 +86,100 @@ pub enum PlayerCommand {
     StepFwd,
     StepBack,
     SeekAbs { seconds: f64 },
+    /// Preview-only display LUT — applied as a labelled `vf` entry so it can
+    /// be removed by that exact label. Never used by proxy generation or
+    /// export/deliver (see the negative assertions in `core::artifacts` and
+    /// `core::deliver`).
+    ApplyDisplayLut { path: PathBuf },
+    ClearDisplayLut,
+    /// 0-based, audio-relative index (matches `clip_audio_tracks.stream_index`
+    /// and the `-map 0:a:N` convention). Converted to mpv's 1-based `aid` in
+    /// exactly one place — `mpv_calls_for` — never anywhere else.
+    SelectAudioTrack { stream_index: i64 },
+    SetMute { muted: bool },
+    /// Sets mpv's `video-rotate` property. Only meaningful for a clip whose
+    /// stored rotation came from a legacy `rotate` metadata tag with no
+    /// `side_data_list` display matrix (`clips.manual_rotation` — see
+    /// `core::import::parse_probe_json`). mpv already auto-rotates from the
+    /// display matrix by default (confirmed via its own
+    /// `[autorotate] Inserting rotation filter` log), so callers must NEVER
+    /// pass the merged `clips.rotation` value here — that would add this
+    /// rotation on top of mpv's own, doubling it for the common case.
+    SetRotation { degrees: Option<i64> },
+}
+
+/// mpv's `vf` label for the preview LUT filter — `vf remove @tripcut-lut`
+/// must match exactly what `vf add` used, so the label lives in one place.
+const DISPLAY_LUT_LABEL: &str = "@tripcut-lut";
+
+/// A pure description of what `execute_command` will ask mpv to do for one
+/// `PlayerCommand`. Kept separate from the actual `Mpv` calls so the
+/// command→mpv-call mapping (including path escaping) is unit-testable
+/// without a live mpv instance — there is no GUI test for this plumbing.
+#[derive(Debug, Clone, PartialEq)]
+enum MpvCall {
+    Command(&'static str, Vec<String>),
+    SetPropertyInt(&'static str, i64),
+    SetPropertyBool(&'static str, bool),
+}
+
+fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
+    Ok(match command {
+        PlayerCommand::ApplyDisplayLut { path } => vec![MpvCall::Command(
+            "vf",
+            vec![
+                "add".to_owned(),
+                format!("{DISPLAY_LUT_LABEL}:lut3d={}", escape_mpv_path(&path)),
+            ],
+        )],
+        PlayerCommand::ClearDisplayLut => vec![MpvCall::Command(
+            "vf",
+            vec!["remove".to_owned(), DISPLAY_LUT_LABEL.to_owned()],
+        )],
+        PlayerCommand::SelectAudioTrack { stream_index } => {
+            if stream_index < 0 {
+                return Err(format!("音轨序号不能为负：{stream_index}"));
+            }
+            // mpv's `aid` is 1-based; `stream_index` is the 0-based,
+            // audio-relative index stored in `clip_audio_tracks` — this is
+            // the ONLY place that conversion happens.
+            vec![MpvCall::SetPropertyInt("aid", stream_index + 1)]
+        }
+        PlayerCommand::SetMute { muted } => vec![MpvCall::SetPropertyBool("mute", muted)],
+        PlayerCommand::SetRotation { degrees } => match degrees {
+            Some(90) | Some(180) | Some(270) => {
+                vec![MpvCall::SetPropertyInt("video-rotate", degrees.expect("matched Some above"))]
+            }
+            // 0/None, or any value outside the three real orientations: no call.
+            _ => Vec::new(),
+        },
+        PlayerCommand::Play | PlayerCommand::Pause | PlayerCommand::StepFwd | PlayerCommand::StepBack
+        | PlayerCommand::SeekAbs { .. } => Vec::new(),
+    })
+}
+
+/// mpv's length-prefixed `%n%text` quoting: quotes any byte sequence
+/// (including `:`, `,` and spaces, all significant in `vf`'s filter-graph
+/// syntax) without needing to escape individual characters.
+fn escape_mpv_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    format!("%{}%{}", text.len(), text)
+}
+
+fn apply_mpv_call(mpv: &Mpv, call: MpvCall) -> Result<(), String> {
+    match call {
+        MpvCall::Command(name, args) => {
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            mpv.command(name, &arg_refs)
+                .map_err(|error| format!("执行 {name} 命令失败：{error}"))
+        }
+        MpvCall::SetPropertyInt(name, value) => mpv
+            .set_property(name, value)
+            .map_err(|error| format!("设置 {name} 失败：{error}")),
+        MpvCall::SetPropertyBool(name, value) => mpv
+            .set_property(name, value)
+            .map_err(|error| format!("设置 {name} 失败：{error}")),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -388,11 +482,22 @@ pub fn resolve_clip_path(db_path: &Path, clip_id: i64) -> Result<PathBuf, String
         .map_err(|error| error.to_string())
 }
 
+/// Opens the project database and resolves the path (and, for a proxy, its
+/// time mapper) `player_open` should play. Returns the open `Connection`
+/// alongside the result so the caller can reuse it for
+/// `apply_stored_display_prefs` instead of opening a second one.
 pub fn resolve_playback_source(
     db_path: &Path,
     cache_root: &Path,
     clip_id: i64,
-) -> Result<(PathBuf, Option<crate::core::canonical_time::ProxyTimeMapper>), String> {
+) -> Result<
+    (
+        rusqlite::Connection,
+        PathBuf,
+        Option<crate::core::canonical_time::ProxyTimeMapper>,
+    ),
+    String,
+> {
     use rusqlite::OptionalExtension;
 
     let connection = crate::core::db::open_project(db_path).map_err(|error| error.to_string())?;
@@ -420,13 +525,13 @@ pub fn resolve_playback_source(
             let mapper = crate::core::canonical_time::load_proxy_mapper(&connection, clip_id)
                 .map_err(|error| error.to_string())?;
             if mapper.is_some() {
-                return Ok((proxy_path, mapper));
+                return Ok((connection, proxy_path, mapper));
             }
         }
     }
     let source = crate::core::media_source::verified_clip_path(&connection, clip_id)
         .map_err(|error| error.to_string())?;
-    Ok((source, None))
+    Ok((connection, source, None))
 }
 
 fn create_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<RenderSurface, String> {
@@ -687,6 +792,18 @@ fn run_worker(
         // 这个属性不存在,设置会返回 PropertyNotFound 并让整个初始化失败。
         let _ = initializer.set_property("osc", false);
         initializer.set_property("pause", true)?;
+        // 解复用缓存上限:避免长时间播放/拖动时 demuxer 缓存无界增长占满内存。
+        // 分发版 libmpv 是 -Dcplayer=false,这三项属于 demuxer 核心而非 cplayer,
+        // 理论上总是存在;仍以 if let Err 兜底,缺失时告警而不阻断初始化。
+        if let Err(error) = initializer.set_property("demuxer-max-bytes", "150MiB") {
+            tracing::warn!(%error, "设置 demuxer-max-bytes 失败");
+        }
+        if let Err(error) = initializer.set_property("demuxer-max-back-bytes", "50MiB") {
+            tracing::warn!(%error, "设置 demuxer-max-back-bytes 失败");
+        }
+        if let Err(error) = initializer.set_property("cache-secs", 10i64) {
+            tracing::warn!(%error, "设置 cache-secs 失败");
+        }
         Ok(())
     })
     .map_err(|error| format!("libmpv 初始化失败：{error}"))?;
@@ -856,6 +973,15 @@ fn execute_command(
             if let Err(error) = mpv.command("seek", &[&target, "absolute+exact"]) {
                 *pending_seek = None;
                 return Err(format!("精确定位失败：{error}"));
+            }
+        }
+        command @ (PlayerCommand::ApplyDisplayLut { .. }
+        | PlayerCommand::ClearDisplayLut
+        | PlayerCommand::SelectAudioTrack { .. }
+        | PlayerCommand::SetMute { .. }
+        | PlayerCommand::SetRotation { .. }) => {
+            for call in mpv_calls_for(command)? {
+                apply_mpv_call(mpv, call)?;
             }
         }
     }
@@ -1073,5 +1199,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command, PlayerCommand::SeekAbs { seconds: 12.5 });
+    }
+
+    #[test]
+    fn lut_and_track_commands_are_tagged_and_snake_case() {
+        let apply: PlayerCommand =
+            serde_json::from_str(r#"{"type":"apply_display_lut","path":"/tmp/x.cube"}"#).unwrap();
+        assert_eq!(apply, PlayerCommand::ApplyDisplayLut { path: PathBuf::from("/tmp/x.cube") });
+
+        let clear: PlayerCommand = serde_json::from_str(r#"{"type":"clear_display_lut"}"#).unwrap();
+        assert_eq!(clear, PlayerCommand::ClearDisplayLut);
+
+        let select: PlayerCommand =
+            serde_json::from_str(r#"{"type":"select_audio_track","stream_index":2}"#).unwrap();
+        assert_eq!(select, PlayerCommand::SelectAudioTrack { stream_index: 2 });
+
+        let mute: PlayerCommand = serde_json::from_str(r#"{"type":"set_mute","muted":true}"#).unwrap();
+        assert_eq!(mute, PlayerCommand::SetMute { muted: true });
+    }
+
+    #[test]
+    fn escape_mpv_path_uses_length_prefixed_quoting_for_special_characters() {
+        // libmpv's filter-graph syntax is delimited by `:`/`,`; a raw path
+        // containing either would be silently mis-parsed. `%n%text` sidesteps
+        // that entirely by length-prefixing instead of escaping characters.
+        let path = PathBuf::from("/Users/x/my luts:weird, name.cube");
+        let text = path.to_string_lossy();
+        let escaped = escape_mpv_path(&path);
+        assert_eq!(escaped, format!("%{}%{}", text.len(), text));
+        assert!(escaped.starts_with(&format!("%{}%", text.len())));
+    }
+
+    #[test]
+    fn mpv_calls_for_apply_lut_adds_labelled_filter_with_escaped_path() {
+        let path = PathBuf::from("/Volumes/Look Book/rec709 to log.cube");
+        let calls = mpv_calls_for(PlayerCommand::ApplyDisplayLut { path: path.clone() }).unwrap();
+        assert_eq!(
+            calls,
+            vec![MpvCall::Command(
+                "vf",
+                vec![
+                    "add".to_owned(),
+                    format!("@tripcut-lut:lut3d={}", escape_mpv_path(&path)),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn mpv_calls_for_clear_lut_removes_the_exact_label_that_add_used() {
+        let calls = mpv_calls_for(PlayerCommand::ClearDisplayLut).unwrap();
+        assert_eq!(
+            calls,
+            vec![MpvCall::Command("vf", vec!["remove".to_owned(), "@tripcut-lut".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn mpv_calls_for_audio_track_converts_zero_based_stream_index_to_one_based_aid() {
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SelectAudioTrack { stream_index: 0 }).unwrap(),
+            vec![MpvCall::SetPropertyInt("aid", 1)]
+        );
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SelectAudioTrack { stream_index: 2 }).unwrap(),
+            vec![MpvCall::SetPropertyInt("aid", 3)]
+        );
+    }
+
+    #[test]
+    fn mpv_calls_for_audio_track_rejects_negative_stream_index() {
+        assert!(mpv_calls_for(PlayerCommand::SelectAudioTrack { stream_index: -1 }).is_err());
+    }
+
+    #[test]
+    fn mpv_calls_for_mute_sets_the_expected_property() {
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetMute { muted: true }).unwrap(),
+            vec![MpvCall::SetPropertyBool("mute", true)]
+        );
+    }
+
+    #[test]
+    fn mpv_calls_for_rotation_sets_video_rotate_for_the_three_real_orientations() {
+        for degrees in [90, 180, 270] {
+            assert_eq!(
+                mpv_calls_for(PlayerCommand::SetRotation { degrees: Some(degrees) }).unwrap(),
+                vec![MpvCall::SetPropertyInt("video-rotate", degrees)],
+            );
+        }
+    }
+
+    #[test]
+    fn mpv_calls_for_rotation_none_or_zero_issues_no_call() {
+        // A clip with no manual-correction rotation must not touch
+        // video-rotate at all — mpv's own default already handles the
+        // side_data case, so an unconditional call here would double it.
+        assert!(mpv_calls_for(PlayerCommand::SetRotation { degrees: None }).unwrap().is_empty());
+        assert!(mpv_calls_for(PlayerCommand::SetRotation { degrees: Some(0) }).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mpv_calls_for_transport_commands_stay_empty_here() {
+        // Play/Pause/StepFwd/StepBack/SeekAbs are handled directly in
+        // execute_command's existing arms, not through this mapping.
+        assert!(mpv_calls_for(PlayerCommand::Play).unwrap().is_empty());
+        assert!(mpv_calls_for(PlayerCommand::SeekAbs { seconds: 1.0 }).unwrap().is_empty());
     }
 }

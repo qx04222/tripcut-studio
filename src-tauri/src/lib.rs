@@ -1,12 +1,15 @@
 pub mod core;
 mod app_paths;
 mod libraries;
+mod notify;
 mod packaging;
+mod updater;
 #[cfg(target_os = "macos")]
 pub mod player;
+pub mod runtime;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -15,6 +18,7 @@ use tauri::Manager;
 use crate::core::analysis::ClipAnalysis;
 use crate::core::asset_safety::AssetSafetyInfo;
 use crate::core::artifacts::ClipArtifacts;
+use crate::core::audio_tracks::ClipAudioTrack;
 use crate::core::canonical_time::DeviceClockSetting;
 use crate::core::clip_dimensions::ClipDimension;
 use crate::core::clip_search::ClipSearchHit;
@@ -27,6 +31,7 @@ use crate::core::llm::{
     AiDescriptionResult, DirectorAnswerResult, DirectorContext, LlmLedgerEntry, LlmStatus,
 };
 use crate::core::media_server::MediaServerInfo;
+use crate::core::music::{MusicAnalysis, MusicTrackSummary};
 use crate::core::ratings::{ClipRating, SelectSegment};
 use crate::core::similar::SimilarGroup;
 use crate::core::settings::{CacheRebuildResult, SettingsStatus, WindowState};
@@ -35,6 +40,28 @@ use crate::core::transcribe::TranscriptMatch;
 use crate::core::story::{StoryOrderRef, Storyboard};
 #[cfg(target_os = "macos")]
 use crate::player::{PlayerCommand, PlayerManager, PlayerStatus, PlayerViewport};
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSWorkspace, NSWorkspaceDidWakeNotification};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSNotification, NSOperationQueue};
+
+/// R6 Task 4:`NSWorkspaceDidWakeNotification` 的观察者 token。留着它不是为了
+/// 再去调用什么方法,纯粹是「只要有人还强引用着它,回调就还在生效」——一旦
+/// 被释放,系统随时可能悄悄停止投递。`app.manage` 把它的生命周期钉在整个
+/// 应用进程上。Objective-C 对象本身不是 `Send`/`Sync`,但这里从头到尾只在
+/// 主线程创建、只被存起来、永不跨线程调用它的任何方法,借用
+/// `player/mod.rs` 里 `RenderSurface`/`MainThreadView` 同款的手法。
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+struct WakeObserver(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+#[cfg(target_os = "macos")]
+unsafe impl Send for WakeObserver {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for WakeObserver {}
 
 #[derive(Clone)]
 struct RuntimeState {
@@ -257,6 +284,23 @@ fn search_everything(
 }
 
 #[tauri::command]
+fn list_ocr_hits(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::ocr::OcrTextHit>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::ocr::list_hits(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn enqueue_ocr_for_episode(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<usize, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::ocr::enqueue_for_episode(&mut connection, &state.cache_root).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_memory_lens(
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<Vec<core::channel_memory::MemoryLensEntry>, String> {
@@ -370,6 +414,25 @@ fn get_component_statuses(
 ) -> std::result::Result<Vec<core::provisioning::ComponentStatus>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::provisioning::component_statuses(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rollback_component(
+    component: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::provisioning::ComponentStatus, String> {
+    if state.read_only {
+        return Err("只读窗口不能回滚组件".into());
+    }
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let model_tier = core::settings::string_value(
+        &connection,
+        core::settings::WHISPER_MODEL_TIER_KEY,
+        "large-v3-turbo",
+    )
+    .map_err(|error| error.to_string())?;
+    core::provisioning::rollback_component_guarded(&connection, &component, &model_tier)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -518,10 +581,37 @@ fn rename_current_episode(
 #[tauri::command]
 fn archive_current_episode(
     next_title: Option<String>,
+    next_platform: Option<String>,
+    next_orientation: Option<String>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<core::episode::ArchiveOutcome, String> {
     let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    core::episode::archive_current(&mut connection, next_title.as_deref())
+    core::episode::archive_current_with_platform(
+        &mut connection,
+        next_title.as_deref(),
+        next_platform.as_deref(),
+        next_orientation.as_deref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_platform_presets(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::platform::PlatformPreset>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::platform::list_platform_presets(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_episode_platform(
+    episode_id: i64,
+    platform: String,
+    orientation: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::platform::set_episode_platform(&mut connection, episode_id, &platform, &orientation)
         .map_err(|error| error.to_string())
 }
 
@@ -672,6 +762,25 @@ async fn pick_import_folder() -> std::result::Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn pick_music_file() -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title("选择配乐文件")
+        .add_filter("音频", &["mp3", "wav", "m4a", "aac", "flac", "aiff", "ogg"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn pick_relink_folder() -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title("选择新挂载位置")
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 async fn pick_export_folder() -> std::result::Result<Option<String>, String> {
     Ok(rfd::AsyncFileDialog::new()
         .set_title("选择交付包保存位置")
@@ -694,6 +803,35 @@ async fn start_import(
     .await
     .map_err(|error| format!("导入扫描任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_paths(
+    paths: Vec<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<ImportStart>, String> {
+    if state.read_only { return Err("只读窗口不能导入素材".into()); }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        let mut results = Vec::new();
+        let mut files = Vec::new();
+        for raw in paths {
+            let path = PathBuf::from(raw);
+            if path.is_dir() {
+                results.push(core::import::start_import(&mut connection, &path)?);
+            } else {
+                files.push(path);
+            }
+        }
+        if !files.is_empty() {
+            results.push(core::import::start_import_files(&mut connection, &files)?);
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(|error| format!("导入扫描任务异常结束：{error}"))?
+    .map_err(|error: CoreError| error.to_string())
 }
 
 #[tauri::command]
@@ -757,7 +895,23 @@ fn get_import_progress(
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<ImportProgress, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    core::import::get_import_progress(&connection).map_err(|error| error.to_string())
+    let mut progress =
+        core::import::get_import_progress(&connection).map_err(|error| error.to_string())?;
+    // 内存压力暂停时界面要说明原因,否则用户只看到进度条不动。
+    progress.paused_for_memory = state
+        .worker_control
+        .as_ref()
+        .is_some_and(core::jobs::WorkerControl::pause_state);
+    // 解码类吃满许可时,把还在排队的解码任务数报给界面,否则界面上只会"停住"。
+    if state
+        .worker_control
+        .as_ref()
+        .is_some_and(core::jobs::WorkerControl::decode_saturated)
+    {
+        progress.waiting_for_permit =
+            core::import::pending_decode_count(&connection).map_err(|error| error.to_string())?;
+    }
+    Ok(progress)
 }
 
 #[tauri::command]
@@ -777,6 +931,113 @@ fn list_clips(
         clip.cover_url = clip.id.and_then(|id| cover_urls.get(&id).cloned());
     }
     Ok(clips)
+}
+
+/// 只读的「旅程时间线」:当前集的地点卡与素材按标准时间合并排序。
+/// `cover_url` 的填法与 `list_clips` 完全同源——`core::journey::timeline`
+/// 只管排序与取数,不知道缓存端口/token,由这里事后按 clip_id 补上。
+#[tauri::command]
+fn get_journey_timeline(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::journey::JourneyEntry>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let mut entries = core::journey::timeline(&connection).map_err(|error| error.to_string())?;
+    let cover_urls = core::artifacts::cover_urls(
+        &connection,
+        &state.cache_root,
+        state.media_server.port,
+        &state.media_server.token,
+    )
+    .map_err(|error| error.to_string())?;
+    for entry in &mut entries {
+        entry.cover_url = entry.clip_id.and_then(|id| cover_urls.get(&id).cloned());
+    }
+    Ok(entries)
+}
+
+/// `list_clips` 的廉价前哨:轮询前先比这个字符串,不变就跳过整表拉取。
+#[tauri::command]
+fn get_clips_revision(state: tauri::State<'_, RuntimeState>) -> std::result::Result<String, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::import::clips_revision(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_missing_clips(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::media_source::MissingClip>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::media_source::list_missing_clips(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_music_track(
+    path: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<MusicTrackSummary, String> {
+    if state.read_only {
+        return Err("只读窗口不能导入音乐".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        // 不再信任前端传来的 episode_id——就像 `start_import` 一样，导入永远
+        // 落到当前活动集，由服务端解析。
+        let episode = core::episode::current_episode(&connection)?;
+        core::music::import_track(&mut connection, episode.id, &PathBuf::from(path))
+    })
+    .await
+    .map_err(|error| format!("音乐导入任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_music_tracks(
+    episode_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<MusicTrackSummary>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::music::list_tracks(&connection, episode_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_music_analysis(
+    track_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<MusicAnalysis, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::music::get_analysis(&connection, track_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_music_track(
+    track_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    if state.read_only {
+        return Err("只读窗口不能删除音乐".into());
+    }
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::music::delete_track(&connection, track_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn relink_volume(
+    volume_uuid: String,
+    new_mount: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::media_source::RelinkOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能重连素材".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        core::media_source::relink_volume(&mut connection, &volume_uuid, &PathBuf::from(new_mount))
+    })
+    .await
+    .map_err(|error| format!("重连素材任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -815,6 +1076,91 @@ fn set_clip_time_stage(
 ) -> std::result::Result<(), String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::clip_dimensions::set_user_time_stage(&connection, clip_id, &label)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn probe_audio_tracks(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<ClipAudioTrack>, String> {
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::audio_tracks::probe_and_store(&mut connection, clip_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_audio_tracks(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<ClipAudioTrack>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::audio_tracks::list_for_clip(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+/// Preview-only display LUT. `scope` is `"clip"` (`target_id` is a clip id)
+/// or `"episode"` (`target_id` is an episode id, written to every clip of
+/// it). Never touches proxy generation or export/deliver — see the
+/// negative assertions in `core::artifacts` and `core::deliver`.
+#[tauri::command]
+fn set_display_lut(
+    scope: String,
+    target_id: i64,
+    path: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::player_prefs::set_display_lut(&connection, &scope, target_id, Path::new(&path))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_display_lut(
+    scope: String,
+    target_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::player_prefs::clear_display_lut(&connection, &scope, target_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_playback_track(
+    clip_id: i64,
+    stream_index: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::player_prefs::set_playback_track(&connection, clip_id, stream_index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_transcribe_track(
+    clip_id: i64,
+    stream_index: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::player_prefs::set_transcribe_track(&connection, clip_id, stream_index)
+        .map_err(|error| error.to_string())
+}
+
+/// Absolute paths of every `.cube` file under `<app support dir>/luts/`,
+/// creating that directory if it doesn't exist yet. An empty list is fine.
+#[tauri::command]
+fn list_display_luts() -> std::result::Result<Vec<String>, String> {
+    let root = crate::app_paths::app_support_root()
+        .ok_or_else(|| "无法确定应用支持目录".to_owned())?;
+    let luts_dir = root.join("luts");
+    core::player_prefs::list_display_luts(&luts_dir)
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -946,12 +1292,24 @@ fn get_storyboard(
 }
 
 #[tauri::command]
+fn list_story_templates() -> Vec<core::narrative::StoryTemplateInfo> {
+    core::narrative::STORY_TEMPLATES.to_vec()
+}
+
+#[tauri::command]
 fn enqueue_narrate_episode(
+    template: Option<String>,
     state: tauri::State<'_, RuntimeState>,
-) -> std::result::Result<i64, String> {
+) -> std::result::Result<core::narrative::EnqueueOutcome, String> {
+    let template = template
+        .as_deref()
+        .map(core::narrative::StoryTemplate::parse)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let mut connection =
         core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    core::narrative::enqueue(&mut connection).map_err(|error| error.to_string())
+    core::narrative::enqueue_with_template(&mut connection, template)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1047,12 +1405,21 @@ fn undo_story_change(
 #[tauri::command]
 async fn start_export(
     dest: String,
+    override_platform: Option<String>,
+    include_contact_sheet: bool,
+    target_seconds: Option<u32>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<ExportStatus, String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = core::db::open_project(&db_path)?;
-        core::deliver::start_export(&mut connection, &PathBuf::from(dest))
+        core::deliver::start_export(
+            &mut connection,
+            &PathBuf::from(dest),
+            override_platform.as_deref(),
+            include_contact_sheet,
+            target_seconds,
+        )
     })
     .await
     .map_err(|error| format!("交付任务异常结束：{error}"))?
@@ -1193,6 +1560,17 @@ fn delete_select_segment(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn restore_select_segment(
+    segment_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::ratings::restore_select_segment(&mut connection, segment_id)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 async fn player_set_viewport(
@@ -1218,12 +1596,56 @@ async fn player_open(
     let cache_root = runtime.cache_root.clone();
     let player = player.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (path, time_mapper) =
+        let (connection, path, time_mapper) =
             crate::player::resolve_playback_source(&db_path, &cache_root, clip_id)?;
-        player.open(path, clip_id, time_mapper)
+        let status = player.open(path, clip_id, time_mapper)?;
+        apply_stored_display_prefs(&connection, clip_id, &player);
+        Ok::<PlayerStatus, String>(status)
     })
     .await
     .map_err(|error| format!("播放器启动任务异常结束：{error}"))?
+}
+
+/// After a clip loads, replays any stored preview-only display LUT and
+/// selected monitor track onto the fresh mpv instance. This is best-effort:
+/// a missing/removed LUT file or a stream index the proxy doesn't carry
+/// must not fail the whole playback session, so failures are only logged.
+#[cfg(target_os = "macos")]
+fn apply_stored_display_prefs(connection: &rusqlite::Connection, clip_id: i64, player: &PlayerManager) {
+    type DisplayPrefsRow = (Option<String>, Option<i64>, Option<i64>);
+    let prefs: std::result::Result<DisplayPrefsRow, rusqlite::Error> = connection
+        .query_row(
+            "SELECT display_lut_path, selected_monitor_track, manual_rotation FROM clips WHERE id = ?1",
+            [clip_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+    let (lut_path, monitor_track, manual_rotation) = match prefs {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            tracing::warn!(%error, "读取素材显示偏好失败");
+            return;
+        }
+    };
+    if let Some(lut_path) = lut_path {
+        if let Err(error) = player.command(PlayerCommand::ApplyDisplayLut { path: PathBuf::from(lut_path) }) {
+            tracing::warn!(%error, "打开素材后应用显示 LUT 失败");
+        }
+    }
+    if let Some(stream_index) = monitor_track {
+        if let Err(error) = player.command(PlayerCommand::SelectAudioTrack { stream_index }) {
+            tracing::warn!(%error, "打开素材后设置监听音轨失败");
+        }
+    }
+    // `manual_rotation` (NOT `rotation`) — mpv already auto-rotates the
+    // side_data case on its own by default; this column only carries a
+    // value when that autorotate would NOT already have handled it (see
+    // `core::import::parse_probe_json` and the doc comment on
+    // `PlayerCommand::SetRotation`).
+    if manual_rotation.is_some() {
+        if let Err(error) = player.command(PlayerCommand::SetRotation { degrees: manual_rotation }) {
+            tracing::warn!(%error, "打开素材后设置手动旋转失败");
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1303,12 +1725,53 @@ async fn switch_library(id: String, app: tauri::AppHandle, state: tauri::State<'
     }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
 
+/// R6 Task 4:开发/QA 用的手动唤醒入口——真机上没法在测试脚本里让 Mac 真的
+/// 睡一觉再醒,所以给一条命令直接调 `runtime::on_wake` 里那同一个函数。
+/// `TRIPCUT_SIMULATE_WAKE=1` 必须在**调用时**的进程环境里为真;这不是一次性
+/// 开关,是每次调用都重新读——防止某次调试忘了改回去,却在生产环境里留了
+/// 条能被前端随手触发的后门。
+/// 拆成纯函数好单测:`simulate_wake` 本身要一个真实的 `tauri::AppHandle`,
+/// 单元测试里造不出来;这条门槛判定跟 `AppHandle` 完全无关,单独测。
+fn wake_simulation_permitted() -> bool {
+    std::env::var("TRIPCUT_SIMULATE_WAKE").as_deref() == Ok("1")
+}
+
+#[tauri::command]
+async fn simulate_wake(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    if !wake_simulation_permitted() {
+        return Err("TRIPCUT_SIMULATE_WAKE 未设置为 1；此命令仅用于测试/QA".to_owned());
+    }
+    runtime::on_wake(&app);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let clean_shutdown_root = Arc::new(Mutex::new(None::<PathBuf>));
     let setup_clean_shutdown_root = clean_shutdown_root.clone();
+    let mut context = tauri::generate_context!();
+    // QA 用本地 http 端点跑正/负例;生产端点写死在 tauri.conf.json 里。改的是配置本身,
+    // 原因见 updater.rs 顶部注释(前端 check() 读的是插件 clone 的那份配置)。
+    if let Some(endpoint) = updater::endpoint_override_from_env() {
+        let plugins = &mut context.config_mut().plugins.0;
+        let applied = plugins
+            .get_mut("updater")
+            .is_some_and(|value| updater::apply_endpoint_override(value, &endpoint));
+        if applied {
+            tracing::warn!(%endpoint, "updater endpoint overridden by TRIPCUT_UPDATER_ENDPOINT");
+        } else {
+            // 覆盖没生效却继续启动,等于拿生产端点冒充本地端点跑 QA。宁可炸在这里。
+            panic!(
+                "TRIPCUT_UPDATER_ENDPOINT={endpoint} 未能生效:要么 tauri.conf.json 里没有 \
+                 plugins.updater,要么这个端点不被允许(http 只接受 127.0.0.1/localhost/[::1])"
+            );
+        }
+    }
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ProvisioningState::default())
         .setup(move |app| {
             packaging::configure(app);
@@ -1367,6 +1830,20 @@ pub fn run() {
                 core::import_control::fail_scans(&mut core::db::open_project(&db_path)?,None)?;
             }
 
+            // 三步交换崩溃可能留下孤儿 `.rolling`;启动时扫一遍托管目录,能恢复
+            // 就恢复,能确认已完成就清理,与项目是否只读无关(这是应用级托管
+            // 目录,不是项目数据库)。
+            for managed_dir in [core::provisioning::managed_bin_dir(), core::provisioning::models_dir()] {
+                match managed_dir {
+                    Ok(directory) => {
+                        if let Err(error) = core::provisioning::sweep_rolling_orphans(&directory) {
+                            tracing::warn!(%error, ?directory, "sweeping orphaned .rolling files failed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "resolving managed directory for .rolling sweep failed"),
+                }
+            }
+
             let mut connection = core::db::open_project(&db_path)?;
             if !read_only {
                 // NAS/云盘工作流:每 5 分钟对 auto_sync 关注文件夹增量重扫(导入幂等)。
@@ -1421,6 +1898,12 @@ pub fn run() {
                 if metadata_jobs > 0 {
                     tracing::info!(metadata_jobs, "enqueued incremental temporal metadata backfill");
                 }
+                // R6 Task 7d 修复 High:补上封面已落盘、胶片条任务却从未存在过的窗口
+                // (进程在 `finalize_artifacts` 和 `enqueue_strip` 之间死掉)。
+                let strip_jobs = core::artifacts::enqueue_missing_strips(&mut connection)?;
+                if strip_jobs > 0 {
+                    tracing::info!(strip_jobs, "enqueued missing film-strip jobs");
+                }
                 let clip_embeddings =
                     core::clip_search::enqueue_missing(&mut connection, &cache_root)?;
                 if clip_embeddings > 0 {
@@ -1466,6 +1949,7 @@ pub fn run() {
                 }
             }
             let worker_count = core::settings::worker_count(&connection)?;
+            let decode_permits = core::memory_profile::resolve(&connection)?.decode_permits();
             let window_state = core::settings::window_state(&connection)?;
             drop(connection);
 
@@ -1475,7 +1959,18 @@ pub fn run() {
             let worker_control = if read_only {
                 None
             } else {
-                let runner = core::jobs::JobRunner::new(db_path.clone(), worker_count);
+                // R6 Task 4:通知出口在这里接线——闭包捕获的 AppHandle 是唯一
+                // 一处 core::jobs 之外知道「AppHandle 长什么样」的地方;
+                // core::jobs 只认 `Fn(&str, &str) -> bool`,不知道 Tauri 的存
+                // 在。fire-and-forget 的 `std::thread::spawn` 包装在
+                // `core::jobs::notify_on_completion` 那一侧,这里只需要把
+                // `notify::post` 的成功/失败原样透传回去。
+                let notifier_app = app.handle().clone();
+                let runner = core::jobs::JobRunner::new(db_path.clone(), worker_count)
+                    .with_decode_limit(decode_permits)
+                    .with_notifier(std::sync::Arc::new(move |title: &str, body: &str| {
+                        notify::post(&notifier_app, title, body)
+                    }));
                 let control = runner.control();
                 tauri::async_runtime::spawn(runner.run());
                 Some(control)
@@ -1597,6 +2092,44 @@ pub fn run() {
                 });
                 app.manage(player);
             }
+            #[cfg(target_os = "macos")]
+            {
+                // R6 Task 4:睡眠唤醒。objc2/objc2-app-kit/block2 已经是直接依赖
+                // (播放器那半边就在用),不必为这一个通知再引入一整套额外绑定或
+                // 退化成 30 秒轮询猜内存钟跳变——`NSWorkspaceDidWakeNotification`
+                // 就是操作系统本来就会发的那条真实事件。
+                //
+                // `addObserverForName:object:queue:usingBlock:` 返回的 token 不
+                // 用来注销——进程活着就一直听。NSNotificationCenter 内部会保留
+                // (retain)这个 block 式 observer 本身,所以就算这里把 `token`
+                // drop 掉,投递也不会停;塞进 `app.manage` 不是为了防止投递停
+                // 止,而是让 `WakeObserver` 的生命周期显式绑定到应用进程,避免
+                // 有人误读成"可以随手 drop"再手滑真去调用注销。
+                let app_handle = app.handle().clone();
+                let workspace = NSWorkspace::sharedWorkspace();
+                let center = workspace.notificationCenter();
+                let main_queue = NSOperationQueue::mainQueue();
+                let wake_block = block2::RcBlock::new(move |_note: std::ptr::NonNull<NSNotification>| {
+                    runtime::on_wake(&app_handle);
+                });
+                // SAFETY: `addObserverForName:object:queue:usingBlock:` requires a
+                // valid Objective-C block and a valid NSOperationQueue for the
+                // duration of the call. `wake_block` is a real retained ObjC block
+                // (`block2::RcBlock`) constructed just above, and `main_queue` is
+                // the process-lifetime main operation queue, so both are valid.
+                // `app_handle` is captured by value into the block; NSNotification-
+                // Center retains the block (and therefore `app_handle`) on our
+                // behalf, so nothing this call touches is freed before it returns.
+                let observer = unsafe {
+                    center.addObserverForName_object_queue_usingBlock(
+                        Some(NSWorkspaceDidWakeNotification),
+                        None,
+                        Some(&main_queue),
+                        &wake_block,
+                    )
+                };
+                app.manage(WakeObserver(observer));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1608,6 +2141,8 @@ pub fn run() {
             get_media_server_info,
             get_app_info,
             search_everything,
+            list_ocr_hits,
+            enqueue_ocr_for_episode,
             get_memory_lens,
             set_routine_override,
             accept_all_routine_suggestions,
@@ -1619,6 +2154,7 @@ pub fn run() {
             remove_watched_folder,
             rescan_watched_folders,
             get_component_statuses,
+            rollback_component,
             start_component_install,
             get_install_progress,
             cancel_component_install,
@@ -1627,6 +2163,8 @@ pub fn run() {
             get_current_episode,
             rename_current_episode,
             archive_current_episode,
+            list_platform_presets,
+            set_episode_platform,
             get_settings,
             set_setting,
             get_llm_status,
@@ -1638,7 +2176,13 @@ pub fn run() {
             clear_cache_and_rebuild,
             run_clip_self_check,
             pick_import_folder,
+            pick_relink_folder,
             pick_export_folder,
+            pick_music_file,
+            import_music_track,
+            list_music_tracks,
+            get_music_analysis,
+            delete_music_track,
             list_libraries,
             create_library,
             set_library_hidden,
@@ -1649,17 +2193,30 @@ pub fn run() {
             preview_import_removal,
             remove_imported_material,
             start_import,
+            import_paths,
             get_import_progress,
             list_clips,
+            get_clips_revision,
+            get_journey_timeline,
+            list_missing_clips,
+            relink_volume,
             list_device_clocks,
             set_device_clock_offset,
             list_clip_dimensions,
             set_clip_time_stage,
+            probe_audio_tracks,
+            list_audio_tracks,
+            set_display_lut,
+            clear_display_lut,
+            set_playback_track,
+            set_transcribe_track,
+            list_display_luts,
             rate_clip,
             clear_clip_rating,
             list_select_segments,
             create_select_segment,
             delete_select_segment,
+            restore_select_segment,
             get_clip_analysis,
             search_transcripts,
             search_clips,
@@ -1671,6 +2228,7 @@ pub fn run() {
             set_shot_stack_user_state,
             get_storyboard,
             enqueue_narrate_episode,
+            list_story_templates,
             update_destination_card,
             set_destination_card_verified,
             set_destination_field_state,
@@ -1695,9 +2253,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             player_command,
             #[cfg(target_os = "macos")]
-            player_status
+            player_status,
+            simulate_wake
         ])
-        .build(tauri::generate_context!());
+        .build(context);
     let app = result.expect("旅剪工作台启动失败");
     // macOS 上退出走 process::exit,run() 之后的代码永不执行;必须在 Exit 事件里清哨兵。
     app.run(move |_app_handle, event| {
@@ -1713,4 +2272,33 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod wake_simulation_tests {
+    use super::wake_simulation_permitted;
+
+    // 同一个环境变量,两条分支都要覆盖到;写成一个测试避免并行测试线程
+    // 互相踩这个进程级全局变量的读写。
+    #[test]
+    fn only_the_exact_value_one_permits_simulate_wake() {
+        unsafe {
+            std::env::remove_var("TRIPCUT_SIMULATE_WAKE");
+        }
+        assert!(!wake_simulation_permitted(), "没设置时必须拒绝");
+
+        unsafe {
+            std::env::set_var("TRIPCUT_SIMULATE_WAKE", "true");
+        }
+        assert!(!wake_simulation_permitted(), "非「1」的真值字面量也必须拒绝");
+
+        unsafe {
+            std::env::set_var("TRIPCUT_SIMULATE_WAKE", "1");
+        }
+        assert!(wake_simulation_permitted(), "恰好是「1」时才允许");
+
+        unsafe {
+            std::env::remove_var("TRIPCUT_SIMULATE_WAKE");
+        }
+    }
 }

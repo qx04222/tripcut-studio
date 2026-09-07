@@ -1,0 +1,27 @@
+[package]
+name = "s2b_tauri_embed"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+libmpv2 = "6.0.0"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSWindow",
+    "NSView",
+    "NSResponder",
+    "NSGraphics",
+    "NSOpenGL",
+    "NSOpenGLView",
+] }
+rand = "0.9"
+libc = "0.2"
+
+[[bin]]
+name = "s2b_tauri_embed"
+path = "src/main.rs"

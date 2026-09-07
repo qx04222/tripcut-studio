@@ -1,0 +1,50 @@
+{
+  "fixture": "/Users/xin/Projects/tripcut-studio/src-tauri/target/optimization-qa/hevc10bit.gray",
+  "fixture_bytes": 1536000,
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "results": [
+    {
+      "mode": "before",
+      "source_sha256": "50104f8c84645f9bb9eaed63bad12d3e56e59a75943e9ec5fd23643bcc980deb",
+      "samples": [
+        {
+          "wall_seconds": 0.09319858299932093,
+          "max_rss_bytes": 5439488,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        },
+        {
+          "wall_seconds": 0.02594554099778179,
+          "max_rss_bytes": 5439488,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        },
+        {
+          "wall_seconds": 0.02232295900103054,
+          "max_rss_bytes": 5439488,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        }
+      ]
+    },
+    {
+      "mode": "after",
+      "source_sha256": "b09f93161295725a687ddc79703b7ea5a862e1e0ee1e35d20f0cbbaface6f05e",
+      "samples": [
+        {
+          "wall_seconds": 0.08759570800248184,
+          "max_rss_bytes": 2146304,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        },
+        {
+          "wall_seconds": 0.025121750000835164,
+          "max_rss_bytes": 2129920,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        },
+        {
+          "wall_seconds": 0.017862624998087995,
+          "max_rss_bytes": 2129920,
+          "output_sha256": "18589dbcfb55e9433f7fc8651389395bd63a8fa452004b04786bf69c0e6ecdc3"
+        }
+      ]
+    }
+  ],
+  "outputs_equal": true
+}

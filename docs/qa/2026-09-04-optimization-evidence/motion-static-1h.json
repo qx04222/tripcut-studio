@@ -1,0 +1,50 @@
+{
+  "fixture": "/Users/xin/Projects/tripcut-studio/src-tauri/target/optimization-qa/static-1h.gray",
+  "fixture_bytes": 184320000,
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "results": [
+    {
+      "mode": "before",
+      "source_sha256": "50104f8c84645f9bb9eaed63bad12d3e56e59a75943e9ec5fd23643bcc980deb",
+      "samples": [
+        {
+          "wall_seconds": 1.0784743750009511,
+          "max_rss_bytes": 394919936,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        },
+        {
+          "wall_seconds": 0.8861294999987877,
+          "max_rss_bytes": 395034624,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        },
+        {
+          "wall_seconds": 0.9115060829972208,
+          "max_rss_bytes": 394903552,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        }
+      ]
+    },
+    {
+      "mode": "after",
+      "source_sha256": "b09f93161295725a687ddc79703b7ea5a862e1e0ee1e35d20f0cbbaface6f05e",
+      "samples": [
+        {
+          "wall_seconds": 0.12565950000134762,
+          "max_rss_bytes": 3031040,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        },
+        {
+          "wall_seconds": 0.06822033299977193,
+          "max_rss_bytes": 3145728,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        },
+        {
+          "wall_seconds": 0.06898562499918626,
+          "max_rss_bytes": 2998272,
+          "output_sha256": "00fb7092f824a741805f58372765306b1b0688ba4cc3b59a13ddc463c217a134"
+        }
+      ]
+    }
+  ],
+  "outputs_equal": true
+}

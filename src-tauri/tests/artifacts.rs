@@ -158,8 +158,10 @@ fn enqueue_and_claim(
     jobs::claim_next(connection).unwrap().unwrap()
 }
 
+/// R6 Task 7d/F-R1-8:`thumbnail` 现在只产封面,并在完成后把 `strip`
+/// 排上队——它不再一次性把胶片条也做完。
 #[test]
-fn thumbnail_generates_cover_and_single_horizontal_strip_and_records_both() {
+fn thumbnail_generates_only_the_cover_and_enqueues_exactly_one_strip_job() {
     let Some(ffmpeg) = ffmpeg_or_skip() else { return };
     let directory = TestDirectory::new("thumbnail");
     let source = directory.path.join("source.mp4");
@@ -171,6 +173,47 @@ fn thumbnail_generates_cover_and_single_horizontal_strip_and_records_both() {
     artifacts::run_thumbnail(&mut connection, &job, &directory.cache_root()).unwrap();
 
     assert!(directory.cache_root().join(format!("{clip_id}/cover.jpg")).is_file());
+    assert!(
+        !directory.cache_root().join(format!("{clip_id}/strip.jpg")).exists(),
+        "封面任务不该再顺带产出胶片条"
+    );
+    let cover_records: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM cache_artifacts
+             WHERE clip_id = ?1 AND kind = 'cover' AND source_hash = ?2",
+            params![clip_id, source_hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cover_records, 1);
+
+    let strip_jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'strip' AND status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(strip_jobs, 1, "thumbnail 完成后应该恰好排上一条 strip 任务");
+}
+
+/// R6 Task 7d/F-R1-8:`strip` 独立跑完之后才有胶片条产物,并且此时才触发
+/// `clip_embed` 的入队(片段检索嵌入依赖胶片条格子图)。
+#[test]
+fn strip_runs_after_thumbnail_and_produces_the_film_strip() {
+    let Some(ffmpeg) = ffmpeg_or_skip() else { return };
+    let directory = TestDirectory::new("strip");
+    let source = directory.path.join("source.mp4");
+    generate_video(&ffmpeg, &source, 720, true).unwrap();
+    let mut connection = db::open_project(&directory.db_path()).unwrap();
+    let (clip_id, source_hash) = insert_clip(&connection, &source, 720);
+    let thumbnail_job = enqueue_and_claim(&mut connection, "thumbnail", clip_id, &source, &source_hash);
+    artifacts::run_thumbnail(&mut connection, &thumbnail_job, &directory.cache_root()).unwrap();
+
+    let strip_job = jobs::claim_next(&mut connection).unwrap().expect("strip 任务应已入队");
+    assert_eq!(strip_job.kind, "strip");
+    artifacts::run_strip(&mut connection, &strip_job, &directory.cache_root()).unwrap();
+
     assert!(directory.cache_root().join(format!("{clip_id}/strip.jpg")).is_file());
     let records: i64 = connection
         .query_row(

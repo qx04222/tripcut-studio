@@ -1,7 +1,7 @@
 {
   "name": "tripcut-studio",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,10 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-process": "2.3.1",
+    "@tauri-apps/plugin-updater": "2.11.0",
     "cmdk": "^1.1.1",
+    "pinyin-pro": "3.29.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-resizable-panels": "^4.12.3"
@@ -29,6 +32,7 @@
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.1",
     "eslint": "10.9.1",
+    "eslint-plugin-jsx-a11y": "6.10.2",
     "jsdom": "^30.0.1",
     "typescript": "6.0.3",
     "typescript-eslint": "8.68.0",
@@ -37,5 +41,10 @@
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
+  },
+  "overrides": {
+    "eslint-plugin-jsx-a11y": {
+      "eslint": "$eslint"
+    }
   }
 }

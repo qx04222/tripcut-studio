@@ -4,15 +4,81 @@
 //! - FFmpeg/FFprobe/whisper-cli 必须来自签名 DMG；缺失时要求重新安装；
 //! - Chinese-CLIP 的 Python 运行时尚未形成带哈希的签名组件包，因此不在线安装；
 //! - Whisper 模型下载在固定版本与 SHA-256 清单落地前保持关闭。
+//!
+//! 回滚:无论组件是怎么落地到托管目录的(将来的签名安装、手工放置、还是
+//! 已废弃的在线安装路径),只要它经过 `install_with_rollback` 落地,旧版本
+//! 就会被保留为同目录下的 `<file>.prev`(只留一代,新安装会覆盖更早的
+//! `.prev`)。`rollback_component` 用三步 rename 把 `.prev` 换回当前版本,
+//! 而且这一步也会自检,自检失败会把刚才的交换原样撤销,绝不会把一个能跑的
+//! 版本换丢。
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rusqlite::Connection;
 use serde::Serialize;
 
 use super::error::{CoreError, Result};
+
+/// 本次进程运行期间,`sweep_rolling_orphans` 从孤儿 `.rolling` 恢复过的文件名
+/// (如 `"ffmpeg"`)。只在启动时写入一次;`component_statuses` 据此把
+/// `recovered_from_rolling` 置真,让用户知道刚才发生过一次崩溃恢复。
+fn recovered_from_rolling_registry() -> &'static Mutex<HashSet<String>> {
+    static REGISTRY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 三步交换(`swap_current_and_prev`)中途崩溃可能留下 `<name>.rolling`:
+/// - 只有 `.rolling`,`<name>` 缺失 → 换步 1 之后、换步 2 之前中断;
+///   把 `.rolling` 原样 rename 回 `<name>`,恢复成崩溃前的状态。
+/// - `.rolling` 和 `<name>` 同时存在 → 换步 2 已完成(新版本已经是
+///   `<name>`),只是换步 3(`.rolling` → `prev`)没跑完;`.rolling` 是
+///   废弃的旧版本副本,直接删除。
+/// - 干净目录(没有 `.rolling`)→ 不做任何事。
+///
+/// 在启动时对托管目录调用一次;每个被恢复的文件名记入
+/// `recovered_from_rolling_registry`,供 `component_statuses` 展示。
+pub fn sweep_rolling_orphans(managed_dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(managed_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(base_name) = file_name.strip_suffix(".rolling") else {
+            continue;
+        };
+        let destination = managed_dir.join(base_name);
+        if destination.is_file() {
+            // 换步 2 已完成:destination 就是新版本,.rolling 是废弃的旧副本。
+            std::fs::remove_file(&path)?;
+            tracing::info!(
+                component = base_name,
+                "removed orphaned .rolling left over after a completed provisioning swap"
+            );
+        } else {
+            // destination 缺失:换步 2 没跑完,.rolling 仍是唯一可用的版本。
+            std::fs::rename(&path, &destination)?;
+            recovered_from_rolling_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(base_name.to_owned());
+            tracing::info!(
+                component = base_name,
+                "recovered a component from an orphaned .rolling file after an interrupted provisioning swap"
+            );
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ComponentStatus {
@@ -22,6 +88,13 @@ pub struct ComponentStatus {
     pub detail: String,
     pub installable: bool,
     pub approx_size_mb: u64,
+    /// 托管目录里是否留有可回滚的上一版本(`<file>.prev`)。
+    pub has_previous: bool,
+    /// 上一版本的版本串(来自 `-version` 输出的第一行);拿不到时为 None。
+    pub previous_version: Option<String>,
+    /// 本次进程启动时,`sweep_rolling_orphans` 是否从一个孤儿 `.rolling`
+    /// 文件恢复过这个组件(即上次进程在三步交换的换步 2 之前崩溃)。
+    pub recovered_from_rolling: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -52,6 +125,276 @@ pub fn models_dir() -> Result<PathBuf> {
     Ok(root.join("models"))
 }
 
+/// 同目录下的 `.prev` 备份路径。
+fn prev_path_for(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("component");
+    path.with_file_name(format!("{file_name}.prev"))
+}
+
+/// 同目录下用于三步交换的临时路径,避免中途中断丢失任一版本。
+fn rolling_path_for(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("component");
+    path.with_file_name(format!("{file_name}.rolling"))
+}
+
+/// 实跑 `-version`,失败说明这个可执行文件装坏了。
+fn verify_executable_runs(path: &Path) -> Result<()> {
+    let output = Command::new(path)
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| {
+            CoreError::Io(std::io::Error::other(format!("安装的程序无法运行:{error}")))
+        })?;
+    if !output.status.success() {
+        return Err(CoreError::Io(std::io::Error::other(
+            "安装的程序无法正常启动,已回滚",
+        )));
+    }
+    Ok(())
+}
+
+/// 数据文件(如 whisper 模型)没有 `-version`,自检退化为「非空文件」。
+fn verify_file_nonempty(path: &Path) -> Result<()> {
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if size == 0 {
+        return Err(CoreError::Io(std::io::Error::other(
+            "文件为空,自检失败,已回滚",
+        )));
+    }
+    Ok(())
+}
+
+/// 尽力读取一个可执行文件的版本串(`-version` 输出的第一行);跑不起来则 None。
+fn probe_version(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let output = Command::new(path)
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let text = if !output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    text.lines().next().map(|line| line.trim().to_owned())
+}
+
+/// 把 `staged_source` 原子地装到 `destination`,装之前把现有文件备份为
+/// `<file>.prev`(只留一代);装完用 `self_check` 校验,失败则把 `.prev`
+/// 换回来并返回错误(自动回滚),成功则保留 `.prev` 供之后手动回滚。
+///
+/// 目前没有生产调用点:`install_component` 是商用构建的硬门,不落任何文件
+/// (见文件顶部说明),因此这条原子安装+自检+备份链路只被测试直接调用。
+/// 保留为 `pub(crate)` 是为了在「签名组件包」或「手工侧载单个组件」这类
+/// 未来能力落地时,复用这里已经踩过坑的自动回滚语义,而不是让那天的实现
+/// 重新发明一遍原子替换。
+#[allow(dead_code)]
+pub(crate) fn install_with_rollback(
+    destination: &Path,
+    staged_source: &Path,
+    self_check: impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let prev = prev_path_for(destination);
+    let had_previous_file = destination.is_file();
+    if had_previous_file {
+        let _ = std::fs::remove_file(&prev);
+        std::fs::rename(destination, &prev)?;
+    }
+
+    let install_result = std::fs::rename(staged_source, destination)
+        .or_else(|_| std::fs::copy(staged_source, destination).map(|_| ()));
+    if let Err(error) = install_result {
+        // 落地这一步都没成功,把旧版本换回去,不留半装状态。
+        if had_previous_file {
+            let _ = std::fs::rename(&prev, destination);
+        }
+        return Err(CoreError::Io(error));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(destination) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            let _ = std::fs::set_permissions(destination, permissions);
+        }
+    }
+    let _ = Command::new("/usr/bin/xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(destination)
+        .status();
+
+    if let Err(error) = self_check(destination) {
+        let _ = std::fs::remove_file(destination);
+        if had_previous_file {
+            std::fs::rename(&prev, destination)?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// 把 `destination` 和它的 `.prev` 互换。要求 `.prev` 存在;中途用
+/// `.rolling` 临时名,保证任一步中断都不会同时丢失两个版本。
+fn swap_current_and_prev(destination: &Path, prev: &Path) -> Result<()> {
+    if !prev.is_file() {
+        return Err(CoreError::Io(std::io::Error::other(
+            "没有可回滚的上一版本",
+        )));
+    }
+    let rolling = rolling_path_for(destination);
+    let _ = std::fs::remove_file(&rolling);
+    let had_current = destination.is_file();
+    if had_current {
+        std::fs::rename(destination, &rolling)?;
+    }
+    std::fs::rename(prev, destination)?;
+    if had_current {
+        std::fs::rename(&rolling, prev)?;
+    }
+    Ok(())
+}
+
+/// 把 `destination` 换回 `.prev` 保存的上一版本,并自检;自检失败会把这次
+/// 交换原样撤销(即换回失败前的当前版本),保证不会把一个能跑的版本弄丢。
+fn rollback_with_selfcheck(destination: &Path, self_check: impl Fn(&Path) -> Result<()>) -> Result<()> {
+    let prev = prev_path_for(destination);
+    swap_current_and_prev(destination, &prev)?;
+    if let Err(error) = self_check(destination) {
+        let _ = swap_current_and_prev(destination, &prev);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn component_title(component: &str) -> String {
+    match component {
+        "ffmpeg" => "FFmpeg(视频解码与转码)",
+        "ffprobe" => "FFprobe(素材信息探测)",
+        "whisper-cli" => "Whisper(对白转写引擎)",
+        "whisper-model" => "转写模型",
+        "clip-sidecar" => "画面语义搜索(Chinese-CLIP)",
+        other => return other.to_owned(),
+    }
+    .to_owned()
+}
+
+/// 组件在托管目录里的落地路径;只有真正会被 `install_with_rollback` 写入
+/// 托管目录的组件才支持回滚(clip-sidecar 是整套服务安装,不是单文件,不在此列)。
+fn managed_path_for(component: &str, model_tier: &str) -> Result<Option<PathBuf>> {
+    Ok(match component {
+        "ffmpeg" | "ffprobe" | "whisper-cli" => Some(managed_bin_dir()?.join(component)),
+        "whisper-model" => Some(models_dir()?.join(super::settings::model_file_for_tier(model_tier))),
+        _ => None,
+    })
+}
+
+fn self_check_for(component: &str) -> impl Fn(&Path) -> Result<()> {
+    let is_binary = matches!(component, "ffmpeg" | "ffprobe" | "whisper-cli");
+    move |path: &Path| {
+        if is_binary {
+            verify_executable_runs(path)
+        } else {
+            verify_file_nonempty(path)
+        }
+    }
+}
+
+/// 这个组件的托管文件名(如 `"ffmpeg"`)本次启动是否被
+/// `sweep_rolling_orphans` 从孤儿 `.rolling` 恢复过。
+fn recovered_flag_for(component: &str, model_tier: &str) -> bool {
+    let Ok(Some(path)) = managed_path_for(component, model_tier) else {
+        return false;
+    };
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    recovered_from_rolling_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(file_name)
+}
+
+/// 单个组件当前的回滚状态,不依赖数据库连接。
+fn component_status_single(component: &str, model_tier: &str) -> Result<ComponentStatus> {
+    let destination = managed_path_for(component, model_tier)?;
+    let (installed, detail, has_previous, previous_version) = match &destination {
+        Some(path) => {
+            let prev = prev_path_for(path);
+            let installed = path.is_file();
+            let detail = if installed {
+                path.display().to_string()
+            } else {
+                "未安装".into()
+            };
+            (installed, detail, prev.is_file(), probe_version(&prev))
+        }
+        None => (false, "组件不支持回滚".into(), false, None),
+    };
+    Ok(ComponentStatus {
+        id: component.into(),
+        title: component_title(component),
+        installed,
+        detail,
+        installable: false,
+        approx_size_mb: 0,
+        has_previous,
+        previous_version,
+        recovered_from_rolling: recovered_flag_for(component, model_tier),
+    })
+}
+
+/// 手动回滚一个组件到上一版本;自检失败会自动撤销这次回滚。
+pub fn rollback_component(component: &str, model_tier: &str) -> Result<ComponentStatus> {
+    let destination = managed_path_for(component, model_tier)?.ok_or_else(|| {
+        CoreError::Io(std::io::Error::other(format!(
+            "组件 {component} 不支持回滚"
+        )))
+    })?;
+    rollback_with_selfcheck(&destination, self_check_for(component))?;
+    component_status_single(component, model_tier)
+}
+
+/// [`rollback_component`] 前置一道闸:批量任务是每个片段各自新起一个子进程,
+/// 跑到一半回滚 ffmpeg/whisper-cli 会让同一批次的产出混着新旧两种二进制。
+/// 只读窗口(`lib.rs` 里已有的检查)挡的是"这份工程当前不可写";这里额外挡
+/// "当前有任务在跑",且必须在触碰任何文件之前生效。
+pub fn rollback_component_guarded(
+    connection: &Connection,
+    component: &str,
+    model_tier: &str,
+) -> Result<ComponentStatus> {
+    let running: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status = 'running'",
+        [],
+        |row| row.get(0),
+    )?;
+    if running > 0 {
+        return Err(CoreError::InvalidTransition(
+            "有任务正在运行，请等待完成后再回滚".to_owned(),
+        ));
+    }
+    rollback_component(component, model_tier)
+}
+
 pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus>> {
     let cache_root = super::channel_memory::channel_path_for_project(connection)
         .ok()
@@ -65,7 +408,19 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
     )?;
     let model_file = super::settings::model_file_for_tier(&model_tier);
     let model_ok = models_dir()?.join(model_file).is_file();
+
+    let previous_of = |component: &str| -> (bool, Option<String>) {
+        match managed_path_for(component, &model_tier) {
+            Ok(Some(path)) => {
+                let prev = prev_path_for(&path);
+                (prev.is_file(), probe_version(&prev))
+            }
+            _ => (false, None),
+        }
+    };
+
     let mut list = Vec::new();
+    let (ffmpeg_prev, ffmpeg_prev_version) = previous_of("ffmpeg");
     list.push(ComponentStatus {
         id: "ffmpeg".into(),
         title: "FFmpeg(视频解码与转码)".into(),
@@ -77,7 +432,11 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         },
         installable: false,
         approx_size_mb: 0,
+        has_previous: ffmpeg_prev,
+        previous_version: ffmpeg_prev_version,
+        recovered_from_rolling: recovered_flag_for("ffmpeg", &model_tier),
     });
+    let (ffprobe_prev, ffprobe_prev_version) = previous_of("ffprobe");
     list.push(ComponentStatus {
         id: "ffprobe".into(),
         title: "FFprobe(素材信息探测)".into(),
@@ -89,7 +448,11 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         },
         installable: false,
         approx_size_mb: 0,
+        has_previous: ffprobe_prev,
+        previous_version: ffprobe_prev_version,
+        recovered_from_rolling: recovered_flag_for("ffprobe", &model_tier),
     });
+    let (whisper_cli_prev, whisper_cli_prev_version) = previous_of("whisper-cli");
     list.push(ComponentStatus {
         id: "whisper-cli".into(),
         title: "Whisper(对白转写引擎)".into(),
@@ -101,7 +464,11 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         },
         installable: false,
         approx_size_mb: 0,
+        has_previous: whisper_cli_prev,
+        previous_version: whisper_cli_prev_version,
+        recovered_from_rolling: recovered_flag_for("whisper-cli", &model_tier),
     });
+    let (model_prev, model_prev_version) = previous_of("whisper-model");
     list.push(ComponentStatus {
         id: "whisper-model".into(),
         title: format!("转写模型({model_tier})"),
@@ -113,6 +480,9 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         },
         installable: false,
         approx_size_mb: 0,
+        has_previous: model_prev,
+        previous_version: model_prev_version,
+        recovered_from_rolling: recovered_flag_for("whisper-model", &model_tier),
     });
     list.push(ComponentStatus {
         id: "clip-sidecar".into(),
@@ -125,6 +495,9 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         },
         installable: false,
         approx_size_mb: 0,
+        has_previous: false,
+        previous_version: None,
+        recovered_from_rolling: false,
     });
     Ok(list)
 }
@@ -148,6 +521,32 @@ pub fn download_progress(_component: &str, _model_tier: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{db, jobs};
+    use crate::core::test_support::TestDirectory;
+
+    /// 写一个会打印版本号、exit 0 的假可执行脚本(模拟 ffmpeg/ffprobe/whisper-cli)。
+    fn write_fake_binary(path: &Path, version_line: &str) {
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\necho \"{version_line}\"\nexit 0\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// 写一个总是以非零码退出的假脚本,模拟自检失败(装坏的可执行文件)。
+    fn write_failing_binary(path: &Path) {
+        std::fs::write(path, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
 
     #[test]
     fn every_online_component_install_is_refused_before_work_starts() {
@@ -162,5 +561,211 @@ mod tests {
     fn managed_dirs_are_under_app_support() {
         assert!(managed_bin_dir().unwrap().ends_with("TripCutStudio/bin"));
         assert!(models_dir().unwrap().ends_with("TripCutStudio/models"));
+    }
+
+    #[test]
+    fn install_v2_over_v1_keeps_v1_as_prev() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("whisper-cli");
+        let staged = directory.path().join("incoming");
+
+        write_fake_binary(&destination, "v1.0.0");
+        write_fake_binary(&staged, "v2.0.0");
+
+        install_with_rollback(&destination, &staged, verify_executable_runs).unwrap();
+
+        let prev = prev_path_for(&destination);
+        assert!(prev.is_file(), ".prev 应保留旧版本");
+        assert_eq!(probe_version(&prev).as_deref(), Some("v1.0.0"));
+        assert_eq!(probe_version(&destination).as_deref(), Some("v2.0.0"));
+    }
+
+    #[test]
+    fn rollback_swaps_current_and_prev_and_selfchecks() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("whisper-cli");
+        let staged = directory.path().join("incoming");
+
+        write_fake_binary(&destination, "v1.0.0");
+        write_fake_binary(&staged, "v2.0.0");
+        install_with_rollback(&destination, &staged, verify_executable_runs).unwrap();
+        assert_eq!(probe_version(&destination).as_deref(), Some("v2.0.0"));
+
+        rollback_with_selfcheck(&destination, verify_executable_runs).unwrap();
+
+        assert_eq!(probe_version(&destination).as_deref(), Some("v1.0.0"), "回滚后应恢复 v1");
+        let prev = prev_path_for(&destination);
+        assert_eq!(probe_version(&prev).as_deref(), Some("v2.0.0"), ".prev 应改持有 v2");
+    }
+
+    #[test]
+    fn failed_self_check_on_install_auto_rolls_back() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("whisper-cli");
+        let staged = directory.path().join("incoming");
+
+        write_fake_binary(&destination, "v1.0.0");
+        write_failing_binary(&staged);
+
+        let error =
+            install_with_rollback(&destination, &staged, verify_executable_runs)
+                .unwrap_err();
+        assert!(error.to_string().contains("已回滚"));
+
+        // v1 必须原样恢复,且必须能跑。
+        assert_eq!(probe_version(&destination).as_deref(), Some("v1.0.0"));
+        assert!(!prev_path_for(&destination).is_file(), "自检失败时不应留下 .prev");
+    }
+
+    #[test]
+    fn has_previous_reflects_reality() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("whisper-cli");
+        let staged = directory.path().join("incoming");
+
+        write_fake_binary(&destination, "v1.0.0");
+        assert!(!prev_path_for(&destination).is_file());
+
+        write_fake_binary(&staged, "v2.0.0");
+        install_with_rollback(&destination, &staged, verify_executable_runs).unwrap();
+        assert!(prev_path_for(&destination).is_file());
+    }
+
+    #[test]
+    fn rollback_without_previous_version_is_refused() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("whisper-cli");
+        write_fake_binary(&destination, "v1.0.0");
+
+        let error = rollback_with_selfcheck(&destination, verify_executable_runs)
+            .unwrap_err();
+        assert!(error.to_string().contains("没有可回滚的上一版本"));
+        // 当前版本必须原封不动。
+        assert_eq!(probe_version(&destination).as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn model_file_selfcheck_is_nonempty_check() {
+        let directory = TestDirectory::new();
+        let destination = directory.path().join("model.bin");
+        let staged = directory.path().join("incoming.bin");
+
+        std::fs::write(&destination, b"v1-bytes").unwrap();
+        std::fs::write(&staged, b"").unwrap(); // 空文件,模拟下载被截断
+
+        let error =
+            install_with_rollback(&destination, &staged, verify_file_nonempty).unwrap_err();
+        assert!(error.to_string().contains("自检失败"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"v1-bytes", "应回滚到原文件");
+    }
+
+    #[test]
+    fn sweep_recovers_a_rolling_orphan_when_destination_is_missing() {
+        // 换步 1(destination → .rolling)完成、换步 2(prev → destination)
+        // 之前崩溃:目录里只有 .rolling,destination 缺失。
+        let directory = TestDirectory::new();
+        let name = "sweep-recover-missing";
+        let rolling = directory.path().join(format!("{name}.rolling"));
+        write_fake_binary(&rolling, "v1.0.0");
+        let destination = directory.path().join(name);
+        assert!(!destination.is_file());
+
+        sweep_rolling_orphans(directory.path()).unwrap();
+
+        assert!(destination.is_file(), ".rolling 应被恢复为原文件名");
+        assert!(!rolling.is_file(), "恢复后不应再留下 .rolling");
+        assert_eq!(probe_version(&destination).as_deref(), Some("v1.0.0"));
+        assert!(
+            recovered_from_rolling_registry()
+                .lock()
+                .unwrap()
+                .contains(name),
+            "应记入 recovered_from_rolling 登记表"
+        );
+    }
+
+    #[test]
+    fn sweep_deletes_a_rolling_orphan_when_destination_already_exists() {
+        // 换步 2(prev → destination)已完成,只是换步 3
+        // (.rolling → prev)没跑完:destination 和 .rolling 同时存在,
+        // .rolling 是废弃的旧版本副本,应直接删除。
+        let directory = TestDirectory::new();
+        let name = "sweep-clean-both";
+        let destination = directory.path().join(name);
+        let rolling = directory.path().join(format!("{name}.rolling"));
+        write_fake_binary(&destination, "v2.0.0");
+        write_fake_binary(&rolling, "v1.0.0");
+
+        sweep_rolling_orphans(directory.path()).unwrap();
+
+        assert!(destination.is_file(), "已完成换步的 destination 不应被动");
+        assert_eq!(probe_version(&destination).as_deref(), Some("v2.0.0"));
+        assert!(!rolling.is_file(), "废弃的 .rolling 应被删除");
+        assert!(
+            !recovered_from_rolling_registry()
+                .lock()
+                .unwrap()
+                .contains(name),
+            "此情形是清理而非恢复,不应记入登记表"
+        );
+    }
+
+    #[test]
+    fn sweep_on_a_clean_directory_is_a_noop() {
+        let directory = TestDirectory::new();
+        let name = "sweep-clean-dir";
+        let destination = directory.path().join(name);
+        write_fake_binary(&destination, "v1.0.0");
+
+        sweep_rolling_orphans(directory.path()).unwrap();
+
+        assert!(destination.is_file());
+        assert_eq!(probe_version(&destination).as_deref(), Some("v1.0.0"));
+        assert!(
+            !recovered_from_rolling_registry()
+                .lock()
+                .unwrap()
+                .contains(name)
+        );
+    }
+
+    /// 批量任务是每片段各自新起一个子进程;跑到一半回滚 ffmpeg/whisper 会让
+    /// 同一批次产出混着新旧两种二进制。只读窗口挡的是"工程当前不可写",
+    /// 这条额外挡"当前有任务在跑",在真正触碰任何文件之前就必须生效。
+    #[test]
+    fn rollback_component_guarded_refuses_while_a_job_is_running() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        jobs::enqueue(&mut connection, "noop", "{}", "guard-running").unwrap();
+        jobs::claim_next(&mut connection).unwrap().unwrap();
+
+        // 故意用一个不认识的组件名("nope")——它在真正的 rollback_component
+        // 内部会报"不支持回滚",这里绝不能看到那句话,否则说明请求已经穿透
+        // 闸门碰到了真实的(会触碰 app-support 目录下真实文件的)回滚逻辑。
+        let error = rollback_component_guarded(&connection, "nope", "large-v3-turbo")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("有任务正在运行，请等待完成后再回滚"),
+            "实际错误：{error}"
+        );
+        assert!(
+            !error.to_string().contains("不支持回滚") && !error.to_string().contains("没有可回滚"),
+            "有任务在跑时不应该跑到真正的回滚逻辑：{error}"
+        );
+    }
+
+    #[test]
+    fn rollback_component_guarded_proceeds_as_before_when_no_job_is_running() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        // 不认识的组件名会在真正的 rollback_component 内部报"不支持回滚"——
+        // 用它来证明闸门放行了,请求确实穿透到了原有逻辑,而不是被吞掉或
+        // 提前返回成功。
+        let error = rollback_component_guarded(&connection, "nope", "large-v3-turbo")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("不支持回滚"),
+            "没有任务在跑时应该像此前一样放行到 rollback_component 本体：{error}"
+        );
     }
 }

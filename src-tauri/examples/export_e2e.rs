@@ -8,7 +8,7 @@ fn main() {
     let db = PathBuf::from(home).join("Library/Application Support/TripCutStudio/dev/project.db");
     let mut conn = tripcut_studio_lib::core::db::open_project(&db).expect("打开开发库失败");
     let status =
-        tripcut_studio_lib::core::deliver::start_export(&mut conn, PathBuf::from(&dest).as_path())
+        tripcut_studio_lib::core::deliver::start_export(&mut conn, PathBuf::from(&dest).as_path(), None, true, None)
             .expect("start_export 失败");
     println!("started: {status:?}");
     let job = tripcut_studio_lib::core::jobs::claim_next(&mut conn)

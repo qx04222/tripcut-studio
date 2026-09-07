@@ -43,6 +43,7 @@ struct ClipSource {
     source_hash: String,
     tb_num: i64,
     tb_den: i64,
+    selected_transcribe_track: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +230,8 @@ pub fn run_transcribe(
         remove_file_if_exists(path)?;
     }
 
-    extract_audio(&source.path, &audio_path, &ffmpeg)?;
+    let transcribe_track = resolve_transcribe_track(connection, &source);
+    extract_audio(&source.path, &audio_path, &ffmpeg, transcribe_track)?;
     let whisper_permit = WHISPER_PERMIT
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -302,7 +304,7 @@ fn load_eligible_source(
 ) -> Result<Option<ClipSource>> {
     connection
         .query_row(
-            "SELECT c.tb_num, c.tb_den
+            "SELECT c.tb_num, c.tb_den, c.selected_transcribe_track
              FROM clips c
              JOIN clip_analysis a ON a.clip_id = c.id
              WHERE c.id = ?1 AND c.quick_hash = ?2
@@ -315,11 +317,41 @@ fn load_eligible_source(
                     source_hash: payload.source_hash.clone(),
                     tb_num: row.get(0)?,
                     tb_den: row.get(1)?,
+                    selected_transcribe_track: row.get(2)?,
                 })
             },
         )
         .optional()
         .map_err(CoreError::from)
+}
+
+/// 解析这条素材实际要喂给 ffmpeg `-map 0:a:N` 的音频相对序号：
+/// 未选择时默认第 0 路；选择的序号在 `clip_audio_tracks` 里找不到对应行
+/// （比如音轨表还没探测过，或选择已过期）时也回退到 0 并记录告警，
+/// 不能让 ffmpeg 直接因越界的 `-map` 失败。
+fn resolve_transcribe_track(connection: &Connection, source: &ClipSource) -> i64 {
+    let Some(selected) = source.selected_transcribe_track else {
+        return 0;
+    };
+    let exists: bool = connection
+        .query_row(
+            "SELECT 1 FROM clip_audio_tracks WHERE clip_id = ?1 AND stream_index = ?2",
+            params![source.clip_id, selected],
+            |_| Ok(true),
+        )
+        .optional()
+        .unwrap_or(None)
+        .unwrap_or(false);
+    if exists {
+        selected
+    } else {
+        tracing::warn!(
+            clip_id = source.clip_id,
+            selected_track = selected,
+            "selected_transcribe_track 在 clip_audio_tracks 中无对应行，回退到轨道 0"
+        );
+        0
+    }
 }
 
 #[cfg(test)]
@@ -378,8 +410,10 @@ fn block_job(connection: &mut Connection, job: &Job, summary: &str) -> Result<()
     Ok(())
 }
 
-fn extract_audio(source: &Path, output: &Path, ffmpeg: &OsStr) -> Result<()> {
-    let args = [
+/// 构造抽音用的 ffmpeg 参数；`track` 是 `-map 0:a:N` 里的音频相对序号
+/// （由 `resolve_transcribe_track` 解析，未选择或选择失效时为 0）。
+fn extract_audio_args(source: &Path, output: &Path, track: i64) -> Vec<OsString> {
+    vec![
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
         OsString::from("error"),
@@ -387,7 +421,7 @@ fn extract_audio(source: &Path, output: &Path, ffmpeg: &OsStr) -> Result<()> {
         OsString::from("-i"),
         source.as_os_str().to_owned(),
         OsString::from("-map"),
-        OsString::from("0:a:0"),
+        OsString::from(format!("0:a:{track}")),
         OsString::from("-vn"),
         OsString::from("-ac"),
         OsString::from("1"),
@@ -399,7 +433,11 @@ fn extract_audio(source: &Path, output: &Path, ffmpeg: &OsStr) -> Result<()> {
         OsString::from("wav"),
         OsString::from("-y"),
         output.as_os_str().to_owned(),
-    ];
+    ]
+}
+
+fn extract_audio(source: &Path, output: &Path, ffmpeg: &OsStr, track: i64) -> Result<()> {
+    let args = extract_audio_args(source, output, track);
     let result = execute_with_timeout(ffmpeg, &args, AUDIO_EXTRACT_TIMEOUT).map_err(|error| {
         CoreError::Transcription(format!("无法提取 Whisper 16kHz 单声道音频：{error}"))
     })?;
@@ -769,6 +807,7 @@ mod tests {
     use super::*;
     use crate::core::migrations::{
         MIGRATION_0001, MIGRATION_0002, MIGRATION_0003, MIGRATION_0005, MIGRATION_0013,
+        MIGRATION_0032,
     };
     use crate::core::test_support::TestDirectory;
 
@@ -780,6 +819,7 @@ mod tests {
         connection.execute_batch(MIGRATION_0003).unwrap();
         connection.execute_batch(MIGRATION_0005).unwrap();
         connection.execute_batch(MIGRATION_0013).unwrap();
+        connection.execute_batch(MIGRATION_0032).unwrap();
         connection
     }
 
@@ -813,6 +853,85 @@ mod tests {
             )
             .unwrap();
         clip_id
+    }
+
+    #[test]
+    fn extract_audio_args_maps_selected_track() {
+        let source = Path::new("/tmp/source.mov");
+        let output = Path::new("/tmp/whisper-input.wav");
+        let args = extract_audio_args(source, output, 1);
+        let map_index = args.iter().position(|arg| arg == "-map").unwrap();
+        assert_eq!(args[map_index + 1], OsString::from("0:a:1"));
+        assert!(args.iter().any(|arg| arg == "-vn"));
+    }
+
+    #[test]
+    fn extract_audio_args_defaults_to_track_zero() {
+        let source = Path::new("/tmp/source.mov");
+        let output = Path::new("/tmp/whisper-input.wav");
+        let args = extract_audio_args(source, output, 0);
+        let map_index = args.iter().position(|arg| arg == "-map").unwrap();
+        assert_eq!(args[map_index + 1], OsString::from("0:a:0"));
+    }
+
+    #[test]
+    fn resolve_transcribe_track_uses_selection_when_row_exists() {
+        let connection = self::connection();
+        let clip_id = insert_clip(&connection, Path::new("/tmp/multi.mov"), true, Some(-10.0));
+        connection
+            .execute(
+                "INSERT INTO clip_audio_tracks(clip_id, stream_index, channels, channel_layout, sample_rate, role_guess)
+                 VALUES (?1, 0, 2, 'stereo', 48000, 'onboard_mic'),
+                        (?1, 1, 1, 'mono', 48000, 'wireless_mic')",
+                params![clip_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET selected_transcribe_track = 1 WHERE id = ?1",
+                params![clip_id],
+            )
+            .unwrap();
+        let source = ClipSource {
+            clip_id,
+            path: PathBuf::from("/tmp/multi.mov"),
+            source_hash: "hash".to_owned(),
+            tb_num: 1,
+            tb_den: 1000,
+            selected_transcribe_track: Some(1),
+        };
+        assert_eq!(resolve_transcribe_track(&connection, &source), 1);
+    }
+
+    #[test]
+    fn resolve_transcribe_track_falls_back_to_zero_when_selection_has_no_row() {
+        let connection = self::connection();
+        let clip_id = insert_clip(&connection, Path::new("/tmp/stale.mov"), true, Some(-10.0));
+        // 没有插入任何 clip_audio_tracks 行：选择的音轨已过期或从未探测过。
+        let source = ClipSource {
+            clip_id,
+            path: PathBuf::from("/tmp/stale.mov"),
+            source_hash: "hash".to_owned(),
+            tb_num: 1,
+            tb_den: 1000,
+            selected_transcribe_track: Some(3),
+        };
+        assert_eq!(resolve_transcribe_track(&connection, &source), 0);
+    }
+
+    #[test]
+    fn resolve_transcribe_track_defaults_to_zero_when_unset() {
+        let connection = self::connection();
+        let clip_id = insert_clip(&connection, Path::new("/tmp/default.mov"), true, Some(-10.0));
+        let source = ClipSource {
+            clip_id,
+            path: PathBuf::from("/tmp/default.mov"),
+            source_hash: "hash".to_owned(),
+            tb_num: 1,
+            tb_den: 1000,
+            selected_transcribe_track: None,
+        };
+        assert_eq!(resolve_transcribe_track(&connection, &source), 0);
     }
 
     #[test]
@@ -933,6 +1052,7 @@ mod tests {
             source_hash: "source-hash".to_owned(),
             tb_num: 1,
             tb_den: 1_000,
+            selected_transcribe_track: None,
         };
         let segments = parse_srt(
             "1\n00:00:01,000 --> 00:00:02,000\nhello\n",
@@ -991,6 +1111,7 @@ mod tests {
             source_hash: "source-hash".to_owned(),
             tb_num: 1,
             tb_den: 1_000,
+            selected_transcribe_track: None,
         };
         let segments = parse_srt(
             "1\n00:00:01,000 --> 00:00:02,000\nhello\n",

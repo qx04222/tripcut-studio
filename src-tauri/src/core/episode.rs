@@ -24,6 +24,8 @@ pub struct EpisodeSummary {
     pub clip_count: i64,
     pub favorite_count: i64,
     pub export_count: i64,
+    pub target_platform: String,
+    pub canvas_orientation: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -36,6 +38,7 @@ fn summary_by_id(connection: &Connection, id: i64) -> Result<EpisodeSummary> {
     connection
         .query_row(
             "SELECT e.id, e.title, e.theme, e.episode_number, e.status, e.created_at, e.archived_at,
+                    e.target_platform, e.canvas_orientation,
                     (SELECT COUNT(*) FROM clips c WHERE c.episode_id = e.id),
                     (SELECT COUNT(*) FROM clips c2
                       WHERE c2.episode_id = e.id
@@ -70,9 +73,11 @@ fn summary_by_id(connection: &Connection, id: i64) -> Result<EpisodeSummary> {
                     status: row.get(4)?,
                     created_at: row.get(5)?,
                     archived_at: row.get(6)?,
-                    clip_count: row.get(7)?,
-                    favorite_count: row.get(8)?,
-                    export_count: row.get(9)?,
+                    target_platform: row.get(7)?,
+                    canvas_orientation: row.get(8)?,
+                    clip_count: row.get(9)?,
+                    favorite_count: row.get(10)?,
+                    export_count: row.get(11)?,
                 })
             },
         )
@@ -124,8 +129,24 @@ pub fn rename_current(connection: &mut Connection, title: &str, theme: &str) -> 
     Ok(summary)
 }
 
-/// 封存当前集并开启下一集。单事务;快照只增,可回查不可改。
+/// 封存当前集并开启下一集,不改变下一集的平台/朝向默认值(即继承)。
+/// 保留原签名,供既有调用方(不关心平台默认值)使用。
 pub fn archive_current(connection: &mut Connection, next_title: Option<&str>) -> Result<ArchiveOutcome> {
+    archive_current_with_platform(connection, next_title, None, None)
+}
+
+/// 封存当前集并开启下一集。单事务;快照只增,可回查不可改。
+///
+/// `next_platform`/`next_orientation` 为 `None` 时,下一集继承被封存集当前的
+/// `target_platform`/`canvas_orientation`;给出 `Some` 时按同一套枚举校验
+/// (与 `platform::set_episode_platform` 共用 `validate_platform_and_orientation`),
+/// 非法值使整个事务失败回滚——不建下一集,也不把当前集置为已封存。
+pub fn archive_current_with_platform(
+    connection: &mut Connection,
+    next_title: Option<&str>,
+    next_platform: Option<&str>,
+    next_orientation: Option<&str>,
+) -> Result<ArchiveOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let current_id: i64 = transaction
@@ -189,11 +210,19 @@ pub fn archive_current(connection: &mut Connection, next_title: Option<&str>) ->
     if title.chars().count() > 120 {
         return Err(CoreError::Story("集标题必须为 1-120 字".to_owned()));
     }
+
+    // None → 继承被封存集当前值;Some → 按 platform 模块同一套枚举校验,
+    // 非法值让整个事务失败(未提交,current 保持 active,next 不创建)。
+    let platform = next_platform.unwrap_or(&current.target_platform);
+    let orientation = next_orientation.unwrap_or(&current.canvas_orientation);
+    super::platform::validate_platform_and_orientation(platform, orientation)?;
+
     transaction.execute(
-        "INSERT INTO episodes(title, theme, created_at, status, episode_number, memory_id)
+        "INSERT INTO episodes(title, theme, created_at, status, episode_number, memory_id,
+                               target_platform, canvas_orientation)
          VALUES (?1, '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'active', ?2,
-                 lower(hex(randomblob(16))))",
-        params![title, next_number],
+                 lower(hex(randomblob(16))), ?3, ?4)",
+        params![title, next_number, platform, orientation],
     )?;
     let next_id = transaction.last_insert_rowid();
 
@@ -488,6 +517,84 @@ mod tests {
         // 新集里的素材照常可写
         let new_clip = insert_clip(&connection, "new.mov");
         assert!(ensure_clip_writable(&connection, new_clip).is_ok());
+    }
+
+    #[test]
+    fn archived_episode_select_segment_delete_and_restore_are_refused() {
+        let (_d, mut connection) = test_connection();
+        let old_clip = insert_clip(&connection, "old-select.mov");
+        let segment =
+            crate::core::ratings::create_select_segment(&mut connection, old_clip, 0.1, 0.2).unwrap();
+        archive_current(&mut connection, None).unwrap();
+
+        let delete_error =
+            crate::core::ratings::delete_select_segment(&mut connection, segment.id).unwrap_err();
+        assert!(delete_error.to_string().contains("历史集"));
+
+        let restore_error =
+            crate::core::ratings::restore_select_segment(&mut connection, segment.id).unwrap_err();
+        assert!(restore_error.to_string().contains("历史集"));
+    }
+
+    #[test]
+    fn archive_with_none_platform_inherits_archived_episodes_values() {
+        let (_dir, mut connection) = test_connection();
+        let current = current_episode(&connection).unwrap();
+        crate::core::platform::set_episode_platform(&mut connection, current.id, "bilibili", "portrait")
+            .unwrap();
+        insert_clip(&connection, "a.mp4");
+        let outcome = archive_current_with_platform(&mut connection, None, None, None).unwrap();
+        assert_eq!(outcome.archived.target_platform, "bilibili");
+        assert_eq!(outcome.archived.canvas_orientation, "portrait");
+        assert_eq!(outcome.next.target_platform, "bilibili");
+        assert_eq!(outcome.next.canvas_orientation, "portrait");
+    }
+
+    #[test]
+    fn archive_with_some_platform_applies_the_given_values() {
+        let (_dir, mut connection) = test_connection();
+        insert_clip(&connection, "a.mp4");
+        let outcome =
+            archive_current_with_platform(&mut connection, None, Some("douyin"), Some("portrait"))
+                .unwrap();
+        assert_eq!(outcome.next.target_platform, "douyin");
+        assert_eq!(outcome.next.canvas_orientation, "portrait");
+    }
+
+    #[test]
+    fn archive_with_invalid_platform_errors_and_archives_nothing() {
+        let (_dir, mut connection) = test_connection();
+        let current = current_episode(&connection).unwrap();
+        insert_clip(&connection, "a.mp4");
+        let error =
+            archive_current_with_platform(&mut connection, None, Some("youtube"), None).unwrap_err();
+        assert!(error.to_string().contains("目标平台"));
+        // 事务整体回滚:当前集仍是 active,没有新集,没有快照
+        let still_current = current_episode(&connection).unwrap();
+        assert_eq!(still_current.id, current.id);
+        assert_eq!(still_current.status, "active");
+        let episode_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM episodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(episode_count, 1);
+        let archive_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM episode_archives", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(archive_count, 0);
+    }
+
+    #[test]
+    fn archive_with_invalid_orientation_errors_and_archives_nothing() {
+        let (_dir, mut connection) = test_connection();
+        insert_clip(&connection, "a.mp4");
+        let error =
+            archive_current_with_platform(&mut connection, None, Some("douyin"), Some("sideways"))
+                .unwrap_err();
+        assert!(error.to_string().contains("画布朝向"));
+        let episode_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM episodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(episode_count, 1);
     }
 
     #[test]

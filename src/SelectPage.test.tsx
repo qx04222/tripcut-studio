@@ -1,7 +1,75 @@
 // @vitest-environment jsdom
 
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+type OcrTextHitStub = {
+  frame_tick: number;
+  tb_num: number;
+  tb_den: number;
+  text: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+};
+
+const apiMocks = vi.hoisted(() => ({
+  applyRescueRange: vi.fn(),
+  askDirector: vi.fn(),
+  clearClipRating: vi.fn(),
+  createSelectSegment: vi.fn(),
+  deleteSelectSegment: vi.fn(),
+  listSimilarGroups: vi.fn().mockResolvedValue([]),
+  setSimilarPrimary: vi.fn().mockResolvedValue(undefined),
+  listAudioTracks: vi.fn().mockResolvedValue([]),
+  probeAudioTracks: vi.fn().mockResolvedValue([]),
+  listDisplayLuts: vi.fn().mockResolvedValue([]),
+  setDisplayLut: vi.fn().mockResolvedValue(undefined),
+  clearDisplayLut: vi.fn().mockResolvedValue(undefined),
+  setPlaybackTrack: vi.fn().mockResolvedValue(undefined),
+  setTranscribeTrack: vi.fn().mockResolvedValue(undefined),
+  restoreSelectSegment: vi.fn(),
+  describeClipWithAi: vi.fn(),
+  getAiDescription: vi.fn(async () => null),
+  getClipArtifacts: vi.fn(async () => null),
+  getMemoryLens: vi.fn(async () => []),
+  getCurrentEpisode: vi.fn(async () => ({
+    id: 1,
+    title: "EP01",
+    theme: "",
+    episode_number: 1,
+    status: "active",
+    created_at: "",
+    archived_at: null,
+    clip_count: 0,
+    favorite_count: 0,
+    export_count: 0,
+    target_platform: "general",
+    canvas_orientation: "landscape",
+  })),
+  getNarrativeRevision: vi.fn(async () => null),
+  getLlmStatus: vi.fn(),
+  getSettings: vi.fn(),
+  listAssetSafety: vi.fn(),
+  listClipDimensions: vi.fn(),
+  listClips: vi.fn(),
+  listSelectSegments: vi.fn(),
+  listShotStacks: vi.fn(),
+  listOcrHits: vi.fn(async (): Promise<OcrTextHitStub[]> => []),
+  rateClip: vi.fn(),
+  searchClips: vi.fn(),
+  searchTranscripts: vi.fn(),
+  setClipTimeStage: vi.fn(),
+  setShotStackUserState: vi.fn(),
+}));
+
+vi.mock("./api", () => apiMocks);
+vi.mock("./PlayerOverlay", () => ({
+  formatTimecode: () => "00:00:00.000",
+  PlayerOverlay: () => null,
+}));
+vi.mock("./Storyboard", () => ({ StoryboardView: () => null }));
 
 import {
   SelectPage,
@@ -11,10 +79,12 @@ import {
   applyRatingAction,
   buildShotStackWallItems,
   filterClipsByDimension,
+  filterClipsByOrientation,
   filterSelectionClips,
   filmGridColumnCount,
   filterSearchHitsToVisibleClips,
   isFilmGridShortcutTarget,
+  isPortraitClip,
   matchPercentage,
   nextShotStackClipId,
   ratingActionForKey,
@@ -26,6 +96,8 @@ import type {
   BestTakeBreakdown,
   ClipDimension,
   ClipListItem,
+  OcrTextHit,
+  SelectSegment,
   ShotStack,
 } from "./api";
 
@@ -187,6 +259,28 @@ describe("selection workbench", () => {
       .toHaveLength(2);
   });
 
+  it("determines portrait orientation from rotation XOR decoded aspect ratio", () => {
+    // 解码尺寸是 landscape(1920x1080,来自 clip() 默认值);旋转 90/270 → 竖屏。
+    expect(isPortraitClip({ ...clip(1), rotation: 90, width: 1920, height: 1080 })).toBe(true);
+    expect(isPortraitClip({ ...clip(1), rotation: 270, width: 1920, height: 1080 })).toBe(true);
+    expect(isPortraitClip({ ...clip(1), rotation: 0, width: 1920, height: 1080 })).toBe(false);
+    expect(isPortraitClip({ ...clip(1), rotation: null, width: 1920, height: 1080 })).toBe(false);
+    // 解码尺寸本身已是竖屏(如手机竖握无 side_data 的罕见情况);无旋转仍是竖屏。
+    expect(isPortraitClip({ ...clip(1), rotation: null, width: 1080, height: 1920 })).toBe(true);
+    // 已是竖屏尺寸,又转 90/270 → 变回横屏。
+    expect(isPortraitClip({ ...clip(1), rotation: 90, width: 1080, height: 1920 })).toBe(false);
+  });
+
+  it("filters the clip list by orientation toggle", () => {
+    const landscape = clip(1);
+    const portrait = { ...clip(2), rotation: 90 };
+    const clips = [landscape, portrait];
+
+    expect(filterClipsByOrientation(clips, "all")).toHaveLength(2);
+    expect(filterClipsByOrientation(clips, "portrait")).toEqual([portrait]);
+    expect(filterClipsByOrientation(clips, "landscape")).toEqual([landscape]);
+  });
+
   it("removes raw search hits that are hidden by the active combined filters", () => {
     const visibleIds = new Set([2]);
     const hits = [
@@ -344,6 +438,7 @@ describe("selection workbench", () => {
 
     expect(markup).toContain("排除普通疑似废片");
     expect(markup).toContain("只看 Stack 首选");
+    expect(markup).toContain("竖屏");
     expect(markup).toContain("展开 Stack");
     expect(markup).toContain("替换首选");
     expect(markup).toContain("八维筛选");
@@ -373,5 +468,277 @@ describe("expanded candidate row virtualization", () => {
     expect(filmRowAtOffset(819, 1)).toBe(1);
     expect(filmRowAtOffset(820, 1)).toBe(2);
     expect(filmRowAtOffset(900, null)).toBe(3);
+  });
+});
+
+describe("select segment delete undo toast", () => {
+  const readyClip: ClipListItem = clip(7);
+  const segment: SelectSegment = {
+    id: 42,
+    clip_id: 7,
+    in_ticks: 0,
+    out_ticks: 5_000,
+    tb_num: 1,
+    tb_den: 1_000,
+  };
+
+  const mounted: Array<{ container: HTMLDivElement; root: ReturnType<typeof createRoot> }> = [];
+
+  afterEach(async () => {
+    while (mounted.length > 0) {
+      const current = mounted.pop();
+      if (!current) continue;
+      await act(async () => current.root.unmount());
+      current.container.remove();
+    }
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function mountSelectPageWithOneSegment() {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([readyClip]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([segment]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(<SelectPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const deleteButton = container.querySelector(
+      'button[aria-label="删除精选段 1"]',
+    ) as HTMLButtonElement | null;
+    expect(deleteButton).toBeTruthy();
+    return { container, deleteButton: deleteButton! };
+  }
+
+  function findUndoButton(container: HTMLDivElement) {
+    return Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "撤销",
+    );
+  }
+
+  it("shows a 撤销 button after delete and restores the segment on click", async () => {
+    vi.useFakeTimers();
+    apiMocks.deleteSelectSegment.mockResolvedValue(undefined);
+    apiMocks.restoreSelectSegment.mockResolvedValue(undefined);
+    const { container, deleteButton } = await mountSelectPageWithOneSegment();
+
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    await act(async () => {
+      deleteButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.deleteSelectSegment).toHaveBeenCalledWith(segment.id);
+    expect(container.textContent).toContain("已删除精选段，撤销");
+    const undoButton = findUndoButton(container);
+    expect(undoButton).toBeTruthy();
+
+    apiMocks.listSelectSegments.mockResolvedValue([segment]);
+    await act(async () => {
+      undoButton!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.restoreSelectSegment).toHaveBeenCalledWith(segment.id);
+    expect(findUndoButton(container)).toBeFalsy();
+  });
+
+  it("hides the 撤销 button 10 seconds after delete without restoring", async () => {
+    vi.useFakeTimers();
+    apiMocks.deleteSelectSegment.mockResolvedValue(undefined);
+    const { container, deleteButton } = await mountSelectPageWithOneSegment();
+
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    await act(async () => {
+      deleteButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(findUndoButton(container)).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(findUndoButton(container)).toBeFalsy();
+    expect(apiMocks.restoreSelectSegment).not.toHaveBeenCalled();
+  });
+});
+
+describe("R5 Task 5: OCR badge on the selection inspector", () => {
+  const readyClip: ClipListItem = clip(9);
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows 画面文字 with the first two recognized texts when listOcrHits returns hits", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([readyClip]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    const hits: OcrTextHit[] = [
+      { frame_tick: 0, tb_num: 1, tb_den: 1000, text: "旅剪", confidence: 0.9, bbox: [0, 0, 0.2, 0.2] },
+      { frame_tick: 1000, tb_num: 1, tb_den: 1000, text: "TripCut", confidence: 0.8, bbox: [0, 0, 0.2, 0.2] },
+      { frame_tick: 2000, tb_num: 1, tb_den: 1000, text: "第三条", confidence: 0.7, bbox: [0, 0, 0.2, 0.2] },
+    ];
+    apiMocks.listOcrHits.mockResolvedValue(hits);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<SelectPage />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiMocks.listOcrHits).toHaveBeenCalledWith(readyClip.id);
+      const badge = container.querySelector(".ocr-badge");
+      expect(badge).toBeTruthy();
+      expect(badge?.textContent).toContain("画面文字：旅剪、TripCut");
+      expect(badge?.textContent).not.toContain("第三条");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("renders no badge when the clip has no OCR hits", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([readyClip]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    apiMocks.listOcrHits.mockResolvedValue([]);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<SelectPage />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.querySelector(".ocr-badge")).toBeFalsy();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+describe("R6 终审 P1-8: tripcut:select-clip must clear a stale viewingEpisode", () => {
+  // `getCurrentEpisode` mock（文件顶部）返回 id: 1 —— 这就是"当前集"。
+  const currentEpisodeClip = clip(1);
+  const historicalEpisodeClip: ClipListItem = { ...clip(2), episode_id: 2 };
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function mountWithTwoEpisodes() {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([currentEpisodeClip, historicalEpisodeClip]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    apiMocks.listOcrHits.mockResolvedValue([]);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<SelectPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 切到历史集只读视图(EpisodePanel 点历史集时发的事件)。
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("tripcut:view-episode", { detail: { id: 2, title: "EP02" } }),
+      );
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("正在只读查看已封存集「EP02」");
+
+    return { container, root };
+  }
+
+  it("clears viewingEpisode and selects the target when it belongs to the current episode", async () => {
+    const { container, root } = await mountWithTwoEpisodes();
+    try {
+      // 跳转目标(clip 1)属于当前集,不属于正在只读查看的 EP02。
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("tripcut:select-clip", { detail: 1 }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain("正在只读查看已封存集");
+      const grid = container.querySelector('[role="grid"]');
+      expect(grid?.getAttribute("aria-activedescendant")).toBe("select-clip-1");
+      expect(document.getElementById("select-clip-1")).toBeTruthy();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("keeps the historical read-only view when the jump target belongs to that historical episode", async () => {
+    const { container, root } = await mountWithTwoEpisodes();
+    try {
+      // 跳转目标(clip 2)本来就属于正在查看的 EP02——这条路径此前就应该正常工作。
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("tripcut:select-clip", { detail: 2 }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain("正在只读查看已封存集「EP02」");
+      const grid = container.querySelector('[role="grid"]');
+      expect(grid?.getAttribute("aria-activedescendant")).toBe("select-clip-2");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });

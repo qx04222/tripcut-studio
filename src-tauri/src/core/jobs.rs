@@ -13,6 +13,13 @@ use super::error::{CoreError, Result};
 
 pub const MAX_ATTEMPTS: i64 = 3;
 
+/// R6 Task 4:交付/批量分析完成通知出口的类型——`(标题, 正文)`,返回是否
+/// 投递成功。调用点(`notify_on_completion`)把它包进 `std::thread::spawn`
+/// 做成 fire-and-forget:它是在持有数据库连接和任务租约的 `spawn_blocking`
+/// worker 线程上被触发的,不能同步等一个可能很慢的系统通知服务占住 worker
+/// 槽位。
+type NotificationFn = dyn Fn(&str, &str) -> bool + Send + Sync;
+
 // M5 benchmark reconciliation showed that four concurrent workers move the
 // 500-item workload from roughly 100 minutes into the 10-minute range.
 pub const WORKER_COUNT: usize = super::settings::DEFAULT_WORKER_COUNT;
@@ -21,6 +28,9 @@ const BUSY_RETRY_LIMIT: usize = 3;
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const LEASE_SECONDS: i64 = 30;
 const LEASE_HEARTBEAT: Duration = Duration::from_secs(10);
+const MEMORY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const SIDECAR_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const SIDECAR_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
 
 type CancellationMap = HashMap<(String, i64), Arc<AtomicBool>>;
 
@@ -168,19 +178,84 @@ pub fn get(connection: &Connection, id: i64) -> Result<Job> {
         .map_err(CoreError::from)
 }
 
+/// 资源类:同一类内的并发受许可约束(P5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceClass {
+    /// 解码密集:占用视频解码器与大块像素缓冲。
+    Decode,
+    /// 大模型推理:占用统一内存里的权重。
+    HeavyModel,
+    /// 其余任务:只受总 worker 数约束。
+    Light,
+}
+
+pub(crate) fn resource_class(kind: &str) -> ResourceClass {
+    match kind {
+        "thumbnail" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze" => {
+            ResourceClass::Decode
+        }
+        "clip_embed" | "classify_dims" | "transcribe" => ResourceClass::HeavyModel,
+        _ => ResourceClass::Light,
+    }
+}
+
+/// SQL 字面量:与 `resource_class` 的 Decode 分支必须逐字一致。
+pub(crate) const DECODE_KINDS_SQL: &str =
+    "('thumbnail','strip','analyze_l1','analyze_motion','proxy','music_analyze')";
+/// SQL 字面量:与 `resource_class` 的 HeavyModel 分支必须逐字一致。
+pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcribe')";
+
+/// 大模型类同时只允许一个任务在跑。
+const HEAVY_MODEL_LIMIT: usize = 1;
+/// 解码许可数的兜底值(未经 `with_decode_limit` 接线时使用)。
+const DEFAULT_DECODE_LIMIT: usize = 4;
+/// 内存压力恢复阈值:暂停后必须回到该百分比才恢复认领(滞回)。
+const RESUME_ABOVE_PERCENT: u32 = 25;
+
+/// 内存压力暂停的滞回判定,纯函数以便单测。
+pub(crate) fn next_pause_state(paused: bool, percent: u32) -> bool {
+    if paused {
+        percent < RESUME_ABOVE_PERCENT
+    } else {
+        percent < super::memory_profile::PAUSE_BELOW_PERCENT
+    }
+}
+
 pub fn claim_next(connection: &mut Connection) -> Result<Option<Job>> {
     claim_next_for_owner(connection, "legacy-worker")
 }
 
 pub fn claim_next_for_owner(connection: &mut Connection, owner_id: &str) -> Result<Option<Job>> {
+    claim_next_for_owner_excluding(connection, owner_id, false, false)
+}
+
+/// 认领下一个任务,并排除已饱和的资源类;解码类另外按 `clip_id` 串行——
+/// 同一素材上已有解码任务在跑时,它的其它解码任务不可认领。
+pub fn claim_next_for_owner_excluding(
+    connection: &mut Connection,
+    owner_id: &str,
+    exclude_decode: bool,
+    exclude_heavy: bool,
+) -> Result<Option<Job>> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let id = transaction
-        .query_row(
-            "SELECT id FROM jobs
+    let select_sql = format!(
+        "SELECT id FROM jobs
              WHERE status = 'pending'
                AND cancel_requested = 0
                AND COALESCE(next_attempt_at, created_at)
                    <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               AND (?1 = 0 OR kind NOT IN {DECODE_KINDS_SQL})
+               AND (?2 = 0 OR kind NOT IN {HEAVY_KINDS_SQL})
+               AND NOT (
+                     kind IN {DECODE_KINDS_SQL}
+                     AND json_valid(jobs.payload)
+                     AND EXISTS (
+                       SELECT 1 FROM jobs running_decode
+                       WHERE running_decode.status = 'running'
+                         AND running_decode.kind IN {DECODE_KINDS_SQL}
+                         AND json_valid(running_decode.payload)
+                         AND json_extract(running_decode.payload, '$.clip_id')
+                             = json_extract(jobs.payload, '$.clip_id')))
              ORDER BY CASE kind
                         WHEN 'export_package' THEN 100
                         WHEN 'import_probe' THEN 60
@@ -188,6 +263,7 @@ pub fn claim_next_for_owner(connection: &mut Connection, owner_id: &str) -> Resu
                         WHEN 'align_clocks' THEN 56
                         WHEN 'chapterize' THEN 55
                         WHEN 'thumbnail' THEN 40
+                        WHEN 'strip' THEN 39
                         WHEN 'analyze_l1' THEN 30
                         WHEN 'analyze_motion' THEN 28
                         WHEN 'clip_embed' THEN 25
@@ -200,8 +276,12 @@ pub fn claim_next_for_owner(connection: &mut Connection, owner_id: &str) -> Resu
                         ELSE 0
                       END DESC,
                       created_at, id
-             LIMIT 1",
-            [],
+             LIMIT 1"
+    );
+    let id = transaction
+        .query_row(
+            &select_sql,
+            params![i64::from(exclude_decode), i64::from(exclude_heavy)],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
@@ -360,8 +440,12 @@ pub fn retry_or_block(connection: &mut Connection, id: i64, expected_attempt: i6
     } else {
         let delay_seconds = 1_i64 << (attempt.saturating_sub(1) as u32);
         let modifier = format!("+{delay_seconds} seconds");
+        // `UPDATE OR IGNORE`: migration 0036 的部分唯一索引会在这条 failed 行改回
+        // pending 时与一条同 (kind,payload_hash) 的既有 pending/running 行相撞
+        // (ocr.rs:396 允许失败后再排一条)。撞上时应静默丢弃这次重试,而不是让
+        // 整条命令报 UNIQUE constraint failed 崩出去。
         transaction.execute(
-            "UPDATE jobs
+            "UPDATE OR IGNORE jobs
              SET status = 'pending', blocked_summary = NULL,
                  owner_id = NULL, lease_expires_at = NULL,
                  cancel_requested = 0, finished_at = NULL,
@@ -389,8 +473,12 @@ pub fn recover_expired(connection: &mut Connection) -> Result<usize> {
                 OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
         [],
     )?;
+    // `UPDATE OR IGNORE`: 这是一条批量 UPDATE,覆盖本轮所有到期租约。若其中一条
+    // (通常是 ocr_scan)撞上 migration 0036 的部分唯一索引,SQLite 对
+    // `OR IGNORE` 的处理是只丢弃那一行、继续处理批次里的其它行,而不是让整条
+    // UPDATE 报 UNIQUE constraint failed 并回滚本轮全部回收。
     let recovered = transaction.execute(
-        "UPDATE jobs
+        "UPDATE OR IGNORE jobs
          SET status = 'pending', blocked_summary = NULL,
              owner_id = NULL, lease_expires_at = NULL,
              next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -400,8 +488,23 @@ pub fn recover_expired(connection: &mut Connection) -> Result<usize> {
                 OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
         [],
     )?;
+    // 被 OR IGNORE 跳过的行仍然停在 running 状态、租约已过期、owner 是旧 owner——
+    // 它们既不会被再次认领(owner 校验会挡住),也不会悄悄提升成撞车的 pending。
+    // 把它们标记为 failed,让它们退出"卡死的 running"状态,便于重试/告警路径处理,
+    // 而不是无限期占用一个已经不存在的 owner。
+    let dropped = transaction.execute(
+        "UPDATE jobs SET status = 'failed',
+             blocked_summary = '租约过期回收时与既有任务冲突(kind+payload_hash 重复)',
+             owner_id = NULL, lease_expires_at = NULL,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE status = 'running' AND cancel_requested = 0
+           AND (lease_expires_at IS NULL
+                OR lease_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        [],
+    )?;
     transaction.commit()?;
-    Ok(recovered)
+    Ok(recovered + dropped)
 }
 
 pub fn recover_running(connection: &mut Connection) -> Result<usize> {
@@ -664,12 +767,30 @@ fn with_busy_retry<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
     }
 }
 
-#[derive(Default)]
 struct WorkerPoolState {
     active_regular_jobs: usize,
     export_pending: bool,
     export_active: bool,
     maintenance_active: bool,
+    active_decode: usize,
+    active_heavy: usize,
+    decode_limit: usize,
+    paused_for_memory: bool,
+}
+
+impl Default for WorkerPoolState {
+    fn default() -> Self {
+        Self {
+            active_regular_jobs: 0,
+            export_pending: false,
+            export_active: false,
+            maintenance_active: false,
+            active_decode: 0,
+            active_heavy: 0,
+            decode_limit: DEFAULT_DECODE_LIMIT,
+            paused_for_memory: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -677,6 +798,14 @@ struct WorkerPoolCoordinator {
     claim_lock: Mutex<()>,
     state: Mutex<WorkerPoolState>,
     state_changed: Condvar,
+    /// R6 Task 4:睡眠唤醒后用来把还在 `idle_delay` 里睡觉的 worker 提前叫醒,
+    /// 别等满 250ms 才发现刚恢复的过期租约。`notify_waiters` 对没人在等的
+    /// 情况是无操作,所以清醒时调用也无害。
+    wake: tokio::sync::Notify,
+    /// R6 Task 4:交付/批量分析完成的通知出口,由 Tauri 层在启动时接线一次
+    /// (`JobRunner::with_notifier`)。测试环境不设置时保持 `None`,
+    /// `run_one_with_executor` 里的完成检测直接跳过,不产生任何副作用。
+    notifier: OnceLock<Arc<NotificationFn>>,
 }
 
 impl WorkerPoolCoordinator {
@@ -706,9 +835,22 @@ impl WorkerPoolCoordinator {
                 .wait(state)
                 .unwrap_or_else(|error| error.into_inner());
         }
+        // 内存压力暂停期间只挡解码与大模型两类;Light 类(export_package、waveform 等)
+        // 照常认领——导出不吃解码器也不吃模型权重,把它一起挡住会让内存一紧就无声卡死。
+        let (exclude_decode, exclude_heavy) = if state.paused_for_memory {
+            (true, true)
+        } else {
+            (
+                state.active_decode >= state.decode_limit,
+                state.active_heavy >= HEAVY_MODEL_LIMIT,
+            )
+        };
         drop(state);
 
-        let Some(job) = with_busy_retry(|| claim_next_for_owner(connection, owner_id))? else {
+        let Some(job) = with_busy_retry(|| {
+            claim_next_for_owner_excluding(connection, owner_id, exclude_decode, exclude_heavy)
+        })?
+        else {
             return Ok(None);
         };
 
@@ -716,6 +858,12 @@ impl WorkerPoolCoordinator {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let class = resource_class(&job.kind);
+        match class {
+            ResourceClass::Decode => state.active_decode += 1,
+            ResourceClass::HeavyModel => state.active_heavy += 1,
+            ResourceClass::Light => {}
+        }
         let permit_kind = if job.kind == "export_package" {
             state.export_pending = true;
             while state.active_regular_jobs > 0 {
@@ -738,6 +886,7 @@ impl WorkerPoolCoordinator {
             _permit: ExecutionPermit {
                 coordinator: self.clone(),
                 kind: permit_kind,
+                class,
             },
         }))
     }
@@ -802,6 +951,65 @@ impl WorkerControl {
         result
     }
 
+    /// 解码许可数(由内存档位决定),启动接线时设置一次。
+    pub fn set_decode_limit(&self, limit: usize) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.decode_limit = limit.max(1);
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+    }
+
+    /// 当前在跑的解码类任务数。
+    pub fn active_decode(&self) -> usize {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active_decode
+    }
+
+    /// 解码类是否已经吃满许可——前端「等待解码许可」的判据。
+    pub fn decode_saturated(&self) -> bool {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active_decode >= state.decode_limit
+    }
+
+    /// R6 Task 4:睡眠唤醒后叫醒还在 idle 轮询里睡觉的 worker,让它立刻重新
+    /// 认领一次而不是等满 `idle_delay`。谁都没在等时是无操作。
+    pub fn wake_worker(&self) {
+        self.coordinator.wake.notify_waiters();
+    }
+
+    /// 当前是否因内存压力暂停认领。
+    pub fn pause_state(&self) -> bool {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.paused_for_memory
+    }
+
+    fn set_paused_for_memory(&self, paused: bool) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.paused_for_memory = paused;
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+    }
+
     fn finish_maintenance(&self) {
         let mut state = self
             .coordinator
@@ -823,6 +1031,7 @@ enum PermitKind {
 struct ExecutionPermit {
     coordinator: Arc<WorkerPoolCoordinator>,
     kind: PermitKind,
+    class: ResourceClass,
 }
 
 impl Drop for ExecutionPermit {
@@ -838,6 +1047,17 @@ impl Drop for ExecutionPermit {
                 state.active_regular_jobs = state.active_regular_jobs.saturating_sub(1);
             }
             PermitKind::Export => state.export_active = false,
+        }
+        match self.class {
+            ResourceClass::Decode => {
+                debug_assert!(state.active_decode > 0);
+                state.active_decode = state.active_decode.saturating_sub(1);
+            }
+            ResourceClass::HeavyModel => {
+                debug_assert!(state.active_heavy > 0);
+                state.active_heavy = state.active_heavy.saturating_sub(1);
+            }
+            ResourceClass::Light => {}
         }
         drop(state);
         self.coordinator.state_changed.notify_all();
@@ -922,9 +1142,47 @@ impl JobRunner {
         WorkerControl::new(self.coordinator.clone())
     }
 
+    /// 按内存档位接线解码类许可数(`MemoryProfile::decode_permits`)。
+    pub fn with_decode_limit(self, limit: usize) -> Self {
+        self.control().set_decode_limit(limit);
+        self
+    }
+
+    /// R6 Task 4:接一个通知出口——交付完成、批量分析完成时,worker 会带着
+    /// (标题, 正文) 调它。Tauri 层接的是绑定了 `AppHandle` 的
+    /// `notify::post` 闭包;测试/`run_one` 一次性入口不接,`OnceLock` 保持
+    /// 空,完成检测直接跳过。只能接一次——第二次调用是无操作,这与「进程
+    /// 生命周期内只有一套 worker 池」的前提一致。
+    pub fn with_notifier(self, notifier: Arc<NotificationFn>) -> Self {
+        let _ = self.coordinator.notifier.set(notifier);
+        self
+    }
+
     pub fn run_one(db_path: &Path) -> Result<bool> {
         let coordinator = Arc::new(WorkerPoolCoordinator::default());
         Self::run_one_with_coordinator(db_path, &coordinator)
+    }
+
+    /// F-R1-9:非 tokio 调用方(perf 装置)按 self 持有的**同一个**协调器认领
+    /// 并执行一步——与 `run()` 里每个 worker 调的是同一条路径
+    /// (`run_one_with_owner`),因此吃同一份解码/大模型许可与内存暂停状态。
+    /// 不同于 `run_one()`:后者每次调用都新建一个空协调器,许可与暂停状态
+    /// 从不跨调用累积,等于完全绕开了协调器——那正是 perf 装置此前的 bug。
+    ///
+    /// 把这一步真正认领并跑完的 job kind 带出来——
+    /// 不需要调用方再另开一条连接去猜"最近完成的是哪条"(`ORDER BY
+    /// finished_at DESC LIMIT 1`那条路径在多个 worker 几毫秒内先后收尾时
+    /// 会被撞车重复读到同一行,把 strip/ocr_scan 这类几毫秒就跑完的任务
+    /// 计成两次以上)。`Ok(None)` 表示这一步没能认领到任何 job。
+    pub fn run_one_step_with_kind(&self) -> Result<Option<String>> {
+        Self::run_one_with_executor_kind(&self.db_path, &self.coordinator, &self.owner_id, Self::execute_claimed)
+    }
+
+    /// F-R1-9:内存压力单拍轮询,供不跑 tokio 事件循环的调用方使用——与
+    /// `watch_memory_pressure` 的 5 秒循环调的是同一个 `poll_memory_pressure_once`,
+    /// 只是由调用方自己决定节奏(perf 装置在自己的采样循环里敲拍)。
+    pub fn poll_memory_pressure(&self) {
+        poll_memory_pressure_once(&self.coordinator);
     }
 
     fn run_one_with_coordinator(
@@ -939,17 +1197,91 @@ impl JobRunner {
         coordinator: &Arc<WorkerPoolCoordinator>,
         owner_id: &str,
     ) -> Result<bool> {
+        Self::run_one_with_executor(db_path, coordinator, owner_id, Self::execute_claimed)
+    }
+
+    /// 认领一步 + 执行一步。执行部分是参数,测试用假执行器(睡一会儿再 mark_done)
+    /// 就能在不跑真解码的前提下观察许可上限。
+    fn run_one_with_executor(
+        db_path: &Path,
+        coordinator: &Arc<WorkerPoolCoordinator>,
+        owner_id: &str,
+        execute: impl FnOnce(&Path, &mut Connection, &Job) -> Result<()>,
+    ) -> Result<bool> {
+        Self::run_one_with_executor_kind(db_path, coordinator, owner_id, execute).map(|kind| kind.is_some())
+    }
+
+    /// 同 `run_one_with_executor`,多返回一份"认领到的是哪个 kind"——
+    /// `run_one_step_with_kind` 靠它把 kind 直接带给调用方,不用再另开
+    /// 连接去猜。
+    fn run_one_with_executor_kind(
+        db_path: &Path,
+        coordinator: &Arc<WorkerPoolCoordinator>,
+        owner_id: &str,
+        execute: impl FnOnce(&Path, &mut Connection, &Job) -> Result<()>,
+    ) -> Result<Option<String>> {
         // The connection is created inside the blocking worker iteration and is
         // never shared with another worker or moved across an execution boundary.
         let mut connection = db::open_project(db_path)?;
         recover_expired(&mut connection)?;
         let Some(claimed) = coordinator.claim_for_owner(&mut connection, owner_id)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let _cancellation = CancellationRegistration::register(&connection, claimed.job.id)?;
         let _lease = LeaseHeartbeat::start(db_path, &claimed.job, owner_id);
-        Self::execute_claimed(db_path, &mut connection, &claimed.job)?;
-        Ok(true)
+        let kind = claimed.job.kind.clone();
+        execute(db_path, &mut connection, &claimed.job)?;
+        Self::notify_on_completion(coordinator, &connection, &claimed.job);
+        Ok(Some(kind))
+    }
+
+    /// R6 Task 4:`execute()` 落地之后重新读一次这条 job——交付包成功、或
+    /// 某个导入批次的分析队列刚好排空,就把 (标题, 正文) 递给接线好的通知
+    /// 出口。没接通知出口(测试、`run_one` 一次性入口)时提前退出,不碰库。
+    /// 检测函数本身返回 `Err` 不会拖垮这次成功的任务执行——只记日志。
+    ///
+    /// 投递本身用 `std::thread::spawn` 做成 fire-and-forget:这里是在
+    /// `run_one_with_executor` 内部,`connection`(数据库连接)和调用方持有
+    /// 的任务租约都还活着,决不能在这条 worker 线程上同步等一个可能很慢的
+    /// 系统通知服务——那会把这个 worker 槽白占住,直到通知服务响应。
+    ///
+    /// 批量分析批次的「已通知」去重标记只在 `notifier` 真的返回成功之后才
+    /// 落(`import::mark_batch_analysis_notified`);在那之前只是「检测到刚
+    /// 排空」,还没有确认送达。
+    fn notify_on_completion(coordinator: &Arc<WorkerPoolCoordinator>, connection: &Connection, job: &Job) {
+        let Some(notifier) = coordinator.notifier.get() else {
+            return;
+        };
+        let db_key = connection.path().unwrap_or("<memory>").to_owned();
+        let export_event = match super::deliver::export_completion_notice(connection, job) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, job_id = job.id, "交付完成通知检测失败");
+                None
+            }
+        };
+        if let Some((title, body)) = export_event {
+            let notifier = notifier.clone();
+            std::thread::spawn(move || {
+                notifier(&title, &body);
+            });
+            return;
+        }
+        let batch_event = match super::import::batch_analysis_completion_notice(&db_key, connection, job) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, job_id = job.id, "批量分析完成通知检测失败");
+                None
+            }
+        };
+        if let Some((batch_id, title, body)) = batch_event {
+            let notifier = notifier.clone();
+            std::thread::spawn(move || {
+                if notifier(&title, &body) {
+                    super::import::mark_batch_analysis_notified(&db_key, batch_id);
+                }
+            });
+        }
     }
 
     fn execute_claimed(db_path: &Path, connection: &mut Connection, job: &Job) -> Result<()> {
@@ -1081,10 +1413,23 @@ impl JobRunner {
                     }
                 }
             }
-            "thumbnail" | "waveform" | "proxy" => {
+            "music_analyze" => {
+                if let Err(error) = super::music::run_music_analyze(connection, job) {
+                    fail_or_retry(connection, job, &error.to_string())?;
+                }
+            }
+            "thumbnail" | "strip" | "waveform" | "proxy" => {
                 match super::artifacts::run_artifact_job(connection, job, &cache_root) {
                     Ok(()) if job.kind == "waveform" => {
                         enqueue_dimensions_after(connection, job, &cache_root);
+                    }
+                    // R6 Task 7d/F-R1-8:封面(thumbnail)先行,胶片条(strip)
+                    // 随后单独跑。OCR 是在胶片条格子上裁切的,只有 strip 落
+                    // 地之后才有东西可扫,所以触发点从 thumbnail 挪到 strip。
+                    Ok(()) if job.kind == "strip" => {
+                        if let Err(error) = super::ocr::enqueue_after_strip(connection, job, &cache_root) {
+                            tracing::warn!(clip_dependency = %job.kind, %error, "could not enqueue ocr scan");
+                        }
                     }
                     Ok(()) => {}
                     Err(error) => {
@@ -1092,6 +1437,17 @@ impl JobRunner {
                     }
                 }
             }
+            "ocr_scan" => match super::ocr::run_ocr_scan(connection, job, &cache_root) {
+                Ok(()) => {}
+                Err(error) => {
+                    // 工具没装是确定性错误：直接 blocked，不烧三次重试。
+                    if super::ocr::is_missing_tool_error(&error) {
+                        mark_blocked_deterministic(connection, job.id, job.attempt, &error.to_string())?;
+                    } else {
+                        fail_or_retry(connection, job, &error.to_string())?;
+                    }
+                }
+            },
             _ => {
                 let summary = format!("unsupported job kind: {}", job.kind);
                 fail_or_retry(
@@ -1149,11 +1505,62 @@ impl JobRunner {
                 }
                 Err(error) => tracing::error!(worker_id, %error, "job worker task panicked"),
             }
-            tokio::time::sleep(idle_delay).await;
+            // R6 Task 4:睡眠唤醒调 `WorkerControl::wake_worker` 时提前结束这次
+            // idle 等待,不用干等到 `idle_delay` 走完才发现刚恢复的过期租约。
+            tokio::select! {
+                () = tokio::time::sleep(idle_delay) => {}
+                () = coordinator.wake.notified() => {}
+            }
+        }
+    }
+
+    /// 每 30 秒检查一次:队列里是否还有排队/在跑的嵌入/分类任务;有则 CLIP
+    /// 子进程需要保留("keep"),否则可在空闲超过阈值后被 `sidecar::unload_if_idle` 卸载。
+    async fn watch_sidecar_idle(db_path: PathBuf) {
+        loop {
+            tokio::time::sleep(SIDECAR_IDLE_POLL_INTERVAL).await;
+            let iteration_path = db_path.clone();
+            let keep = tokio::task::spawn_blocking(move || -> Result<bool> {
+                let connection = db::open_project(&iteration_path)?;
+                embedding_work_pending(&connection)
+            })
+            .await;
+            let keep = match keep {
+                Ok(Ok(keep)) => keep,
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "sidecar idle check failed to read job queue");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "sidecar idle check task panicked");
+                    continue;
+                }
+            };
+            let unloaded =
+                tokio::task::spawn_blocking(move || super::sidecar::unload_if_idle(SIDECAR_IDLE_THRESHOLD, keep))
+                    .await
+                    .unwrap_or(false);
+            if unloaded {
+                tracing::info!("CLIP sidecar 已因空闲超过阈值被卸载");
+            }
+        }
+    }
+
+    /// 每 5 秒探一次可用内存,按滞回(<15% 暂停,≥25% 恢复)切换认领开关。
+    async fn watch_memory_pressure(coordinator: Arc<WorkerPoolCoordinator>) {
+        loop {
+            tokio::time::sleep(MEMORY_POLL_INTERVAL).await;
+            poll_memory_pressure_once(&coordinator);
         }
     }
 
     pub async fn run(self) {
+        // 两个轮询任务的生命周期挂在这个守卫上:run() 正常返回、被 abort 掉、
+        // 或者 future 被丢弃时,守卫析构都会把它们 abort,不留后台任务。
+        let _pollers = PollerHandles::new(vec![
+            tokio::spawn(Self::watch_memory_pressure(self.coordinator.clone())).abort_handle(),
+            tokio::spawn(Self::watch_sidecar_idle(self.db_path.clone())).abort_handle(),
+        ]);
         let mut workers = Vec::with_capacity(self.worker_count);
         for worker_id in 0..self.worker_count {
             workers.push(tokio::spawn(Self::run_worker(
@@ -1171,6 +1578,57 @@ impl JobRunner {
             }
         }
     }
+}
+
+/// 后台轮询任务的句柄:析构即 abort。`JobRunner::run` 把它作为局部变量持有,
+/// 所以 run() 无论怎样离开(返回、被取消、panic)轮询任务都不会泄漏。
+struct PollerHandles {
+    handles: Vec<tokio::task::AbortHandle>,
+}
+
+impl PollerHandles {
+    fn new(handles: Vec<tokio::task::AbortHandle>) -> Self {
+        Self { handles }
+    }
+}
+
+impl Drop for PollerHandles {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+/// 单次内存压力采样:读当前暂停态、探可用内存、按滞回决定是否切换。
+/// 从 5 秒循环里抽出来,好让端到端测试用 `TRIPCUT_MEMORY_PRESSURE_FILE` 逐拍驱动。
+fn poll_memory_pressure_once(coordinator: &Arc<WorkerPoolCoordinator>) {
+    let control = WorkerControl::new(coordinator.clone());
+    let paused = control.pause_state();
+    let percent = super::memory_profile::available_percent();
+    let next = next_pause_state(paused, percent);
+    if next == paused {
+        return;
+    }
+    control.set_paused_for_memory(next);
+    if next {
+        tracing::warn!(
+            available_percent = percent,
+            "内存可用率过低,暂停认领解码与大模型任务"
+        );
+    } else {
+        tracing::warn!(available_percent = percent, "内存已回落,恢复认领新任务");
+    }
+}
+
+/// 队列里是否还有待跑/在跑的嵌入或八维分类任务("keep"信号的来源)。
+fn embedding_work_pending(connection: &Connection) -> Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running') AND kind IN ('clip_embed','classify_dims')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn enqueue_dimensions_after(connection: &mut Connection, job: &Job, cache_root: &Path) {
@@ -1192,6 +1650,30 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Barrier};
     use std::time::Instant;
+
+    /// 认领 SQL 的优先级 CASE 覆盖的全部 kind,加上 noop——`kinds_sql_literals_agree_with_resource_class`
+    /// 的反向断言就打在这份名单上。
+    const ALL_JOB_KINDS: &[&str] = &[
+        "noop",
+        "export_package",
+        "import_probe",
+        "metadata_backfill",
+        "align_clocks",
+        "chapterize",
+        "full_hash",
+        "thumbnail",
+        "strip",
+        "analyze_l1",
+        "analyze_motion",
+        "clip_embed",
+        "classify_dims",
+        "waveform",
+        "transcribe",
+        "proxy",
+        "similar_cluster",
+        "ocr_scan",
+        "music_analyze",
+    ];
 
     fn run_pool_until_empty(db_path: PathBuf, coordinator: Arc<WorkerPoolCoordinator>) {
         while JobRunner::run_one_with_coordinator(&db_path, &coordinator).unwrap() {}
@@ -1600,6 +2082,43 @@ mod tests {
         assert_eq!(delayed, 1);
     }
 
+    /// 这是 migration 0036 实际会撞上的、完全合法可达的场景:同一 payload_hash
+    /// 的旧行已经 failed(`ocr.rs:396` 允许失败后再排一条 pending),新行仍在
+    /// pending/running。此时对旧的 failed 行调用 `retry_or_block` 会撞上新行,
+    /// 必须静默丢弃这次重试(旧行保持 failed),而不是让命令报
+    /// `UNIQUE constraint failed` 崩出去。
+    #[test]
+    fn retry_or_block_silently_drops_when_colliding_with_an_active_duplicate() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+
+        // 旧行:ocr_scan,已经 failed。
+        let old = enqueue(&mut connection, "ocr_scan", r#"{"clip_id":1}"#, "dup-hash").unwrap();
+        claim_next(&mut connection).unwrap().unwrap();
+        mark_failed(&mut connection, old, 1, "旧行失败").unwrap();
+        assert_eq!(get(&connection, old).unwrap().status, JobStatus::Failed);
+
+        // 新行:旧行失败后按 ocr.rs 的规则被允许排队(同哈希),仍处于 pending。
+        let new_pending =
+            enqueue_idempotent(&mut connection, "ocr_scan", r#"{"clip_id":1}"#, "dup-hash").unwrap();
+        assert_eq!(get(&connection, new_pending).unwrap().status, JobStatus::Pending);
+
+        // 对旧的 failed 行重试:不能报错,只能静默无效(旧行仍是 failed)。
+        let status = retry_or_block(&mut connection, old, 1).unwrap();
+        assert_eq!(
+            status,
+            JobStatus::Pending,
+            "retry_or_block 的返回值描述的是它尝试的目标状态,不代表写入一定生效"
+        );
+        assert_eq!(
+            get(&connection, old).unwrap().status,
+            JobStatus::Failed,
+            "旧行撞上新行的唯一约束时必须保持 failed,不能被静默提升为撞车的 pending"
+        );
+        // 新行完全不受影响。
+        assert_eq!(get(&connection, new_pending).unwrap().status, JobStatus::Pending);
+    }
+
     #[test]
     fn import_probe_timeout_is_retryable_not_deterministic_damage() {
         let timeout = CoreError::Import(
@@ -1866,6 +2385,47 @@ mod tests {
         assert_eq!(third.kind, "proxy");
     }
 
+    /// R6 Task 7d/F-R1-8:三条素材都排了 thumbnail(封面)与 strip(胶片条)。
+    /// 三个封面必须全部先认领完,才轮到任何一条胶片条——用不同 clip_id 避免
+    /// 撞上"同一 clip 的解码类互斥"那条串行规则,单纯看优先级。
+    #[test]
+    fn all_thumbnails_are_claimed_before_any_strip() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        for clip_id in 1..=3 {
+            enqueue(
+                &mut connection,
+                "thumbnail",
+                &format!(r#"{{"clip_id":{clip_id}}}"#),
+                &format!("thumbnail-{clip_id}"),
+            )
+            .unwrap();
+        }
+        // strip 通常是 thumbnail 完成后才动态入队的,但优先级只取决于 kind,
+        // 提前把三条 strip 也摆进队列同样必须排在三条 thumbnail 之后。
+        for clip_id in 1..=3 {
+            enqueue(
+                &mut connection,
+                "strip",
+                &format!(r#"{{"clip_id":{clip_id}}}"#),
+                &format!("strip-{clip_id}"),
+            )
+            .unwrap();
+        }
+
+        let mut claimed_order = Vec::new();
+        for _ in 0..6 {
+            let job = claim_next(&mut connection).unwrap().unwrap();
+            claimed_order.push(job.kind.clone());
+            mark_done(&mut connection, job.id, job.attempt).unwrap();
+        }
+        assert_eq!(
+            claimed_order,
+            vec!["thumbnail", "thumbnail", "thumbnail", "strip", "strip", "strip"],
+            "三条封面必须全部先于任何一条胶片条被认领"
+        );
+    }
+
     #[test]
     fn dimension_classification_is_priority_22_between_embedding_and_waveform() {
         let directory = TestDirectory::new();
@@ -1962,6 +2522,91 @@ mod tests {
         assert_eq!(get(&connection, live).unwrap().status, JobStatus::Running);
     }
 
+    /// migration 0036 在 `(kind, payload_hash)` 上建了一条部分唯一索引:
+    /// `kind='ocr_scan' AND status IN ('pending','running')`。这条不变式本身
+    /// 使得"一条 pending、一条 running,哈希相同"这个具体持久化状态在该索引存续期间
+    /// 无法通过任何写入序列真正达成(任何让第二行也落进该分区的写入都会当场被挡)。
+    /// 为了仍然在真实的 `jobs` 表结构上验证 `recover_expired` 那条批量 UPDATE
+    /// 遇到约束冲突时不拖累整批——而不是伪造一个数据库自己都不允许存在的状态——
+    /// 这里给 `jobs` 表临时加一条等价的 CHECK 约束(同样受 `OR IGNORE` 约束解决算法
+    /// 管辖),只毒化"某条到期 running 任务被改回 pending"这一步,精确复现同一类
+    /// 约束冲突,而不依赖一个自相矛盾的前置状态。
+    #[test]
+    fn recover_expired_does_not_abort_the_whole_batch_on_a_constraint_collision() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+
+        let poisoned = enqueue(&mut connection, "ocr_scan", r#"{"clip_id":1}"#, "poison-hash").unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET status='running', attempt=1, owner_id='old',
+                 lease_expires_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second')
+                 WHERE id=?1",
+                [poisoned],
+            )
+            .unwrap();
+        // 同一批次里还有一条不相关、正常应该被回收的过期任务。
+        let unrelated = enqueue(&mut connection, "noop", "{}", "unrelated-expired").unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET status='running', attempt=1, owner_id='old',
+                 lease_expires_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second')
+                 WHERE id=?1",
+                [unrelated],
+            )
+            .unwrap();
+
+        // 把 jobs 表整体重建成带一条额外 CHECK 约束的版本:
+        // "payload_hash='poison-hash' 的行不能被写成 status='pending'"——
+        // 这精确模拟了 0036 那条唯一索引在真实撞车场景里会做的事(挡下这一行
+        // 变成 pending),同时是 SQLite 文档明确说明 `OR IGNORE` 会遵守的
+        // 约束类别(UNIQUE / NOT NULL / CHECK 都算,唯独不算 FK/触发器)。
+        let create_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(create_sql.trim_end().ends_with(')'));
+        let augmented_sql = format!(
+            "{trimmed}, CHECK (NOT (payload_hash = 'poison-hash' AND status = 'pending')))",
+            trimmed = &create_sql.trim_end()[..create_sql.trim_end().len() - 1]
+        );
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE jobs RENAME TO jobs_old;
+                 {augmented_sql};
+                 INSERT INTO jobs SELECT * FROM jobs_old;
+                 DROP TABLE jobs_old;"
+            ))
+            .unwrap();
+
+        // 不能 panic / 不能返回 Err;冲突只应吞掉那一条,不拖累 unrelated。
+        let recovered = recover_expired(&mut connection).unwrap();
+
+        // 不相关的任务必须仍被正常回收。
+        assert_eq!(
+            get(&connection, unrelated).unwrap().status,
+            JobStatus::Pending,
+            "同批次里不相关的过期任务必须照常被回收,不能被这一条冲突拖累"
+        );
+        // 被毒化的那条不能被静默地"提升"成撞约束的 pending;根据本次修复,
+        // 它应该被第二道扫尾 UPDATE 标记为 failed(退出卡死的 running)。
+        let poisoned_status = get(&connection, poisoned).unwrap().status;
+        assert_ne!(
+            poisoned_status,
+            JobStatus::Pending,
+            "撞约束的过期任务不能被静默提升为 pending"
+        );
+        assert_eq!(
+            poisoned_status,
+            JobStatus::Failed,
+            "撞约束的过期任务应该被标记为 failed,退出卡死的 running,而不是原地不动"
+        );
+        assert_eq!(recovered, 2, "两条过期任务都应计入回收计数(一条 pending,一条 failed)");
+    }
+
     #[test]
     fn import_and_export_failures_share_the_three_attempt_block_rule() {
         for (kind, payload, hash) in [
@@ -2029,5 +2674,731 @@ mod tests {
         release_tx.send(()).unwrap();
         handle.join().unwrap();
         assert!(coordinator.try_begin_claim_for_test().is_some());
+    }
+
+    #[test]
+    fn decode_jobs_for_same_clip_do_not_run_concurrently() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":7}"#, "a").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":7}"#, "b").unwrap();
+        enqueue(&mut connection, "analyze_l1", r#"{"clip_id":8}"#, "c").unwrap();
+
+        let first = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(first.kind, "thumbnail");
+        let second = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(second.payload, r#"{"clip_id":8}"#);
+        assert!(claim_next(&mut connection).unwrap().is_none());
+    }
+
+    #[test]
+    fn saturated_decode_class_is_skipped_but_light_jobs_still_claim() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "proxy", r#"{"clip_id":1}"#, "p").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":2}"#, "w").unwrap();
+
+        let job = claim_next_for_owner_excluding(&mut connection, "t", true, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.kind, "waveform");
+    }
+
+    #[test]
+    fn saturated_heavy_model_class_is_skipped() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "clip_embed", r#"{"clip_id":1}"#, "e").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":2}"#, "w2").unwrap();
+
+        let job = claim_next_for_owner_excluding(&mut connection, "t", false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.kind, "waveform");
+    }
+
+    #[test]
+    fn resource_classes_map_each_job_kind() {
+        assert!(matches!(resource_class("thumbnail"), ResourceClass::Decode));
+        assert!(matches!(resource_class("proxy"), ResourceClass::Decode));
+        assert!(matches!(
+            resource_class("clip_embed"),
+            ResourceClass::HeavyModel
+        ));
+        assert!(matches!(
+            resource_class("transcribe"),
+            ResourceClass::HeavyModel
+        ));
+        assert!(matches!(resource_class("waveform"), ResourceClass::Light));
+        assert!(matches!(
+            resource_class("export_package"),
+            ResourceClass::Light
+        ));
+        assert!(matches!(
+            resource_class("music_analyze"),
+            ResourceClass::Decode
+        ));
+    }
+
+    #[test]
+    fn saturated_decode_class_skips_music_analyze_too() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "music_analyze", r#"{"clip_id":1}"#, "m").unwrap();
+
+        // 内存压力暂停期间(exclude_decode=true),music_analyze 必须像其它 Decode
+        // 类一样被挡下——它是唯一在队列里的任务,所以没有可认领的。
+        let none = claim_next_for_owner_excluding(&mut connection, "t", true, false).unwrap();
+        assert!(
+            none.is_none(),
+            "music_analyze 在解码暂停期间不应被认领,但被认领了: {:?}",
+            none.map(|j| j.kind)
+        );
+
+        // 压力解除后(exclude_decode=false)应能正常认领。
+        let job = claim_next_for_owner_excluding(&mut connection, "t", false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.kind, "music_analyze");
+    }
+
+    #[test]
+    fn memory_pause_uses_hysteresis_between_fifteen_and_twenty_five() {
+        // 未暂停时,只有跌破 15% 才暂停。
+        assert!(!next_pause_state(false, 20));
+        assert!(!next_pause_state(false, 15));
+        assert!(next_pause_state(false, 14));
+        // 已暂停时,必须回到 25% 才恢复。
+        assert!(next_pause_state(true, 16));
+        assert!(next_pause_state(true, 24));
+        assert!(!next_pause_state(true, 25));
+    }
+
+    #[test]
+    fn memory_pause_blocks_decode_and_heavy_but_not_light_jobs() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "paused-d").unwrap();
+        enqueue(&mut connection, "clip_embed", r#"{"clip_id":2}"#, "paused-h").unwrap();
+        let export_id = enqueue(&mut connection, "export_package", "{}", "paused-x").unwrap();
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_paused_for_memory(true);
+        assert!(control.pause_state());
+
+        // Light 类照常认领:导出不吃解码器也不吃模型权重。
+        let claimed = coordinator
+            .claim_for_owner(&mut connection, "paused-owner")
+            .unwrap()
+            .expect("export_package 必须能在内存暂停期间被认领");
+        assert_eq!(claimed.job.id, export_id);
+        assert_eq!(claimed.job.kind, "export_package");
+        mark_done(&mut connection, claimed.job.id, claimed.job.attempt).unwrap();
+        drop(claimed);
+
+        // 解码与大模型两类被挡住:队列里只剩它们,所以认领不到只可能来自暂停。
+        assert!(coordinator
+            .claim_for_owner(&mut connection, "paused-owner")
+            .unwrap()
+            .is_none());
+
+        control.set_paused_for_memory(false);
+        let resumed = coordinator
+            .claim_for_owner(&mut connection, "paused-owner")
+            .unwrap()
+            .expect("解除暂停后解码任务应可认领");
+        assert_eq!(resumed.job.kind, "thumbnail");
+    }
+
+    /// 4 个线程抢同一个 coordinator,假执行器睡 50ms 并在睡前采样 `active_decode`。
+    /// 返回观察到的解码并发峰值。
+    fn observed_decode_peak(decode_limit: usize, job_count: usize) -> usize {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            for index in 0..job_count {
+                // clip_id 各不相同,免得同素材串行规则替许可上限背了锅。
+                enqueue(
+                    &mut connection,
+                    "thumbnail",
+                    &format!(r#"{{"clip_id":{}}}"#, index + 1),
+                    &format!("decode-limit-{decode_limit}-{index}"),
+                )
+                .unwrap();
+            }
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(decode_limit);
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let thread_path = db_path.clone();
+                let thread_coordinator = coordinator.clone();
+                let thread_control = control.clone();
+                let thread_peak = peak.clone();
+                std::thread::spawn(move || loop {
+                    let ran = JobRunner::run_one_with_executor(
+                        &thread_path,
+                        &thread_coordinator,
+                        "limit-probe",
+                        |_db_path, connection, job| {
+                            // 采样点在许可持有期内:permit 在这个闭包返回之后才 drop。
+                            let active = thread_control.active_decode();
+                            thread_peak.fetch_max(active, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(50));
+                            mark_done(connection, job.id, job.attempt)
+                        },
+                    )
+                    .unwrap();
+                    if !ran {
+                        // 认领不到有两种可能:队列空了,或者解码类正好饱和。
+                        // 只有队列真的空了才收工。
+                        let connection = db::open_project(&thread_path).unwrap();
+                        let remaining: i64 = connection
+                            .query_row(
+                                "SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                        if remaining == 0 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let connection = db::open_project(&db_path).unwrap();
+        let done: i64 = connection
+            .query_row("SELECT COUNT(*) FROM jobs WHERE status='done'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(done, job_count as i64, "所有解码任务都应跑完");
+        peak.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn four_threads_never_exceed_a_decode_limit_of_one() {
+        assert_eq!(observed_decode_peak(1, 8), 1);
+    }
+
+    #[test]
+    fn four_threads_reach_but_never_exceed_a_decode_limit_of_two() {
+        let peak = observed_decode_peak(2, 8);
+        // 上限守住,而且并发确实发生了——否则"≤2"可能只是因为从来没并行过。
+        assert!(peak <= 2, "解码并发峰值 {peak} 超过许可上限 2");
+        assert!(peak >= 2, "解码并发峰值只有 {peak},没能证明真的并行了");
+    }
+
+    struct MemoryPressureEnvGuard {
+        previous: Option<OsString>,
+    }
+
+    impl MemoryPressureEnvGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("TRIPCUT_MEMORY_PRESSURE_FILE");
+            std::env::set_var("TRIPCUT_MEMORY_PRESSURE_FILE", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for MemoryPressureEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("TRIPCUT_MEMORY_PRESSURE_FILE", value),
+                None => std::env::remove_var("TRIPCUT_MEMORY_PRESSURE_FILE"),
+            }
+        }
+    }
+
+    /// 写压力文件 → 敲一拍轮询 → 看暂停态。`TRIPCUT_MEMORY_PRESSURE_FILE` 是进程级的,
+    /// `memory_profile` 的测试也会动它,所以每一拍都重新指名自己的文件并允许重试,
+    /// 免得被并行测试的 env 改动打成偶发红。
+    fn tick_until(
+        coordinator: &Arc<WorkerPoolCoordinator>,
+        control: &WorkerControl,
+        pressure_file: &Path,
+        percent: &str,
+        expected_paused: bool,
+    ) -> bool {
+        for _ in 0..40 {
+            std::fs::write(pressure_file, percent).unwrap();
+            std::env::set_var("TRIPCUT_MEMORY_PRESSURE_FILE", pressure_file);
+            poll_memory_pressure_once(coordinator);
+            if control.pause_state() == expected_paused {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[test]
+    fn memory_pressure_file_drives_pause_and_resume_end_to_end() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let pressure_file = db_path.with_file_name("memory-pressure");
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "e2e-decode").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":2}"#, "e2e-light").unwrap();
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        let _env = MemoryPressureEnvGuard::set(&pressure_file);
+
+        // 可用内存 5% —— 一拍轮询后必须暂停。
+        assert!(
+            tick_until(&coordinator, &control, &pressure_file, "5", true),
+            "5% 可用内存应触发暂停"
+        );
+
+        // 暂停期间:解码认领不到,Light 的 waveform 照常。
+        let claimed = coordinator
+            .claim_for_owner(&mut connection, "e2e-owner")
+            .unwrap()
+            .expect("waveform 应能在暂停期间被认领");
+        assert_eq!(claimed.job.kind, "waveform");
+        mark_done(&mut connection, claimed.job.id, claimed.job.attempt).unwrap();
+        drop(claimed);
+        assert!(
+            coordinator
+                .claim_for_owner(&mut connection, "e2e-owner")
+                .unwrap()
+                .is_none(),
+            "暂停期间不该认领到解码任务"
+        );
+
+        // 回到 40% —— 一拍轮询后恢复,解码任务可认领。
+        assert!(
+            tick_until(&coordinator, &control, &pressure_file, "40", false),
+            "40% 可用内存应恢复认领"
+        );
+        let resumed = coordinator
+            .claim_for_owner(&mut connection, "e2e-owner")
+            .unwrap()
+            .expect("恢复后解码任务应可认领");
+        assert_eq!(resumed.job.kind, "thumbnail");
+    }
+
+    /// F-R1-9:证明 perf 装置改走的新入口(`run_one_step_with_kind`/`poll_memory_pressure`)
+    /// 真的是协调器路径——压力生效期间,同一个 `JobRunner` 认不到 decode 类
+    /// (thumbnail),但 Light 类(noop)照常认领并跑完。用 `noop` 而不是
+    /// `waveform` 是为了不需要真实素材文件就能走完整条 `run_one_with_executor`
+    /// 执行路径。
+    #[test]
+    fn run_one_step_honours_memory_pressure_like_the_real_worker_pool() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let pressure_file = db_path.with_file_name("memory-pressure-run-one-step");
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "step-decode").unwrap();
+        enqueue(&mut connection, "noop", "{}", "step-light").unwrap();
+        drop(connection);
+
+        let runner = JobRunner::new(db_path.clone(), 1);
+        let _env = MemoryPressureEnvGuard::set(&pressure_file);
+
+        let mut paused = false;
+        for _ in 0..40 {
+            std::fs::write(&pressure_file, "5").unwrap();
+            std::env::set_var("TRIPCUT_MEMORY_PRESSURE_FILE", &pressure_file);
+            runner.poll_memory_pressure();
+            if runner.control().pause_state() {
+                paused = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(paused, "5% 可用内存应通过 poll_memory_pressure 触发暂停");
+
+        // 暂停期间:run_one_step_with_kind 不该认领 decode(thumbnail),但要认领并跑完 Light(noop)。
+        assert_eq!(
+            runner.run_one_step_with_kind().unwrap().as_deref(),
+            Some("noop"),
+            "暂停期间不该认领到 thumbnail(decode),应精确认到 noop"
+        );
+
+        // 队列里只剩 thumbnail(decode 类),暂停期间 run_one_step_with_kind 应认领不到。
+        assert_eq!(
+            runner.run_one_step_with_kind().unwrap(),
+            None,
+            "暂停期间不该认领到解码任务"
+        );
+    }
+
+    /// R6 Task 7d 修复:perf 装置此前用「全局查一次最近完成的是哪条」来给
+    /// 每一步计时打标签——多个 worker 在几毫秒内先后收尾时,这条查询可能
+    /// 被好几个 worker 同时读到同一行,导致 `strip`/`ocr_scan` 这类几毫秒
+    /// 就跑完的任务被重复计数(实测 500 条素材记出 1027 条 strip 计时样
+    /// 本)。`run_one_step_with_kind` 直接把"这一步真正认领并跑完的是哪个
+    /// job"带出来,不再需要那次容易撞车的重新查询。
+    #[test]
+    fn run_one_step_with_kind_attributes_exactly_the_job_it_claimed() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "noop", "{}", "kind-a").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":1}"#, "kind-b").unwrap();
+        drop(connection);
+
+        // waveform 优先级(20)高于 noop(不在优先级表里,ELSE 0),所以先认领到的是 waveform。
+        let runner = JobRunner::new(db_path.clone(), 1);
+        let first = runner.run_one_step_with_kind().unwrap();
+        assert_eq!(
+            first.as_deref(),
+            Some("waveform"),
+            "第一步应精确认到 waveform——waveform 缺真实素材会执行失败,\
+             但 attempt 计入 blocked/failed 之前 kind 依然要如实带出来"
+        );
+        let second = runner.run_one_step_with_kind().unwrap();
+        assert_eq!(second.as_deref(), Some("noop"), "第二步应精确认到 noop,不是猜出来的");
+        let third = runner.run_one_step_with_kind().unwrap();
+        assert_eq!(third, None, "队列空了应该是 None,不是某条历史 job 的 kind");
+    }
+
+    #[test]
+    fn poller_handles_abort_their_tasks_when_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let never_ends = tokio::spawn(async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3_600)).await;
+                }
+            });
+            let handles = PollerHandles::new(vec![never_ends.abort_handle()]);
+            assert!(!never_ends.is_finished());
+            drop(handles);
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !never_ends.is_finished() {
+                assert!(Instant::now() < deadline, "轮询任务在 1s 内没有被终止");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(never_ends.is_finished());
+        });
+    }
+
+    /// `DECODE_KINDS_SQL` / `HEAVY_KINDS_SQL` 是手抄给 SQL 的名单,与
+    /// `resource_class()` 的 match 分支必须一一对上——两边任一处改动都在这里红。
+    fn parse_kinds_sql(literal: &str) -> Vec<String> {
+        literal
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\'').to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn kinds_sql_literals_agree_with_resource_class() {
+        let decode = parse_kinds_sql(DECODE_KINDS_SQL);
+        let heavy = parse_kinds_sql(HEAVY_KINDS_SQL);
+        // 期望长度从 `resource_class` 在全部已知 kind 上的判定推导,不再手抄数字——
+        // 字面量和 match 分支任一边新增/删减一个 kind,这里都会红,不会漂移出一个
+        // "凑巧都是 5/3" 的假绿。
+        let expected_decode = ALL_JOB_KINDS
+            .iter()
+            .filter(|kind| matches!(resource_class(kind), ResourceClass::Decode))
+            .count();
+        let expected_heavy = ALL_JOB_KINDS
+            .iter()
+            .filter(|kind| matches!(resource_class(kind), ResourceClass::HeavyModel))
+            .count();
+        assert_eq!(
+            decode.len(),
+            expected_decode,
+            "DECODE_KINDS_SQL 的条目数与 resource_class 判成 Decode 的 kind 数不一致"
+        );
+        assert_eq!(
+            heavy.len(),
+            expected_heavy,
+            "HEAVY_KINDS_SQL 的条目数与 resource_class 判成 HeavyModel 的 kind 数不一致"
+        );
+        for kind in &decode {
+            assert!(
+                matches!(resource_class(kind), ResourceClass::Decode),
+                "{kind} 在 DECODE_KINDS_SQL 里,但 resource_class 不认为它是 Decode"
+            );
+        }
+        for kind in &heavy {
+            assert!(
+                matches!(resource_class(kind), ResourceClass::HeavyModel),
+                "{kind} 在 HEAVY_KINDS_SQL 里,但 resource_class 不认为它是 HeavyModel"
+            );
+        }
+        // 反向:除这两份名单外,没有别的 kind 会被判成 Decode/HeavyModel。
+        for kind in ALL_JOB_KINDS {
+            match resource_class(kind) {
+                ResourceClass::Decode => assert!(
+                    decode.iter().any(|listed| listed == kind),
+                    "{kind} 被判成 Decode,却不在 DECODE_KINDS_SQL 里"
+                ),
+                ResourceClass::HeavyModel => assert!(
+                    heavy.iter().any(|listed| listed == kind),
+                    "{kind} 被判成 HeavyModel,却不在 HEAVY_KINDS_SQL 里"
+                ),
+                ResourceClass::Light => {
+                    assert!(!decode.iter().any(|listed| listed == kind));
+                    assert!(!heavy.iter().any(|listed| listed == kind));
+                }
+            }
+        }
+    }
+
+    /// 认领 SQL 的相关子查询在深队列下的耗时:一次性测量,不进常规门禁。
+    /// 跑法:`cargo test --manifest-path src-tauri/Cargo.toml claim_sql_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "基准测量,手动跑"]
+    fn claim_sql_cost_under_a_deep_queue() {
+        const PENDING: usize = 5_000;
+        const RUNNING: usize = 4;
+        const SAMPLES: usize = 100;
+
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        for index in 0..PENDING {
+            enqueue(
+                &mut connection,
+                "thumbnail",
+                &format!(r#"{{"clip_id":{index}}}"#),
+                &format!("bench-{index}"),
+            )
+            .unwrap();
+        }
+        for index in 0..RUNNING {
+            let id = enqueue(
+                &mut connection,
+                "analyze_l1",
+                &format!(r#"{{"clip_id":{}}}"#, 900_000 + index),
+                &format!("bench-running-{index}"),
+            )
+            .unwrap();
+            connection
+                .execute("UPDATE jobs SET status='running' WHERE id=?1", [id])
+                .unwrap();
+        }
+
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            let job = claim_next(&mut connection).unwrap().unwrap();
+            mark_done(&mut connection, job.id, job.attempt).unwrap();
+        }
+        let deep = started.elapsed();
+
+        // 浅队列基线:同样是 claim + mark_done 两笔写事务,只是没有 5000 行要扫。
+        // 两者之差才是相关子查询在深队列上的额外成本。
+        let shallow_directory = TestDirectory::new();
+        let mut shallow = db::open_project(&shallow_directory.db_path()).unwrap();
+        for index in 0..SAMPLES {
+            enqueue(
+                &mut shallow,
+                "thumbnail",
+                &format!(r#"{{"clip_id":{index}}}"#),
+                &format!("shallow-{index}"),
+            )
+            .unwrap();
+        }
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            let job = claim_next(&mut shallow).unwrap().unwrap();
+            mark_done(&mut shallow, job.id, job.attempt).unwrap();
+        }
+        let baseline = started.elapsed();
+
+        let per = |value: Duration| value.as_secs_f64() * 1_000.0 / SAMPLES as f64;
+        println!(
+            "claim+mark_done 深队列 {:.3} ms/claim({PENDING} pending + {RUNNING} running),\
+             浅队列基线 {:.3} ms/claim,差值 {:.3} ms —— {SAMPLES} 次采样",
+            per(deep),
+            per(baseline),
+            per(deep) - per(baseline)
+        );
+    }
+
+    #[test]
+    fn decode_permit_counts_track_active_decode_jobs() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "d1").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":2}"#, "d2").unwrap();
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(1);
+
+        let claimed = coordinator
+            .claim_for_owner(&mut connection, "decode-owner")
+            .unwrap()
+            .unwrap();
+        assert_eq!(control.active_decode(), 1);
+        assert!(control.decode_saturated());
+        // 第二个解码任务因为类饱和而不可认领。
+        assert!(coordinator
+            .claim_for_owner(&mut connection, "decode-owner")
+            .unwrap()
+            .is_none());
+        drop(claimed);
+        assert_eq!(control.active_decode(), 0);
+    }
+
+    #[test]
+    fn embedding_work_pending_is_false_with_no_jobs() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        assert!(!embedding_work_pending(&connection).unwrap());
+    }
+
+    #[test]
+    fn embedding_work_pending_is_true_with_a_pending_clip_embed() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "clip_embed", "{}", "e1").unwrap();
+        assert!(embedding_work_pending(&connection).unwrap());
+    }
+
+    #[test]
+    fn embedding_work_pending_is_false_with_only_a_done_clip_embed() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let job_id = enqueue(&mut connection, "clip_embed", "{}", "e2").unwrap();
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let claimed = coordinator
+            .claim_for_owner(&mut connection, "done-owner")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.job.id, job_id);
+        mark_done(&mut connection, job_id, claimed.job.attempt).unwrap();
+        assert!(!embedding_work_pending(&connection).unwrap());
+    }
+
+    /// R6 Task 4:交付完成时,接线好的通知出口恰好收到一条——不多不少。假
+    /// 执行器直接把 job 落成「完成态、带 result_path」,不真的跑 ffmpeg;
+    /// `notify_on_completion` 认的是 DB 里这条 job 行的最终状态,不是执行器
+    /// 内部怎么走到那的,所以这个假执行器足够撑起这条契约测试。
+    ///
+    /// 投递现在是 fire-and-forget(`std::thread::spawn`),所以测试用
+    /// `mpsc` channel 等实际那条通知落地,而不是 sleep 猜时间。
+    #[test]
+    fn notifier_fires_exactly_once_for_a_completed_export_package() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            enqueue(&mut connection, "export_package", "{}", "export-notify").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String)>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .notifier
+            .set(Arc::new(move |title: &str, body: &str| {
+                sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((title.to_owned(), body.to_owned()))
+                    .is_ok()
+            }))
+            .ok();
+
+        let ran = JobRunner::run_one_with_executor(&db_path, &coordinator, "export-owner", |_db_path, connection, job| {
+            connection.execute(
+                "UPDATE jobs SET status='done', result_path=?2 WHERE id=?1",
+                params![job.id, "/tmp/我的交付包_2026-09-06"],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(ran);
+
+        let received = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fire-and-forget 通知必须在超时前送达");
+        assert_eq!(received, ("交付完成".to_owned(), "我的交付包_2026-09-06".to_owned()));
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "不多不少,恰好一条"
+        );
+    }
+
+    /// R6 Task 4:批量分析队列排空时通知出口恰好收到一条。两条分析 job 属
+    /// 于同一个导入批次;第一条完成时批次还没排空(不该发),第二条完成时
+    /// 排空了(该发,且只发一次)。
+    #[test]
+    fn notifier_fires_exactly_once_when_a_batchs_analysis_queue_drains() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let (job_a, job_b) = {
+            let mut connection = db::open_project(&db_path).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO clips(id, rel_path) VALUES (1, 'a.mov'), (2, 'b.mov')",
+                    [],
+                )
+                .unwrap();
+            let batch_id = super::super::import_control::create_batch(&connection, "/fixture").unwrap();
+            connection
+                .execute(
+                    "INSERT INTO import_batch_clips(batch_id, clip_id) VALUES (?1, 1), (?1, 2)",
+                    [batch_id],
+                )
+                .unwrap();
+            let job_a = enqueue(&mut connection, "analyze_l1", r#"{"clip_id":1}"#, "batch-notify-a").unwrap();
+            let job_b = enqueue(&mut connection, "analyze_l1", r#"{"clip_id":2}"#, "batch-notify-b").unwrap();
+            (job_a, job_b)
+        };
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String)>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .notifier
+            .set(Arc::new(move |title: &str, body: &str| {
+                sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((title.to_owned(), body.to_owned()))
+                    .is_ok()
+            }))
+            .ok();
+        let mark_one_done = |_db_path: &Path, connection: &mut Connection, job: &Job| -> Result<()> {
+            mark_done(connection, job.id, job.attempt)
+        };
+
+        let ran_a = JobRunner::run_one_with_executor(&db_path, &coordinator, "batch-owner", mark_one_done).unwrap();
+        assert!(ran_a);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "第一条完成时批次还没排空,不该通知"
+        );
+
+        let ran_b = JobRunner::run_one_with_executor(&db_path, &coordinator, "batch-owner", mark_one_done).unwrap();
+        assert!(ran_b);
+        let received = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("批次排空后必须(异步)通知,等在这里而不是 sleep 猜时间");
+        assert_eq!(received.0, "批量分析完成");
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "必须恰好通知一次"
+        );
+        let _ = (job_a, job_b);
     }
 }

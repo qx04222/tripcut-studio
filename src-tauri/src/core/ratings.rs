@@ -133,13 +133,51 @@ pub fn delete_select_segment(connection: &mut Connection, segment_id: i64) -> Re
         super::episode::ensure_clip_writable(&transaction, clip_id)?;
     }
     let changed = transaction.execute(
-        "UPDATE segments SET tombstone = 1
+        "UPDATE segments SET tombstone = 1, deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?1 AND kind = 'select' AND tombstone = 0",
         [segment_id],
     )?;
     if changed != 1 {
         return Err(CoreError::Rating(format!(
             "精选段 {segment_id} 不存在、已删除或不是用户精选段"
+        )));
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// 撤销 [`delete_select_segment`]:清除墓碑标记与删除时间戳。
+/// 若恢复后与另一条存活精选段撞上分区唯一索引(clip_id, in_ticks, id WHERE
+/// kind='select' AND tombstone=0),把驱动层的约束错误文案换成中文提示。
+pub fn restore_select_segment(connection: &mut Connection, segment_id: i64) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let owner_clip: Option<i64> = transaction
+        .query_row(
+            "SELECT clip_id FROM segments WHERE id = ?1",
+            [segment_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(clip_id) = owner_clip {
+        super::episode::ensure_clip_writable(&transaction, clip_id)?;
+    }
+    let result = transaction.execute(
+        "UPDATE segments SET tombstone = 0, deleted_at = NULL
+         WHERE id = ?1 AND kind = 'select' AND tombstone = 1",
+        [segment_id],
+    );
+    let changed = match result {
+        Ok(changed) => changed,
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("UNIQUE constraint failed") =>
+        {
+            return Err(CoreError::Rating("已有相同入出点的精选段".to_owned()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if changed != 1 {
+        return Err(CoreError::Rating(format!(
+            "精选段 {segment_id} 不存在、未被删除或不是用户精选段"
         )));
     }
     transaction.commit()?;
@@ -480,6 +518,70 @@ mod tests {
 
         assert_eq!(tombstone, 1);
         assert!(list_select_segments(&connection, clip_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restoring_a_deleted_select_segment_relists_it_with_ratings_intact() {
+        let (_directory, mut connection, clip_id) = connection_with_clip();
+        let segment = create_select_segment(&mut connection, clip_id, 1.0, 2.0).unwrap();
+        let rating_before: (String, i64) = connection
+            .query_row(
+                "SELECT rating_type, value FROM ratings WHERE segment_id = ?1",
+                [segment.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        delete_select_segment(&mut connection, segment.id).unwrap();
+        assert!(list_select_segments(&connection, clip_id).unwrap().is_empty());
+
+        restore_select_segment(&mut connection, segment.id).unwrap();
+
+        let segments = list_select_segments(&connection, clip_id).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].id, segment.id);
+
+        let (tombstone, deleted_at): (i64, Option<String>) = connection
+            .query_row(
+                "SELECT tombstone, deleted_at FROM segments WHERE id = ?1",
+                [segment.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tombstone, 0);
+        assert!(deleted_at.is_none());
+
+        let rating_after: (String, i64) = connection
+            .query_row(
+                "SELECT rating_type, value FROM ratings WHERE segment_id = ?1",
+                [segment.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rating_before, rating_after);
+    }
+
+    #[test]
+    fn deleting_a_select_segment_stamps_deleted_at() {
+        let (_directory, mut connection, clip_id) = connection_with_clip();
+        let segment = create_select_segment(&mut connection, clip_id, 1.0, 2.0).unwrap();
+        delete_select_segment(&mut connection, segment.id).unwrap();
+
+        let deleted_at: Option<String> = connection
+            .query_row(
+                "SELECT deleted_at FROM segments WHERE id = ?1",
+                [segment.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some());
+    }
+
+    #[test]
+    fn restore_refuses_a_segment_that_was_never_deleted() {
+        let (_directory, mut connection, clip_id) = connection_with_clip();
+        let segment = create_select_segment(&mut connection, clip_id, 1.0, 2.0).unwrap();
+        assert!(restore_select_segment(&mut connection, segment.id).is_err());
     }
 
     #[test]

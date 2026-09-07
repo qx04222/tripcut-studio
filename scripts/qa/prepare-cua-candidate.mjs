@@ -148,6 +148,17 @@ const bundleId = `com.tripcut.studio.qa.${runToken}`;
 mkdirSync(outputDirectory, { recursive: true });
 mkdirSync(supportDirectory, { recursive: true });
 mkdirSync(jianyingDirectory, { recursive: true });
+const seedDb = argument("--seed-db");
+if (seedDb) {
+  const seedDbPath = resolve(seedDb);
+  if (!existsSync(seedDbPath)) {
+    console.error(`usage: prepare-cua-candidate.mjs --app /absolute/path/App.app [--seed-db /absolute/path/project.db] [--out directory]`);
+    console.error(`FAIL seed-db.missing-source: ${seedDbPath} does not exist`);
+    process.exit(2);
+  }
+  mkdirSync(join(supportDirectory, "default"), { recursive: true });
+  cpSync(seedDbPath, join(supportDirectory, "default/project.db"));
+}
 cpSync(sourceApp, qaApp, { recursive: true, preserveTimestamps: true });
 const qaExecutable = join(qaApp, "Contents/MacOS/tripcut-studio");
 const canonicalQaExecutable = realpathSync(qaExecutable);
@@ -166,6 +177,12 @@ const launchEnvironment = {
   TRIPCUT_DISABLE_LLM_PROVIDERS: "1",
   PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
 };
+// 更新端点覆盖(R6 Task 1)。只在调用方显式设置时才透传:不设的候选走 tauri.conf.json
+// 里的生产端点,这样"忘了设"表现为去问 GitHub 而不是静默沿用上一次 QA 的本地端点。
+// lib.rs 在这个变量非空却覆盖不到 plugins.updater 时会直接 panic,不会假装成功。
+if ((process.env.TRIPCUT_UPDATER_ENDPOINT ?? "").trim() !== "") {
+  launchEnvironment.TRIPCUT_UPDATER_ENDPOINT = process.env.TRIPCUT_UPDATER_ENDPOINT;
+}
 for (const [name, value] of Object.entries(launchEnvironment)) {
   requireSuccess(run("launchctl", ["setenv", name, value]));
 }
@@ -248,6 +265,7 @@ const manifest = {
     supportDirectory,
     jianyingDirectory,
     realProvidersDisabled: true,
+    updaterEndpoint: launchEnvironment.TRIPCUT_UPDATER_ENDPOINT ?? null,
     pid: qaPid,
   },
   crashBaseline: baseline,

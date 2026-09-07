@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "旅剪工作台主窗口的最小本地能力",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default", "updater:default", "process:allow-restart"]
 }

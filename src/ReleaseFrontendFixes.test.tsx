@@ -17,12 +17,15 @@ const apiMocks = vi.hoisted(() => ({
   getAppInfo: vi.fn(),
   getLlmStatus: vi.fn(),
   getNarrativeRevision: vi.fn(async () => null),
+  getComponentStatuses: vi.fn(async () => []),
+  rollbackComponent: vi.fn(),
   getSettings: vi.fn(),
   getSettingsStatus: vi.fn(),
   getStoryboard: vi.fn(),
   listLlmLedger: vi.fn(),
   listSelectSegments: vi.fn(),
   listShotStacks: vi.fn(),
+  listStoryTemplates: vi.fn(async () => []),
   listDeviceClocks: vi.fn(),
   setDeviceClockOffset: vi.fn(),
   mergeChapters: vi.fn(),
@@ -100,6 +103,7 @@ const board: Storyboard = {
   mode: "legacy",
   mode_notice: "L3 增强已关闭：故事板明确回退到 D2 本地章节。",
   narrative: null,
+  current_template: null,
   narration_job_status: null,
 };
 

@@ -313,7 +313,7 @@ fn run_workflow(
     }
 
     fs::create_dir(&request.export_directory)?;
-    let export = core::deliver::start_export(&mut connection, &request.export_directory)?;
+    let export = core::deliver::start_export(&mut connection, &request.export_directory, None, true, None)?;
     let export_job_id = export.job_id.ok_or("export did not return a job id")?;
     drop(connection);
     drain_jobs(&request.database_path)?;

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{CoreError, Result};
 use super::channel_memory::ClipMemoryAnnotation;
-use super::narrative::{self, NarrativeOverview};
+use super::narrative::{self, NarrativeOverview, StoryTemplate};
 use super::settings::{self, LLM_ENABLED_KEY};
 
 const CHAPTER_GAP_MS: i64 = 45 * 60 * 1_000;
@@ -47,6 +47,9 @@ pub struct Storyboard {
     pub mode_notice: String,
     pub narrative: Option<NarrativeOverview>,
     pub narration_job_status: Option<String>,
+    /// 当前 revision 生成时用的模板 id（如 "cinematic"）；无 revision 或 LLM 路径
+    /// 未指定模板时为 None。供故事板顶部模板卡片高亮当前选择。
+    pub current_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -543,25 +546,40 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
     )? == 1;
 
     let l3_enabled = settings::string_value(connection, LLM_ENABLED_KEY, "false")? == "true";
-    let narrative = if l3_enabled {
-        narrative::load_overview(connection)?
-    } else {
-        None
-    };
-    let (mode, mode_notice) = if !l3_enabled {
-        (
-            "legacy".to_owned(),
-            "L3 增强已关闭：故事板明确回退到 D2 本地章节；时间/GPS 仅按原行为显示。".to_owned(),
-        )
-    } else if narrative.is_some() {
-        (
-            "narrative".to_owned(),
-            "L3 叙事 v2 已启用；粗剪与镜头表按 Beat 顺序读取。".to_owned(),
-        )
-    } else {
+    // 有 revision 就展示它——LLM 关闭时那份 revision 是同步跑的确定性兜底，
+    // 不该被藏起来假装故事板一片空白（R4 Task 5 之前的行为）。
+    let narrative = narrative::load_overview(connection)?;
+    let current_template = narrative
+        .as_ref()
+        .and_then(|overview| overview.episode.template.clone());
+    let (mode, mode_notice) = if let Some(overview) = narrative.as_ref() {
+        if l3_enabled {
+            (
+                "narrative".to_owned(),
+                "L3 叙事 v2 已启用；粗剪与镜头表按 Beat 顺序读取。".to_owned(),
+            )
+        } else {
+            let template_name = overview
+                .episode
+                .template
+                .as_deref()
+                .and_then(|id| StoryTemplate::parse(id).ok())
+                .map(StoryTemplate::name_zh);
+            let notice = match template_name {
+                Some(name) => format!("未启用 AI，按模板规则生成（{name}）"),
+                None => "未启用 AI，按模板规则生成".to_owned(),
+            };
+            ("template".to_owned(), notice)
+        }
+    } else if l3_enabled {
         (
             "legacy".to_owned(),
             "L3 已开启但尚无有效编排：当前仍显示 D2 本地章节，候选边界不会自动定章。".to_owned(),
+        )
+    } else {
+        (
+            "legacy".to_owned(),
+            "L3 增强已关闭：故事板明确回退到 D2 本地章节；时间/GPS 仅按原行为显示。".to_owned(),
         )
     };
     let narration_job_status = narrative::latest_job_status(connection)?;
@@ -575,6 +593,7 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
         mode_notice,
         narrative,
         narration_job_status,
+        current_template,
     })
 }
 
@@ -1306,11 +1325,97 @@ mod tests {
     }
 
     #[test]
+    fn l3_off_with_a_persisted_fallback_revision_shows_template_mode() {
+        // R4 Task 5：LLM 关闭但已有一份同步落地的兜底 revision 时,不能再假装
+        // 「什么都没生成」——要展示它,并如实标注这是模板产物不是 AI 编排。
+        let (_directory, mut connection) = setup();
+        insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, true);
+        chapterize(&mut connection).unwrap();
+        narrative::enqueue_with_template(&mut connection, Some(StoryTemplate::Cinematic))
+            .unwrap();
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert_eq!(storyboard.mode, "template");
+        assert!(storyboard.mode_notice.contains("未启用 AI"));
+        assert!(storyboard.mode_notice.contains("电影感"));
+        assert_eq!(storyboard.current_template.as_deref(), Some("cinematic"));
+        assert!(storyboard.narrative.is_some());
+        assert!(!storyboard.narrative.unwrap().chapters.is_empty());
+    }
+
+    #[test]
+    fn l3_off_without_any_revision_stays_legacy() {
+        let (_directory, mut connection) = setup();
+        insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, true);
+        chapterize(&mut connection).unwrap();
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert_eq!(storyboard.mode, "legacy");
+        assert!(storyboard.narrative.is_none());
+        assert_eq!(storyboard.current_template, None);
+    }
+
+    #[test]
     fn l3_on_without_a_draft_keeps_d2_as_a_visible_fallback() {
         let (_directory, connection) = setup();
         set_setting(&connection, LLM_ENABLED_KEY, "true").unwrap();
         let storyboard = get_storyboard(&connection).unwrap();
         assert_eq!(storyboard.mode, "legacy");
         assert!(storyboard.mode_notice.contains("尚无有效编排"));
+    }
+
+    /// R6 Task 7c pin: two Episodes, each with its own clip + chapter — the
+    /// storyboard for whichever Episode is active must show only its own
+    /// chapter/clip, never the other Episode's. Written as a regression test
+    /// for `get_storyboard`'s episode scoping; it passed on the first run
+    /// against the existing code (recorded in task-7c-report.md as a
+    /// legitimate "already correct" outcome, not skipped).
+    #[test]
+    fn get_storyboard_never_leaks_another_episodes_chapter_or_clips() {
+        let (_directory, mut connection) = setup();
+        let episode_one = crate::core::episode::current_episode(&connection).unwrap().id;
+        let clip_one = insert_clip(&connection, "ep1.mov", "2026-08-31T10:00:00Z", None, true);
+        connection
+            .execute(
+                "UPDATE clips SET episode_id = ?2 WHERE id = ?1",
+                params![clip_one, episode_one],
+            )
+            .unwrap();
+        chapterize(&mut connection).unwrap();
+        let storyboard_one = get_storyboard(&connection).unwrap();
+        assert_eq!(storyboard_one.chapters.len(), 1);
+        let chapter_one = storyboard_one.chapters[0].id;
+
+        // 封存,并保持下一集也有素材才能封存
+        let clip_placeholder = insert_clip(&connection, "placeholder.mov", "2026-08-31T09:00:00Z", None, false);
+        connection
+            .execute(
+                "UPDATE clips SET episode_id = ?2 WHERE id = ?1",
+                params![clip_placeholder, episode_one],
+            )
+            .unwrap();
+        let outcome = crate::core::episode::archive_current(&mut connection, None).unwrap();
+        let episode_two = outcome.next.id;
+
+        let clip_two = insert_clip(&connection, "ep2.mov", "2026-09-01T10:00:00Z", None, true);
+        connection
+            .execute(
+                "UPDATE clips SET episode_id = ?2 WHERE id = ?1",
+                params![clip_two, episode_two],
+            )
+            .unwrap();
+        chapterize(&mut connection).unwrap();
+
+        let storyboard_two = get_storyboard(&connection).unwrap();
+        // 只看到本集的章节
+        assert_eq!(storyboard_two.chapters.len(), 1);
+        assert_ne!(storyboard_two.chapters[0].id, chapter_one);
+        // 只看到本集的素材(精选 items + 候选 candidates 合起来只有 clip_two)
+        let all_clip_ids: HashSet<i64> = storyboard_two
+            .items
+            .iter()
+            .chain(storyboard_two.candidates.iter())
+            .map(|item| item.clip_id)
+            .collect();
+        assert_eq!(all_clip_ids, HashSet::from([clip_two]));
+        assert!(!all_clip_ids.contains(&clip_one));
     }
 }

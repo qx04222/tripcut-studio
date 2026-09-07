@@ -7,21 +7,23 @@
 <p align="center"><strong>把一整天的旅途素材，收束成一条可以开始剪的故事。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.1">下载 v0.1</a>
+  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.2.0">下载 v0.2.0</a>
   · <a href="docs/USER_GUIDE.md">用户指南</a>
-  · <a href="docs/releases/v0.1.md">版本说明</a>
+  · <a href="docs/releases/v0.2.0.md">版本说明</a>
   · <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img alt="Release v0.1" src="https://img.shields.io/badge/preview-v0.1-f4a261?style=flat-square">
+  <img alt="Release v0.2.0" src="https://img.shields.io/badge/preview-v0.2.0-f4a261?style=flat-square">
   <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=flat-square&amp;logo=apple">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-offline-2a9d8f?style=flat-square">
   <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-3b82f6?style=flat-square">
 </p>
 
 > [!IMPORTANT]
-> v0.1 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试。
+> v0.2.0 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试；首次启动如遇 Gatekeeper 拦截，右键点击应用图标选择「打开」即可。
+>
+> 本版 DMG：`TripCut-Studio_0.2.0_github-preview-v0.2.0-20260907T0029Z_preview_aarch64.dmg`，SHA-256 `8c634e3ce032f76bd03a4d640cf5db818e04f8421c605466c5a1202d9dae527f`。
 
 ## 它解决的不是剪辑，而是剪辑前的混乱
 
@@ -58,42 +60,60 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 | AI 建议可能不可靠 | 建议与人工确认分开保存，创作者拥有最终裁量 |
 | 最终仍要在熟悉的软件里精剪 | 默认生成稳定交付包，继续进入剪映专业版 |
 
-## v0.1 包含什么
+## v0.2.0 包含什么
 
-### 素材工作台
+### 性能（小内存设备）
 
-- 引用式导入，不复制、不移动、不覆盖相机原片；
-- watched folder 支持移动硬盘、NAS 与云盘同步目录；
-- 4K HEVC/10-bit 原片筛片与沉浸播放；
-- 收藏、拒绝、五星评级、I/O 精选段与 Shot Stack。
+- 缩略图、分析、胶片条、代理生成全面优先走硬件解码，软解只作回退；封面先缩放再选帧，单素材峰值内存显著下降；
+- 新增内存档位（自动 / 标准 / 省内存），24 GB 以下内存的机器自动走省内存档；系统可用内存跌到过低时会暂停解码与模型任务并提示，恢复后自动继续。
 
-### 故事与记忆
+### 筛片新工具
 
-- Episode 工作集、封存与跨集素材记忆；
-- 章节、Beat、Storyboard 与可选 AI 描述；
-- L3 大模型增强默认关闭，用户可自行选择 provider；
-- Whisper 模型由用户自行选择，不随安装包分发。
+- 「相似镜头」面板可比对同组素材并设代表镜头；
+- 「技术检查」面板一处查看色彩空间、横竖屏、多声道音轨与拍摄参数；显示 LUT 仅影响预览，不改原始文件；
+- 素材筛选新增「竖屏」过滤，含物理旋转但文件仍按横向存储的素材；
+- 缩略图生成后本机离线跑画面文字识别（中英文都认），结果显示在右栏「画面文字」角标；
+- 支持把文件夹或视频直接拖进导入页；
+- 保存精选段后按「删除」，10 秒内可「撤销」恢复。
 
-### 稳定交付
+### 故事板
 
-- 精选片段与 1080p 参考粗剪；
-- CSV 镜头表、字幕和中文交付说明；
-- FFmpeg、FFprobe、libmpv 与 whisper-cli 随应用打包；
-- 剪映原生草稿仍属实验能力，稳定交付包是默认出口。
+- 「一键 AI 编排」前可选四种故事模板（电影感 / 快节奏 / 安静氛围 / 旅行日记），没有配置大模型时也有确定性兜底；
+- 「音乐与节奏」页签可导入参考音乐查看节拍与段落分布，仅供参考、不会替你重排镜头；
+- 「旅程时间线」页签按跨设备校正过的拍摄时间把素材重排成只读时间线，按天分组，用于核对故事顺序。
 
-本次更新新增素材库切换与恢复、导入批次停止与撤销，以及长视频分析和桌面交互优化，详见 [v0.1.1 更新说明](docs/releases/v0.1.1.md)。
+### 搜索
+
+- 支持拼音 / 首字母搜索中文文件名、标签、章节标题；
+- 每条结果标来源徽章（文件 / 转写 / AI / 标签 / 画面文字 / 拼音）。
+
+### 交付
+
+- 交付包目录改为编号 01–07，结构更清楚；
+- 新增可选的「联系表.pdf」：A4 网格缩略图 + 序号/文件名 + 入出点 + 章节，内嵌中文字体；
+- 新建集与交付页可选目标平台预设（抖音 / 小红书 / B站 / 朋友圈 / 家庭纪录 / 通用），交付说明、字幕、剪映草稿画布尺寸都跟着走；
+- 「参考粗剪时长」新增 30 秒 / 60 秒 / 3 分钟档位，按 Beat 顺序在预算内截取；
+- 旁白稿按叙事分章生成，已确认的修订标注「已确认」，未经确认的会标注「AI 建议稿，未经人工确认」。
+
+### 系统
+
+- 电脑睡眠期间的任务在唤醒后自动接着跑完；
+- 交付包生成、批量 AI 分析完成时有 macOS 系统通知；
+- 「设置 → 工具链」组件可一键「回滚到上一版」；
+- 「设置 → 帮助与关于」新增「检查更新」——首次接入，仅在点击时联网查一次（详见下方「自动更新」）。
+
+完整变更详见 [v0.2.0 更新说明](docs/releases/v0.2.0.md)。
+
+## 自动更新
+
+设置页「帮助与关于 → 检查更新」可发现新版本并下载安装，安装包会做 minisign 签名校验；未签名的预览版仍可能被 Gatekeeper 拦截，请按提示核对来源后放行。
 
 ## 下载与第一次使用
 
-1. 前往 [v0.1.1 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.1.1)，下载 `TripCut-Studio_0.1.1_v0.1.1-preview-r3_preview_aarch64.dmg`；
-2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256：
-
-   ```text
-   12e2a8db84cffa2abfd268d5a2481f69bea5e74b7211b1f4896fadbc97cd0b21
-   ```
-
+1. 前往 [v0.2.0 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.2.0)，下载对应的 DMG 安装包；
+2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256；
 3. 打开 DMG，把“旅剪工作台”拖入 Applications；
-4. 如果 Gatekeeper 阻止首次启动，在“系统设置 → 隐私与安全性”中确认“仍要打开”；
+4. 如果 Gatekeeper 阻止首次启动，右键点击应用图标选择「打开」（或在“系统设置 → 隐私与安全性”中确认“仍要打开”）；
 5. 按[用户指南](docs/USER_GUIDE.md)用一份有备份的短素材完成第一次“导入 → 筛片 → 选段 → 交付”。
 
 完整安全边界见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。

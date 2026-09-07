@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -138,6 +138,14 @@ struct DraftInput {
     width: i64,
     height: i64,
     srt_source: Option<PathBuf>,
+    /// R3 Task 6：转录实际用了哪一路音轨（人话映射见 `audio_track_note`）。
+    selected_transcribe_track: Option<i64>,
+    /// R3 Task 6：这条素材全部音轨，按 `stream_index` 升序。
+    audio_tracks: Vec<deliver::ExportAudioTrack>,
+    /// R6 Task 7b：`clips.manual_rotation`——只在 rotate 标签兜底命中(没有
+    /// side_data 显示矩阵)时非空。写入 segment 的 `clip.rotation`(11.3.0
+    /// 金样已有此键，见 `build_draft` 里的 `clip` json blob，不新增键)。
+    manual_rotation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +276,28 @@ impl Drop for StagingGuard {
     }
 }
 
+/// R6 Task 2 真机金丝雀用：把内嵌的 11.3.0 `template.tmp` 金样解析成键集合，
+/// 供集成测试与磁盘上真实剪映草稿的 `template.tmp` 逐键比对。不读取、不复制
+/// 用户草稿——这里只暴露我们自己内嵌模板的键集。
+pub fn golden_key_sets() -> (BTreeSet<String>, BTreeSet<String>) {
+    let value: Value = serde_json::from_str(DRAFT_TEMPLATE_11_3_0)
+        .expect("embedded 11.3.0 draft template must be valid JSON");
+    let top_level = value
+        .as_object()
+        .expect("golden template top level must be a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    let materials = value
+        .get("materials")
+        .and_then(Value::as_object)
+        .expect("golden template must have a materials object")
+        .keys()
+        .cloned()
+        .collect();
+    (top_level, materials)
+}
+
 pub fn availability() -> JianyingAvailability {
     let version = read_editor_version(Path::new(JIANYING_APP_PLIST));
     let draft_root_exists = default_draft_root().is_ok_and(|root| root.is_dir());
@@ -294,6 +324,10 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
         )
         .map_err(|_| CoreError::Jianying("没有进行中的 Episode，无法生成草稿".to_owned()))?;
     let mut clips = deliver::selected_clips(&transaction)?;
+    // R3 Task 3:草稿画布来自集的目标平台预设,不再取首条素材的原始尺寸——
+    // `both` 朝向在这里折成 `landscape`(横竖同时制作,草稿按横版画布)。
+    // 原生草稿没有交付层的 override 入口,永远读集自己的 target_platform。
+    let (canvas_width, canvas_height) = super::platform::resolve_platform(&transaction, episode_id, None)?.canvas();
     transaction.commit()?;
     if clips.is_empty() {
         return Err(CoreError::Jianying(
@@ -309,7 +343,7 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
     let draft_name = format!("{PROJECT_NAME}_剪映草稿_{short_id}");
     let root = default_draft_root()?;
     let final_path = root.join(&draft_name);
-    let draft = build_draft(&draft_name, &draft_id, &inputs, now)?;
+    let draft = build_draft(&draft_name, &draft_id, &inputs, now, canvas_width, canvas_height)?;
     let meta = build_meta(&draft, &final_path, now)?;
     let subtitle_count = write_draft_atomically(&root, &final_path, &draft, &meta, &inputs)?;
 
@@ -502,6 +536,9 @@ fn draft_inputs(connection: &Connection, clips: &[ExportClip]) -> Result<Vec<Dra
                 width: clip.width.unwrap_or(1920).max(1),
                 height: clip.height.unwrap_or(1080).max(1),
                 srt_source,
+                selected_transcribe_track: clip.selected_transcribe_track,
+                audio_tracks: clip.audio_tracks.clone(),
+                manual_rotation: clip.manual_rotation,
             })
         })
         .collect()
@@ -533,19 +570,49 @@ fn ticks_to_microseconds(ticks: i64, tb_num: i64, tb_den: i64) -> Result<i64> {
     i64::try_from(rounded).map_err(|_| CoreError::Jianying("时间换算超出 i64".to_owned()))
 }
 
+/// R3 Task 6：草稿模板没有独立的音频素材条目——原片自带的音轨随视频素材一起
+/// 进 `materials.videos`，剪映读取时按容器里的默认音轨播放，不知道 TripCut
+/// 转录用的是哪一路。11.3.0 模板的 `DraftVideoMaterial` 没有能塞新字段的地方
+/// （多余键会被剪映拒绝），所以把映射写进已有的 `material_name` 字符串字段，
+/// 追加在文件名后面，剪映和人都能照常读——这是本 Task 选定的落点，不新增 JSON 键。
+fn audio_track_material_name(input: &DraftInput) -> String {
+    if input.audio_tracks.len() < 2 {
+        return input.file_name.clone();
+    }
+    let transcribe_track = input.selected_transcribe_track.unwrap_or(0);
+    let mapping = input
+        .audio_tracks
+        .iter()
+        .map(|track| {
+            let label = deliver::audio_role_label(track.role_guess.as_deref());
+            if track.stream_index == transcribe_track {
+                format!("{}={label}(转录)", track.stream_index)
+            } else {
+                format!("{}={label}", track.stream_index)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{} [音轨映射 {mapping}]", input.file_name)
+}
+
 fn build_draft(
     name: &str,
     draft_id: &str,
     inputs: &[DraftInput],
     now: i64,
+    canvas_width: i64,
+    canvas_height: i64,
 ) -> Result<DraftInfo> {
     let mut draft: DraftInfo = serde_json::from_str(DRAFT_TEMPLATE_11_3_0)
         .map_err(|error| CoreError::Jianying(format!("内嵌草稿模板无效：{error}")))?;
-    let first = inputs
-        .first()
-        .ok_or_else(|| CoreError::Jianying("没有可写入草稿的精选素材".to_owned()))?;
-    draft.canvas_config.width = first.width;
-    draft.canvas_config.height = first.height;
+    if inputs.is_empty() {
+        return Err(CoreError::Jianying("没有可写入草稿的精选素材".to_owned()));
+    }
+    // R3 Task 3:画布尺寸来自集的目标平台预设(已按朝向解析),不再取首条素材
+    // 的原始分辨率——平台预设与真实素材宽高比无关,不应受哪条素材排第一影响。
+    draft.canvas_config.width = canvas_width;
+    draft.canvas_config.height = canvas_height;
     draft.id = draft_id.to_owned();
     draft.name = name.to_owned();
     draft.new_version = SCHEMA_NEW_VERSION.to_owned();
@@ -577,7 +644,7 @@ fn build_draft(
             id: material_id.clone(),
             local_material_id: String::new(),
             material_id: material_id.clone(),
-            material_name: input.file_name.clone(),
+            material_name: audio_track_material_name(input),
             media_path: String::new(),
             path: input.source_path.to_string_lossy().into_owned(),
             material_type: "video".to_owned(),
@@ -619,7 +686,7 @@ fn build_draft(
             track_render_index: 0,
             visible: true,
             volume: 1.0,
-            clip: json!({"alpha":1.0,"flip":{"horizontal":false,"vertical":false},"rotation":0.0,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}}),
+            clip: json!({"alpha":1.0,"flip":{"horizontal":false,"vertical":false},"rotation":input.manual_rotation.unwrap_or(0) as f64,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}}),
             uniform_scale: json!({"on":true,"value":1.0}),
         });
         target_start = target_start
@@ -849,6 +916,9 @@ mod tests {
             width: 3840,
             height: 2160,
             srt_source: None,
+            selected_transcribe_track: None,
+            audio_tracks: Vec::new(),
+            manual_rotation: None,
         }
     }
 
@@ -941,7 +1011,7 @@ mod tests {
 
     #[test]
     fn schema_serializes_measured_version_and_absolute_material_paths() {
-        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 2_000)], 10).unwrap();
+        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 2_000)], 10, 1920, 1080).unwrap();
         let value = serde_json::to_value(draft).unwrap();
         assert_eq!(value.as_object().unwrap().len(), 36);
         assert_eq!(value["materials"].as_object().unwrap().len(), 55);
@@ -951,6 +1021,93 @@ mod tests {
         assert_eq!(value["materials"]["videos"][0]["path"], "/Volumes/CARD/one.mov");
     }
 
+    /// R6 Task 7b：`clips.manual_rotation` 要落到 segment 的 `clip.rotation`——
+    /// 这个键在 11.3.0 金样里本来就有(見 `golden_key_sets` 的顶层/materials
+    /// 键集比对不覆盖 segment 内部字段，加值不加键，不影响该门禁)。
+    #[test]
+    fn manual_rotation_is_written_to_segment_clip_rotation() {
+        let mut rotated = input("rotated.mov", 0, 2_000);
+        rotated.manual_rotation = Some(90);
+        let draft = build_draft("旅剪", "DRAFT-ID", &[rotated], 10, 1920, 1080).unwrap();
+        let value = serde_json::to_value(draft).unwrap();
+        assert_eq!(value["tracks"][0]["segments"][0]["clip"]["rotation"], 90.0);
+    }
+
+    #[test]
+    fn no_manual_rotation_keeps_segment_clip_rotation_zero() {
+        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 2_000)], 10, 1920, 1080).unwrap();
+        let value = serde_json::to_value(draft).unwrap();
+        assert_eq!(value["tracks"][0]["segments"][0]["clip"]["rotation"], 0.0);
+    }
+
+    #[test]
+    fn material_name_is_unchanged_for_single_track_clips() {
+        let mut clip = input("one.mov", 0, 2_000);
+        clip.audio_tracks = vec![deliver::ExportAudioTrack {
+            stream_index: 0,
+            role_guess: Some("onboard_mic".to_owned()),
+        }];
+        assert_eq!(audio_track_material_name(&clip), "one.mov");
+    }
+
+    #[test]
+    fn material_name_carries_audio_track_mapping_for_multi_track_clips() {
+        let mut clip = input("one.mov", 0, 2_000);
+        clip.selected_transcribe_track = Some(1);
+        clip.audio_tracks = vec![
+            deliver::ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+            deliver::ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+        ];
+        assert_eq!(
+            audio_track_material_name(&clip),
+            "one.mov [音轨映射 0=机内麦/1=无线麦(转录)]"
+        );
+    }
+
+    #[test]
+    fn draft_video_material_name_preserves_audio_track_mapping() {
+        let mut clip = input("one.mov", 0, 2_000);
+        clip.audio_tracks = vec![
+            deliver::ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+            deliver::ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+        ];
+        let draft = build_draft("旅剪", "DRAFT-ID", &[clip], 10, 1920, 1080).unwrap();
+        assert_eq!(
+            draft.materials.videos[0].material_name,
+            "one.mov [音轨映射 0=机内麦(转录)/1=无线麦]"
+        );
+    }
+
+    #[test]
+    fn canvas_config_comes_from_the_platform_preset_not_the_first_clip() {
+        // Regression for R3 Task 3: the draft canvas must reflect the platform
+        // preset (e.g. douyin/portrait -> 1080x1920), not the first selected
+        // clip's own resolution — the fixture input() below is 3840x2160.
+        let draft =
+            build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1080, 1920)
+                .unwrap();
+        let value = serde_json::to_value(&draft).unwrap();
+        assert_eq!(value["canvas_config"]["width"], 1080);
+        assert_eq!(value["canvas_config"]["height"], 1920);
+    }
+
+    #[test]
+    fn resolve_platform_for_draft_folds_both_to_landscape_and_reads_portrait_preset() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let current = crate::core::episode::current_episode(&connection).unwrap();
+        crate::core::platform::set_episode_platform(
+            &mut connection,
+            current.id,
+            "douyin",
+            "portrait",
+        )
+        .unwrap();
+        let resolved = crate::core::platform::resolve_platform(&connection, current.id, None)
+            .unwrap();
+        assert_eq!(resolved.canvas(), (1080, 1920));
+    }
+
     #[test]
     fn story_order_inputs_become_contiguous_target_ranges() {
         let draft = build_draft(
@@ -958,6 +1115,8 @@ mod tests {
             "DRAFT-ID",
             &[input("second.mov", 500, 1_500), input("first.mov", 2_000, 4_500)],
             10,
+            1920,
+            1080,
         )
         .unwrap();
         let segments = &draft.tracks[0].segments;
@@ -974,6 +1133,8 @@ mod tests {
             "DRAFT-ID",
             &[input("one.mov", 0, 1_000), input("two.mov", 0, 1_000)],
             10,
+            1920,
+            1080,
         )
         .unwrap();
         draft.tracks[0].segments[1].target_timerange.start += 1;
@@ -986,7 +1147,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let final_path = root.join("invalid-draft");
         let mut draft =
-            build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10).unwrap();
+            build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         draft.new_version = "unexpected".to_owned();
         let meta = build_meta(&draft, &final_path, 10).unwrap();
 
@@ -1011,7 +1172,7 @@ mod tests {
 
     #[test]
     fn meta_points_at_draft_info_json() {
-        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10).unwrap();
+        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         let meta = build_meta(&draft, Path::new("/draft-root/旅剪"), 10).unwrap();
         assert_eq!(meta.draft_id, "DRAFT-ID");
         assert_eq!(meta.draft_json_file, "/draft-root/旅剪/draft_info.json");
@@ -1023,7 +1184,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tripcut-jianying-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let final_path = root.join("new-draft");
-        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10).unwrap();
+        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         let meta = build_meta(&draft, &final_path, 10).unwrap();
         write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)]).unwrap();
         assert!(final_path.join(DRAFT_INFO_FILE).is_file());
@@ -1042,7 +1203,7 @@ mod tests {
         std::fs::create_dir_all(&final_path).unwrap();
         let marker = final_path.join("keep.txt");
         std::fs::write(&marker, b"keep").unwrap();
-        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10).unwrap();
+        let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         let meta = build_meta(&draft, &final_path, 10).unwrap();
         assert!(write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)]).is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), b"keep");

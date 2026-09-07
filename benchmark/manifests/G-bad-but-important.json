@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "group": { "id": "G", "name": "坏素材但重要", "source_kind": "synthetic" },
+  "defaults": {
+    "expected": {
+      "scene_boundaries_us": [4000000],
+      "scene_tolerance_us": 250000,
+      "stack_label": null,
+      "important_event": true,
+      "recommend_or_retain": true,
+      "unique_event": true,
+      "narrative_critical": true
+    },
+    "timeline": { "vfr_checkpoints_us": [], "proxy_checkpoints_us": [0, 2000000, 4000000, 6000000] },
+    "routine": null
+  },
+  "fixtures": [
+    { "id": "G-001", "source": { "kind": "synthetic", "relative_path": "G/G-001.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-001 --output <DIR>" }, "scenario": "强抖动的熊 + 高价值唯一口播", "golden": true },
+    { "id": "G-002", "source": { "kind": "synthetic", "relative_path": "G/G-002.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-002 --output <DIR>" }, "scenario": "严重欠曝的陷车异常事件", "golden": true },
+    { "id": "G-003", "source": { "kind": "synthetic", "relative_path": "G/G-003.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-003 --output <DIR>" }, "scenario": "竖拍冰雹突发事件", "golden": true },
+    { "id": "G-004", "source": { "kind": "synthetic", "relative_path": "G/G-004.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-004 --output <DIR>" }, "scenario": "严重失焦但不可重拍的真实反应", "golden": true },
+    { "id": "G-005", "source": { "kind": "synthetic", "relative_path": "G/G-005.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-005 --output <DIR>" }, "scenario": "高噪点夜间故障", "golden": true },
+    { "id": "G-006", "source": { "kind": "synthetic", "relative_path": "G/G-006.mp4", "generation_command": "./benchmark/scripts/generate-g.sh --case G-006 --output <DIR>" }, "scenario": "强风噪中的唯一口播", "golden": true }
+  ]
+}

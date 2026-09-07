@@ -2,20 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Command } from "cmdk";
 
 import { listClips, searchEverything, type ClipListItem, type GlobalSearchHit } from "./api";
+import { openHistoricalEpisode } from "./historyView";
+import { useFocusTrap } from "./useFocusTrap";
+import { KIND_LABEL } from "./kindLabels";
+import { useSearchAugment } from "./useSearchAugment";
 
 interface CommandPaletteProps {
   onNavigate: (path: string) => void;
   onSelectClip: (clipId: number) => void;
 }
 
-const KIND_LABEL: Record<GlobalSearchHit["kind"], string> = {
-  file: "文件名",
-  transcript: "对白转写",
-  description: "AI 描述",
-  dimension: "八维标签",
-};
-
-/** P6-U1 全局命令面板(cmdk):Cmd+K——跳页、全量搜索(文件/转写/描述/标签)、素材直达。 */
+/** P6-U1 全局命令面板(cmdk):Cmd+K——跳页、全量搜索(文件/转写/描述/标签/画面文字)、素材直达。 */
 export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const [clips, setClips] = useState<ClipListItem[]>([]);
@@ -24,6 +21,12 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
   const debounceRef = useRef<number | undefined>(undefined);
   const queryRef = useRef("");
   queryRef.current = query;
+  // cmdk 的裸 <Command> (非 Command.Dialog)不带 focus trap——Command.Item
+  // 不进 Tab 序列(靠内部方向键选中),只有 Command.Input 天然可聚焦,Tab 会
+  // 直接漏到面板背后的页面。所以这里自己收一道。
+  const paletteRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(paletteRef, open);
+  const { augmentHits, describeHitEpisode } = useSearchAugment();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -64,8 +67,10 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
       // 记住发起时的查询词:慢的旧请求返回时不能覆盖新查询的结果
       const issuedFor = query;
       void searchEverything(query)
-        .then((hits) => {
-          if (issuedFor === queryRef.current) setDeepHits(hits);
+        .then(async (hits) => {
+          if (issuedFor !== queryRef.current) return;
+          const merged = await augmentHits(hits, issuedFor);
+          if (issuedFor === queryRef.current) setDeepHits(merged);
         })
         .catch(() => {
           if (issuedFor === queryRef.current) setDeepHits([]);
@@ -90,17 +95,34 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
     [onSelectClip],
   );
 
+  const jumpToHit = useCallback(
+    (hit: GlobalSearchHit) => {
+      const { isHistorical, episodeTitle } = describeHitEpisode(hit);
+      if (isHistorical && hit.episode_id !== null) {
+        openHistoricalEpisode(hit.episode_id, episodeTitle ?? "历史集");
+        setOpen(false);
+        return;
+      }
+      jumpToClip(hit.clip_id);
+    },
+    [describeHitEpisode, jumpToClip],
+  );
+
   if (!open) return null;
 
   return (
-    <div className="command-palette-backdrop" onClick={() => setOpen(false)}>
+    <div className="command-palette-backdrop" role="presentation" onClick={() => setOpen(false)}>
       <Command
         label="全局命令"
         className="command-palette"
         shouldFilter={deepHits.length === 0}
         onClick={(event) => event.stopPropagation()}
+        ref={paletteRef}
+        role="dialog"
+        aria-modal="true"
       >
         <Command.Input
+          // eslint-disable-next-line jsx-a11y/no-autofocus -- 命令面板打开即为唯一交互目标,不抢焦点则键盘用户无法输入,这是该组件模式的预期行为。
           autoFocus
           placeholder="跳转页面、全量搜索(文件/转写/AI描述/标签)…"
           value={query}
@@ -110,17 +132,21 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
           <Command.Empty>没有匹配项</Command.Empty>
           {deepHits.length > 0 ? (
             <Command.Group heading="全量搜索">
-              {deepHits.map((hit, index) => (
-                <Command.Item
-                  key={`${hit.kind}-${hit.clip_id}-${index}`}
-                  value={`deep-${hit.kind}-${hit.clip_id}-${index}`}
-                  onSelect={() => jumpToClip(hit.clip_id)}
-                >
-                  <span className="hit-kind">{KIND_LABEL[hit.kind]}</span>
-                  <span className="hit-file">{hit.file_name.split("/").pop()}</span>
-                  <span className="hit-excerpt">{hit.excerpt}</span>
-                </Command.Item>
-              ))}
+              {deepHits.map((hit, index) => {
+                const { isHistorical } = describeHitEpisode(hit);
+                return (
+                  <Command.Item
+                    key={`${hit.kind}-${hit.clip_id}-${index}`}
+                    value={`deep-${hit.kind}-${hit.clip_id}-${index}`}
+                    onSelect={() => jumpToHit(hit)}
+                  >
+                    <span className="hit-kind">{KIND_LABEL[hit.kind] ?? hit.kind}</span>
+                    <span className="hit-file">{hit.file_name.split("/").pop()}</span>
+                    <span className="hit-excerpt">{hit.excerpt}</span>
+                    {isHistorical ? <span className="hit-history-badge">历史集（只读）</span> : null}
+                  </Command.Item>
+                );
+              })}
             </Command.Group>
           ) : null}
           <Command.Group heading="页面">

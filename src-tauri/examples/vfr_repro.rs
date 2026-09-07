@@ -62,7 +62,7 @@ fn run() -> ReproResult<()> {
         core::ratings::BINARY_RATING,
         1,
     )?;
-    let export = core::deliver::start_export(&mut connection, &export_root)?;
+    let export = core::deliver::start_export(&mut connection, &export_root, None, true, None)?;
     let export_job_id = export.job_id.ok_or("export did not create a job")?;
     drop(connection);
     drain_jobs(&database_path)?;
@@ -176,7 +176,7 @@ fn latest_export_contains_clip(connection: &Connection, clip_id: i64) -> ReproRe
     });
     Ok(output_name.is_some_and(|name| {
         Path::new(&output_path)
-            .join("01_精选片段")
+            .join("01_精选原片")
             .join(name)
             .is_file()
     }))

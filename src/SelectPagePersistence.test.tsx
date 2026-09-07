@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SelectPage } from "./SelectPage";
 import type { ClipListItem } from "./api";
@@ -12,11 +12,21 @@ const apiMocks = vi.hoisted(() => ({
   askDirector: vi.fn(),
   clearClipRating: vi.fn(),
   deleteSelectSegment: vi.fn(),
+  listSimilarGroups: vi.fn().mockResolvedValue([]),
+  setSimilarPrimary: vi.fn().mockResolvedValue(undefined),
+  listAudioTracks: vi.fn().mockResolvedValue([]),
+  probeAudioTracks: vi.fn().mockResolvedValue([]),
+  listDisplayLuts: vi.fn().mockResolvedValue([]),
+  setDisplayLut: vi.fn().mockResolvedValue(undefined),
+  clearDisplayLut: vi.fn().mockResolvedValue(undefined),
+  setPlaybackTrack: vi.fn().mockResolvedValue(undefined),
+  setTranscribeTrack: vi.fn().mockResolvedValue(undefined),
   describeClipWithAi: vi.fn(),
   getAiDescription: vi.fn(),
   getClipArtifacts: vi.fn(),
+  getClipsRevision: vi.fn(),
   getMemoryLens: vi.fn(async () => []),
-  getCurrentEpisode: vi.fn(async () => ({ id: 1, title: "EP01", theme: "", episode_number: 1, status: "active", created_at: "", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0 })),
+  getCurrentEpisode: vi.fn(async () => ({ id: 1, title: "EP01", theme: "", episode_number: 1, status: "active", created_at: "", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, target_platform: "general", canvas_orientation: "landscape" })),
   getNarrativeRevision: vi.fn(async () => null),
   getLlmStatus: vi.fn(),
   getSettings: vi.fn(),
@@ -25,6 +35,7 @@ const apiMocks = vi.hoisted(() => ({
   listClips: vi.fn(),
   listSelectSegments: vi.fn(),
   listShotStacks: vi.fn(),
+  listOcrHits: vi.fn(async () => []),
   rateClip: vi.fn(),
   searchClips: vi.fn(),
   searchTranscripts: vi.fn(),
@@ -73,6 +84,12 @@ const readyClip: ClipListItem = {
 };
 
 const mounted: Array<{ container: HTMLDivElement; root: ReturnType<typeof createRoot> }> = [];
+
+beforeEach(() => {
+  // 默认拿不到修订号就退回全量拉取——保持这份文件里既有用例"每轮都全量拉取"
+  // 的既有行为。想测跳过逻辑的用例自己在测试体内覆盖成 mockResolvedValue。
+  apiMocks.getClipsRevision.mockRejectedValue(new Error("clips revision not mocked in this test"));
+});
 
 afterEach(async () => {
   while (mounted.length > 0) {
@@ -173,6 +190,71 @@ describe("empty selection inspector", () => {
   });
 });
 
+describe("O14 header counts are scoped to the current episode", () => {
+  // 回归说明：头部收藏/拒绝/星级计数此前直接吃 clips 全量,往集的评级会混进
+  // 当前集的计数里。两集各一条收藏的夹具:头部只应显示 1,不是 2。
+  it("only counts the active episode's favorites, not the whole clips array", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const activeFavorite: ClipListItem = {
+      ...readyClip,
+      id: 11,
+      episode_id: 1,
+      path: "/Volumes/CARD/clip-11.mov",
+      file_name: "clip-11.mov",
+      binary_rating: 1,
+    };
+    const pastEpisodeFavorite: ClipListItem = {
+      ...readyClip,
+      id: 12,
+      episode_id: 2,
+      path: "/Volumes/CARD/clip-12.mov",
+      file_name: "clip-12.mov",
+      binary_rating: 1,
+    };
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([activeFavorite, pastEpisodeFavorite]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getCurrentEpisode.mockResolvedValue({
+      id: 1,
+      title: "EP01",
+      theme: "",
+      episode_number: 1,
+      status: "active",
+      created_at: "",
+      archived_at: null,
+      clip_count: 0,
+      favorite_count: 0,
+      export_count: 0,
+      target_platform: "general",
+      canvas_orientation: "landscape",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(<SelectPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const filterTabs = container.querySelector('[aria-label="评级过滤"]');
+    expect(filterTabs).not.toBeNull();
+    const favoriteTab = Array.from(filterTabs?.querySelectorAll("button") ?? []).find((button) =>
+      (button.textContent ?? "").includes("收藏"),
+    );
+    expect(favoriteTab).toBeDefined();
+    // "收藏1" 而不是 "收藏2"——往集(episode_id 2)的那条收藏不能计进当前集的头部计数。
+    expect(favoriteTab?.textContent).toContain("1");
+    expect(favoriteTab?.textContent).not.toContain("2");
+  });
+});
+
 describe("same-route archive keeps the active episode in sync", () => {
   // 回归说明：封存后筛片页不会切换到新 active 集——SelectPage 只在挂载时
   // 调用一次 getCurrentEpisode(),EpisodePanel 封存成功后也不会广播新 active
@@ -198,6 +280,8 @@ describe("same-route archive keeps the active episode in sync", () => {
       clip_count: 0,
       favorite_count: 0,
       export_count: 0,
+      target_platform: "general",
+      canvas_orientation: "landscape",
     });
     const container = document.createElement("div");
     document.body.append(container);
@@ -258,6 +342,57 @@ describe("selection background refresh", () => {
     expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
     visibility.mockReturnValue("visible");
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips listClips while the clips revision is unchanged across polls", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    vi.useFakeTimers();
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    apiMocks.getClipsRevision.mockResolvedValue("rev-A");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    await act(async () => root.render(<SelectPage />));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+
+    // 修订号不变——再轮询两次也不该再拉全表。
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+
+    // 修订号变了——下一轮该重新全量拉取。
+    apiMocks.getClipsRevision.mockResolvedValue("rev-B");
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to a full fetch when getClipsRevision rejects", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    vi.useFakeTimers();
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+    apiMocks.getClipsRevision.mockRejectedValue(new Error("no revision command"));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    await act(async () => root.render(<SelectPage />));
+    expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(apiMocks.listClips).toHaveBeenCalledTimes(2);
   });
 });

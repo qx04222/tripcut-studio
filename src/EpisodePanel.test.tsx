@@ -16,6 +16,8 @@ const active: EpisodeSummary = {
   clip_count: 12,
   favorite_count: 3,
   export_count: 0,
+  target_platform: "douyin",
+  canvas_orientation: "portrait",
 };
 const archived: EpisodeSummary = {
   ...active,
@@ -32,6 +34,7 @@ const apiMock = vi.hoisted(() => ({
   listEpisodes: vi.fn(),
   archiveCurrentEpisode: vi.fn(),
   renameCurrentEpisode: vi.fn(),
+  setEpisodePlatform: vi.fn(),
 }));
 vi.mock("./api", () => apiMock);
 
@@ -45,6 +48,8 @@ describe("EpisodePanel", () => {
     apiMock.getCurrentEpisode.mockResolvedValue(active);
     apiMock.listEpisodes.mockResolvedValue([active, archived]);
     apiMock.archiveCurrentEpisode.mockResolvedValue({ archived: { ...active, status: "archived" }, next: { ...active, id: 3, title: "EP03" } });
+    apiMock.renameCurrentEpisode.mockResolvedValue(active);
+    apiMock.setEpisodePlatform.mockResolvedValue(undefined);
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -101,6 +106,43 @@ describe("EpisodePanel", () => {
     expect(container.textContent).toContain("已封存");
   });
 
+  it("archive dialog preselects the current episode's platform/orientation and passes the chosen ones", async () => {
+    await act(async () => root.render(<EpisodePanel />));
+    await act(async () => container.querySelector<HTMLButtonElement>(".episode-current")?.click());
+    const archiveButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "封存本集");
+    await act(async () => archiveButton?.click());
+
+    const platformSelect = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="下一集目标平台"]',
+    );
+    expect(platformSelect?.value).toBe("douyin");
+    const portraitRadio = [
+      ...container.querySelectorAll<HTMLInputElement>('input[name="episode-archive-orientation"]'),
+    ].find((input) => input.value === "portrait");
+    expect(portraitRadio?.checked).toBe(true);
+
+    await act(async () => {
+      if (platformSelect) {
+        platformSelect.value = "bilibili";
+        platformSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    const landscapeRadio = [
+      ...container.querySelectorAll<HTMLInputElement>('input[name="episode-archive-orientation"]'),
+    ].find((input) => input.value === "landscape");
+    await act(async () => {
+      landscapeRadio?.click();
+    });
+
+    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("确认封存"));
+    await act(async () => {
+      confirm?.click();
+      await Promise.resolve();
+    });
+
+    expect(apiMock.archiveCurrentEpisode).toHaveBeenCalledWith(null, "bilibili", "landscape");
+  });
+
   it("explains that an empty episode does not need archiving", async () => {
     apiMock.getCurrentEpisode.mockResolvedValueOnce({ ...active, clip_count: 0 });
     apiMock.listEpisodes.mockResolvedValueOnce([{ ...active, clip_count: 0 }, archived]);
@@ -137,6 +179,40 @@ describe("EpisodePanel", () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "取消")?.click();
     });
     expect(container.textContent).not.toContain("集标题必须为 1-120 字");
+  });
+
+  it("shows the current episode's platform and orientation as a badge", async () => {
+    await act(async () => root.render(<EpisodePanel />));
+    expect(container.textContent).toContain("抖音 · 竖屏");
+  });
+
+  it("submits the platform and orientation selection alongside a rename", async () => {
+    await act(async () => root.render(<EpisodePanel />));
+    await act(async () => container.querySelector<HTMLButtonElement>(".episode-current")?.click());
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "重命名本集")?.click();
+    });
+
+    const platformSelect = container.querySelector<HTMLSelectElement>('select[aria-label="目标平台"]');
+    expect(platformSelect?.value).toBe("douyin");
+    await act(async () => {
+      if (platformSelect) {
+        platformSelect.value = "douyin";
+        platformSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    const portraitRadio = [...container.querySelectorAll<HTMLInputElement>('input[name="episode-orientation"]')]
+      .find((input) => input.value === "portrait");
+    await act(async () => {
+      portraitRadio?.click();
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "保存")?.click();
+      await Promise.resolve();
+    });
+
+    expect(apiMock.setEpisodePlatform).toHaveBeenCalledWith(active.id, "douyin", "portrait");
   });
 
   it("switches every route to the new episode even when the list refresh fails", async () => {

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "s2b-tauri-embed",
+  "version": "0.1.0",
+  "identifier": "ca.tripcut.spike.s2b-tauri-embed",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TripCut S2b — libmpv render API in Tauri",
+        "width": 1040,
+        "height": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

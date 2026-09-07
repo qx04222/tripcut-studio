@@ -74,11 +74,11 @@ struct PairMotion {
     residual_rms: f64,
 }
 
-struct CommandOutput<T = Vec<u8>> {
-    success: bool,
-    code: Option<i32>,
-    stdout: T,
-    stderr: Vec<u8>,
+pub(crate) struct CommandOutput<T = Vec<u8>> {
+    pub(crate) success: bool,
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: T,
+    pub(crate) stderr: Vec<u8>,
 }
 
 pub fn enqueue_missing(connection: &mut Connection) -> Result<usize> {
@@ -252,14 +252,15 @@ fn load_source(connection: &Connection, payload: &AnalyzeMotionPayload) -> Resul
         })
 }
 
-fn gray_frame_args(path: &Path) -> Vec<OsString> {
+fn gray_frame_args(path: &Path, hardware_decode: bool) -> Vec<OsString> {
     let filter = format!(
         "fps={MOTION_SAMPLE_FPS},scale={MOTION_WIDTH}:{MOTION_HEIGHT}:force_original_aspect_ratio=increase,crop={MOTION_WIDTH}:{MOTION_HEIGHT},format=gray"
     );
-    vec![
-        OsString::from("-v"),
-        OsString::from("error"),
-        OsString::from("-nostdin"),
+    let mut args = vec![OsString::from("-v"), OsString::from("error"), OsString::from("-nostdin")];
+    if hardware_decode {
+        args.extend([OsString::from("-hwaccel"), OsString::from("videotoolbox")]);
+    }
+    args.extend([
         OsString::from("-i"),
         path.as_os_str().to_owned(),
         OsString::from("-map"),
@@ -272,11 +273,31 @@ fn gray_frame_args(path: &Path) -> Vec<OsString> {
         OsString::from("-f"),
         OsString::from("rawvideo"),
         OsString::from("-"),
-    ]
+    ]);
+    args
 }
 
+/// 先硬解后软解:硬解失败(命令出错或退出码非零)则用软解重跑;两次都失败合并报错。
 fn analyze_video(path: &Path, ffmpeg: &OsStr) -> Result<ClipMotion> {
-    let output = execute_with_reader(ffmpeg, &gray_frame_args(path), MOTION_TIMEOUT, analyze_frame_stream)
+    analyze_video_with_fallback(ffmpeg, |hardware_decode| gray_frame_args(path, hardware_decode))
+}
+
+fn analyze_video_with_fallback(
+    ffmpeg: &OsStr,
+    build: impl Fn(bool) -> Vec<OsString>,
+) -> Result<ClipMotion> {
+    match run_analyze_video(ffmpeg, &build(true)) {
+        Ok(motion) => Ok(motion),
+        Err(hardware_error) => run_analyze_video(ffmpeg, &build(false)).map_err(|software_error| {
+            CoreError::Motion(format!(
+                "VideoToolbox 硬解：{hardware_error}；CPU 解码：{software_error}"
+            ))
+        }),
+    }
+}
+
+fn run_analyze_video(ffmpeg: &OsStr, args: &[OsString]) -> Result<ClipMotion> {
+    let output = execute_with_reader(ffmpeg, args, MOTION_TIMEOUT, analyze_frame_stream)
         .map_err(|error| CoreError::Motion(format!("提取运镜采样帧失败：{error}")))?;
     if !output.success {
         return Err(command_failure("ffmpeg 运镜采样", &output));
@@ -326,7 +347,7 @@ fn analyze_frame_stream(mut reader: impl Read) -> std::io::Result<Result<Vec<Pai
 
 #[cfg(test)]
 fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
-    let args = gray_frame_args(path);
+    let args = gray_frame_args(path, true);
     let output = execute_with_timeout(ffmpeg, &args, MOTION_TIMEOUT)
         .map_err(|error| CoreError::Motion(format!("提取运镜采样帧失败：{error}")))?;
     if !output.success {
@@ -768,7 +789,7 @@ fn execute_with_timeout(
     execute_with_reader(executable, args, timeout, |pipe| read_pipe(Some(pipe)))
 }
 
-fn execute_with_reader<T: Send + 'static>(
+pub(crate) fn execute_with_reader<T: Send + 'static>(
     executable: &OsStr,
     args: &[OsString],
     timeout: Duration,
@@ -1372,5 +1393,66 @@ mod tests {
         assert_eq!(pan.class, "pan");
         assert!(pan.shake_score < jitter.shake_score);
         assert!(pan.shake_score < crate::core::settings::DEFAULT_JITTER_THRESHOLD);
+    }
+
+    #[test]
+    fn gray_frame_args_prefer_hardware_decode() {
+        let args = gray_frame_args(Path::new("/x.mp4"), true);
+        assert!(args.windows(2).any(|w| w[0] == "-hwaccel" && w[1] == "videotoolbox"));
+        assert!(!gray_frame_args(Path::new("/x.mp4"), false).iter().any(|a| a == "-hwaccel"));
+    }
+
+    #[test]
+    fn analyze_video_falls_back_to_software_decode_when_hardware_fails() {
+        if !ffmpeg_available() {
+            eprintln!("skipping fallback test: ffmpeg unavailable");
+            return;
+        }
+        let calls = std::cell::RefCell::new(Vec::new());
+        // 第一次(硬解)指向不存在的输入让 ffmpeg 失败,第二次(软解)用 lavfi 源成功。
+        let result = analyze_video_with_fallback(&test_ffmpeg(), |hardware| {
+            calls.borrow_mut().push(hardware);
+            if hardware {
+                vec![
+                    OsString::from("-v"), OsString::from("error"), OsString::from("-nostdin"),
+                    OsString::from("-i"), OsString::from("/nonexistent-input.mp4"),
+                    OsString::from("-pix_fmt"), OsString::from("gray"),
+                    OsString::from("-f"), OsString::from("rawvideo"), OsString::from("-"),
+                ]
+            } else {
+                vec![
+                    OsString::from("-v"), OsString::from("error"), OsString::from("-nostdin"),
+                    OsString::from("-f"), OsString::from("lavfi"),
+                    OsString::from("-i"), OsString::from(format!(
+                        "nullsrc=size={MOTION_WIDTH}x{MOTION_HEIGHT}:rate={MOTION_SAMPLE_FPS}:duration=2"
+                    )),
+                    OsString::from("-pix_fmt"), OsString::from("gray"),
+                    OsString::from("-f"), OsString::from("rawvideo"), OsString::from("-"),
+                ]
+            }
+        });
+        assert!(result.is_ok(), "expected software fallback to succeed: {result:?}");
+        assert_eq!(*calls.borrow(), vec![true, false]);
+    }
+
+    #[test]
+    fn analyze_video_reports_both_errors_when_hardware_and_software_both_fail() {
+        if !ffmpeg_available() {
+            eprintln!("skipping both-fail test: ffmpeg unavailable");
+            return;
+        }
+        // 硬解、软解都指向不存在的输入:两条路径都失败,合并报错必须两半都在。
+        let result = analyze_video_with_fallback(&test_ffmpeg(), |_hardware| {
+            vec![
+                OsString::from("-v"), OsString::from("error"), OsString::from("-nostdin"),
+                OsString::from("-i"), OsString::from("/nonexistent-both-fail.mp4"),
+                OsString::from("-pix_fmt"), OsString::from("gray"),
+                OsString::from("-f"), OsString::from("rawvideo"), OsString::from("-"),
+            ]
+        });
+        let error = result.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("VideoToolbox 硬解"));
+        assert!(message.contains("CPU 解码"));
     }
 }

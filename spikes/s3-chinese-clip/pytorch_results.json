@@ -1,0 +1,21 @@
+{
+  "device": "mps",
+  "load_time_s": 4.595930814743042,
+  "batch1_p50_ms": 22.104501724243164,
+  "batch1_p95_ms": 26.66417360305786,
+  "batch1_mean_ms": 22.84907341003418,
+  "batch1_total_s": 2.284907341003418,
+  "batch8_p50_ms_per_frame": 18.11736822128296,
+  "batch8_p95_ms_per_frame": 21.99685573577881,
+  "batch8_mean_ms_per_frame": 18.53616237640381,
+  "batch8_total_s": 1.8536162376403809,
+  "text_p50_ms": 8.207917213439941,
+  "text_p95_ms": 15.838122367858887,
+  "text_mean_ms": 9.725689888000488,
+  "sanity_has_nan": false,
+  "sanity_sim_min": 0.22667358815670013,
+  "sanity_sim_max": 0.36579442024230957,
+  "sanity_sim_std": 0.02496357075870037,
+  "sanity_row_argmax_unique_count": 13,
+  "peak_rss_mb": 2893.0625
+}

@@ -1,0 +1,75 @@
+{
+  "all_cover_ms": 808895,
+  "finished_at": "unix:1788678013",
+  "first_screen_cover_ms": 55614,
+  "fixtures": 500,
+  "jobs": {
+    "blocked": 0,
+    "done": 4166,
+    "failed": 0
+  },
+  "rss_bytes": {
+    "p95": 3858644992,
+    "peak": 7963590656
+  },
+  "schema_version": 1,
+  "stages": {
+    "analyze_l1": {
+      "count": 500,
+      "p50_ms": 9340,
+      "p95_ms": 14338
+    },
+    "analyze_motion": {
+      "count": 1421,
+      "p50_ms": 5,
+      "p95_ms": 9706
+    },
+    "chapterize": {
+      "count": 3,
+      "p50_ms": 28,
+      "p95_ms": 58
+    },
+    "clip_embed": {
+      "count": 539,
+      "p50_ms": 3,
+      "p95_ms": 18
+    },
+    "full_hash": {
+      "count": 499,
+      "p50_ms": 31,
+      "p95_ms": 61
+    },
+    "import_probe": {
+      "count": 500,
+      "p50_ms": 109,
+      "p95_ms": 134
+    },
+    "proxy": {
+      "count": 500,
+      "p50_ms": 4968,
+      "p95_ms": 8407
+    },
+    "thumbnail": {
+      "count": 500,
+      "p50_ms": 5566,
+      "p95_ms": 11864
+    },
+    "transcribe": {
+      "count": 125,
+      "p50_ms": 6280,
+      "p95_ms": 7070
+    },
+    "waveform": {
+      "count": 540,
+      "p50_ms": 49,
+      "p95_ms": 78
+    }
+  },
+  "started_at": "unix:1788674737",
+  "swapouts_delta": 0,
+  "total_ms": 3275468,
+  "workers": 4,
+  "excluded": {
+    "clip_embed_blocked": 0
+  }
+}

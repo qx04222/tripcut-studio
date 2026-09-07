@@ -8,13 +8,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { StoryboardView } from "./Storyboard";
-import type { RevisionInfo, ShotStack, Storyboard as StoryboardData } from "./api";
+import type { RevisionInfo, ShotStack, Storyboard as StoryboardData, StoryTemplateInfo } from "./api";
 
 const apiMocks = vi.hoisted(() => ({
   enqueueNarrateEpisode: vi.fn(),
   getLlmStatus: vi.fn(),
   getStoryboard: vi.fn(),
   listShotStacks: vi.fn(async () => [] as ShotStack[]),
+  listStoryTemplates: vi.fn(async () => [] as StoryTemplateInfo[]),
   mergeChapters: vi.fn(),
   renameChapter: vi.fn(),
   setDestinationCardVerified: vi.fn(),
@@ -41,6 +42,7 @@ const board: StoryboardData = {
   mode: "legacy",
   mode_notice: "",
   narrative: null,
+  current_template: null,
   narration_job_status: null,
 };
 
@@ -134,5 +136,105 @@ describe("chapter title edit survives the native event's currentTarget being nul
     const updatedInput = container.querySelector<HTMLInputElement>("input[maxlength='80']");
     expect(updatedInput).not.toBeNull();
     expect(updatedInput!.value).toBe("新标题");
+  });
+});
+
+// R4 Task 5：故事板顶部的四选一模板卡片 + 「不使用模板」；两道 R4 Task 4
+// 遗留的接线缺口——outcome 要按 kind 区分 job/revision，L3 关闭不能再挡住
+// enqueueNarrateEpisode 的调用。
+describe("story template cards", () => {
+  const templateInfos: StoryTemplateInfo[] = [
+    { id: "cinematic", name_zh: "电影感", blurb_zh: "稳定广角开场,收在最长稳定镜头" },
+    { id: "fastcut", name_zh: "快节奏", blurb_zh: "最短高能镜头开场,密集蒙太奇" },
+    { id: "ambient", name_zh: "安静氛围", blurb_zh: "无人物空镜开场,静止或缓慢运镜" },
+    { id: "diary", name_zh: "旅行日记", blurb_zh: "严格按拍摄时间先后叙述" },
+  ];
+
+  async function mountStoryboard(props: { readOnly?: boolean } = {}) {
+    apiMocks.getStoryboard.mockResolvedValue(board);
+    apiMocks.listStoryTemplates.mockResolvedValue(templateInfos);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    await act(async () => {
+      root.render(<StoryboardView {...props} />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return container;
+  }
+
+  it("renders the four story-template cards plus 不使用模板", async () => {
+    const container = await mountStoryboard();
+    const cards = container.querySelectorAll<HTMLButtonElement>(".story-template-cards button");
+    // 四套模板 + 「不使用模板」= 5 张卡片。
+    expect(cards.length).toBe(5);
+    const labels = Array.from(cards).map((card) => card.textContent);
+    expect(labels.some((label) => label?.includes("不使用模板"))).toBe(true);
+    for (const info of templateInfos) {
+      expect(labels.some((label) => label?.includes(info.name_zh))).toBe(true);
+    }
+  });
+
+  it('clicking 「电影感」 calls enqueueNarrateEpisode("cinematic")', async () => {
+    apiMocks.getLlmStatus.mockResolvedValue({
+      enabled: false,
+      provider: "none",
+      budget_exhausted: false,
+      remaining_calls: 0,
+    });
+    apiMocks.enqueueNarrateEpisode.mockResolvedValue({ kind: "job", id: 42 });
+    const container = await mountStoryboard();
+    const cards = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".story-template-cards button"),
+    );
+    const cinematicCard = cards.find((card) => card.textContent?.includes("电影感"));
+    expect(cinematicCard).toBeDefined();
+
+    await act(async () => {
+      cinematicCard!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.enqueueNarrateEpisode).toHaveBeenCalledWith("cinematic");
+  });
+
+  it('a kind:"revision" response refetches the storyboard and shows the 未启用 AI notice', async () => {
+    apiMocks.getLlmStatus.mockResolvedValue({
+      enabled: false,
+      provider: "none",
+      budget_exhausted: false,
+      remaining_calls: 0,
+    });
+    apiMocks.enqueueNarrateEpisode.mockResolvedValue({ kind: "revision", id: 7 });
+    const container = await mountStoryboard();
+    const callsBeforeClick = apiMocks.getStoryboard.mock.calls.length;
+    const cards = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".story-template-cards button"),
+    );
+    const cinematicCard = cards.find((card) => card.textContent?.includes("电影感"));
+
+    await act(async () => {
+      cinematicCard!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // revision 分支必须立刻重新拉一次故事板,不能像 job 分支一样只排队等轮询。
+    expect(apiMocks.getStoryboard.mock.calls.length).toBeGreaterThan(callsBeforeClick);
+    expect(container.textContent).toContain("已按模板生成（未启用 AI）");
+  });
+
+  it("disables every template card in a read-only historical episode", async () => {
+    const container = await mountStoryboard({ readOnly: true });
+    const cards = container.querySelectorAll<HTMLButtonElement>(".story-template-cards button");
+    expect(cards.length).toBe(5);
+    cards.forEach((card) => expect(card.disabled).toBe(true));
+    expect(container.textContent).toContain("历史集为只读档案");
   });
 });

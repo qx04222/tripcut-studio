@@ -5,8 +5,26 @@ import {
   getCurrentEpisode,
   listEpisodes,
   renameCurrentEpisode,
+  setEpisodePlatform,
+  type CanvasOrientation,
   type EpisodeSummary,
+  type TargetPlatform,
 } from "./api";
+
+const PLATFORM_LABELS: Record<TargetPlatform, string> = {
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  bilibili: "B站",
+  moments: "朋友圈",
+  family: "家庭纪录",
+  general: "通用",
+};
+
+const ORIENTATION_LABELS: Record<CanvasOrientation, string> = {
+  landscape: "横屏",
+  portrait: "竖屏",
+  both: "同时",
+};
 
 function formatDate(value: string): string {
   return value.slice(0, 10);
@@ -33,6 +51,10 @@ export function EpisodePanel() {
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftTheme, setDraftTheme] = useState("");
+  const [draftPlatform, setDraftPlatform] = useState<TargetPlatform>("general");
+  const [draftOrientation, setDraftOrientation] = useState<CanvasOrientation>("landscape");
+  const [archivePlatform, setArchivePlatform] = useState<TargetPlatform>("general");
+  const [archiveOrientation, setArchiveOrientation] = useState<CanvasOrientation>("landscape");
 
   const refresh = useCallback(async () => {
     const [nextCurrent, nextList] = await Promise.all([getCurrentEpisode(), listEpisodes()]);
@@ -57,14 +79,18 @@ export function EpisodePanel() {
 
   const archive = async () => {
     if (!archiveArmed) {
+      if (current) {
+        setArchivePlatform(current.target_platform);
+        setArchiveOrientation(current.canvas_orientation);
+      }
       setArchiveArmed(true);
-      setNotice("再次点击确认:本集将封存为只读档案,并自动开启下一集。");
+      setNotice("再次点击确认:本集将封存为只读档案,并按下方选择开启下一集。");
       return;
     }
     setArchiveArmed(false);
     setBusy(true);
     try {
-      const outcome = await archiveCurrentEpisode(null);
+      const outcome = await archiveCurrentEpisode(null, archivePlatform, archiveOrientation);
       setNotice(`已封存「${outcome.archived.title}」,当前进入「${outcome.next.title}」`);
       // 封存在同一路由内完成时,SelectPage/Storyboard/DeliverPage 各自持有的
       // activeEpisodeId 不会自动感知——广播新 active 集,避免它们继续把刚
@@ -87,9 +113,11 @@ export function EpisodePanel() {
   };
 
   const saveRename = async () => {
+    if (!current) return;
     setBusy(true);
     try {
       await renameCurrentEpisode(draftTitle, draftTheme);
+      await setEpisodePlatform(current.id, draftPlatform, draftOrientation);
       setEditing(false);
       setNotice("集信息已更新");
       await refresh();
@@ -126,7 +154,12 @@ export function EpisodePanel() {
         }}
       >
         <span className="episode-kicker">CURRENT EPISODE {open ? "▾" : "▸"}</span>
-        <strong>{current.title}</strong>
+        <strong>
+          {current.title}
+          <span className="episode-platform-badge">
+            {PLATFORM_LABELS[current.target_platform]} · {ORIENTATION_LABELS[current.canvas_orientation]}
+          </span>
+        </strong>
         <small>
           {current.clip_count} 素材 · {current.favorite_count} 收藏
         </small>
@@ -155,6 +188,37 @@ export function EpisodePanel() {
                   setDraftTheme(value);
                 }}
               />
+              <label className="episode-platform-field">
+                目标平台
+                <select
+                  aria-label="目标平台"
+                  value={draftPlatform}
+                  onChange={(event) => {
+                    setDraftPlatform(event.currentTarget.value as TargetPlatform);
+                  }}
+                >
+                  {(Object.keys(PLATFORM_LABELS) as TargetPlatform[]).map((platform) => (
+                    <option key={platform} value={platform}>
+                      {PLATFORM_LABELS[platform]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <fieldset className="episode-orientation-field">
+                <legend>画布方向</legend>
+                {(Object.keys(ORIENTATION_LABELS) as CanvasOrientation[]).map((orientation) => (
+                  <label key={orientation}>
+                    <input
+                      type="radio"
+                      name="episode-orientation"
+                      value={orientation}
+                      checked={draftOrientation === orientation}
+                      onChange={() => setDraftOrientation(orientation)}
+                    />
+                    {ORIENTATION_LABELS[orientation]}
+                  </label>
+                ))}
+              </fieldset>
               <div className="episode-edit-actions">
                 <button type="button" disabled={busy} onClick={() => void saveRename()}>保存</button>
                 <button
@@ -177,12 +241,51 @@ export function EpisodePanel() {
                 onClick={() => {
                   setDraftTitle(current.title);
                   setDraftTheme(current.theme);
+                  setDraftPlatform(current.target_platform);
+                  setDraftOrientation(current.canvas_orientation);
                   setEditing(true);
                   setNotice(null);
                 }}
               >
                 重命名本集
               </button>
+              {archiveArmed ? (
+                <div className="episode-archive-dialog" aria-label="封存并开启下一集">
+                  <label className="episode-platform-field">
+                    下一集目标平台
+                    <select
+                      aria-label="下一集目标平台"
+                      value={archivePlatform}
+                      disabled={busy}
+                      onChange={(event) => {
+                        setArchivePlatform(event.currentTarget.value as TargetPlatform);
+                      }}
+                    >
+                      {(Object.keys(PLATFORM_LABELS) as TargetPlatform[]).map((platform) => (
+                        <option key={platform} value={platform}>
+                          {PLATFORM_LABELS[platform]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <fieldset className="episode-orientation-field">
+                    <legend>下一集画布方向</legend>
+                    {(Object.keys(ORIENTATION_LABELS) as CanvasOrientation[]).map((orientation) => (
+                      <label key={orientation}>
+                        <input
+                          type="radio"
+                          name="episode-archive-orientation"
+                          value={orientation}
+                          checked={archiveOrientation === orientation}
+                          disabled={busy}
+                          onChange={() => setArchiveOrientation(orientation)}
+                        />
+                        {ORIENTATION_LABELS[orientation]}
+                      </label>
+                    ))}
+                  </fieldset>
+                </div>
+              ) : null}
               <button
                 type="button"
                 className={archiveArmed ? "danger armed" : "danger"}
@@ -196,6 +299,18 @@ export function EpisodePanel() {
                     ? "确认封存并开启下一集"
                     : "封存本集"}
               </button>
+              {archiveArmed ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setArchiveArmed(false);
+                    setNotice(null);
+                  }}
+                >
+                  取消封存
+                </button>
+              ) : null}
             </div>
           )}
 

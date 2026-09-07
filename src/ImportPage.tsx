@@ -1,5 +1,7 @@
 import { ImportManagement } from "./ImportManagement";
+import { MissingMediaPanel } from "./MissingMediaPanel";
 import { AnalysisBadges, AnalysisPanel } from "./AnalysisPanel";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   useCallback,
   useEffect,
@@ -12,7 +14,9 @@ import {
 
 import {
   getClipArtifacts,
+  getClipsRevision,
   getImportProgress,
+  importPaths,
   listClips,
   pickImportFolder,
   startImport,
@@ -33,7 +37,14 @@ import {
 const ROW_HEIGHT = 66;
 const DETAIL_HEIGHT = 198;
 const OVERSCAN_ROWS = 5;
-const EMPTY_PROGRESS: ImportProgress = { total: 0, done: 0, failed: 0, running: 0 };
+const EMPTY_PROGRESS: ImportProgress = {
+  total: 0,
+  done: 0,
+  failed: 0,
+  running: 0,
+  waiting_for_permit: 0,
+  paused_for_memory: false,
+};
 
 export function formatDuration(clip: ClipListItem): string {
   if (
@@ -233,12 +244,13 @@ function WaveformCanvas({ url, status }: { url: string | null; status: ArtifactS
     );
   }
   return (
-    <canvas
-      ref={canvasRef}
-      className={waveform ? "waveform-canvas" : "waveform-canvas loading"}
-      role="img"
-      aria-label="素材音频波形"
-    />
+    <span role="img" aria-label="素材音频波形" style={{ display: "block" }}>
+      <canvas
+        ref={canvasRef}
+        className={waveform ? "waveform-canvas" : "waveform-canvas loading"}
+        aria-hidden="true"
+      />
+    </span>
   );
 }
 
@@ -501,10 +513,31 @@ export function ImportPage() {
   const [choosing, setChoosing] = useState(false);
   const [checkedIds, setCheckedIds] = useState<number[]>([]);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const refreshRequest = useRef(0);
+  const lastClipsRevision = useRef<string | undefined>(undefined);
 
   const refresh = useCallback(async (isActive: () => boolean = () => true) => {
     const request = ++refreshRequest.current;
+
+    // 轮询先问一句「变了吗」——没变就跳过 listClips 整表拉取,只刷新进度。
+    // 拿修订号本身失败(命令报错)就当作「变了」,退回全量拉取,不能卡死轮询。
+    let nextRevision: string | undefined;
+    let shouldFetchClips: boolean;
+    try {
+      nextRevision = await getClipsRevision();
+      shouldFetchClips = nextRevision !== lastClipsRevision.current;
+    } catch {
+      shouldFetchClips = true;
+    }
+
+    if (!shouldFetchClips) {
+      const nextProgress = await getImportProgress();
+      if (!isActive() || request !== refreshRequest.current) return;
+      setProgress(nextProgress);
+      return;
+    }
+
     const [nextProgress, nextClips, currentEpisode] = await Promise.all([
       getImportProgress(),
       listClips(),
@@ -513,6 +546,7 @@ export function ImportPage() {
     if (!isActive() || request !== refreshRequest.current) return;
     setProgress(nextProgress);
     setClips(nextClips.filter((clip) => clip.episode_id === currentEpisode.id));
+    lastClipsRevision.current = nextRevision;
   }, []);
 
   useEffect(() => {
@@ -555,6 +589,43 @@ export function ImportPage() {
     return () => window.removeEventListener("tripcut:action", onAction);
   });
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragActive(true);
+        } else if (payload.type === "leave") {
+          setDragActive(false);
+        } else if (payload.type === "drop") {
+          setDragActive(false);
+          if (payload.paths.length === 0) return;
+          setError(null);
+          setNotice(null);
+          void importPaths(payload.paths)
+            .then((results) => {
+              const total = results.reduce((sum, result) => sum + result.total, 0);
+              const enqueued = results.reduce((sum, result) => sum + result.enqueued, 0);
+              const skipped = results.reduce((sum, result) => sum + result.skipped, 0);
+              const duplicateNote = skipped > 0 ? `，跳过 ${skipped} 项已入库或已排队素材（可能属于其他集）` : "";
+              setNotice(`已发现 ${total} 个视频，新增 ${enqueued} 项${duplicateNote}`);
+              return refresh();
+            })
+            .catch((importError) => setError(String(importError)));
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refresh]);
+
   const chooseFolder = async () => {
     setChoosing(true);
     setError(null);
@@ -586,7 +657,12 @@ export function ImportPage() {
   );
 
   return (
-    <section className="import-panel" aria-label="素材导入">
+    <section className={`import-panel${dragActive ? " drop-target" : ""}`} aria-label="素材导入">
+      {dragActive ? (
+        <div className="drop-overlay" role="status">
+          <span>松开即导入</span>
+        </div>
+      ) : null}
       {toolchainMissing ? (
         <div className="toolchain-warning" role="alert">
           <span>应用内置的媒体工具不可用，暂时无法解析画面与时长。请重新安装完整 DMG；开发调试时也可到设置页「工具链」填写可信的自定义路径。</span>
@@ -680,6 +756,10 @@ export function ImportPage() {
           <span>
             {progress.running > 0 ? `${progress.running} 正在探测` : `${pending} 等待中`} · {summary}
           </span>
+          <PermitWaitingHint
+            waiting={progress.waiting_for_permit}
+            pausedForMemory={progress.paused_for_memory}
+          />
         </div>
         <div
           className="progress-track"
@@ -709,6 +789,7 @@ export function ImportPage() {
       {error ? <div className="import-message error" role="alert">{error}</div> : null}
       {!error && notice ? <div className="import-message">{notice}</div> : null}
 
+      <MissingMediaPanel />
       <ImportManagement selectedIds={checkedIds.filter((id) => clips.some((clip) => clip.id === id))} onChanged={() => {
         setCheckedIds([]);
         void refresh().then(() => refreshWatched()).catch((e) => setError(String(e)));
@@ -727,6 +808,24 @@ export function ImportPage() {
       )}
     </section>
   );
+}
+
+/// 解码许可吃满时的提示——否则界面上只看到进度条不动。
+export function PermitWaitingHint({
+  waiting,
+  pausedForMemory = false,
+}: {
+  waiting: number;
+  pausedForMemory?: boolean;
+}) {
+  // 内存暂停时「等待解码许可」会误导——排队的不是许可,是内存;说清楚真正的原因。
+  if (pausedForMemory) {
+    return <span className="permit-waiting paused-for-memory">{`「内存不足，已暂停解码与模型任务」`}</span>;
+  }
+  if (!waiting || waiting <= 0) {
+    return null;
+  }
+  return <span className="permit-waiting">{`「${waiting} 等待解码许可」`}</span>;
 }
 
 export function analysisProgress(clips: ClipListItem[], kind: "analysis" | "motion") {

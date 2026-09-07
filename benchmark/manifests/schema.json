@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tripcut.local/benchmark/manifest.schema.json",
+  "title": "TripCut travel benchmark scenario manifest",
+  "type": "object",
+  "required": ["schema_version", "group", "defaults", "fixtures"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "group": {
+      "type": "object",
+      "required": ["id", "name", "source_kind"],
+      "properties": {
+        "id": { "enum": ["A", "B", "C", "D", "E", "F", "G"] },
+        "name": { "type": "string", "minLength": 1 },
+        "source_kind": { "enum": ["seed", "synthetic"] }
+      },
+      "additionalProperties": false
+    },
+    "defaults": { "$ref": "#/$defs/expectationBundle" },
+    "fixtures": {
+      "type": "array",
+      "minItems": 5,
+      "items": { "$ref": "#/$defs/fixture" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "fixture": {
+      "type": "object",
+      "required": ["id", "source", "scenario", "golden"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-G]-[0-9]{3}$" },
+        "source": {
+          "type": "object",
+          "required": ["kind", "relative_path"],
+          "properties": {
+            "kind": { "enum": ["seed", "synthetic"] },
+            "relative_path": { "type": "string", "minLength": 1 },
+            "generation_command": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "scenario": { "type": "string", "minLength": 1 },
+        "golden": { "type": "boolean" },
+        "expected": { "$ref": "#/$defs/expected" },
+        "timeline": { "$ref": "#/$defs/timeline" },
+        "routine": { "$ref": "#/$defs/routine" }
+      },
+      "additionalProperties": false
+    },
+    "expectationBundle": {
+      "type": "object",
+      "required": ["expected", "timeline", "routine"],
+      "properties": {
+        "expected": { "$ref": "#/$defs/expected" },
+        "timeline": { "$ref": "#/$defs/timeline" },
+        "routine": { "$ref": "#/$defs/routine" }
+      },
+      "additionalProperties": false
+    },
+    "expected": {
+          "type": "object",
+          "required": [
+            "scene_boundaries_us", "scene_tolerance_us", "stack_label",
+            "important_event", "recommend_or_retain", "unique_event",
+            "narrative_critical"
+          ],
+          "properties": {
+            "scene_boundaries_us": {
+              "type": ["array", "null"],
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "scene_tolerance_us": { "type": "integer", "minimum": 0 },
+            "stack_label": { "type": ["string", "null"] },
+            "important_event": { "type": "boolean" },
+            "recommend_or_retain": { "type": "boolean" },
+            "unique_event": { "type": "boolean" },
+            "narrative_critical": { "type": "boolean" }
+          },
+          "additionalProperties": false
+    },
+    "timeline": {
+          "type": "object",
+          "required": ["vfr_checkpoints_us", "proxy_checkpoints_us"],
+          "properties": {
+            "vfr_checkpoints_us": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "proxy_checkpoints_us": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "additionalProperties": false
+    },
+    "routine": {
+          "type": ["object", "null"],
+          "required": ["kind", "occurrence_index"],
+          "properties": {
+            "kind": { "type": "string", "minLength": 1 },
+            "occurrence_index": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { useEffect, useRef, type MouseEvent } from "react";
 import {
   HELP_FAQS,
   KEYBOARD_SHORTCUT_GROUPS,
+  SETTINGS_HELP_TOPICS,
   WORKFLOW_STEPS,
 } from "./helpContent";
 
@@ -61,7 +62,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
   };
 
   return (
-    <div className="help-backdrop" onMouseDown={closeFromBackdrop}>
+    <div className="help-backdrop" role="presentation" onMouseDown={closeFromBackdrop}>
       <div
         className="help-dialog"
         ref={dialogRef}
@@ -145,9 +146,33 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
             </div>
           </section>
 
+          <section className="help-section settings-help" aria-labelledby="settings-help-title">
+            <div className="help-section-heading">
+              <span>03 / SETTINGS</span>
+              <div>
+                <h3 id="settings-help-title">设置页导览</h3>
+                <p>每个分区做什么、隐私与诊断信息去了哪里。</p>
+              </div>
+            </div>
+            <div className="settings-help-topics">
+              {SETTINGS_HELP_TOPICS.map((topic) => (
+                <article data-help-topic={topic.id} key={topic.id}>
+                  <header>
+                    <span>{topic.eyebrow}</span>
+                    <strong>{topic.label}</strong>
+                    <small>{topic.description}</small>
+                  </header>
+                  {topic.paragraphs.map((paragraph, index) => (
+                    <p key={index}>{paragraph}</p>
+                  ))}
+                </article>
+              ))}
+            </div>
+          </section>
+
           <section className="help-section faq-help" aria-labelledby="faq-help-title">
             <div className="help-section-heading">
-              <span>03 / FAQ</span>
+              <span>04 / FAQ</span>
               <div>
                 <h3 id="faq-help-title">常见问题</h3>
                 <p>围绕本机工具链、剪映交付和素材安全。</p>
