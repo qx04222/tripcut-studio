@@ -1,14 +1,6 @@
 import { useEffect, useReducer } from "react";
 
-import {
-  getClipsRevision,
-  getCurrentEpisode,
-  getStoryboard,
-  listClipDimensions,
-  listClips,
-  listEpisodes,
-  type GlobalSearchHit,
-} from "./api";
+import { getCurrentEpisode, listEpisodes, type GlobalSearchHit } from "./api";
 import {
   buildPinyinIndex,
   matchPinyin,
@@ -16,6 +8,7 @@ import {
   type PinyinIndex,
   type PinyinIndexEntry,
 } from "./pinyinIndex";
+import { getClipsFeedSnapshot, subscribeClipsFeed } from "./workspace/useClipsFeed";
 
 interface SearchAugmentState {
   pinyinIndex: PinyinIndex;
@@ -29,31 +22,75 @@ const emptyState: SearchAugmentState = {
   episodeTitleById: new Map(),
 };
 
-/** 轮询间隔——跟 SelectPage.tsx 里 getClipsRevision 轮询用的间隔保持一致(见该文件~1130-1200行)。 */
-const POLL_INTERVAL_MS = 2_000;
-
 /**
  * 拼音索引 + 历史集判断的共享数据层——模块级单例(而不是每个组件一份 ref),
- * 侧栏搜索与命令面板两处挂载共用同一份数据、同一次拉取(R6 Task 5 P3):
- * - P2:不再"挂载时拉一次就不管了",而是像 SelectPage 轮询 getClipsRevision 那样,
- *   变了才整表重拉;此外 clips 修订号覆盖不到的"当前集切换"额外监听
- *   tripcut:view-episode / tripcut:episode-changed 强制刷新一次。
- * - P3:两个组件各自 useEffect 订阅同一份 state,只有一次真正的网络拉取。
+ * 侧栏搜索与命令面板两处挂载共用同一份数据、同一次拉取(R6 Task 5 P3)。
+ *
+ * R8 Task 2:clips / 八维标签 / 故事板这三份数据不再由本模块自己轮询
+ * `getClipsRevision` —— 它们来自 `useClipsFeed` 这个全应用唯一的 feed
+ * (规格 §5「轮询合并」)。本模块只剩两件自己的事:
+ * - 订阅 feed,**只在 revision 变化时**重建拼音索引(重建是纯 CPU,不走网络);
+ * - 集信息(`getCurrentEpisode` / `listEpisodes`)仍由自己拉,因为它不在 clips
+ *   修订号的覆盖范围内 —— 切集不顶 clips 修订号,所以保留
+ *   `tripcut:view-episode` / `tripcut:episode-changed` 两个强制刷新监听。
  */
 let state: SearchAugmentState = emptyState;
-let lastRevision: string | undefined;
+let episodeInfo = {
+  activeEpisodeId: null as number | null,
+  episodeTitleById: new Map<number, string>(),
+};
+let lastIndexedRevision: string | undefined;
+let hasIndexed = false;
 let subscriberCount = 0;
-let pollTimer: ReturnType<typeof setInterval> | undefined;
 let inFlight = false;
-// P2:一次强制刷新(切集事件)如果撞上正在飞的常规轮询,此前会被 `if (inFlight) return`
-// 直接丢弃——切集不会顶 clips 修订号,后续任何一次常规轮询都不会重试,
-// activeEpisodeId 就此留在旧值上,只有下次 clips 真的变化才会误打误撞刷新回来。
-// 记住这次被吞掉的强制请求,等飞着的那次一结束就立刻补跑一次。
+// P2:一次强制刷新(切集事件)如果撞上正在飞的常规拉取,此前会被 `if (inFlight) return`
+// 直接丢弃——切集不会顶 clips 修订号,后续任何一次常规刷新都不会重试,
+// activeEpisodeId 就此留在旧值上。记住这次被吞掉的强制请求,等飞着的那次一结束就补跑。
 let pendingForce = false;
+let unsubscribeFeed: (() => void) | undefined;
 const listeners = new Set<() => void>();
 
 function notify() {
   for (const listener of listeners) listener();
+}
+
+/** 从 feed 的当前快照重建拼音索引 —— 纯 CPU,不发一条命令。 */
+function rebuildFromFeed(): void {
+  const feed = getClipsFeedSnapshot();
+  const entries: PinyinIndexEntry[] = [];
+  // 用 allClips 而不是 clips:feed 的 clips 已按当前集裁过(媒体池要的),而
+  // 搜索本来就要能命中历史集 —— describeHitEpisode 正是靠这个区分「历史集」。
+  for (const clip of feed.allClips) {
+    if (clip.id === null) continue;
+    entries.push({ kind: "file", clip_id: clip.id, episode_id: clip.episode_id, text: clip.file_name });
+  }
+  for (const dimension of feed.dimensions) {
+    entries.push({
+      kind: "tag",
+      clip_id: dimension.clip_id,
+      episode_id: feed.clipsById.get(dimension.clip_id)?.episode_id ?? null,
+      text: dimension.label,
+    });
+  }
+  const storyboard = feed.storyboard;
+  for (const chapter of storyboard?.chapters ?? []) {
+    const representative = storyboard?.items.find((item) => item.chapter_id === chapter.id);
+    if (!representative) continue;
+    entries.push({
+      kind: "chapter",
+      clip_id: representative.clip_id,
+      episode_id: episodeInfo.activeEpisodeId,
+      text: chapter.title,
+    });
+  }
+  state = {
+    pinyinIndex: buildPinyinIndex(entries),
+    activeEpisodeId: episodeInfo.activeEpisodeId,
+    episodeTitleById: episodeInfo.episodeTitleById,
+  };
+  lastIndexedRevision = feed.revision;
+  hasIndexed = true;
+  notify();
 }
 
 async function fetchAugmentData(force: boolean): Promise<void> {
@@ -63,56 +100,15 @@ async function fetchAugmentData(force: boolean): Promise<void> {
   }
   inFlight = true;
   try {
-    let nextRevision: string | undefined;
-    let shouldFetch = force;
-    try {
-      nextRevision = await getClipsRevision();
-      shouldFetch = force || nextRevision !== lastRevision;
-    } catch {
-      shouldFetch = true;
-    }
-    if (!shouldFetch) return;
-
-    const [clips, dimensions, storyboard, currentEpisode, episodes] = await Promise.all([
-      listClips().catch(() => []),
-      listClipDimensions().catch(() => []),
-      getStoryboard().catch(() => null),
+    const [currentEpisode, episodes] = await Promise.all([
       getCurrentEpisode().catch(() => null),
       listEpisodes().catch(() => []),
     ]);
-
-    const clipsById = new Map(clips.map((clip) => [clip.id, clip]));
-    const entries: PinyinIndexEntry[] = [];
-    for (const clip of clips) {
-      if (clip.id === null) continue;
-      entries.push({ kind: "file", clip_id: clip.id, episode_id: clip.episode_id, text: clip.file_name });
-    }
-    for (const dimension of dimensions) {
-      entries.push({
-        kind: "tag",
-        clip_id: dimension.clip_id,
-        episode_id: clipsById.get(dimension.clip_id)?.episode_id ?? null,
-        text: dimension.label,
-      });
-    }
-    for (const chapter of storyboard?.chapters ?? []) {
-      const representative = storyboard?.items.find((item) => item.chapter_id === chapter.id);
-      if (!representative) continue;
-      entries.push({
-        kind: "chapter",
-        clip_id: representative.clip_id,
-        episode_id: currentEpisode?.id ?? null,
-        text: chapter.title,
-      });
-    }
-
-    state = {
-      pinyinIndex: buildPinyinIndex(entries),
+    episodeInfo = {
       activeEpisodeId: currentEpisode?.id ?? null,
       episodeTitleById: new Map(episodes.map((episode) => [episode.id, episode.title])),
     };
-    lastRevision = nextRevision;
-    notify();
+    rebuildFromFeed();
   } finally {
     inFlight = false;
   }
@@ -122,25 +118,19 @@ async function fetchAugmentData(force: boolean): Promise<void> {
   }
 }
 
+function onFeedChange(): void {
+  const feed = getClipsFeedSnapshot();
+  // 只在 revision 变化时重建索引 —— 乐观 patch / 元数据刷新不该重跑拼音分词。
+  if (hasIndexed && feed.revision === lastIndexedRevision) return;
+  rebuildFromFeed();
+}
+
 function onEpisodeSignal() {
   // 当前集切换不一定改 clips 修订号(clips 集合本身没变),但 activeEpisodeId /
   // episodeTitleById 必须立刻跟上,所以强制刷新一次,跳过修订号比较。
+  // clips 的强制重拉由 useClipsFeed 自己的同名监听负责(它按集裁剪,必须自己听);
+  // 这里只补自己的那一份集信息(listEpisodes 的标题表不在 feed 覆盖范围内)。
   void fetchAugmentData(true);
-}
-
-function startSharedPolling() {
-  if (pollTimer !== undefined) return;
-  pollTimer = setInterval(() => {
-    void fetchAugmentData(false);
-  }, POLL_INTERVAL_MS);
-}
-
-function stopSharedPollingIfIdle() {
-  if (subscriberCount > 0) return;
-  if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
-    pollTimer = undefined;
-  }
 }
 
 function subscribe(listener: () => void): () => void {
@@ -149,8 +139,8 @@ function subscribe(listener: () => void): () => void {
   if (subscriberCount === 1) {
     window.addEventListener("tripcut:view-episode", onEpisodeSignal);
     window.addEventListener("tripcut:episode-changed", onEpisodeSignal);
+    unsubscribeFeed = subscribeClipsFeed(onFeedChange);
   }
-  startSharedPolling();
   void fetchAugmentData(false);
   return () => {
     listeners.delete(listener);
@@ -158,8 +148,9 @@ function subscribe(listener: () => void): () => void {
     if (subscriberCount === 0) {
       window.removeEventListener("tripcut:view-episode", onEpisodeSignal);
       window.removeEventListener("tripcut:episode-changed", onEpisodeSignal);
+      unsubscribeFeed?.();
+      unsubscribeFeed = undefined;
     }
-    stopSharedPollingIfIdle();
   };
 }
 
@@ -167,15 +158,16 @@ function subscribe(listener: () => void): () => void {
 export function __resetSearchAugmentForTests(): void {
   listeners.clear();
   subscriberCount = 0;
-  if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
-    pollTimer = undefined;
-  }
   window.removeEventListener("tripcut:view-episode", onEpisodeSignal);
   window.removeEventListener("tripcut:episode-changed", onEpisodeSignal);
+  unsubscribeFeed?.();
+  unsubscribeFeed = undefined;
   state = emptyState;
-  lastRevision = undefined;
+  episodeInfo = { activeEpisodeId: null, episodeTitleById: new Map() };
+  lastIndexedRevision = undefined;
+  hasIndexed = false;
   inFlight = false;
+  pendingForce = false;
 }
 
 export function useSearchAugment() {

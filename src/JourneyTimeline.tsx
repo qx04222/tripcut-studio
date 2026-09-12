@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { getJourneyTimeline, type JourneyEntry } from "./api";
+import { CoverImage } from "./workspace/ui";
 
 /** 从标准时间取 YYYY-MM-DD 作为天分组的 header;非法/空字符串一律归入未标时间。 */
 function dayOf(canonicalTime: string): string | null {
@@ -56,18 +57,21 @@ function EntryRow({ entry }: { entry: JourneyEntry }) {
   }
   return (
     <div className="journey-row journey-clip" data-kind="clip">
-      {entry.cover_url ? (
-        <img className="journey-clip-cover" src={entry.cover_url} alt="" />
-      ) : (
-        <div className="journey-clip-cover journey-clip-cover-placeholder" aria-hidden="true" />
-      )}
+      {/* 封面缺失或加载失败都走套件占位(R9 D4),不留坏图「?」。 */}
+      <span className="journey-clip-cover" aria-hidden="true">
+        <CoverImage src={entry.cover_url} />
+      </span>
       <span className="journey-clip-name">{entry.file_name ?? `素材 #${entry.clip_id ?? "?"}`}</span>
       {!entry.undated ? <time>{timeOf(entry.canonical_time)}</time> : null}
     </div>
   );
 }
 
-export function JourneyTimeline() {
+/**
+ * `emptyState`:R9 新壳附属区传入套件空状态(带一个动作)替换默认那句;
+ * 旧故事板页不传,仍是只读一句话(无任何可交互控件)。
+ */
+export function JourneyTimeline({ emptyState }: { emptyState?: ReactNode } = {}) {
   const [entries, setEntries] = useState<JourneyEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
@@ -111,9 +115,9 @@ export function JourneyTimeline() {
 
   return (
     <div className="journey-timeline" aria-label="旅程时间线">
-      {days.length === 0 && undated.length === 0 ? (
-        <p className="journey-timeline-empty">这一集还没有可排列的素材或地点卡。</p>
-      ) : null}
+      {days.length === 0 && undated.length === 0
+        ? (emptyState ?? <p className="journey-timeline-empty">这一集还没有可排列的素材或地点卡。</p>)
+        : null}
       {days.map((group) => (
         <section className="journey-day" key={group.day}>
           <header className="journey-day-header">{group.day}</header>

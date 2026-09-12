@@ -1251,6 +1251,74 @@ ON jobs(kind, payload_hash)
 WHERE kind = 'strip' AND status IN ('pending', 'running');
 "#;
 
+// R7 Task 1: story-gap detection + MiniMax cloud in-fill + generation
+// reflow. `story_gaps` records detected narrative gaps one-per-(chapter,slot);
+// `generation_requests` is the draft/submit/poll/import lifecycle of a single
+// cloud generation call; `generation_ledger` is the append-only cost log the
+// monthly-budget circuit breaker reads. `clips.generated_source` is the
+// clip-level authority for "this clip came from MiniMax, not real footage"
+// (see docs/superpowers/specs/2026-09-10-r7-story-gaps-minimax-design.md
+// §3.1 for why this isn't a segment-level tag). The `generation_poll` job
+// kind reuses the same active-payload dedupe pattern as `ocr_scan` (0036)
+// and `strip` (0040): only one pending/running poll per (kind, payload_hash).
+pub const MIGRATION_0041: &str = r#"
+CREATE TABLE story_gaps (
+    id INTEGER PRIMARY KEY,
+    episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES narrative_revisions(id) ON DELETE CASCADE,
+    chapter_id  INTEGER NOT NULL REFERENCES narrative_chapters(id) ON DELETE CASCADE,
+    beat_id     INTEGER REFERENCES narrative_beats(id) ON DELETE SET NULL,
+    slot        TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open','requested','filled','dismissed')),
+    detected_at TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX story_gaps_unique_idx ON story_gaps(chapter_id, slot);
+
+CREATE TABLE generation_requests (
+    id INTEGER PRIMARY KEY,
+    gap_id   INTEGER NOT NULL REFERENCES story_gaps(id) ON DELETE CASCADE,
+    retry_of INTEGER REFERENCES generation_requests(id),
+    provider TEXT NOT NULL DEFAULT 'minimax' CHECK(provider IN ('minimax')),
+    model    TEXT NOT NULL,
+    mode     TEXT NOT NULL CHECK(mode IN ('t2v','i2v','fl2v','r2v')),
+    prompt   TEXT NOT NULL,
+    refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(refs_json)),
+    duration_s INTEGER NOT NULL CHECK(duration_s BETWEEN 4 AND 15),
+    resolution TEXT NOT NULL CHECK(resolution IN ('480P','768P','2K')),
+    ratio TEXT,
+    estimated_cost_usd REAL NOT NULL CHECK(estimated_cost_usd >= 0),
+    task_id TEXT,
+    status TEXT NOT NULL DEFAULT 'draft'
+           CHECK(status IN ('draft','submitted','queued','succeeded','failed','cancelled','imported')),
+    error TEXT,
+    result_url TEXT,
+    result_clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX generation_requests_gap_idx ON generation_requests(gap_id, id);
+CREATE UNIQUE INDEX generation_requests_task_idx ON generation_requests(task_id) WHERE task_id IS NOT NULL;
+
+CREATE TABLE generation_ledger (
+    id INTEGER PRIMARY KEY,
+    request_id INTEGER NOT NULL REFERENCES generation_requests(id) ON DELETE CASCADE,
+    cost_usd REAL NOT NULL CHECK(cost_usd >= 0),
+    seconds  INTEGER NOT NULL,
+    images   INTEGER NOT NULL DEFAULT 0,
+    at TEXT NOT NULL
+);
+CREATE INDEX generation_ledger_month_idx ON generation_ledger(at);
+
+ALTER TABLE clips ADD COLUMN generated_source TEXT;
+
+CREATE UNIQUE INDEX jobs_active_generation_poll_payload_unique_idx
+ON jobs(kind, payload_hash)
+WHERE kind = 'generation_poll' AND status IN ('pending','running');
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1392,9 +1460,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 38, sql: MIGRATION_0038 },
     Migration { version: 39, sql: MIGRATION_0039 },
     Migration { version: 40, sql: MIGRATION_0040 },
+    Migration { version: 41, sql: MIGRATION_0041 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 40;
+pub const LATEST_SCHEMA_VERSION: i64 = 41;
 
 #[cfg(test)]
 mod tests {
@@ -1664,5 +1733,109 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, 1, "0040 必须给 strip 任务建部分唯一索引");
+    }
+
+    #[test]
+    fn schema_version_is_41() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 41);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 41);
+    }
+
+    #[test]
+    fn migration_0041_creates_gap_and_generation_tables() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+
+        let column_names = |table: &str| -> Vec<String> {
+            let mut statement = connection
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|value| value.unwrap())
+                .collect()
+        };
+
+        let story_gaps_columns = column_names("story_gaps");
+        for expected in [
+            "id",
+            "episode_id",
+            "revision_id",
+            "chapter_id",
+            "beat_id",
+            "slot",
+            "reason",
+            "status",
+            "detected_at",
+            "updated_at",
+        ] {
+            assert!(
+                story_gaps_columns.iter().any(|name| name == expected),
+                "story_gaps 缺列 {expected}"
+            );
+        }
+
+        let generation_requests_columns = column_names("generation_requests");
+        for expected in [
+            "id",
+            "gap_id",
+            "retry_of",
+            "provider",
+            "model",
+            "mode",
+            "prompt",
+            "refs_json",
+            "duration_s",
+            "resolution",
+            "ratio",
+            "estimated_cost_usd",
+            "task_id",
+            "status",
+            "error",
+            "result_url",
+            "result_clip_id",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                generation_requests_columns.iter().any(|name| name == expected),
+                "generation_requests 缺列 {expected}"
+            );
+        }
+
+        let generation_ledger_columns = column_names("generation_ledger");
+        for expected in ["id", "request_id", "cost_usd", "seconds", "images", "at"] {
+            assert!(
+                generation_ledger_columns.iter().any(|name| name == expected),
+                "generation_ledger 缺列 {expected}"
+            );
+        }
+
+        let clips_columns = column_names("clips");
+        assert!(
+            clips_columns.iter().any(|name| name == "generated_source"),
+            "clips 必须新增 generated_source 列"
+        );
+
+        let unique_index_exists = |name: &str| -> i64 {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            unique_index_exists("story_gaps_unique_idx"),
+            1,
+            "0041 必须给 story_gaps(chapter_id, slot) 建唯一索引"
+        );
+        assert_eq!(
+            unique_index_exists("jobs_active_generation_poll_payload_unique_idx"),
+            1,
+            "0041 必须给 generation_poll 任务建部分唯一索引"
+        );
     }
 }

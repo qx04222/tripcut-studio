@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX, type ReactNode } from "react";
 
 import {
   deleteMusicTrack,
@@ -11,6 +11,7 @@ import {
   type MusicSection,
   type MusicTrackSummary,
 } from "./api";
+import { Button, EmptyState, SectionHeader } from "./workspace/ui";
 
 const SECTION_LABELS: Record<MusicSection["label"], string> = {
   intro: "前奏",
@@ -43,7 +44,12 @@ export function formatCutTime(tick: number, tbNum: number, tbDen: number): strin
 
 const POLL_INTERVAL_MS = 3_000;
 
-export function MusicPanel({ readOnly }: { readOnly: boolean }) {
+/**
+ * `variant="band"` 是 R9 新壳镜头带附属区里的皮:栏标题条 / 按钮 / 空状态走套件,
+ * 没有英文 kicker。数据流、api 调用顺序、AX 名(`音乐与节奏`、`导入音乐`、
+ * `.music-track-select` 等 class 锚点)两种皮完全一样;`page` 是旧故事板页的原样。
+ */
+export function MusicPanel({ readOnly, variant = "page" }: { readOnly: boolean; variant?: "page" | "band" }) {
   const [episodeId, setEpisodeId] = useState<number | null>(null);
   const [tracks, setTracks] = useState<MusicTrackSummary[]>([]);
   const [selectedTrackId, setSelectedTrackId] = useState<number | null>(null);
@@ -158,21 +164,51 @@ export function MusicPanel({ readOnly }: { readOnly: boolean }) {
     setCopiedNotice(`已复制切点 ${label}`);
   };
 
+  const kit = variant === "band";
+  const action = (label: ReactNode, onClick: () => void, extra: { disabled?: boolean; className?: string; tone?: "neutral" | "danger" } = {}): JSX.Element =>
+    kit ? (
+      <Button variant="ghost" size="sm" tone={extra.tone} className={extra.className} disabled={extra.disabled} onClick={onClick}>
+        {label}
+      </Button>
+    ) : (
+      <button type="button" className={extra.className} disabled={extra.disabled} onClick={onClick}>
+        {label}
+      </button>
+    );
+
   if (loading) {
     return <div className="music-panel-empty">正在装载音乐列表…</div>;
   }
 
   const selectedTrack = tracks.find((track) => track.id === selectedTrackId) ?? null;
   const duration = analysis?.track.duration_ticks ?? 0;
+  const importDisabled = readOnly || importing || episodeId === null;
+  const importLabel = importing ? "导入中…" : "导入音乐";
+  // 套件皮:有曲目时「导入音乐」在栏标题条右侧;没有曲目时它是空状态的唯一动作 ——
+  // 同一屏永远只有一颗同名按钮。
+  const importButton = kit ? (
+    <Button variant="secondary" size="sm" icon="import" busy={importing} disabled={importDisabled} onClick={() => void onImport()}>
+      {importLabel}
+    </Button>
+  ) : null;
 
   return (
-    <div className="music-panel" aria-label="音乐与节奏">
-      <header className="music-panel-header">
-        <span>MUSIC / 音乐与节奏</span>
-        <button type="button" disabled={readOnly || importing || episodeId === null} onClick={() => void onImport()}>
-          {importing ? "导入中…" : "导入音乐"}
-        </button>
-      </header>
+    <div className={kit ? "music-panel music-panel--band" : "music-panel"} aria-label="音乐与节奏">
+      {kit ? (
+        <SectionHeader
+          size="pane"
+          title="音乐与节奏"
+          meta={tracks.length > 0 ? `${tracks.length} 首` : undefined}
+          actions={tracks.length > 0 ? importButton : undefined}
+        />
+      ) : (
+        <header className="music-panel-header">
+          <span>MUSIC / 音乐与节奏</span>
+          <button type="button" disabled={importDisabled} onClick={() => void onImport()}>
+            {importLabel}
+          </button>
+        </header>
+      )}
       {readOnly ? <p className="read-only-notice">历史集为只读档案</p> : null}
       {notice ? <p className="music-panel-notice" aria-live="polite">{notice}</p> : null}
       <ul className="music-track-list">
@@ -188,18 +224,26 @@ export function MusicPanel({ readOnly }: { readOnly: boolean }) {
             {!readOnly && pendingDeleteId === track.id ? (
               <span className="music-track-delete-confirm">
                 <span>确认删除「{track.file_name}」？</span>
-                <button type="button" onClick={() => void confirmDelete(track.id)}>确认删除</button>
-                <button type="button" onClick={() => setPendingDeleteId(null)}>取消</button>
+                {action("确认删除", () => void confirmDelete(track.id), { tone: "danger" })}
+                {action("取消", () => setPendingDeleteId(null))}
               </span>
             ) : !readOnly ? (
-              <button type="button" className="music-track-delete" onClick={() => setPendingDeleteId(track.id)}>
-                删除
-              </button>
+              action("删除", () => setPendingDeleteId(track.id), { className: "music-track-delete" })
             ) : null}
           </li>
         ))}
-        {tracks.length === 0 ? <li className="music-track-empty">还没有导入音乐</li> : null}
+        {tracks.length === 0 && !kit ? <li className="music-track-empty">还没有导入音乐</li> : null}
       </ul>
+      {tracks.length === 0 && kit ? (
+        <EmptyState
+          icon="volume"
+          size="inline"
+          className="music-tracks-empty"
+          title="还没有导入音乐"
+          body="导入一首配乐后,节拍、段落与切点建议会标在镜头带上方的刻度轨上。"
+          action={importButton}
+        />
+      ) : null}
       {selectedTrack && analysis ? (
         <div className="music-analysis">
           <div className="music-analysis-summary">
@@ -258,6 +302,14 @@ export function MusicPanel({ readOnly }: { readOnly: boolean }) {
           {copiedNotice ? <p className="music-copied-notice" aria-live="polite">{copiedNotice}</p> : null}
           <p className="music-panel-note">节拍、段落与切点仅作建议，点击切点只复制时间，不改写任何已存在片段。</p>
         </div>
+      ) : kit && tracks.length > 0 ? (
+        <EmptyState
+          icon="play"
+          size="inline"
+          className="music-analysis-hint"
+          title={selectedTrack ? "正在读取节拍分析…" : "选一首曲目"}
+          body="节拍、段落与切点建议会显示在这里,并标到镜头带上方的刻度轨。"
+        />
       ) : null}
     </div>
   );

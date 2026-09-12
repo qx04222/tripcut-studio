@@ -12,12 +12,16 @@ import type { ClipListItem, LlmLedgerEntry, PlayerStatus, Storyboard } from "./a
 
 const apiMocks = vi.hoisted(() => ({
   clearCacheAndRebuild: vi.fn(),
+  clearMinimaxKey: vi.fn(),
   createSelectSegment: vi.fn(),
   enqueueNarrateEpisode: vi.fn(),
+  generationAvailability: vi.fn(async () => ({ enabled: false, has_key: false, budget_remaining_usd: 10 })),
+  generationLedgerSummary: vi.fn(async () => ({ month: "2026-09", spent_usd: 0, budget_usd: 10, entries: [] })),
   getAppInfo: vi.fn(),
   getLlmStatus: vi.fn(),
   getNarrativeRevision: vi.fn(async () => null),
   getComponentStatuses: vi.fn(async () => []),
+  hasMinimaxKey: vi.fn(async () => false),
   rollbackComponent: vi.fn(),
   getSettings: vi.fn(),
   getSettingsStatus: vi.fn(),

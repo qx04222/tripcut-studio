@@ -54,6 +54,8 @@ const commands = [
   { id: "typescript", command: "npm", args: ["run", "typecheck"] },
   { id: "eslint", command: "npm", args: ["run", "lint"] },
   { id: "vite-build", command: "npm", args: ["run", "build"] },
+  // R8 Task 8:chunk 预算检测器必须在链条里,否则只是"存在"不是"把关"。
+  { id: "check-chunks", command: "node", args: ["scripts/qa/check-chunks.mjs"] },
   { id: "vitest", command: "npm", args: ["test"] },
   { id: "cargo-test", command: "cargo", args: ["test", "--manifest-path", "src-tauri/Cargo.toml"] },
   // R6 Task 2：真机剪映金丝雀——对活的 template.tmp 键集比对,剪映/草稿缺失时

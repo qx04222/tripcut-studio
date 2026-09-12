@@ -221,6 +221,38 @@ pub(crate) fn next_pause_state(paused: bool, percent: u32) -> bool {
     }
 }
 
+/// R7 Task 5:补镜结果需要在 `generation_poll` 自己这次执行里,同步跑完它
+/// 刚入队的那一个 `import_probe`——不等常规 worker 轮到它,否则
+/// `generation_requests` 拿不到 `result_clip_id`。只转移这一个指定 id 的
+/// pending→running,不走 `claim_next_for_owner_excluding` 的优先级/资源类
+/// 挑选(调用方已经确定就是这一个 job,不需要再选)。
+pub(crate) fn claim_specific_pending_job(connection: &mut Connection, id: i64) -> Result<Job> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        "UPDATE jobs
+         SET status = 'running', attempt = attempt + 1,
+             owner_id = 'generation-poll-inline',
+             lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+300 seconds'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             finished_at = NULL
+         WHERE id = ?1 AND status = 'pending'",
+        params![id],
+    )?;
+    if changed != 1 {
+        return Err(CoreError::InvalidTransition(format!(
+            "job {id} could not be claimed for inline execution"
+        )));
+    }
+    let job = transaction.query_row(
+        "SELECT id, kind, payload, status, attempt, blocked_summary, result_path
+         FROM jobs WHERE id = ?1",
+        [id],
+        read_job,
+    )?;
+    transaction.commit()?;
+    Ok(job)
+}
+
 pub fn claim_next(connection: &mut Connection) -> Result<Option<Job>> {
     claim_next_for_owner(connection, "legacy-worker")
 }
@@ -1281,6 +1313,25 @@ impl JobRunner {
                     super::import::mark_batch_analysis_notified(&db_key, batch_id);
                 }
             });
+            return;
+        }
+        // R7 Task 5:这条只在 `run_poll_job` 真的把请求推进到 `imported` 的
+        // 那一次 `execute()` 调用里返回 `Some`——那次调用同时把 job 标成
+        // `done`,之后这个 job 不会再被认领、`execute()` 不会再跑第二次,
+        // 所以天然「恰好一次」,不需要像批量分析那样另开一个「已通知」
+        // 去重集合。
+        let generation_event = match super::generation::completion_notice(connection, job) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, job_id = job.id, "补镜完成通知检测失败");
+                None
+            }
+        };
+        if let Some((title, body)) = generation_event {
+            let notifier = notifier.clone();
+            std::thread::spawn(move || {
+                notifier(&title, &body);
+            });
         }
     }
 
@@ -1417,6 +1468,16 @@ impl JobRunner {
                 if let Err(error) = super::music::run_music_analyze(connection, job) {
                     fail_or_retry(connection, job, &error.to_string())?;
                 }
+            }
+            // R7 Task 5:`generation_poll` 管自己的收尾——`run_poll_job`
+            // 内部按结果分别 `mark_done`(成功/终态失败)或直接改写 jobs 行
+            // 重排下一次退避(仍在排队/生成中),不走这里通用的
+            // `fail_or_retry`(那套重试上限/退避节奏是给别的 job kind 用的,
+            // `generation_poll` 有自己的 10s→…→300s / 2 小时上限,详见
+            // `generation::backoff_delay_seconds`/`requeue_or_timeout`)。
+            "generation_poll" => {
+                let project_root = db_path.parent().unwrap_or_else(|| Path::new("."));
+                super::generation::run_poll_job(connection, job, project_root)?;
             }
             "thumbnail" | "strip" | "waveform" | "proxy" => {
                 match super::artifacts::run_artifact_job(connection, job, &cache_root) {
@@ -2738,6 +2799,26 @@ mod tests {
             resource_class("music_analyze"),
             ResourceClass::Decode
         ));
+        // R7 Task 5:generation_poll 不解码、不占大模型权重,落在默认分支——
+        // 必须是 Light,`generation_poll_is_light_and_not_paused_by_memory_pressure`
+        // 靠这一点保证内存压力暂停挡不住它。
+        assert!(matches!(resource_class("generation_poll"), ResourceClass::Light));
+    }
+
+    /// R7 Task 5:内存压力暂停期间(`exclude_decode=true, exclude_heavy=true`,
+    /// 见 `WorkerPoolCoordinator::claim_for_owner` 里 `paused_for_memory` 分支)
+    /// `generation_poll` 仍然可以被认领——它是 Light 类,认领 SQL 只按
+    /// `DECODE_KINDS_SQL`/`HEAVY_KINDS_SQL` 排除,从不排除 Light。等云端结果
+    /// 时被暂停只会白等,不解码也不占显存。
+    #[test]
+    fn generation_poll_is_light_and_not_paused_by_memory_pressure() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "generation_poll", r#"{"request_id":1}"#, "1").unwrap();
+        let job = claim_next_for_owner_excluding(&mut connection, "t", true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.kind, "generation_poll");
     }
 
     #[test]
@@ -3400,5 +3481,133 @@ mod tests {
             "必须恰好通知一次"
         );
         let _ = (job_a, job_b);
+    }
+
+    /// R7 Task 5:生成请求补镜完成时,通知出口恰好收到一条「补镜完成」。假
+    /// 执行器直接把 `generation_requests.status` 落成 `imported` 再
+    /// `mark_done`——`generation::completion_notice` 认的是这条 job 行 +
+    /// 请求状态,不关心执行器内部是不是真的下载/导入了视频,所以这个假
+    /// 执行器足够撑起「恰好一次」这条契约。
+    #[test]
+    fn notifier_fires_exactly_once_for_a_completed_generation() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let request_id = {
+            let mut connection = db::open_project(&db_path).unwrap();
+            let episode_id: i64 = connection
+                .query_row("SELECT id FROM episodes WHERE status='active'", [], |row| row.get(0))
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO narrative_revisions(episode_id, kind, created_at)
+                     VALUES (?1, 'confirmed', 'now')",
+                    [episode_id],
+                )
+                .unwrap();
+            let revision_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO narrative_chapters(
+                        episode_id, kind, title, \"order\", promoted, score, rationale, promotion_reason
+                     ) VALUES (?1, 'atmosphere', '第一章', 0, 1, 0.9, 'r', 'p')",
+                    [episode_id],
+                )
+                .unwrap();
+            let chapter_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO story_gaps(
+                        episode_id, revision_id, chapter_id, slot, reason, status, detected_at, updated_at
+                     ) VALUES (?1, ?2, ?3, 'ATMOSPHERE', 'r', 'requested', 'now', 'now')",
+                    params![episode_id, revision_id, chapter_id],
+                )
+                .unwrap();
+            let gap_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO generation_requests(
+                        gap_id, provider, model, mode, prompt, refs_json, duration_s,
+                        resolution, ratio, estimated_cost_usd, status, task_id, created_at, updated_at
+                     ) VALUES (?1, 'minimax', 'MiniMax-H3-Max', 't2v', 'p', '[]', 4,
+                        '480P', '16:9', 0.2, 'queued', 'task-x', 'now', 'now')",
+                    [gap_id],
+                )
+                .unwrap();
+            let request_id = connection.last_insert_rowid();
+            enqueue(
+                &mut connection,
+                "generation_poll",
+                &format!("{{\"request_id\":{request_id}}}"),
+                &request_id.to_string(),
+            )
+            .unwrap();
+            request_id
+        };
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String)>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .notifier
+            .set(Arc::new(move |title: &str, body: &str| {
+                sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((title.to_owned(), body.to_owned()))
+                    .is_ok()
+            }))
+            .ok();
+
+        // 走生产那条跃迁函数(带 `status <> 'imported'` 谓词),而不是裸
+        // UPDATE——通知现在绑定的是「这次真的发生了跃迁」这个事件。
+        let ran = JobRunner::run_one_with_executor(&db_path, &coordinator, "gen-owner", move |_db_path, connection, job| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::core::generation::transition_to_imported(&transaction, request_id, None, None)?;
+            transaction.commit()?;
+            mark_done(connection, job.id, job.attempt)
+        })
+        .unwrap();
+        assert!(ran);
+
+        let received = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fire-and-forget 通知必须在超时前送达");
+        assert_eq!(
+            received,
+            ("补镜完成".to_owned(), format!("生成请求 #{request_id} 的素材已导入"))
+        );
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "不多不少,恰好一条"
+        );
+
+        // R7 Task 5 复审 P3-2:同一条请求被**重新认领**(崩溃恢复、手工重排)
+        // 时不能再响一次。请求已经是 imported,这次跃迁不会发生。
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            enqueue(
+                &mut connection,
+                "generation_poll",
+                &format!("{{\"request_id\":{request_id}}}"),
+                &format!("{request_id}-again"),
+            )
+            .unwrap();
+        }
+        let ran_again = JobRunner::run_one_with_executor(&db_path, &coordinator, "gen-owner", move |_db_path, connection, job| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transitioned =
+                crate::core::generation::transition_to_imported(&transaction, request_id, None, None)?;
+            transaction.commit()?;
+            assert!(!transitioned, "已经是 imported 的请求不该再跃迁一次");
+            mark_done(connection, job.id, job.attempt)
+        })
+        .unwrap();
+        assert!(ran_again);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(500)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "重新认领一条已经导入的请求不能再发一次通知"
+        );
     }
 }

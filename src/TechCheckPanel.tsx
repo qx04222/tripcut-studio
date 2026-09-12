@@ -53,12 +53,19 @@ function actualFrameRateLabel(clip: ClipListItem): string {
 export function TechCheckPanel({
   clip,
   readOnly,
+  onCountChange,
+  hideTitle = false,
 }: {
   clip: ClipListItem;
   readOnly: boolean;
+  /** R9 检查器把它装进自己的折叠行(summary 已经叫「技术检查」),内部那行小标题不再画。 */
+  hideTitle?: boolean;
+  /** R8 Task 5 补丁:音轨数一旦从后端拿到就上报,供 Inspector 折叠段状态字用真实计数(加载完成前不上报)。 */
+  onCountChange?: (count: number) => void;
 }) {
   const clipId = clip.id;
   const [tracks, setTracks] = useState<ClipAudioTrack[]>([]);
+  const [tracksLoaded, setTracksLoaded] = useState(false);
   const [luts, setLuts] = useState<string[]>([]);
   const [busyTrack, setBusyTrack] = useState<{ streamIndex: number; action: "monitor" | "transcribe" } | null>(null);
   const [probing, setProbing] = useState(false);
@@ -82,6 +89,7 @@ export function TechCheckPanel({
         if (seq !== latest.current || !mounted.current) return;
         setError(null);
         setTracks(result);
+        setTracksLoaded(true);
       })
       .catch((loadError) => {
         if (seq !== latest.current || !mounted.current) return;
@@ -90,6 +98,11 @@ export function TechCheckPanel({
   }, [clipId]);
 
   useEffect(() => refreshTracks(), [refreshTracks]);
+
+  useEffect(() => {
+    if (!tracksLoaded) return;
+    onCountChange?.(tracks.length);
+  }, [tracksLoaded, tracks.length, onCountChange]);
 
   useEffect(() => {
     listDisplayLuts()
@@ -111,6 +124,7 @@ export function TechCheckPanel({
       .then((result) => {
         if (!mounted.current) return;
         setTracks(result);
+        setTracksLoaded(true);
       })
       .catch((probeError) => {
         if (!mounted.current) return;
@@ -165,7 +179,7 @@ export function TechCheckPanel({
 
   return (
     <div className="inspector-section inspector-tech-check">
-      <span>技术检查</span>
+      {hideTitle ? null : <span>技术检查</span>}
       {readOnly ? <p className="read-only-notice">历史集为只读档案；回到当前集才能修改音轨与 LUT</p> : null}
       {error ? <p className="inspector-error">{error}</p> : null}
       <dl className="tech-check-basics">

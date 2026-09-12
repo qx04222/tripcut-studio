@@ -1,0 +1,18 @@
+/* 封面缩略图占位(R9 D4):cover_url 为空或加载失败时铺满所在井,深井底 + 中性胶片图标,
+   绝不让浏览器画坏图「?」。容器尺寸由各处井(pool-card-image / band-tile-thumb /
+   inspector-head-thumb / band-take-thumb / inspector-take-thumb)自己定。 */
+
+.ui-cover-missing {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--text-faint);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  background: var(--well-bg);
+}

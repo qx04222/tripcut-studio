@@ -1,0 +1,51 @@
+/* 镜头带附属区(R9 Task 8a):音乐 / 旅程 / 地点卡 / 模板 四个面板搬到套件上。
+   由 workspace.css 顶部 `@import` 进来,排在旧分节 8 之前 —— 每条选择器都以
+   `.workspace-shell .band-accessory` 起头,靠特异性压过旧规则与 styles.css 里的旧页面皮。
+   值只从 tokens.css 取:没有颜色字面量,font-size 只用 --text-*,间距只用六档。
+   面板本体(MusicPanel / JourneyTimeline / DestinationCardEditor)的 DOM 与 AX 名一字不改,
+   这里只换皮。 */
+
+/* 单文件 < 400 行:音乐与其余三面板各一分册。@import 必须先于所有规则。 */
+@import "./band-accessory-music.css";
+@import "./band-accessory-panels.css";
+
+/* ---------- 附属区外壳:吃掉镜头带剩下的全部高度,面板自己滚 ---------- */
+
+.workspace-shell .band-accessory {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+}
+
+.workspace-shell .band-accessory-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--space-3);
+  overflow: auto;
+}
+
+.workspace-shell .band-accessory .read-only-notice,
+.workspace-shell .band-accessory .band-accessory-notice,
+.workspace-shell .band-accessory .music-panel-notice,
+.workspace-shell .band-accessory .music-panel-note,
+.workspace-shell .band-accessory .journey-timeline-error {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .journey-timeline-error {
+  color: var(--danger);
+}
+
+.workspace-shell .band-accessory .band-accessory-notice {
+  margin-top: var(--space-2);
+}

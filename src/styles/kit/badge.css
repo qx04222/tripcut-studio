@@ -1,0 +1,23 @@
+/* ---------- Badge ---------- */
+
+.ui-badge {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  height: calc(var(--control-sm) - var(--space-1));
+  padding: 0 var(--space-1);
+  border-radius: calc(var(--radius-6) / 2);
+  background: var(--surface-chrome);
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  font-weight: 500;
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-badge--accent { background: var(--accent-tint); color: var(--accent-text); }
+.ui-badge--warn { background: var(--warn-tint); color: var(--warn); }
+.ui-badge--danger { background: var(--danger-tint); color: var(--danger); }
+.ui-badge--ink { background: var(--media-overlay); color: var(--media-ink); }

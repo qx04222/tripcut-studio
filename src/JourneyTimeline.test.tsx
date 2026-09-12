@@ -69,6 +69,28 @@ describe("JourneyTimeline", () => {
     expect(container.textContent).toContain("a.mov");
   });
 
+  it("封面缺失或加载失败时行首是套件占位(胶片图标),不是坏图(R9 D4)", async () => {
+    apiMock.getJourneyTimeline.mockResolvedValue([
+      clipEntry({ clip_id: 1, cover_url: null }),
+      clipEntry({ clip_id: 2, cover_url: "/covers/broken.jpg", file_name: "b.mov" }),
+    ]);
+    await act(async () => {
+      root.render(<JourneyTimeline />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const covers = container.querySelectorAll(".journey-clip-cover");
+    expect(covers).toHaveLength(2);
+    expect(covers[0]!.querySelector(".ui-cover-missing svg")).not.toBeNull();
+    const img = covers[1]!.querySelector("img")!;
+    expect(img.getAttribute("src")).toBe("/covers/broken.jpg");
+    act(() => {
+      img.dispatchEvent(new Event("error"));
+    });
+    expect(covers[1]!.querySelector("img")).toBeNull();
+    expect(covers[1]!.querySelector(".ui-cover-missing")).not.toBeNull();
+  });
+
   it("renders a destination card as a milestone row with place name and title", async () => {
     apiMock.getJourneyTimeline.mockResolvedValue([destinationEntry()]);
     await act(async () => {

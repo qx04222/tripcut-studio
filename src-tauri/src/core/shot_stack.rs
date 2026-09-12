@@ -92,6 +92,11 @@ pub struct ShotStackMember {
     pub user_state: String,
     pub is_preferred: bool,
     pub long_term_memory: ClipMemoryAnnotation,
+    /// R7 Task 5:`clips.generated_source IS NOT NULL`——MiniMax 云端补镜产出的
+    /// 片子。不存进 `shot_stack_members` 表(那张表被 `rebuild()` 整体重建);
+    /// 每次 `list()` 都从 `clips` 现查,所以天然 rebuild-stable。只影响排序
+    /// (见 `list()` 里的 `sort_by`),从不影响成员分组(哪个 Stack)。
+    pub is_generated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -290,6 +295,9 @@ pub fn rebuild(connection: &mut Connection) -> Result<usize> {
     }
 
     transaction.commit()?;
+    // Stack 成员随分析结果整体重建后,可生成的槽位是否被真实素材覆盖也可能变化;
+    // 缺口检测是廉价的单查询/章节,顺带跑一次保持界面上的缺口卡片是新的。
+    super::story_gap::detect(connection)?;
     Ok(stack_count)
 }
 
@@ -300,10 +308,12 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
                 stack.subject_label, stack.function_label,
                 COALESCE(size.label, '不确定'), COALESCE(movement.label, '不确定'),
                 member.clip_id, member.segment_id, member.best_take_score,
-                member.score_breakdown_json, member.user_state
+                member.score_breakdown_json, member.user_state,
+                clip.generated_source IS NOT NULL
          FROM shot_stacks stack
          JOIN scenes scene ON scene.id = stack.scene_id
          JOIN shot_stack_members member ON member.stack_id = stack.id
+         JOIN clips clip ON clip.id = member.clip_id
          LEFT JOIN clip_dimensions size
            ON size.clip_id = member.clip_id AND size.dimension = 'shot_size'
          LEFT JOIN clip_dimensions movement
@@ -325,6 +335,7 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
             row.get::<_, Option<f64>>(9)?,
             row.get::<_, String>(10)?,
             row.get::<_, String>(11)?,
+            row.get::<_, bool>(12)?,
         ))
     })?;
 
@@ -344,6 +355,7 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
             best_take_score,
             breakdown_json,
             user_state,
+            is_generated,
         ) = row?;
         let score_breakdown: BestTakeBreakdown = serde_json::from_str(&breakdown_json).map_err(|error| {
             CoreError::InvalidSchema(format!(
@@ -395,6 +407,7 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
                 user_state,
                 is_preferred: false,
                 long_term_memory,
+                is_generated,
             });
     }
 
@@ -403,6 +416,10 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
         stack.members.sort_by(|left, right| {
             member_rank(&left.user_state)
                 .cmp(&member_rank(&right.user_state))
+                // 生成片(MiniMax 补镜)一律排在同一 user_state 档位里全部真实
+                // 素材之后——除非业主手动 hero/locked 已经把它提到更高档位
+                // (那时 member_rank 已经分出胜负,这里的比较不会被用到)。
+                .then_with(|| generated_tier(left).cmp(&generated_tier(right)))
                 .then_with(|| {
                     right
                         .best_take_score
@@ -1205,6 +1222,13 @@ fn member_rank(user_state: &str) -> u8 {
     }
 }
 
+/// R7 Task 5:同一 `member_rank` 档位内,生成片排在真实素材之后。手动
+/// hero/locked 已经在 `member_rank` 那一级把生成片提到前面了,这个 tier
+/// 只在两者的 `member_rank` 相同(通常是 `auto`)时才起决定作用。
+fn generated_tier(member: &ShotStackMember) -> u8 {
+    u8::from(member.is_generated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1779,5 +1803,71 @@ mod tests {
             scene_name(Some(2), &[&candidate]),
             "冰原大道 · 主体=风景 · 功能=Establishing · 景别=广角 · 视角=平视 · 运镜=Static · 阶段=路上 · 声音=Natural Sound"
         );
+    }
+
+    // R7 Task 5:MiniMax 补镜产出的生成片进 Stack 时永远是非主选——见
+    // docs/superpowers/specs/2026-09-10-r7-story-gaps-minimax-design.md §6
+    // 「永远是备选，不是主选」。
+
+    fn mark_generated(connection: &Connection, clip_id: i64) {
+        connection
+            .execute(
+                "UPDATE clips SET generated_source = 'minimax' WHERE id = ?1",
+                [clip_id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn generated_clip_ranks_after_every_real_clip_in_its_stack() {
+        let (_directory, mut connection) = database();
+        // 生成片的 best_take_score 明显高于两个真实片,若排序只看分数它会排第一;
+        // 断言的正是"即便分数更高也排最后"这条规则。
+        insert_clip(&connection, 1, "风景", "Atmosphere");
+        insert_clip(&connection, 2, "风景", "Atmosphere");
+        insert_clip(&connection, 3, "风景", "Atmosphere");
+        mark_generated(&connection, 3);
+        rebuild(&mut connection).unwrap();
+        let stack = list(&connection).unwrap().remove(0);
+        assert_eq!(stack.members.len(), 3);
+        assert_eq!(stack.members.last().unwrap().clip_id, 3);
+        assert!(stack.members.last().unwrap().is_generated);
+        assert!(!stack.members[0].is_generated);
+        assert!(!stack.members[1].is_generated);
+    }
+
+    #[test]
+    fn rebuild_does_not_lose_that_ordering() {
+        let (_directory, mut connection) = database();
+        insert_clip(&connection, 1, "风景", "Atmosphere");
+        insert_clip(&connection, 2, "风景", "Atmosphere");
+        mark_generated(&connection, 2);
+        rebuild(&mut connection).unwrap();
+        rebuild(&mut connection).unwrap();
+        rebuild(&mut connection).unwrap();
+        let stack = list(&connection).unwrap().remove(0);
+        assert_eq!(stack.members.len(), 2);
+        assert_eq!(stack.members.last().unwrap().clip_id, 2);
+        assert!(stack.members.last().unwrap().is_generated);
+    }
+
+    #[test]
+    fn manual_hero_can_still_promote_it() {
+        let (_directory, mut connection) = database();
+        insert_clip(&connection, 1, "风景", "Atmosphere");
+        insert_clip(&connection, 2, "风景", "Atmosphere");
+        mark_generated(&connection, 2);
+        rebuild(&mut connection).unwrap();
+        let stack = list(&connection).unwrap().remove(0);
+        set_user_state(&mut connection, stack.id, 2, None, "hero").unwrap();
+        let after = list(&connection).unwrap().remove(0);
+        assert_eq!(after.members[0].clip_id, 2);
+        assert!(after.members[0].is_generated);
+        assert_eq!(after.members[0].user_state, "hero");
+        // rebuild 之后 hero 这个手动状态必须存活("existing_states" 幸存量)。
+        rebuild(&mut connection).unwrap();
+        let survived = list(&connection).unwrap().remove(0);
+        assert_eq!(survived.members[0].clip_id, 2);
+        assert_eq!(survived.members[0].user_state, "hero");
     }
 }

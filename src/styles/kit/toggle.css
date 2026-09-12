@@ -1,0 +1,53 @@
+/* ---------- Toggle:32×18 滑块 ---------- */
+
+.ui-toggle {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  width: var(--space-6);
+  height: calc(var(--space-4) + 2px);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--space-6);
+  background: var(--border-strong);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.ui-toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: calc(var(--space-4) - 2px);
+  height: calc(var(--space-4) - 2px);
+  border-radius: 50%;
+  background: var(--surface-card);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 25%, transparent);
+  transition: transform var(--motion-fast);
+}
+
+.ui-toggle:hover:not(:disabled) {
+  background: var(--text-faint);
+}
+
+.ui-toggle--on,
+.ui-toggle--on:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.ui-toggle--on .ui-toggle-knob {
+  transform: translateX(calc(var(--space-4) - 2px));
+}
+
+.ui-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.ui-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

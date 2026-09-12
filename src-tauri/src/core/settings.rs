@@ -29,6 +29,10 @@ pub const BEST_TAKE_NARRATIVE_WEIGHT_KEY: &str = "best_take.weight.narrative";
 pub const LLM_ENABLED_KEY: &str = "llm_enabled";
 pub const LLM_PROVIDER_KEY: &str = "llm_provider";
 pub const LLM_MONTHLY_BUDGET_KEY: &str = "llm_monthly_budget";
+pub const MINIMAX_ENABLED_KEY: &str = "minimax_enabled";
+pub const MINIMAX_MODEL_KEY: &str = "minimax_model";
+pub const MINIMAX_RESOLUTION_KEY: &str = "minimax_resolution";
+pub const MINIMAX_MONTHLY_BUDGET_KEY: &str = "minimax_monthly_budget_usd";
 
 const WINDOW_WIDTH_KEY: &str = "window.width";
 const WINDOW_HEIGHT_KEY: &str = "window.height";
@@ -53,6 +57,13 @@ pub const DEFAULT_BEST_TAKE_HUMAN_WEIGHT: f64 = 0.14;
 pub const DEFAULT_BEST_TAKE_AUDIO_WEIGHT: f64 = 0.12;
 pub const DEFAULT_BEST_TAKE_NARRATIVE_WEIGHT: f64 = 0.08;
 pub const DEFAULT_LLM_MONTHLY_BUDGET: u32 = 200;
+pub const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-H3-Max";
+pub const DEFAULT_MINIMAX_RESOLUTION: &str = "768P";
+pub const DEFAULT_MINIMAX_MONTHLY_BUDGET: f64 = 10.0;
+/// 规格 §3：`minimax_monthly_budget_usd` 的硬上限，超出的写入被夹到此值（而不是
+/// 像 `LLM_MONTHLY_BUDGET_KEY` 那样直接拒绝）——云端生成按次计费，误配的大额预算
+/// 应该被削平,不应该整条设置写入失败。
+pub const MINIMAX_MONTHLY_BUDGET_MAX: f64 = 500.0;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolStatus {
@@ -165,7 +176,26 @@ fn defaults() -> BTreeMap<String, String> {
             LLM_MONTHLY_BUDGET_KEY.to_owned(),
             DEFAULT_LLM_MONTHLY_BUDGET.to_string(),
         ),
+        (MINIMAX_ENABLED_KEY.to_owned(), "false".to_owned()),
+        (MINIMAX_MODEL_KEY.to_owned(), DEFAULT_MINIMAX_MODEL.to_owned()),
+        (
+            MINIMAX_RESOLUTION_KEY.to_owned(),
+            DEFAULT_MINIMAX_RESOLUTION.to_owned(),
+        ),
+        (
+            MINIMAX_MONTHLY_BUDGET_KEY.to_owned(),
+            DEFAULT_MINIMAX_MONTHLY_BUDGET.to_string(),
+        ),
     ])
+}
+
+/// 把预算值夹到 [0, `MINIMAX_MONTHLY_BUDGET_MAX`]。非法（非有限数）值一律当作
+/// 上限处理——宁可保守地限流,也不让无效输入绕过预算闸。
+pub fn clamp_minimax_monthly_budget(value: f64) -> f64 {
+    if !value.is_finite() {
+        return MINIMAX_MONTHLY_BUDGET_MAX;
+    }
+    value.clamp(0.0, MINIMAX_MONTHLY_BUDGET_MAX)
 }
 
 fn settings_table_exists(connection: &Connection) -> Result<bool> {
@@ -197,7 +227,15 @@ pub fn get_settings(connection: &Connection) -> Result<BTreeMap<String, String>>
 }
 
 pub fn set_setting(connection: &Connection, key: &str, value: &str) -> Result<()> {
-    validate_setting(key, value)?;
+    let stored_value = if key == MINIMAX_MONTHLY_BUDGET_KEY {
+        let raw: f64 = value
+            .parse()
+            .map_err(|_| CoreError::InvalidSchema(format!("设置项 {key} 的值无效")))?;
+        clamp_minimax_monthly_budget(raw).to_string()
+    } else {
+        value.to_owned()
+    };
+    validate_setting(key, &stored_value)?;
     if !settings_table_exists(connection)? {
         return Err(CoreError::InvalidSchema(
             "settings 表尚未接线；合并 0006/0007 后再启用 0008".to_owned(),
@@ -209,7 +247,7 @@ pub fn set_setting(connection: &Connection, key: &str, value: &str) -> Result<()
          ON CONFLICT(key) DO UPDATE SET
              value = excluded.value,
              updated_at = excluded.updated_at",
-        params![key, value],
+        params![key, stored_value],
     )?;
     Ok(())
 }
@@ -242,9 +280,20 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         LLM_MONTHLY_BUDGET_KEY => value
             .parse::<u32>()
             .is_ok_and(|budget| budget <= 10_000),
+        MINIMAX_ENABLED_KEY => matches!(value, "true" | "false"),
+        MINIMAX_MODEL_KEY => !value.is_empty() && value.len() <= 128,
+        MINIMAX_RESOLUTION_KEY => matches!(value, "480P" | "768P" | "2K"),
+        MINIMAX_MONTHLY_BUDGET_KEY => value
+            .parse::<f64>()
+            .is_ok_and(|budget| budget.is_finite() && (0.0..=MINIMAX_MONTHLY_BUDGET_MAX).contains(&budget)),
         _ if matches!(key, WINDOW_WIDTH_KEY | WINDOW_HEIGHT_KEY | WINDOW_X_KEY | WINDOW_Y_KEY) => {
             value.parse::<f64>().is_ok_and(f64::is_finite)
         }
+        // R8:工作区的 UI 偏好(栏宽、折叠态、附属带模式、检查器折叠段等)走 settings 表
+        // 存,好让偏好跟着素材库走而不是跟着这台机器走。键名一律 `ui.` 前缀,值当作
+        // 不透明字符串(有的是 JSON 数组),只限长度,不限内容——限内容就等于把前端的
+        // UI 结构复制一份进 Rust,那是 R8 明确不做的事(规格 §0「不重写 Rust 核心」)。
+        key if key.starts_with("ui.") => value.len() <= 4_096,
         _ => false,
     };
     if valid {
@@ -725,6 +774,29 @@ mod tests {
     }
 
     #[test]
+    fn minimax_defaults() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+
+        let values = get_settings(&connection).unwrap();
+        assert_eq!(values[MINIMAX_ENABLED_KEY], "false");
+        assert_eq!(values[MINIMAX_MODEL_KEY], "MiniMax-H3-Max");
+        assert_eq!(values[MINIMAX_RESOLUTION_KEY], "768P");
+        assert_eq!(values[MINIMAX_MONTHLY_BUDGET_KEY], "10");
+
+        // 上限 500 被夹住：写入超限值不报错,而是落成夹住后的上限。
+        set_setting(&connection, MINIMAX_MONTHLY_BUDGET_KEY, "999").unwrap();
+        let clamped = get_settings(&connection).unwrap();
+        assert_eq!(clamped[MINIMAX_MONTHLY_BUDGET_KEY], "500");
+        assert_eq!(clamp_minimax_monthly_budget(999.0), 500.0);
+        assert_eq!(clamp_minimax_monthly_budget(-5.0), 0.0);
+
+        assert!(set_setting(&connection, MINIMAX_RESOLUTION_KEY, "4K").is_err());
+        set_setting(&connection, MINIMAX_RESOLUTION_KEY, "2K").unwrap();
+        assert_eq!(get_settings(&connection).unwrap()[MINIMAX_RESOLUTION_KEY], "2K");
+    }
+
+    #[test]
     fn migration_0008_creates_the_expected_settings_contract() {
         let (_directory, connection) = connection_with_settings();
         let columns: String = connection
@@ -1051,5 +1123,34 @@ mod tests {
             "ffmpeg",
         )
         .is_err());
+    }
+
+    #[test]
+    fn ui_prefixed_keys_are_accepted_and_round_trip() {
+        let (_dir, connection) = connection_with_settings();
+        set_setting(&connection, "ui.workspace_v2", "true").expect("ui.workspace_v2 应被接受");
+        set_setting(&connection, "ui.pane.pool_width", "320").expect("ui.pane.pool_width 应被接受");
+        set_setting(&connection, "ui.inspector.sections_open", "[\"techcheck\",\"similar\"]")
+            .expect("JSON 值应被接受");
+        let values = get_settings(&connection).expect("读设置");
+        assert_eq!(values.get("ui.workspace_v2").map(String::as_str), Some("true"));
+        assert_eq!(values.get("ui.pane.pool_width").map(String::as_str), Some("320"));
+        assert_eq!(
+            values.get("ui.inspector.sections_open").map(String::as_str),
+            Some("[\"techcheck\",\"similar\"]")
+        );
+    }
+
+    #[test]
+    fn ui_keys_are_length_capped_and_unknown_prefixes_still_rejected() {
+        let (_dir, connection) = connection_with_settings();
+        let oversized = "x".repeat(4_097);
+        assert!(set_setting(&connection, "ui.pool.filter", &oversized).is_err());
+        assert!(set_setting(&connection, "uix.pool.filter", "all").is_err());
+        assert!(set_setting(&connection, "workspace_v2", "true").is_err());
+        // 被拒的写入一律不落库
+        let values = get_settings(&connection).expect("读设置");
+        assert!(values.keys().all(|key| !key.starts_with("uix.")));
+        assert!(!values.contains_key("ui.pool.filter"));
     }
 }

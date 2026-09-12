@@ -349,3 +349,27 @@
     transition: none;
   }
 }
+
+/* 嵌入模式:同一个 mpv,但不是模态 —— 它只占监视器区那块矩形,
+   不 fixed、不盖全屏、不留控件条的 76px 空位(控件条由 Monitor 画)。 */
+.player-overlay.embedded {
+  position: relative;
+  z-index: auto;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+}
+
+.player-overlay.embedded .player-native-slot {
+  inset: 0;
+}
+
+.player-overlay.embedded .player-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  padding: 16px;
+  text-align: center;
+}

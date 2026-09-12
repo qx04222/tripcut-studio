@@ -6,12 +6,16 @@ export function SimilarGroupsPanel({
   clipId,
   readOnly,
   clipsById,
+  onCountChange,
 }: {
   clipId: number | null;
   readOnly: boolean;
   clipsById: ReadonlyMap<number, ClipListItem>;
+  /** R8 Task 5 补丁:相似组一旦从后端拿到就上报当前素材所属的组数(0 或 1),加载完成前不上报。 */
+  onCountChange?: (count: number) => void;
 }) {
   const [groups, setGroups] = useState<SimilarGroup[]>([]);
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
   const [busyClipId, setBusyClipId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const latest = useRef(0);
@@ -30,6 +34,7 @@ export function SimilarGroupsPanel({
       .then((result) => {
         if (seq !== latest.current || !mounted.current) return;
         setGroups(result);
+        setGroupsLoaded(true);
       })
       .catch((loadError) => {
         if (seq !== latest.current || !mounted.current) return;
@@ -41,6 +46,12 @@ export function SimilarGroupsPanel({
 
   const group = clipId === null ? undefined : groups.find((candidate) =>
     candidate.members.some((member) => member.clip_id === clipId));
+  const groupCount = group ? 1 : 0;
+
+  useEffect(() => {
+    if (!groupsLoaded) return;
+    onCountChange?.(groupCount);
+  }, [groupsLoaded, groupCount, onCountChange]);
 
   const onSetPrimary = (memberClipId: number) => {
     if (readOnly || !group) return;

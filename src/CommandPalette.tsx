@@ -6,14 +6,21 @@ import { openHistoricalEpisode } from "./historyView";
 import { useFocusTrap } from "./useFocusTrap";
 import { KIND_LABEL } from "./kindLabels";
 import { useSearchAugment } from "./useSearchAugment";
+import { isTopModal, popModal, pushModal } from "./workspace/modalStack";
 
 interface CommandPaletteProps {
   onNavigate: (path: string) => void;
   onSelectClip: (clipId: number) => void;
+  /**
+   * 命令集按壳分叉(R8 终审 L7)。`"workspace"`(默认)发新 IA 的
+   * `open-*`/`band-*`;`"legacy"` 发旧壳的四条 hash 路由,并且**不渲染**附属带
+   * 那一组——旧壳没有附属带,把命令摆出来再默默吞掉比不摆更糟。
+   */
+  variant?: "workspace" | "legacy";
 }
 
 /** P6-U1 全局命令面板(cmdk):Cmd+K——跳页、全量搜索(文件/转写/描述/标签/画面文字)、素材直达。 */
-export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps) {
+export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace" }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const [clips, setClips] = useState<ClipListItem[]>([]);
   const [query, setQuery] = useState("");
@@ -28,13 +35,23 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
   useFocusTrap(paletteRef, open);
   const { augmentHits, describeHitEpisode } = useSearchAugment();
 
+  // 命令面板可以压在抽屉之上打开。两层都在 document 上听 Esc,所以谁响应要由
+  // 模态栈决定,不能各关各的(R8 终审 L9)。
+  const modalToken = useRef({});
+  useEffect(() => {
+    if (!open) return;
+    const token = modalToken.current;
+    pushModal(token);
+    return () => popModal(token);
+  }, [open]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         setOpen((value) => !value);
       }
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape" && isTopModal(modalToken.current)) setOpen(false);
     };
     document.addEventListener("keydown", onKeyDown);
     const onOpenRequest = () => setOpen(true);
@@ -149,12 +166,30 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
               })}
             </Command.Group>
           ) : null}
-          <Command.Group heading="页面">
-            <Command.Item onSelect={() => go("/import")}>01 · 导入素材</Command.Item>
-            <Command.Item onSelect={() => go("/review")}>02 · 筛片工作台</Command.Item>
-            <Command.Item onSelect={() => go("/deliver")}>03 · 交付</Command.Item>
-            <Command.Item onSelect={() => go("/settings")}>04 · 设置</Command.Item>
-          </Command.Group>
+          {variant === "legacy" ? (
+            <Command.Group heading="页面">
+              <Command.Item onSelect={() => go("/import")}>01 · 导入素材</Command.Item>
+              <Command.Item onSelect={() => go("/review")}>02 · 筛片工作台</Command.Item>
+              <Command.Item onSelect={() => go("/deliver")}>03 · 交付</Command.Item>
+              <Command.Item onSelect={() => go("/settings")}>04 · 设置</Command.Item>
+            </Command.Group>
+          ) : (
+            <>
+              <Command.Group heading="工作区">
+                <Command.Item onSelect={() => go("open-import")}>打开导入素材</Command.Item>
+                <Command.Item onSelect={() => go("open-deliver")}>打开生成交付包</Command.Item>
+                <Command.Item onSelect={() => go("open-settings")}>打开设置</Command.Item>
+                <Command.Item onSelect={() => go("open-help")}>打开帮助</Command.Item>
+              </Command.Group>
+              <Command.Group heading="附属带">
+                <Command.Item onSelect={() => go("band-story")}>切到故事附属带</Command.Item>
+                <Command.Item onSelect={() => go("band-music")}>切到音乐附属带</Command.Item>
+                <Command.Item onSelect={() => go("band-journey")}>切到旅程附属带</Command.Item>
+                <Command.Item onSelect={() => go("band-destination")}>切到目的地附属带</Command.Item>
+                <Command.Item onSelect={() => go("band-template")}>切到模板附属带</Command.Item>
+              </Command.Group>
+            </>
+          )}
           {deepHits.length === 0 ? (
             <Command.Group heading="素材直达">
               {clips.slice(0, 200).map((clip) => (

@@ -1,0 +1,12 @@
+/*
+ * R9 Task 3:媒体池卡片 + 预览监视器(规格 §3.5 / §3.6,视觉按 A 稿「编辑台密度」,
+ * 传输条按 C 稿的单一分组条,监视器按 B 稿做全屏唯一的深色锚点)。
+ *
+ * 这份表经 workspace.css 顶部的 @import 进来,在分节 6、7 **之前**;所以每条都
+ * 挂在 `.media-pool` / `.monitor` 之下抬一级特异性,把旧规则的同名属性逐条压掉。
+ * 值只从 tokens.css 与 styles.css 的调色板取,不写颜色字面量。本文件只是 @import 桶
+ * (pool.css / monitor.css 各 < 400 行);workspace.css 只认这一个入口。
+ */
+
+@import "./pool.css";
+@import "./monitor.css";

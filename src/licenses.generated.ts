@@ -17,6 +17,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "base64",
+    "version": "=0.22.1",
+    "license": "MIT OR Apache-2.0",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
     "name": "blake3",
     "version": "=1.8.7",
     "license": "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception",
@@ -27,6 +34,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "name": "block2",
     "version": "=0.6.2",
     "license": "MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "httpdate",
+    "version": "=1.0.3",
+    "license": "MIT OR Apache-2.0",
     "ecosystem": "Cargo",
     "scope": "runtime"
   },
@@ -76,6 +90,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "name": "printpdf",
     "version": "=0.12.8",
     "license": "MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "reqwest",
+    "version": "=0.13.4",
+    "license": "MIT OR Apache-2.0",
     "ecosystem": "Cargo",
     "scope": "runtime"
   },
@@ -269,6 +290,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "@testing-library/react",
+    "version": "16.3.3",
+    "license": "MIT",
+    "ecosystem": "npm",
+    "scope": "development"
+  },
+  {
     "name": "@types/node",
     "version": "24.3.0",
     "license": "MIT",
@@ -330,6 +358,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "runtime"
+  },
+  {
+    "name": "playwright-core",
+    "version": "1.62.1",
+    "license": "Apache-2.0",
+    "ecosystem": "npm",
+    "scope": "development"
   },
   {
     "name": "react",

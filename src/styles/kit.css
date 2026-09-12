@@ -1,0 +1,19 @@
+/* 组件套件样式(R9 规格 §2)。class 前缀统一 `ui-`;**所有值只从 tokens.css 取**
+   (src/styles/tokens.test.ts 的 kit.css 门禁:没有颜色字面量、font-size 只用 --text-*、
+   间距只用六档)。每个组件都写 hover / focus-visible / disabled 三态;transition 只用
+   var(--motion-fast)。视觉语言按 A 稿「编辑台密度」:铬条、发丝线、一个强调色、28px 控件。 */
+
+@import "./kit/icon.css";
+@import "./kit/button.css";
+@import "./kit/chip.css";
+@import "./kit/badge.css";
+@import "./kit/kbd.css";
+@import "./kit/card.css";
+@import "./kit/section-header.css";
+@import "./kit/toolbar.css";
+@import "./kit/empty-state.css";
+@import "./kit/field.css";
+@import "./kit/toggle.css";
+@import "./kit/select.css";
+@import "./kit/tabs.css";
+@import "./kit/modal.css";

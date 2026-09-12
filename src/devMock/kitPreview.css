@@ -1,0 +1,219 @@
+/* 套件预览页自己的排版(不是套件的一部分,不受 tokens.test.ts 门禁约束,但仍只用令牌)。 */
+
+.kit-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) 120px;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.kit-header h1 {
+  margin: 0;
+  font-size: var(--text-20);
+  font-weight: 600;
+  line-height: var(--lh-20);
+}
+
+.kit-header p {
+  margin: var(--space-1) 0 0;
+}
+
+.kit-section {
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--border-hair);
+}
+
+.kit-header + .kit-section {
+  margin-top: var(--space-5);
+}
+
+.kit-row {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-2) 0;
+}
+
+.kit-row-label {
+  flex: none;
+  width: 160px;
+  padding-top: var(--space-1);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.kit-row-body {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.kit-muted {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.kit-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-1);
+}
+
+.kit-icon-cell {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-6);
+  color: var(--text-primary);
+}
+
+.kit-icon-cell:hover {
+  background: var(--surface-chrome);
+}
+
+.kit-icon-cell code {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+}
+
+.kit-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.kit-on-cover {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-6);
+  background: var(--well-bg);
+}
+
+.kit-pane-frame {
+  width: 320px;
+  overflow: hidden;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-panel);
+}
+
+.kit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 560px;
+}
+
+.kit-input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-12);
+}
+
+textarea.kit-input {
+  height: auto;
+  padding: var(--space-1) var(--space-2);
+  resize: vertical;
+}
+
+.kit-input:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--ring);
+}
+
+.kit-timecode {
+  padding: 0 var(--space-1);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kit-timecode .kit-muted {
+  display: inline;
+  font-family: inherit;
+}
+
+.kit-empty-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-3);
+}
+
+.kit-empty-frame {
+  height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-panel);
+}
+
+.kit-empty-frame--well {
+  background: var(--well-bg);
+  box-shadow: var(--shadow-inset-well);
+}
+
+.kit-modal-body {
+  padding: var(--space-5);
+}
+
+/* 深色一栏:tokens.css / styles.css 的深色块挂在 html[data-theme] 上,这里的
+   <div data-theme="dark"> 要自己把调色板搬一份(与 styles.css :root[data-theme="dark"] 同值)。 */
+.kit-dark {
+  --bg: #10110f;
+  --bg-elevated: rgb(14 15 13 / 96%);
+  --bg-solid: #101110;
+  --border: #2c2e28;
+  --border-strong: #3c4035;
+  --text-primary: #ece9df;
+  --text-secondary: #8b8e84;
+  --text-muted: #9a9e91;
+  --text-faint: #5d6057;
+  --accent: #caf24f;
+  --accent-contrast: #11120f;
+  --accent-tint: rgb(202 242 79 / 10%);
+  --accent-glow: rgb(202 242 79 / 45%);
+  --warning: #e3ad45;
+  --warning-tint: rgb(227 173 69 / 12%);
+  --danger: #f08070;
+  --danger-tint: rgb(240 128 112 / 11%);
+  --media-well: #080906;
+  --media-overlay: rgb(5 6 4 / 76%);
+  --focus-ring: rgb(202 242 79 / 48%);
+  --surface-card: var(--bg-elevated);
+  --surface-raised: var(--bg-elevated);
+  --surface-chrome: color-mix(in srgb, var(--bg) 60%, var(--bg-elevated));
+  --surface-chrome-2: var(--bg);
+  --well-bg: var(--media-well);
+  --shadow-card: 0 0 0 1px var(--border);
+  --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
+
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-10);
+  background: var(--bg);
+  color: var(--text-primary);
+  color-scheme: dark;
+}

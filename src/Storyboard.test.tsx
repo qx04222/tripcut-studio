@@ -18,6 +18,13 @@ vi.mock("./api", async (importOriginal) => {
     listShotStacks: vi.fn(),
     listStoryTemplates: vi.fn(),
     getNarrativeRevision: vi.fn(),
+    listStoryGaps: vi.fn(async () => []),
+    dismissStoryGap: vi.fn(async () => undefined),
+    reopenStoryGap: vi.fn(async () => undefined),
+    generationAvailability: vi.fn(async () => ({ enabled: false, has_key: false, budget_remaining_usd: 0 })),
+    listGenerationRequests: vi.fn(async () => []),
+    retryGeneration: vi.fn(),
+    cancelGeneration: vi.fn(),
   };
 });
 
@@ -38,9 +45,16 @@ import {
   getStoryboard,
   listShotStacks,
   listStoryTemplates,
+  listStoryGaps,
+  dismissStoryGap,
+  reopenStoryGap,
+  generationAvailability,
+  listGenerationRequests,
   type Chapter,
+  type GenerationRequestSummary,
   type NarrativeBeat,
   type Storyboard as StoryboardData,
+  type StoryGap,
   type StoryItem,
 } from "./api";
 
@@ -223,5 +237,261 @@ describe("storyboard journey timeline tab", () => {
     });
 
     expect(container.querySelector('[data-testid="journey-timeline-mock"]')).not.toBeNull();
+  });
+});
+
+function narrativeBoard(): StoryboardData {
+  return {
+    ...emptyBoard(),
+    mode: "narrative",
+    narrative: {
+      episode: { id: 1, title: "第一集", theme: "", created_at: "", template: null },
+      chapters: [
+        {
+          id: 1,
+          kind: "destination",
+          title: "第1章",
+          order: 0,
+          promoted: false,
+          score: 0.8,
+          rationale: "",
+          promotion_reason: "",
+          story_slots: [],
+          missing_slots: [],
+          digital_human_plan: null,
+          beats: [],
+        },
+      ],
+      destination_cards: [],
+      boundary_signals: [],
+      job_status: null,
+      dh_guard: {
+        historical_appearances: [],
+        current_estimated_duration_s: 0,
+        duration_warning_threshold_s: 0,
+        warnings: [],
+      },
+    },
+  };
+}
+
+function request(overrides: Partial<GenerationRequestSummary> = {}): GenerationRequestSummary {
+  return {
+    id: 42,
+    status: "queued",
+    error: null,
+    estimated_cost_usd: 0.3,
+    actual_cost_usd: null,
+    result_clip_id: null,
+    ...overrides,
+  };
+}
+
+function gap(overrides: Partial<StoryGap> = {}): StoryGap {
+  return {
+    id: 1,
+    chapter_id: 1,
+    chapter_title: "第1章",
+    beat_id: null,
+    slot: "establishing",
+    slot_label_zh: "建立镜头",
+    reason: "该章缺一个建立镜头",
+    status: "open",
+    latest_request: null,
+    ...overrides,
+  };
+}
+
+describe("story gap cards", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.mocked(getStoryboard).mockResolvedValue(narrativeBoard());
+    vi.mocked(listShotStacks).mockResolvedValue([]);
+    vi.mocked(listStoryTemplates).mockResolvedValue([]);
+    vi.mocked(getNarrativeRevision).mockResolvedValue(null as never);
+    vi.mocked(listStoryGaps).mockResolvedValue([gap()]);
+    vi.mocked(generationAvailability).mockResolvedValue({
+      enabled: true,
+      has_key: true,
+      budget_remaining_usd: 12,
+    });
+    vi.mocked(listGenerationRequests).mockResolvedValue([]);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("renders a gap card with the Chinese heading and reason", async () => {
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("缺口：建立镜头");
+    expect(container.textContent).toContain("该章缺一个建立镜头");
+  });
+
+  it("collapses a dismissed gap under 「已忽略」 and restores it via 「恢复」", async () => {
+    vi.mocked(dismissStoryGap).mockResolvedValue(undefined);
+    vi.mocked(reopenStoryGap).mockResolvedValue(undefined);
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const ignoreButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "忽略",
+    ) as HTMLButtonElement;
+    vi.mocked(listStoryGaps).mockResolvedValue([gap({ status: "dismissed" })]);
+    await act(async () => {
+      ignoreButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(dismissStoryGap).toHaveBeenCalledWith(1);
+    expect(container.textContent).toContain("已忽略 (1)");
+
+    const restoreButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "恢复",
+    ) as HTMLButtonElement;
+    vi.mocked(listStoryGaps).mockResolvedValue([gap({ status: "open" })]);
+    await act(async () => {
+      restoreButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reopenStoryGap).toHaveBeenCalledWith(1);
+  });
+
+  it("disables 「生成候选」 with a Chinese hint when cloud generation is unavailable", async () => {
+    vi.mocked(generationAvailability).mockResolvedValue({
+      enabled: false,
+      has_key: false,
+      budget_remaining_usd: 0,
+    });
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const generateButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "生成候选",
+    ) as HTMLButtonElement;
+    expect(generateButton.disabled).toBe(true);
+    expect(container.textContent).toContain("先在设置页启用云端补镜");
+  });
+
+  it("disables all gap actions for a read-only historical episode", async () => {
+    await act(async () => {
+      root.render(<StoryboardView readOnly />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const buttons = Array.from(container.querySelectorAll(".story-gap-card button")) as HTMLButtonElement[];
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(container.textContent).toContain("历史集为只读档案");
+  });
+});
+
+describe("story gap polling", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.mocked(getStoryboard).mockResolvedValue(narrativeBoard());
+    vi.mocked(listShotStacks).mockResolvedValue([]);
+    vi.mocked(listStoryTemplates).mockResolvedValue([]);
+    vi.mocked(getNarrativeRevision).mockResolvedValue(null as never);
+    vi.mocked(generationAvailability).mockResolvedValue({
+      enabled: true,
+      has_key: true,
+      budget_remaining_usd: 12,
+    });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("keeps polling while the latest request is succeeded and stops once imported", async () => {
+    vi.useFakeTimers();
+    vi.mocked(listStoryGaps).mockResolvedValue([
+      gap({ status: "requested", latest_request: request({ status: "queued" }) }),
+    ]);
+    vi.mocked(listGenerationRequests)
+      .mockResolvedValueOnce([request({ status: "succeeded" })])
+      .mockResolvedValueOnce([request({ status: "imported" })]);
+
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(listGenerationRequests).toHaveBeenCalledTimes(1);
+
+    // latest_request is now "succeeded" (download/import still pending) — polling must continue.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(listGenerationRequests).toHaveBeenCalledTimes(2);
+
+    // latest_request is now "imported" (terminal) — polling must stop.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(listGenerationRequests).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("生成中");
+  });
+
+  it("clears the polling interval on unmount", async () => {
+    vi.useFakeTimers();
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+    vi.mocked(listStoryGaps).mockResolvedValue([
+      gap({ status: "requested", latest_request: request({ status: "queued" }) }),
+    ]);
+    vi.mocked(listGenerationRequests).mockResolvedValue([request({ status: "queued" })]);
+
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    act(() => root.unmount());
+    expect(clearIntervalSpy).toHaveBeenCalled();
   });
 });

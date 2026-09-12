@@ -13,6 +13,7 @@ import {
 
 import { JourneyTimeline } from "./JourneyTimeline";
 import { MusicPanel } from "./MusicPanel";
+import { GenerationDialog } from "./GenerationDialog";
 import {
   enqueueNarrateEpisode,
   getLlmStatus,
@@ -47,6 +48,16 @@ import {
   setRoutineOverride,
   acceptAllRoutineSuggestions,
   setDestinationFieldState,
+  listStoryGaps,
+  dismissStoryGap,
+  reopenStoryGap,
+  retryGeneration,
+  cancelGeneration,
+  listGenerationRequests,
+  generationAvailability,
+  type StoryGap,
+  type GenerationRequestSummary,
+  type GenerationAvailability,
 } from "./api";
 
 const UNCHAPTERED = "unassigned";
@@ -413,7 +424,11 @@ export function NarrativeBeatCard({ beat, item, onOp, onRoutineOverride }: { bea
   );
 }
 
-function DestinationCardEditor({
+/**
+ * 地点卡编辑器。R8 的附属带「地点卡」模式原样复用它 —— 字段状态与校验(R6)
+ * 只此一份,不在新壳里重写。
+ */
+export function DestinationCardEditor({
   card,
   disabled,
   onSaved,
@@ -522,7 +537,7 @@ function DestinationCardEditor({
         <span className={card.verified ? "verified" : "unverified"}>
           {destinationVerificationLabel(card.verified)}
         </span>
-        <small>Coverage {covered}/13</small>
+        <small>覆盖 {covered}/13</small>
       </header>
       {field("name", "地点名称", false)}
       {field("geo_context", "地理背景")}
@@ -552,6 +567,126 @@ function DestinationCardEditor({
   );
 }
 
+/** 生成请求状态的中文名。镜头带的空槽位卡片(R8)复用同一份 —— 同一件事只有一张表。 */
+export const GENERATION_STATUS_LABELS: Record<GenerationRequestSummary["status"], string> = {
+  draft: "草稿",
+  submitted: "已提交",
+  queued: "排队中",
+  succeeded: "生成中",
+  failed: "失败",
+  cancelled: "已取消",
+  imported: "已入库",
+};
+
+function StoryGapCard({
+  gap,
+  readOnly,
+  canGenerate,
+  disabledHint,
+  onGenerate,
+  onDismiss,
+  onRetry,
+  onCancel,
+}: {
+  gap: StoryGap;
+  readOnly: boolean;
+  canGenerate: boolean;
+  disabledHint: string | null;
+  onGenerate: (gap: StoryGap) => void;
+  onDismiss: (gapId: number) => void;
+  onRetry: (requestId: number, gapId: number) => void;
+  onCancel: (requestId: number) => void;
+}) {
+  const request = gap.latest_request;
+  const status = request?.status ?? null;
+
+  return (
+    <div className="story-gap-card" data-status={gap.status}>
+      <div className="story-gap-card-body">
+        <strong>缺口：{gap.slot_label_zh}</strong>
+        <small>{gap.reason}</small>
+        {status ? (
+          <span className={`story-gap-status story-gap-status-${status}`}>
+            {GENERATION_STATUS_LABELS[status]}
+            {status === "failed" && request?.error ? `：${request.error}` : ""}
+          </span>
+        ) : null}
+      </div>
+      <div className="story-gap-card-actions">
+        {status === "imported" ? null : status === "failed" ? (
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={() => request && onRetry(request.id, gap.id)}
+          >重新生成</button>
+        ) : status === "submitted" || status === "queued" || status === "succeeded" ? (
+          <button type="button" disabled={readOnly} onClick={() => request && onCancel(request.id)}>取消</button>
+        ) : (
+          <button
+            type="button"
+            disabled={readOnly || !canGenerate}
+            title={disabledHint ?? undefined}
+            onClick={() => onGenerate(gap)}
+          >生成候选</button>
+        )}
+        {status === null || status === "failed" ? (
+          <button type="button" disabled={readOnly} onClick={() => onDismiss(gap.id)}>忽略</button>
+        ) : null}
+      </div>
+      {readOnly ? <small className="read-only-notice">历史集为只读档案</small> : null}
+      {!readOnly && disabledHint && status === null ? (
+        <small className="generation-disabled-hint">{disabledHint}</small>
+      ) : null}
+    </div>
+  );
+}
+
+export type NarrateOutcome =
+  | { kind: "blocked"; notice: string }
+  | { kind: "cancelled" }
+  | { kind: "done"; notice: string };
+
+/**
+ * 「按模板重新编排」的全部策略:provider 锁定、预算、知情同意 confirm。
+ * R8 的附属带「模板」模式也走这一条 —— 同一件事只能在一条路径上被做对,
+ * 不允许新壳自己再抄一遍这几道关卡(抄漏一道就是把数据发出去而没问过人)。
+ */
+export async function narrateEpisodeWithConsent(template?: StoryTemplate): Promise<NarrateOutcome> {
+  const status = await getLlmStatus();
+  // L3 关闭不再是死路——enqueueNarrateEpisode 会同步跑确定性模板兜底
+  // 并返回一版 revision；只有 LLM 真正要跑时才需要下面这几道 provider/
+  // 预算/知情同意关卡。
+  if (status.enabled) {
+    if (status.provider === "none" || status.provider === "auto") {
+      return {
+        kind: "blocked",
+        notice:
+          status.provider === "none"
+            ? "尚未选择 LLM provider；请先在设置页锁定单一 provider。"
+            : "旧版自动回退已禁用；请先在设置页锁定单一 provider。",
+      };
+    }
+    if (status.budget_exhausted || status.remaining_calls < 1) {
+      return {
+        kind: "blocked",
+        notice: "L3 月度预算已用尽；未创建任务，当前继续使用 D2/上一版故事板。",
+      };
+    }
+    const confirmed = window.confirm(
+      `重新编排会向已锁定的 ${status.provider} 发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值；不发送文件名、拍摄时间、GPS、转写或频道记忆。预计 1 次调用，不自动回退，并写入 E2 账本。当前剩余 ${status.remaining_calls} 次。继续吗？`,
+    );
+    if (!confirmed) return { kind: "cancelled" };
+  }
+  const outcome = await enqueueNarrateEpisode(template);
+  return {
+    kind: "done",
+    notice:
+      outcome.kind === "job"
+        ? `叙事编排任务 #${outcome.id} 已排队；完成前继续显示当前故事板。`
+        : "已按模板生成（未启用 AI）",
+  };
+}
+
 export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}) {
   const [board, setBoard] = useState<StoryboardData | null>(null);
   const [shotStacks, setShotStacks] = useState<ShotStack[]>([]);
@@ -562,6 +697,114 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
   const [dragged, setDragged] = useState<StoryItem | null>(null);
   const [titleDrafts, setTitleDrafts] = useState<Record<number, string>>({});
   const titleCompositionRef = useRef(false);
+  const [storyGaps, setStoryGaps] = useState<StoryGap[]>([]);
+  const [generationAvail, setGenerationAvail] = useState<GenerationAvailability | null>(null);
+  const [generationDialogGap, setGenerationDialogGap] = useState<StoryGap | null>(null);
+  const gapsMounted = useRef(true);
+
+  useEffect(() => {
+    gapsMounted.current = true;
+    return () => {
+      gapsMounted.current = false;
+    };
+  }, []);
+
+  const refreshStoryGaps = useCallback(async () => {
+    try {
+      const next = await listStoryGaps();
+      if (gapsMounted.current) setStoryGaps(next);
+    } catch (error) {
+      if (gapsMounted.current) setNotice(`故事缺口未载入：${String(error)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStoryGaps();
+    void generationAvailability()
+      .then((next) => {
+        if (gapsMounted.current) setGenerationAvail(next);
+      })
+      .catch(() => {
+        if (gapsMounted.current) setGenerationAvail(null);
+      });
+  }, [refreshStoryGaps]);
+
+  // 生成请求排队中/生成中/已生成但下载入库未完成时每 5 秒轮询一次,卸载或全部转入终态(imported/failed/cancelled)即停止。
+  useEffect(() => {
+    const TERMINAL_STATUSES: ReadonlyArray<GenerationRequestSummary["status"]> = [
+      "imported",
+      "failed",
+      "cancelled",
+    ];
+    const inFlight = storyGaps.some(
+      (gap) => gap.latest_request && !TERMINAL_STATUSES.includes(gap.latest_request.status),
+    );
+    if (!inFlight) return;
+    const timer = window.setInterval(() => {
+      void listGenerationRequests()
+        .then((requests) => {
+          if (!gapsMounted.current) return;
+          const byId = new Map(requests.map((request) => [request.id, request]));
+          setStoryGaps((current) =>
+            current.map((gap) => {
+              const latest = gap.latest_request ? byId.get(gap.latest_request.id) : undefined;
+              if (!latest) return gap;
+              return {
+                ...gap,
+                latest_request: latest,
+                status: latest.status === "imported" ? "filled" : gap.status,
+              };
+            }),
+          );
+        })
+        .catch(() => undefined);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [storyGaps]);
+
+  const dismissGap = useCallback(async (gapId: number) => {
+    try {
+      await dismissStoryGap(gapId);
+      await refreshStoryGaps();
+    } catch (error) {
+      setNotice(`忽略失败：${String(error)}`);
+    }
+  }, [refreshStoryGaps]);
+
+  const reopenGap = useCallback(async (gapId: number) => {
+    try {
+      await reopenStoryGap(gapId);
+      await refreshStoryGaps();
+    } catch (error) {
+      setNotice(`恢复失败：${String(error)}`);
+    }
+  }, [refreshStoryGaps]);
+
+  const retryGap = useCallback(async (requestId: number, gapId: number) => {
+    try {
+      const summary = await retryGeneration(requestId);
+      setStoryGaps((current) =>
+        current.map((gap) => (gap.id === gapId ? { ...gap, latest_request: summary, status: "requested" } : gap)),
+      );
+    } catch (error) {
+      setNotice(`重新生成失败：${String(error)}`);
+    }
+  }, []);
+
+  const cancelGap = useCallback(async (requestId: number) => {
+    try {
+      await cancelGeneration(requestId);
+      await refreshStoryGaps();
+    } catch (error) {
+      setNotice(`取消失败：${String(error)}`);
+    }
+  }, [refreshStoryGaps]);
+
+  const onGenerationSubmitted = useCallback((gapId: number, summary: GenerationRequestSummary) => {
+    setStoryGaps((current) =>
+      current.map((gap) => (gap.id === gapId ? { ...gap, latest_request: summary, status: "requested" } : gap)),
+    );
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -862,39 +1105,21 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
     if (readOnly || busy || ["pending", "running"].includes(board?.narration_job_status ?? "")) return;
     setBusy(true);
     try {
-      const status = await getLlmStatus();
-      // L3 关闭不再是死路——enqueueNarrateEpisode 会同步跑确定性模板兜底
-      // 并返回一版 revision；只有 LLM 真正要跑时才需要下面这几道 provider/
-      // 预算/知情同意关卡。
-      if (status.enabled) {
-        if (status.provider === "none" || status.provider === "auto") {
-          setNotice(status.provider === "none"
-            ? "尚未选择 LLM provider；请先在设置页锁定单一 provider。"
-            : "旧版自动回退已禁用；请先在设置页锁定单一 provider。");
-          return;
-        }
-        if (status.budget_exhausted || status.remaining_calls < 1) {
-          setNotice("L3 月度预算已用尽；未创建任务，当前继续使用 D2/上一版故事板。");
-          return;
-        }
-        const confirmed = window.confirm(
-          `重新编排会向已锁定的 ${status.provider} 发送匿名 clip/segment ID、时长、尺寸、八维标签与镜头 Stack 数值；不发送文件名、拍摄时间、GPS、转写或频道记忆。预计 1 次调用，不自动回退，并写入 E2 账本。当前剩余 ${status.remaining_calls} 次。继续吗？`,
-        );
-        if (!confirmed) return;
+      const result = await narrateEpisodeWithConsent(template);
+      if (result.kind === "cancelled") return;
+      if (result.kind === "blocked") {
+        setNotice(result.notice);
+        return;
       }
-      const outcome = await enqueueNarrateEpisode(template);
       await refresh();
-      setNotice(
-        outcome.kind === "job"
-          ? `叙事编排任务 #${outcome.id} 已排队；完成前继续显示当前故事板。`
-          : "已按模板生成（未启用 AI）",
-      );
+      setNotice(result.notice);
     } catch (error) {
       setNotice(`未创建叙事编排任务：${String(error)}`);
     } finally {
       setBusy(false);
     }
   };
+
 
   if (loading) {
     return <div className="storyboard-empty">正在装载旅行章节与故事顺序…</div>;
@@ -1054,6 +1279,51 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
             >缺 {slot} ⌕</button>
           ))}
         </div>
+        {(() => {
+          const chapterGaps = storyGaps.filter((gap) => gap.chapter_id === chapter.id);
+          const activeGaps = chapterGaps.filter((gap) => gap.status !== "dismissed" && gap.status !== "filled");
+          const dismissedGaps = chapterGaps.filter((gap) => gap.status === "dismissed");
+          const canGenerate = generationAvail?.enabled === true;
+          const disabledHint = !generationAvail
+            ? null
+            : !generationAvail.enabled
+              ? "先在设置页启用云端补镜"
+              : !generationAvail.has_key
+                ? "尚未配置 MiniMax API Key"
+                : null;
+          if (activeGaps.length === 0 && dismissedGaps.length === 0) return null;
+          return (
+            <div className="story-gap-flow" aria-label="缺口：建立镜头">
+              {activeGaps.map((gap) => (
+                <StoryGapCard
+                  key={gap.id}
+                  gap={gap}
+                  readOnly={readOnly}
+                  canGenerate={canGenerate}
+                  disabledHint={disabledHint}
+                  onGenerate={setGenerationDialogGap}
+                  onDismiss={(gapId) => void dismissGap(gapId)}
+                  onRetry={(requestId, gapId) => void retryGap(requestId, gapId)}
+                  onCancel={(requestId) => void cancelGap(requestId)}
+                />
+              ))}
+              {dismissedGaps.length > 0 ? (
+                <details className="story-gap-ignored">
+                  <summary>已忽略 ({dismissedGaps.length})</summary>
+                  {dismissedGaps.map((gap) => (
+                    <div className="story-gap-card story-gap-card-dismissed" key={gap.id}>
+                      <div className="story-gap-card-body">
+                        <strong>缺口：{gap.slot_label_zh}</strong>
+                        <small>{gap.reason}</small>
+                      </div>
+                      <button type="button" disabled={readOnly} onClick={() => void reopenGap(gap.id)}>恢复</button>
+                    </div>
+                  ))}
+                </details>
+              ) : null}
+            </div>
+          );
+        })()}
         <div className="story-chapter-items">
           <SortableContext
             items={regularBeats.map((beat) => `beat-${beat.id}`)}
@@ -1353,6 +1623,15 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
         ) : null}
         </div>
       </div>
+      {generationDialogGap ? (
+        <GenerationDialog
+          gap={generationDialogGap}
+          readOnly={readOnly}
+          availability={generationAvail}
+          onClose={() => setGenerationDialogGap(null)}
+          onSubmitted={onGenerationSubmitted}
+        />
+      ) : null}
     </div>
   );
 }

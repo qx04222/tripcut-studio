@@ -58,6 +58,21 @@ pub enum CoreError {
     Ocr(String),
     #[error("music analysis failed: {0}")]
     Music(String),
+    #[error("story gap detection failed: {0}")]
+    StoryGap(String),
+    #[error("cloud generation failed: {0}")]
+    Generation(String),
+    /// R7 Task 5 幂等闸:同一个缺口在 `submitted`/`queued`/`succeeded` 期间
+    /// 只允许有一条生成请求。第二次提交(重复点击、双客户端、重放)必须在
+    /// 写请求行与账本行之前就被这条**有类型**的错误挡住——错误消息本身
+    /// 是给业主看的那句话,调用方可以 `matches!` 它而不用比字符串。
+    #[error("该缺口已有生成请求进行中")]
+    GenerationInFlight,
+    /// 重新生成只能针对已经走完的失败/取消请求;`submitted`/`queued`/
+    /// `succeeded`/`imported` 都不允许——前三者会重复计费,`imported` 已经
+    /// 有结果片了。
+    #[error("生成请求 {0} 不是失败或已取消状态，无法重新生成")]
+    GenerationNotRetryable(i64),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

@@ -1,0 +1,278 @@
+/* 预览监视器(R9 Task 3)。规则挂在 .monitor 之下,见 pool-monitor.css 头注。 */
+
+/* ---------- 预览监视器 ---------- */
+
+/* 舞台:面板底、四边留白;井是全屏唯一的深色块(B 稿),深阴影让它从纸面上浮起来。 */
+
+.monitor .monitor-stage {
+  /* 舞台严格 = 栏 − 标题条 − 控件条:flex-basis 0 + min-height 0 让它只吃剩余空间,
+     井再高也撑不动它,多出的部分裁掉(真机复核二:井曾盖住栏标题条)。 */
+  flex: 1 1 0;
+  min-height: 0;
+  padding: var(--space-3) var(--space-4);
+  overflow: hidden;
+  background: var(--surface-panel);
+}
+
+.monitor .monitor-well {
+  position: relative;
+  /* 首帧兜底:Chromium 按 cqh 算出 letterbox;WKWebView 实机上这条会退化成 100% 宽,
+     所以 useStageFit 量到舞台后会写内联宽高盖过它,井永远不超出舞台(R9 D5)。 */
+  width: min(100%, calc(100cqh * 16 / 9));
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: none;
+  border-radius: var(--radius-10);
+  background: var(--well-bg);
+  box-shadow:
+    var(--shadow-inset-well),
+    0 12px 32px color-mix(in srgb, var(--text-primary) 18%, transparent),
+    0 1px 2px color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+
+/* 空井:一层很淡的径向高光,像还没通电的屏幕;不画任何品牌纹样。 */
+
+.monitor .monitor-well--empty {
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(60% 50% at 50% 60%, color-mix(in srgb, var(--media-ink) 5%, transparent), transparent 70%),
+    var(--well-bg);
+}
+
+.monitor .monitor-well--empty .ui-empty-body {
+  max-width: 28em;
+}
+
+/* mpv 的画面节点(PlayerOverlay .player-native-slot)本来自带浅色底,井里让它透出井底。 */
+
+.monitor .monitor-well--video .player-overlay.embedded,
+.monitor .monitor-well--video .player-native-slot {
+  background: transparent;
+}
+
+.monitor .monitor-well--video .player-opening-mark {
+  color: color-mix(in srgb, var(--media-ink) 60%, transparent);
+}
+
+/* 井内两枚 chip:文件名左上、规格右上,12px 内缩,深底浅字。 */
+
+.monitor .monitor-well-chips {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  left: var(--space-3);
+  z-index: 1;
+  display: flex;
+  gap: var(--space-2);
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.monitor .monitor-well-name,
+.monitor .monitor-well-spec {
+  position: static;
+  z-index: auto;
+  max-width: none;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border-color: color-mix(in srgb, var(--media-ink) 10%, transparent);
+  border-radius: var(--radius-6);
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-variant-numeric: tabular-nums;
+  backdrop-filter: blur(6px);
+}
+
+.monitor .monitor-well-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: clip;
+}
+
+.monitor .monitor-well-name .ui-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor .monitor-well-spec {
+  color: color-mix(in srgb, var(--media-ink) 85%, transparent);
+}
+
+/* 井底 I/O 轨:渐变压暗 + 3px 轨道,入出点区间强调色,播放头一根白线。 */
+
+.monitor .monitor-io {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  height: 28px;
+  background: linear-gradient(180deg, transparent, rgb(0 0 0 / 40%));
+  pointer-events: none;
+}
+
+.monitor .monitor-io-rail {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-2);
+  left: var(--space-3);
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--media-ink) 18%, transparent);
+}
+
+.monitor .monitor-io-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.monitor .monitor-io-mark {
+  position: absolute;
+  top: -6px;
+  width: 1.5px;
+  height: 15px;
+  background: var(--media-ink);
+}
+
+.monitor .monitor-io-mark::after {
+  position: absolute;
+  top: -12px;
+  left: -3px;
+  color: var(--media-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  line-height: 1;
+}
+
+.monitor .monitor-io-mark--in::after { content: "I"; }
+.monitor .monitor-io-mark--out::after { content: "O"; }
+
+.monitor .monitor-io-head {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 11px;
+  margin-left: -1px;
+  background: var(--media-ink);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 40%);
+}
+
+/* 退化路径(MONITOR_EMBEDDED_PLAYBACK = false):井里只放封面 + 一行「点击进入全屏沉浸」。 */
+
+.monitor .monitor-well--cover {
+  display: grid;
+  gap: var(--space-2);
+  place-items: center;
+  padding: 0;
+  color: color-mix(in srgb, var(--media-ink) 70%, transparent);
+  font: inherit;
+  font-size: var(--text-12);
+  cursor: pointer;
+}
+
+.monitor .monitor-well--cover img {
+  max-width: 100%;
+  max-height: 70%;
+  object-fit: contain;
+}
+
+.monitor .monitor-cover-hint {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+/* 传输条(C 稿):铬条上一条 framed Toolbar,子项贴着排。 */
+
+.monitor .monitor-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0;
+  align-items: center;
+  min-height: 0;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-chrome);
+  font-size: var(--text-12);
+}
+
+.monitor .monitor-transport {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.monitor .monitor-play {
+  color: var(--accent-text);
+}
+
+.monitor .monitor-speed {
+  min-width: var(--control-md);
+  padding: 0 var(--space-1);
+  font-family: var(--font-mono);
+}
+
+.monitor .monitor-timecode {
+  flex: 0 0 auto;
+  padding: 0 var(--space-1);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.monitor .monitor-duration {
+  color: var(--text-muted);
+}
+
+/* 入点 / 出点:键帽 + 打上之后的时码;有值时整颗按钮变强调 tint。 */
+
+.monitor .monitor-mark .ui-kbd {
+  height: 14px;
+  min-width: 14px;
+  padding: 0 3px;
+  font-size: var(--text-11);
+  line-height: 12px;
+}
+
+.monitor .monitor-mark.marked {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.monitor .monitor-mark-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor .monitor-marked {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.monitor .monitor-fullscreen {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.monitor .monitor-fullscreen .ui-kbd {
+  margin-left: var(--space-1);
+}

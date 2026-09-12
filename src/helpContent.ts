@@ -14,6 +14,22 @@ export interface KeyboardShortcutGroup {
   shortcuts: readonly KeyboardShortcut[];
 }
 
+/**
+ * 新壳(导演台工作区)的全局键位 —— 规格 §3.2。这一组必须排在最前:用户抬头
+ * 看帮助,第一眼要的是"整块界面怎么走",而不是某一栏内部的单键。
+ */
+export const WORKSPACE_SHORTCUTS: readonly KeyboardShortcut[] = [
+  { id: "command-palette", keys: ["⌘", "K"], action: "命令面板", detail: "跳转、全量搜索、素材直达" },
+  { id: "cycle-pane", keys: ["F6"], action: "轮转栏焦点", detail: "媒体池 → 预览监视器 → 镜头带 → 检查器；⇧F6 反向，折叠起来的栏跳过" },
+  { id: "toggle-pool", keys: ["⌘", "1"], action: "折叠媒体池", detail: "收成 44px 竖条，再按一次展开" },
+  { id: "toggle-inspector", keys: ["⌘", "2"], action: "折叠检查器", detail: "收成 44px 竖条，再按一次展开" },
+  { id: "immersive", keys: ["⌘", "⏎"], action: "沉浸预览", detail: "监视器铺满窗口，再按一次退出" },
+  { id: "open-import", keys: ["⌘", "I"], action: "导入素材", detail: "打开导入抽屉的「来源」分页；光标在输入框里时不触发" },
+  { id: "open-settings", keys: ["⌘", "，"], action: "打开设置", detail: "设置以 sheet 形式下沉，不离开工作区" },
+  { id: "open-help", keys: ["?"], action: "打开本帮助", detail: "光标在输入框里时不触发" },
+  { id: "escape", keys: ["Esc"], action: "退出当前层", detail: "抽屉 → 设置 sheet → 沉浸 → 清空搜索词，一次只退一层" },
+] as const;
+
 export const SELECTION_SHORTCUTS: readonly KeyboardShortcut[] = [
   { id: "favorite", keys: ["F"], action: "收藏", detail: "把当前素材标为保留" },
   { id: "reject", keys: ["X"], action: "拒绝", detail: "把当前素材标为不采用" },
@@ -40,54 +56,65 @@ export const PLAYER_SHORTCUTS: readonly KeyboardShortcut[] = [
 
 export const KEYBOARD_SHORTCUT_GROUPS: readonly KeyboardShortcutGroup[] = [
   {
+    id: "workspace",
+    label: "工作区",
+    eyebrow: "全局",
+    shortcuts: WORKSPACE_SHORTCUTS,
+  },
+  {
     id: "selection",
-    label: "筛片墙",
-    eyebrow: "SELECT",
+    label: "媒体池",
+    eyebrow: "选片",
     shortcuts: SELECTION_SHORTCUTS,
   },
   {
     id: "player",
-    label: "沉浸播放器",
-    eyebrow: "PLAYER",
+    label: "预览监视器",
+    eyebrow: "播放",
     shortcuts: PLAYER_SHORTCUTS,
   },
 ] as const;
 
+/**
+ * 一屏三栏的说明(规格 §1)。0.3.0 之前这里是"导入 → 筛片 → 打点 → 故事 → 交付"
+ * 五个**页面**;新壳没有页面了,这五条改成"这一屏上的五个地方各管什么",
+ * `number` 仍然保留,因为帮助浮层拿它当序号画。
+ */
 export const WORKFLOW_STEPS = [
   {
-    id: "import",
+    id: "topbar",
     number: "01",
-    label: "导入",
-    eyebrow: "INGEST",
-    description: "选择相机卡、移动硬盘或本地目录；旅剪只建立索引，不改写原片。",
+    label: "顶栏",
+    eyebrow: "进出口",
+    description: "导入素材、切换集、生成交付包、设置 —— 四个按钮,进出工作区的全部入口。",
   },
   {
-    id: "select",
+    id: "pool",
     number: "02",
-    label: "筛片",
-    eyebrow: "SELECT",
-    description: "浏览胶片墙，用收藏、评级与功能感知 Shot Stack 收束素材；信息和人物镜头不会按画质淘汰。",
+    label: "媒体池",
+    eyebrow: "找素材",
+    description: "左栏。搜索、筛选、缩略图网格;点一张卡片,监视器与检查器跟着换。",
   },
   {
-    id: "mark",
+    id: "monitor",
     number: "03",
-    label: "打点",
-    eyebrow: "MARK",
-    description: "进入沉浸播放，用 I / O 标记边界，再按 S 保存真正有用的片段。",
+    label: "预览监视器",
+    eyebrow: "看画面",
+    description: "中栏上半。播放、逐帧、I/O 打点与保存片段;⌘⏎ 铺满窗口。",
   },
   {
-    id: "story",
+    id: "band",
     number: "04",
-    label: "故事",
-    eyebrow: "STORY",
-    description: "把精选段放进章节，调整次序，形成可解释的粗剪结构。",
+    label: "镜头带",
+    eyebrow: "排顺序",
+    description: "中栏下半。按章节分组拖排,空槽位点「生成候选」;下面那排分段切音乐 / 旅程 / 地点卡 / 模板。",
   },
   {
-    id: "deliver",
+    id: "inspector",
     number: "05",
-    label: "交付",
-    eyebrow: "DELIVER",
-    description: "生成稳定交付包，再交给剪映完成精剪、字幕、调色与发布。",
+    label: "检查器",
+    eyebrow: "改这一条",
+    description: "右栏。评级、标签、章节归属、Take 与 AI 描述常驻;技术检查、八维、音轨、相似镜头是折叠段。",
   },
 ] as const;
 
@@ -105,7 +132,7 @@ export const SETTINGS_HELP_TOPICS: readonly SettingsHelpTopic[] = [
   {
     id: "settings",
     label: "设置页导览",
-    eyebrow: "SETTINGS",
+    eyebrow: "设置",
     description: "设置侧栏的每个分区做什么、什么时候该去看它。",
     sections: [
       "appearance",
@@ -113,6 +140,7 @@ export const SETTINGS_HELP_TOPICS: readonly SettingsHelpTopic[] = [
       "timeline",
       "tools",
       "analysis",
+      "generation",
       "privacy",
       "about",
       "cache",
@@ -123,6 +151,7 @@ export const SETTINGS_HELP_TOPICS: readonly SettingsHelpTopic[] = [
       "旅行时间：多设备时钟校正，把不同相机/手机的拍摄时间对齐到统一的 Canonical Journey Time，避免按时间线索排序时素材错位。",
       "工具链：FFmpeg、FFprobe、whisper-cli 与 Chinese-CLIP sidecar 的本机路径与检测状态；留空自动搜索 PATH，缺失只降级不损坏原片。每个组件存在上一版本时会出现「回滚到上一版」按钮，装了新版本发现有问题可以一键退回。",
       "分析与 AI：场景/相似度/抖动阈值，AI Best Take 六轴权重，以及可选的 LLM 增强开关、provider 锁定与月度调用预算。",
+      "云端补镜（MiniMax）：默认关闭，API Key 只写入 macOS 钥匙串、界面上永不回显；启用后按月度预算生成缺口镜头，生成的片子只落到素材库的 generated/ 目录，原素材目录不会被写入，实际扣费以 MiniMax 平台账单为准。",
       "隐私与诊断：本地优先的确切边界、诊断日志位置与保留期限，以及崩溃报告由谁控制——这里不产生新的上传行为，只是把已经存在的规则说清楚。",
       "帮助与关于：中文工作指南、安装向导入口与应用版本、开源许可清单。",
       "缓存与重建：清空可重建的分析缓存并触发重新计算；评级、片段和原始素材不受影响，是这个分区里唯一的破坏性操作。",
@@ -131,7 +160,7 @@ export const SETTINGS_HELP_TOPICS: readonly SettingsHelpTopic[] = [
   {
     id: "privacy",
     label: "隐私与诊断怎么读",
-    eyebrow: "PRIVACY",
+    eyebrow: "隐私",
     description: "本机默认处理素材，诊断信息的去向逐条列出。",
     sections: ["privacy"],
     paragraphs: [

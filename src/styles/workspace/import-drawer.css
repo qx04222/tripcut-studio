@@ -1,0 +1,307 @@
+/*
+ * 导入抽屉(R9 Task 5,规格 §4.1)。B 稿的抽屉表单语法(标题 + 副题、分节标题、
+ * 带标签的行、底部状态行)按 A 稿密度落地:正文 13、元信息 12、控件 28、间距只用
+ * 六档。所有值只从 tokens.css 取——这里不出现颜色字面量。由 workspace.css 顶部
+ * `@import` 进来(必须在第一条规则之前,否则 postcss 会整条丢弃)。
+ */
+
+/* 来源分页(关注文件夹卡 / 工具链警告 / 拖放区 / 最近导入)另放一文件,本文件 < 400 行。 */
+@import "./import-drawer-sources.css";
+
+/* ---------- 外框:分页条 + 滚动区 + 拖放覆盖层 ---------- */
+
+.import-drawer {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.import-drawer-tabs {
+  flex: none;
+  padding: 0 var(--space-5);
+  background: var(--surface-chrome);
+}
+
+.import-drawer-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-5);
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.import-drawer--drop-target .import-drawer-scroll {
+  opacity: 0.35;
+}
+
+.import-drawer-drop {
+  position: absolute;
+  inset: var(--space-3);
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-10);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-raised));
+  color: var(--accent-text);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+  pointer-events: none;
+}
+
+.import-drawer .import-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.import-drawer .import-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.import-drawer .import-section > .ui-section-header {
+  margin-bottom: 0;
+}
+
+.import-drawer .import-sources-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+/* 路径 / 批次名 / 卷标:13 半粗,单行省略。 */
+.import-drawer .import-path,
+.import-drawer .import-job-name,
+.import-drawer .import-missing-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.import-drawer .import-sources-hint .import-path {
+  display: inline;
+  font-weight: 500;
+}
+
+/* ---------- 任务:进度卡(B 稿 .pcard:大数字 + 细进度条 + 阶段行) ---------- */
+
+.import-drawer .import-index {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.import-drawer .import-index-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+}
+
+.import-drawer .import-index-big {
+  color: var(--text-primary);
+  font-size: var(--text-20);
+  font-weight: 600;
+  line-height: var(--lh-20);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-drawer .import-index-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--surface-chrome-2);
+}
+
+.import-drawer .import-index-track > span {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-6);
+  background: var(--accent);
+  transition: width var(--motion-fast);
+}
+
+.import-drawer .import-index-hint {
+  margin: 0;
+  color: var(--warn);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.import-drawer .import-stages {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* B 稿 .trow:每行一条发丝线,标签 + 值 + 余量,数字对齐。 */
+.import-drawer .import-stage {
+  display: grid;
+  grid-template-columns: minmax(64px, 96px) minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+  min-height: var(--control-md);
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--border-hair);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-drawer .import-stage-label {
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+.import-drawer .import-stage-done { color: var(--text-secondary); }
+.import-drawer .import-stage-rest { color: var(--text-muted); }
+.import-drawer .import-stage-failed { color: var(--danger); font-weight: 500; }
+
+.import-drawer .import-index-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+@media (width < 560px) {
+  .import-drawer .import-stage {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .import-drawer .import-stage-rest {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ---------- 任务:批次卡 ---------- */
+
+.import-drawer .import-job {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.import-drawer .import-job-head,
+.import-drawer .import-job-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  margin-left: auto;
+}
+
+/* ---------- 任务:确认框(alertdialog,内嵌浮层卡) ---------- */
+
+.import-drawer .import-confirm {
+  border-left: 3px solid var(--danger);
+}
+
+.import-drawer .import-confirm-title {
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.import-drawer .import-confirm p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.import-drawer .import-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}
+
+/* ---------- 缺失素材:按卷分组卡 ---------- */
+
+.import-drawer .import-missing-relink {
+  margin-left: auto;
+}
+
+.import-drawer .import-missing-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: var(--space-2) 0 0;
+  border-top: 1px solid var(--border-hair);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  list-style: none;
+}
+
+.import-drawer .import-missing-files li {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 状态行(B 稿底部状态行:一句话,不抢眼) ---------- */
+
+.import-drawer .import-status:empty {
+  display: none;
+}
+
+.import-drawer .import-note {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-6);
+  background: var(--info-tint);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.import-drawer .import-note::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translateY(-1px);
+}
+
+.import-drawer .import-note--error {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+
+.import-drawer .import-note--error::before {
+  background: var(--danger);
+}
+
+.import-drawer .import-confirm:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-raised), var(--ring);
+}

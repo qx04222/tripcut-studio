@@ -38,7 +38,9 @@
 | swapouts | 0 | 0 | 0 | 0 |
 | 任务 | — | — | 4627 done / 0 failed | 4627 done / 0 failed |
 
-⚠ 两次 R6 测量期间机器上都有并行 cargo 编译（负载 8.6–15.5），峰值内存不可信；首屏与任务数不受影响（封面先行的排序在装置里可复核）。干净重测待本轮发布后在空闲机器上补跑并更新此表。运行目录：`qa/runs/2026-09-06T22-35-02Z-perf-r6-split`（省内存档）、`qa/runs/2026-09-06T23-29-41Z-perf-r6-split-std`（标准档），均在 `../tripcut-wt-perf/`。装置阶段计数曾出现 strip 1027/ocr_scan 727：是驱动按全局查询猜 kind 的计时假象，jobs 表实为 500/500；已改为 `run_one_step_with_kind` 直接带出 kind（4d6fc32）。
+⚠ 两次 R6 测量期间机器上都有并行 cargo 编译（负载 8.6–15.5），峰值内存不可信；首屏与任务数不受影响（封面先行的排序在装置里可复核）。干净重测待本轮发布后在空闲机器上补跑并更新此表。
+
+2026-09-07 00:38Z 起的干净重测（`--budget-gb 32 --label r6-clean-std`）未能完成：宿主机当时压缩内存约 23 GB、free 约 2 GB（同机另有 ChatGPT 桌面自动化进程 1.9 GB/112% CPU、iCloud 同步与 spindump），应用的内存压力暂停按设计生效，Decode 类任务反复暂停/超时重试（proxy 305 done / 191 pending，attempt 最高 5），5 小时后仍未收敛，已中止（F-R6-INT-8）。这不是本轮代码回归的证据，但也没能证伪；干净数字必须在空闲机器上重测：`node scripts/qa/perf-harness.mjs --budget-gb 32 --label r6-clean-std` 与 `--budget-gb 12 --label r6-clean-low`，跑前确认 `vm_stat` 压缩页 < 4 GB、无其它编译/自动化进程。运行目录：`qa/runs/2026-09-06T22-35-02Z-perf-r6-split`（省内存档）、`qa/runs/2026-09-06T23-29-41Z-perf-r6-split-std`（标准档），均在 `../tripcut-wt-perf/`。装置阶段计数曾出现 strip 1027/ocr_scan 727：是驱动按全局查询猜 kind 的计时假象，jobs 表实为 500/500；已改为 `run_one_step_with_kind` 直接带出 kind（4d6fc32）。
 
 ## 3. 门禁记录
 
@@ -96,3 +98,21 @@
 - 剪映草稿人眼核对，尤其是本轮新落地的 `clip.rotation` 值在剪映时间线里的实际呈现是否符合预期。
 - 解锁屏幕后重跑一次完整 GUI 冒烟（`prepare-cua-candidate.mjs` → `smoke-gui.mjs` → `crash-diff.mjs`），验证 F-R6-10 修复后的两条断言与本轮所有新 UI（检查更新、旅程时间线、竖屏过滤、参考粗剪时长下拉、拼音搜索来源徽章）。
 - 真机看一次系统通知（交付完成 / 批量分析完成）是否真的弹出——本轮只验证了通知调用出口被触发一次（mock 断言），没有条件验证 macOS 通知中心的真实弹出与授权状态。
+
+## 7. 收尾链与发布（2026-09-07 00:29–00:40Z，main 202ca13）
+
+| 步骤 | 结果 |
+|---|---|
+| `package-dmg.sh`（preview，ad-hoc，`TRIPCUT_UPDATER_SIGN=1`） | PASS：DMG SHA-256 `8c634e3c…dae527f`，更新包 `.app.tar.gz` + minisign `.sig` + `latest.json` |
+| `audit-dmg.mjs --expect-signature adhoc` | PASS 11/11（签名完整、无禁用库、无外部依赖、H.264 VideoToolbox、溯源哈希、许可 26 个 Mach-O 1:1） |
+| `preflight.mjs` | PASS（xcode 仅 CLT，QA 模式 warn） |
+| `prepare-cua-candidate.mjs --seed-db`（schema 40，500 条素材） | PASS |
+| `smoke-gui.mjs` | 39 PASS / 2 FAIL / 1 WARN。FAIL：`deliver.platform.content`、`deliver.contact.content`——截图 `qa/runs/2026-09-07T00-31-33Z-smoke/03-deliver.png` 证明「本次交付平台」「联系表.pdf」都已渲染，是 AX 文本转储在 500 条素材页面上超时返回空串的探针缺陷（F-R6-INT-4），非产品缺陷。修好 `clickByLabel` 后，`select.storyboard.template`/`journey_timeline`/`music`、`episode.renamePlatform.field` 四条第一次真正点中并 PASS |
+| `crash-recovery.mjs` | PASS 12/12 |
+| `crash-diff.mjs` | PASS added=0 |
+| `prepare-github-preview.sh`（gitleaks：no leaks found） | PASS，输出改放 `~/Library/Caches/tripcut-build/github-preview/v0.2.0-preview` |
+| GitHub Release | https://github.com/qx04222/tripcut-studio/releases/tag/v0.2.0 ，正式 release（非 pre-release，让 `/releases/latest/download/latest.json` 可解析），资产 ASCII 命名 `TripCut-Studio_0.2.0_…`，含 DMG、SHA256SUMS、审计报告、源码归档（TripCut 0.2.0 + ffmpeg/mpv/libplacebo/whisper）、更新包与 `latest.json`。已验证：`latest.json` 返回 0.2.0，更新包 URL HTTP 200 |
+
+业主拍板（2026-09-07）：Developer ID 与公证先不做；真机验收业主自跑。
+
+追加发现：F-R6-INT-4 见上；F-R6-INT-5 `fast-gates` 的 vite build 会清空 `dist/`，`prepare-github-preview.sh` 默认输出在 `dist/` 下，一次门禁把已组装的发布目录删掉了（已改用 Caches 目录并修默认值）；F-R6-INT-6 smoke 链末尾 `pkill -f 旅剪工作台` 会误杀 argv 含应用路径的并行命令（audit-dmg 被杀一次）；F-R6-INT-7 首轮 7d 装置计数 1027/727 是计时归因假象（jobs 表 500/500）。

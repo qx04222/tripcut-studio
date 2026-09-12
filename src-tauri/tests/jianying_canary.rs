@@ -115,6 +115,12 @@ fn jianying_canary_against_live_environment() {
         println!("SKIP: 未找到剪映（{JIANYING_APP_PLIST} 缺失或不可读），跳过真机金丝雀");
         return;
     };
+    if jianying::JIANYING_VERSIONS_PENDING_HUMAN_CHECK.contains(&installed_version.as_str()) {
+        println!(
+            "WARN: 已安装剪映 {installed_version} 在待人眼验证名单中(草稿文件已加密,键集比对不可行)——业主需在剪映里打开一次 TripCut 草稿确认;跳过金丝雀"
+        );
+        return;
+    }
     assert!(
         jianying::SUPPORTED_JIANYING_VERSIONS.contains(&installed_version.as_str()),
         "已安装剪映 {installed_version} 不在白名单 {:?} 中——先跑一轮 E0 金丝雀确认新版本 template.tmp 结构，再把版本号加进白名单",

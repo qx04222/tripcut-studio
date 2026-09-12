@@ -1,0 +1,107 @@
+/* 设计令牌(R9 规格 §1)。**只定义变量,不含任何规则。**
+   表面色 / 语义色引用 styles.css:4-60 的既有调色板(--bg、--bg-elevated、--accent、
+   --warning、--danger…),深色主题经 prefers-color-scheme 与 html[data-theme] 两条既有
+   机制自动跟随;本文件末尾的两段深色块只改那些浅色时写死了字面量的令牌(卡面、浮层、
+   阴影、井底)。数值来源:.superpowers/sdd/r9-design-explore/A-editing-desk/workspace.html
+   (基准稿 A「编辑台密度」),铬条色 --chrome/--chrome-2、井底 --well、选中环
+   --accent-glow 都是从那份 HTML 里原样抽出来的。 */
+:root {
+  /* 字号五级 + 一一配对的行高。主屏正文 13、元信息 12、角标 11、标题 15、抽屉标题 20。 */
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-15: 15px;
+  --text-20: 20px;
+  --lh-11: 14px;
+  --lh-12: 16px;
+  --lh-13: 18px;
+  --lh-15: 20px;
+  --lh-20: 26px;
+
+  /* 间距六档。只允许这六档;不许写 padding: 10px。 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 表面四级:壳底 → 栏面板 → 卡片 → 浮层(抽屉 / popover)。
+     铬条(栏标题条、传输条、井周边)是 A 稿的 --chrome / --chrome-2,比面板暗半档。 */
+  --surface-ground: var(--bg);
+  --surface-panel: var(--bg-elevated);
+  --surface-card: #fff;
+  --surface-raised: #fff;
+  --surface-chrome: #f0eee7;
+  --surface-chrome-2: #e9e7df;
+  --well-bg: #1d1b18;
+
+  /* 阴影三级。深色下 card 阴影换成 1px 边。 */
+  --shadow-card: 0 1px 2px rgb(29 30 26 / 6%), 0 1px 0 rgb(29 30 26 / 4%);
+  --shadow-raised: 0 8px 24px rgb(29 30 26 / 16%), 0 1px 3px rgb(29 30 26 / 8%);
+  --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 45%), inset 0 0 0 1px rgb(255 255 255 / 5%);
+
+  /* 圆角两档:控件 6,卡片 / 井 / 抽屉 10。 */
+  --radius-6: 6px;
+  --radius-10: 10px;
+
+  /* 边框。 */
+  --border-hair: var(--border);
+  --border-strong: var(--border-strong);
+  --border-focus: var(--accent);
+
+  /* 强调:只有一个强调色。--accent-ink 是压在强调底上的字;--accent-text 是压在
+     强调 tint 上的字(A 稿的 #5b7a1f),按调色板混出来,深色下自动变亮。 */
+  --accent-ink: var(--accent-contrast);
+  --accent-text: color-mix(in srgb, var(--accent) 80%, var(--text-primary));
+
+  /* 语义四色 + tint。ok = accent;info = 次级文字。 */
+  --ok: var(--accent);
+  --ok-tint: var(--accent-tint);
+  --warn: var(--warning);
+  --warn-tint: var(--warning-tint);
+  --danger: var(--danger);
+  --danger-tint: var(--danger-tint);
+  --info: var(--text-secondary);
+  --info-tint: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+
+  /* 焦点双圈(:focus-visible 专用)与选中环(A 稿 .card.sel)。 */
+  --ring: 0 0 0 2px var(--surface-panel), 0 0 0 4px var(--focus-ring);
+  --ring-selected: 0 0 0 2px var(--accent-glow);
+
+  /* 动效:唯一允许的 transition 时长。 */
+  --motion-fast: 150ms cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* 控件高度两档 + 顶栏主按钮。 */
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 30px;
+
+  /* 等宽:时码、文件名、kbd。 */
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+
+/* 深色:只改浅色时写死了字面量的那几个。不做走查,只保证不刺眼、不反色。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-card: var(--bg-elevated);
+    --surface-raised: var(--bg-elevated);
+    --surface-chrome: color-mix(in srgb, var(--bg) 60%, var(--bg-elevated));
+    --surface-chrome-2: var(--bg);
+    --well-bg: var(--media-well);
+    --shadow-card: 0 0 0 1px var(--border);
+    --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
+    --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
+  }
+}
+
+html[data-theme="dark"] {
+  --surface-card: var(--bg-elevated);
+  --surface-raised: var(--bg-elevated);
+  --surface-chrome: color-mix(in srgb, var(--bg) 60%, var(--bg-elevated));
+  --surface-chrome-2: var(--bg);
+  --well-bg: var(--media-well);
+  --shadow-card: 0 0 0 1px var(--border);
+  --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
+  --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
+}

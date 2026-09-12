@@ -102,6 +102,9 @@ pub struct ClipListItem {
     pub display_lut_path: Option<String>,
     pub selected_transcribe_track: Option<i64>,
     pub selected_monitor_track: Option<i64>,
+    /// `NULL` = 真实素材;`'minimax'` = MiniMax 云端补镜生成物。Select 页据此
+    /// 渲染「AI 生成」徽章;见迁移 0041 `clips.generated_source`。
+    pub generated_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +113,13 @@ struct ImportPayload {
     episode_id: i64,
     #[serde(default)]
     folder_label: Option<String>,
+    /// R7 Task 5 复审 P2-3:这条导入任务的 `episode_id` 是**调用方钉死**的
+    /// (云端补镜回流:结果属于提交请求时那一集),不是"入队那一刻恰好活跃
+    /// 的那一集"。为真时 probe 不再要求该 Episode 仍然活跃——2 小时的轮询
+    /// 窗口里业主完全可能已经封存它并开了新一集,而生成片必须回到原来那一
+    /// 集。普通导入(用户点"导入素材")仍然是 false,照旧只往活跃集里写。
+    #[serde(default)]
+    pinned_episode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,17 +468,39 @@ pub fn start_import_files(connection: &mut Connection, paths: &[PathBuf]) -> Res
     }
     files.sort();
     files.dedup();
-    enqueue_import_files(connection, "<explicit-files>".to_owned(), files)
+    enqueue_import_files(connection, "<explicit-files>".to_owned(), files, None)
+}
+
+/// R7 Task 5 复审 P2-3:把文件导进**指定的** Episode,而不是"现在活跃的那
+/// 一集"。给云端补镜回流用——请求是在哪一集里提交的,结果就回哪一集,哪怕
+/// 轮询期间业主已经切了集(那时该集已经 `archived`,普通导入路径会拒绝,
+/// 所以这条路径把 `pinned_episode` 打上,probe 只校验该集仍然存在)。
+pub(crate) fn start_import_files_into_episode(
+    connection: &mut Connection,
+    paths: &[PathBuf],
+    episode_id: i64,
+) -> Result<ImportStart> {
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let canonical = path.canonicalize().map_err(|error| {
+            CoreError::Import(format!("无法打开导入文件 {}：{error}", path.display()))
+        })?;
+        files.push(canonical);
+    }
+    files.sort();
+    files.dedup();
+    enqueue_import_files(connection, "<generated>".to_owned(), files, Some(episode_id))
 }
 
 fn enqueue_import_files(
     connection: &mut Connection,
     source: String,
     files: Vec<PathBuf>,
+    episode_override: Option<i64>,
 ) -> Result<ImportStart> {
     let labeled = files.into_iter().map(|file| (file, None)).collect();
     let batch_id = super::import_control::create_batch(connection, &source)?;
-    let result=enqueue_labeled_files_batch(connection, source, labeled, batch_id);
+    let result=enqueue_labeled_files_batch_into(connection, source, labeled, batch_id, episode_override);
     if result.is_err() { super::import_control::fail_scans(connection,Some(batch_id))?; }
     result
 }
@@ -485,6 +517,18 @@ fn enqueue_labeled_files_batch(
     files: Vec<(PathBuf, Option<String>)>,
     batch_id: i64,
 ) -> Result<ImportStart> {
+    enqueue_labeled_files_batch_into(connection, source, files, batch_id, None)
+}
+
+/// `episode_override` 非空 = 调用方钉死了目标 Episode(见
+/// `start_import_files_into_episode`);为空 = 照旧取当前活跃集。
+fn enqueue_labeled_files_batch_into(
+    connection: &mut Connection,
+    source: String,
+    files: Vec<(PathBuf, Option<String>)>,
+    batch_id: i64,
+    episode_override: Option<i64>,
+) -> Result<ImportStart> {
     let ffprobe = super::settings::configured_executable(
         connection,
         super::settings::FFPROBE_PATH_KEY,
@@ -492,13 +536,16 @@ fn enqueue_labeled_files_batch(
         "ffprobe",
     )?;
     validate_ffprobe(&ffprobe)?;
-    let episode_id: i64 = connection
-        .query_row(
-            "SELECT id FROM episodes WHERE status = 'active'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| CoreError::Import("没有进行中的 Episode，无法导入素材".to_owned()))?;
+    let episode_id: i64 = match episode_override {
+        Some(pinned) => pinned,
+        None => connection
+            .query_row(
+                "SELECT id FROM episodes WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| CoreError::Import("没有进行中的 Episode，无法导入素材".to_owned()))?,
+    };
     let mut enqueued = 0_u64;
     let mut skipped = 0_u64;
     // A watched folder outlives an Episode. Resolve its volume once so a new
@@ -530,6 +577,7 @@ fn enqueue_labeled_files_batch(
             path: path.to_string_lossy().into_owned(),
             episode_id,
             folder_label: folder_label.clone(),
+            pinned_episode: episode_override.is_some(),
         };
         let payload_json = serde_json::to_string(&payload)
             .map_err(|error| CoreError::Import(format!("无法创建导入任务：{error}")))?;
@@ -636,6 +684,39 @@ fn confirmed_duplicate(connection: &Connection, path: &Path, quick: &str, size: 
     Ok(None)
 }
 
+/// R7 Task 5 复审 P2-2:按**文件路径**把一条已经入库的 clip 找回来。
+/// 崩溃后重跑补镜回流时,文件已经在 `generated/` 里、clip 行也已经建好,
+/// `run_import_probe` 这次只会返回 `Duplicate`,导入批次里不会再出现新的
+/// `import_batch_clips` 行——只有按路径(以及退一步按 quick_hash)找回既有
+/// clip,才能把一条其实已经成功的请求正确地推到 `imported`。
+pub(crate) fn clip_id_for_path(connection: &Connection, path: &Path) -> Result<Option<i64>> {
+    let volume = volume_identity(path);
+    let rel_path = relative_path(path, volume.mount_point.as_deref());
+    let by_path: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM clips WHERE volume_uuid = ?1 AND rel_path = ?2",
+            params![volume.uuid, rel_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if by_path.is_some() {
+        return Ok(by_path);
+    }
+    // 路径这一层没命中(卷标识变了、或文件被挪过)——退一步按内容指纹找。
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let (quick_hash, byte_size) = quick_fingerprint(path)?;
+    connection
+        .query_row(
+            "SELECT id FROM clips WHERE quick_hash = ?1 AND byte_size = ?2 ORDER BY id LIMIT 1",
+            params![quick_hash, byte_size as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(CoreError::from)
+}
+
 pub fn run_import_probe(
     connection: &mut Connection,
     job: &Job,
@@ -657,7 +738,7 @@ fn run_import_probe_with(
 ) -> Result<ImportProbeOutcome> {
     let payload: ImportPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Import(format!("导入任务数据无效：{error}")))?;
-    ensure_import_episode_active(connection, payload.episode_id)?;
+    ensure_import_episode(connection, &payload)?;
     super::import_control::ensure_job_current(connection, job)?;
     let path = PathBuf::from(&payload.path);
     let (quick_hash, byte_size) = quick_fingerprint(&path)?;
@@ -699,7 +780,7 @@ fn run_import_probe_with(
         if old_path_gone {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure_import_episode_active(&transaction, payload.episode_id)?;
+            ensure_import_episode(&transaction, &payload)?;
             super::import_control::ensure_job_current(&transaction, job)?;
             let existing_owner: Option<i64> = transaction.query_row(
                 "SELECT episode_id FROM clips WHERE id = ?1",
@@ -746,7 +827,7 @@ fn run_import_probe_with(
         .map(|duration| duration.as_secs() as i64);
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    ensure_import_episode_active(&transaction, payload.episode_id)?;
+    ensure_import_episode(&transaction, &payload)?;
     super::import_control::ensure_job_current(&transaction, job)?;
     let existing_owner = transaction
         .query_row(
@@ -934,6 +1015,26 @@ fn run_import_probe_with(
     super::artifacts::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?;
 
     Ok(ImportProbeOutcome::Imported)
+}
+
+/// 钉死了 Episode 的导入任务(补镜回流)只要求那一集**还存在**;普通导入
+/// 仍然要求它是当前活跃集。见 `ImportPayload::pinned_episode`。
+fn ensure_import_episode(connection: &Connection, payload: &ImportPayload) -> Result<()> {
+    if !payload.pinned_episode {
+        return ensure_import_episode_active(connection, payload.episode_id);
+    }
+    let exists: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM episodes WHERE id = ?1)",
+        [payload.episode_id],
+        |row| row.get(0),
+    )?;
+    if exists == 1 {
+        Ok(())
+    } else {
+        Err(CoreError::Import(
+            "导入任务所属 Episode 已不存在；任务已停止".to_owned(),
+        ))
+    }
 }
 
 fn ensure_import_episode_active(connection: &Connection, episode_id: i64) -> Result<()> {
@@ -1403,7 +1504,8 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
                 a.underexposed_ratio, a.dynamic_range, a.blur_mean, a.entropy_mean,
                 a.motion_mean, a.out_of_focus_ratio,
                 c.iso_value, c.shutter_speed, c.aperture,
-                c.display_lut_path, c.selected_transcribe_track, c.selected_monitor_track
+                c.display_lut_path, c.selected_transcribe_track, c.selected_monitor_track,
+                c.generated_source
          FROM clips c
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
          LEFT JOIN clip_motion m ON m.clip_id = c.id
@@ -1526,6 +1628,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             display_lut_path: row.get(59)?,
             selected_transcribe_track: row.get(60)?,
             selected_monitor_track: row.get(61)?,
+            generated_source: row.get(62)?,
         })
     })?;
     for clip in clips {
@@ -1609,6 +1712,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             display_lut_path: None,
             selected_transcribe_track: None,
             selected_monitor_track: None,
+            generated_source: None,
         });
     }
     Ok(items)
@@ -3201,6 +3305,7 @@ mod tests {
             path: media_path.to_string_lossy().into_owned(),
             episode_id: 1,
             folder_label: None,
+            pinned_episode: false,
         })
         .unwrap();
         let id = jobs::enqueue(&mut connection, "import_probe", &payload, "slow").unwrap();
@@ -3237,6 +3342,7 @@ mod tests {
             path: media_path.to_string_lossy().into_owned(),
             episode_id: archived_id,
             folder_label: None,
+            pinned_episode: false,
         })
         .unwrap();
         jobs::enqueue(&mut connection, "import_probe", &payload, "delayed-archive").unwrap();
@@ -3301,6 +3407,7 @@ esac
             path: media_path.to_string_lossy().into_owned(),
             episode_id: 1,
             folder_label: None,
+            pinned_episode: false,
         })
         .unwrap();
         jobs::enqueue(&mut connection, "import_probe", &payload, "vfr-persist").unwrap();
@@ -3360,6 +3467,7 @@ printf '%s\n' '{"streams":[{"codec_type":"video","codec_name":"h264","width":192
             path: path_a.to_string_lossy().into_owned(),
             episode_id: 1,
             folder_label: Some("A".to_owned()),
+            pinned_episode: false,
         })
         .unwrap();
         jobs::enqueue(&mut connection, "import_probe", &payload_a, "move-a").unwrap();
@@ -3376,6 +3484,7 @@ printf '%s\n' '{"streams":[{"codec_type":"video","codec_name":"h264","width":192
             path: path_b.to_string_lossy().into_owned(),
             episode_id: 1,
             folder_label: Some("B".to_owned()),
+            pinned_episode: false,
         })
         .unwrap();
         jobs::enqueue(&mut connection, "import_probe", &payload_b, "move-b").unwrap();

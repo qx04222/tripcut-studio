@@ -1,0 +1,373 @@
+/* 检查器(R9 规格 §3.8,基准稿 A + C 稿头部)。选择器以 `.workspace-shell .inspector` 起头,
+   压过 workspace.css 分节 9 的旧规则(见 band-inspector.css 说明)。 */
+
+.workspace-shell .inspector .inspector-clip,
+.workspace-shell .inspector .inspector-gap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-2) var(--space-2) var(--space-4);
+  overflow-y: auto;
+  background: var(--surface-ground);
+}
+
+/* ---------- 头部:缩略图 + 文件名 + 上一条 / 下一条 ---------- */
+
+.workspace-shell .inspector .inspector-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  padding: var(--space-1) var(--space-1) var(--space-2);
+}
+
+.workspace-shell .inspector .inspector-head-thumb {
+  display: block;
+  flex: none;
+  width: 64px;
+  height: 36px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-shell .inspector .inspector-head-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-shell .inspector .inspector-head-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.workspace-shell .inspector .inspector-head-name {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .inspector .inspector-head-sub {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  font-family: var(--font-mono);
+}
+
+.workspace-shell .inspector .inspector-head-nav {
+  display: flex;
+  flex: none;
+  gap: 0;
+}
+
+/* ---------- 默认层的卡:铬条标题 + 内容 ---------- */
+
+.workspace-shell .inspector .inspector-default-section {
+  flex: none;
+  padding: 0;
+  border-radius: var(--radius-10);
+  overflow: hidden;
+}
+
+.workspace-shell .inspector .inspector-default-section .ui-section-header--pane {
+  border-radius: 0;
+}
+
+.workspace-shell .inspector .inspector-default-section .ui-section-header-title {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.workspace-shell .inspector .inspector-default-section .ui-section-header-title .ui-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.workspace-shell .inspector .inspector-card-body {
+  padding: var(--space-3);
+}
+
+.workspace-shell .inspector .inspector-card-body p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .inspector .inspector-notice {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+/* ---------- 评级:分段按钮 + 五星 ---------- */
+
+.workspace-shell .inspector .inspector-rating-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.workspace-shell .inspector .inspector-rating-segment {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-button {
+  border: 0;
+  border-right: 1px solid var(--border-hair);
+  border-radius: 0;
+  background: transparent;
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-button:last-child {
+  border-right: 0;
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-button:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-button.is-on {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-button.is-on.is-reject {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+
+.workspace-shell .inspector .inspector-rating-segment .ui-kbd {
+  min-width: 0;
+  height: var(--space-4);
+  border-bottom-width: 1px;
+  color: var(--text-faint);
+}
+
+.workspace-shell .inspector .inspector-stars {
+  display: inline-flex;
+  gap: 0;
+}
+
+.workspace-shell .inspector .inspector-star {
+  width: 20px;
+  color: var(--text-faint);
+}
+
+.workspace-shell .inspector .inspector-star .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.workspace-shell .inspector .inspector-star:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--warn);
+}
+
+.workspace-shell .inspector .inspector-star.is-filled,
+.workspace-shell .inspector .inspector-star[aria-pressed="true"] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--warn);
+}
+
+/* ---------- 标签 ---------- */
+
+.workspace-shell .inspector .inspector-tag-list {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.workspace-shell .inspector .inspector-tag-list .ui-chip {
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+
+.workspace-shell .inspector .inspector-tag-add {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--control-sm);
+  color: var(--text-muted);
+}
+
+/* ---------- 所属章节 / 槽位:两行标签 + 下拉 ---------- */
+
+.workspace-shell .inspector .inspector-placement {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-shell .inspector .inspector-placement .ui-field--inline {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.workspace-shell .inspector .inspector-placement .ui-field-label {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+}
+
+.workspace-shell .inspector .inspector-placement .ui-select {
+  display: flex;
+  width: 100%;
+}
+
+/* ---------- Take 条:缩略图卡 96×54 ---------- */
+
+.workspace-shell .inspector .inspector-take-strip {
+  display: flex;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  overflow-x: auto;
+}
+
+.workspace-shell .inspector .inspector-take-card {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 104px;
+  padding: var(--space-1);
+  cursor: pointer;
+}
+
+.workspace-shell .inspector .inspector-take-thumb {
+  position: relative;
+  display: block;
+  width: 96px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+}
+
+.workspace-shell .inspector .inspector-take-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-shell .inspector .inspector-take-ai { position: absolute; top: var(--space-1); left: var(--space-1); }
+.workspace-shell .inspector .inspector-take-hero { position: absolute; right: var(--space-1); bottom: var(--space-1); }
+
+.workspace-shell .inspector .inspector-take-caption {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  font-family: var(--font-mono);
+}
+
+.workspace-shell .inspector .inspector-take-order { color: var(--text-primary); }
+
+.workspace-shell .inspector .inspector-take-name {
+  overflow: hidden;
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 折叠行:36px,左图标 · 段名 · 右状态字 · chevron ---------- */
+
+.workspace-shell .inspector .inspector-collapsible {
+  flex: none;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-shell .inspector .inspector-collapsible + .inspector-collapsible {
+  margin-top: 0;
+}
+
+.workspace-shell .inspector .inspector-collapsible summary {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  height: 36px;
+  padding: 0 var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  letter-spacing: 0;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.workspace-shell .inspector .inspector-collapsible summary::-webkit-details-marker { display: none; }
+
+.workspace-shell .inspector .inspector-collapsible summary:hover { color: var(--accent-text); }
+
+.workspace-shell .inspector .inspector-collapsible summary:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-6);
+}
+
+.workspace-shell .inspector .inspector-section-icon { flex: none; color: var(--text-muted); }
+
+.workspace-shell .inspector .inspector-section-title { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.workspace-shell .inspector .inspector-section-status {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-weight: 400;
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .inspector .inspector-chevron {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform var(--motion-fast);
+}
+
+.workspace-shell .inspector .inspector-chevron.is-open { transform: rotate(90deg); }
+
+.workspace-shell .inspector .inspector-section-body {
+  padding: 0 var(--space-4) var(--space-4);
+  border-top: 1px solid var(--border-hair);
+  font-size: var(--text-12);
+}
+
+/* ---------- 空槽位分支 ---------- */
+
+.workspace-shell .inspector .inspector-gap-actions {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0 var(--space-1);
+}

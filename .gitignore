@@ -14,3 +14,7 @@ qa/runs/
 # 真正的私钥住在 ~/.tauri/tripcut-updater.key(口令在钥匙串 tripcut-updater),
 # 这条只是防止有人把它复制进仓库。
 *.key
+
+# 假后端封面占位图(scripts/qa/make-mock-covers.mjs 生成)与截图产物
+qa/mock-covers/
+qa/preview/

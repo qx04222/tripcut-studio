@@ -1,0 +1,386 @@
+import type {
+  ClipListItem,
+  NarrativeBeat,
+  ShotStack,
+  ShotStackMember,
+  StoryGap,
+  StoryItem,
+  Storyboard,
+} from "../api";
+import type { BandMode } from "./WorkspaceStore";
+
+/**
+ * 镜头带的纯数据层(规格 §3.3)。组件只负责画,分组、序号、缺口白名单、虚拟化
+ * 窗口全在这里算完 —— 这几条规则每一条都有测试盯着,搬进 JSX 里就没人看得见了。
+ */
+
+/**
+ * 可生成槽位白名单,与 `src-tauri/src/core/story_gap.rs:27` 的 `GENERATABLE_SLOTS`
+ * 同一份。后端 `detect_story_gaps` 本就只按这张表建缺口行,这里再挡一道是因为
+ * 库里可能留着旧版本写下的行 —— 「DH INTRO」「MAP」这类槽位没有可生成的语义,
+ * 一旦漏进来就会给出一个按了没反应的「生成候选」按钮(R7 规则不变)。
+ */
+export const GENERATABLE_SLOTS: readonly string[] = [
+  "REAL/ESTABLISHING",
+  "REAL/DETAIL",
+  "ATMOSPHERE",
+  "TRANSITION",
+];
+
+/** 缺口还「活着」——已忽略与已填补的不占带上的位置。 */
+const ACTIVE_GAP_STATUSES: readonly StoryGap["status"][] = ["open", "requested"];
+
+export interface BandSegment {
+  /** StoryItem.key,或 `slot:{chapterId}:{slot}`。 */
+  key: string;
+  kind: "clip" | "slot";
+  /** 全带内的 1 基序号,用于 aria-label「镜头 {n}」。 */
+  index: number;
+  clipId: number | null;
+  segmentId: number | null;
+  chapterId: number | null;
+  slot: string | null;
+  fileName: string | null;
+  durationTicks: number;
+  takeCount: number;
+  /** 本段在同镜头 Take 里的 1 基位次(「Take 1/3」的 1);不在 Stack 里就是 1。 */
+  takeIndex: number;
+  isGenerated: boolean;
+  /** 封面缩略图(规格 §3.3 的分段缩略图);没封面/空槽位为 null。 */
+  coverUrl: string | null;
+  gap: StoryGap | null;
+  /** 本章内的 1 基槽位序号(A 稿瓦片左下的「槽位 01」),按章重置;`index` 才是全带序号。 */
+  slotIndex: number;
+  /** 叙事模式下 beat 的角色词(瓦片右下);legacy 模式与空槽位为 null。 */
+  roleLabel: string | null;
+}
+
+/**
+ * 一个分段在镜头带上占的像素宽(160px 瓦片 + 8px 间距)。章节偏移、虚拟化窗口与
+ * 音乐刻度轨的序号轴都按它算 —— 三处必须是同一个数,刻度才真的落在镜头上。
+ */
+export const BAND_SEGMENT_PITCH = 168;
+
+/** 瓦片 160 × 130(规格 §3.7)。 */
+export const BAND_TILE_HEIGHT = 130;
+/** 章节头一行(`Toolbar dense`,28px)。 */
+export const BAND_CHAPTER_HEAD_HEIGHT = 28;
+/** 常显横向滚动条的高度。 */
+export const BAND_SCROLLBAR_HEIGHT = 10;
+/** 视口上下 padding 之和(8 + 8)。 */
+export const BAND_VIEWPORT_PADDING = 16;
+/**
+ * 镜头带视口的**内容高**:章节头 + 瓦片 + 滚动条 + padding = 184。视口高度就钉在这个
+ * 数上,中栏再高也不会在瓦片下方留出一片白(规格 §3.7);多出的高度归监视器。
+ */
+export const BAND_VIEWPORT_HEIGHT =
+  BAND_CHAPTER_HEAD_HEIGHT + BAND_TILE_HEIGHT + BAND_SCROLLBAR_HEIGHT + BAND_VIEWPORT_PADDING;
+
+/** 附属带(音乐 / 旅程 / 地点卡 / 模板)展开时至少要给它的高度。 */
+const BAND_ACCESSORY_MIN_HEIGHT = 100;
+
+/**
+ * 镜头带栏的最小高(喂 `WorkspaceShell` 的 `Panel minSize`):故事模式就是视口内容高 184,
+ * 附属带展开时再加一段 = 284。中栏纵向分隔条拖到底就是内容高。
+ */
+export function bandMinHeight(mode: BandMode): number {
+  return mode === "story" ? BAND_VIEWPORT_HEIGHT : BAND_VIEWPORT_HEIGHT + BAND_ACCESSORY_MIN_HEIGHT;
+}
+
+/** 栏标题条(`PaneHead`,套件 `--pane` 32px)——它也在镜头带那个 Panel 里。 */
+export const BAND_PANE_HEAD_HEIGHT = 32;
+
+/** 音乐模式插在带上方的刻度轨(`MusicRuler.MUSIC_RULER_HEIGHT`,那边的测试钉住两者相等)。 */
+export const BAND_MUSIC_RULER_HEIGHT = 36;
+
+/**
+ * `WorkspaceShell` 那个 Panel 的最小高 = 栏标题条 + `bandMinHeight`(故事 216,附属 316),
+ * 音乐模式再加刻度轨 36 = 352 —— 少算它,附属区就被刻度轨挤掉一截。
+ */
+export function bandPanelMinHeight(mode: BandMode): number {
+  return BAND_PANE_HEAD_HEIGHT + (mode === "music" ? BAND_MUSIC_RULER_HEIGHT : 0) + bandMinHeight(mode);
+}
+
+/**
+ * 镜头带栏的**实际**高(`WorkspaceShell` 用它 `resize` 那个 Panel):
+ * - 故事模式跟着内容走(标题条 + 视口 + 可能展开的 Take 条 / toast),再高瓦片下方也只会多出
+ *   一片壳底色,所以多出的全归监视器;内容高还没量到(0)时退到 min。
+ * - 附属模式按持久化的监视器占比分剩余给带,但不低于 min;栈高拿不到时退到 min。
+ */
+export function bandPanelHeight(
+  mode: BandMode,
+  measure: { stackHeight: number; monitorRatio: number; contentHeight: number },
+): number {
+  const min = bandPanelMinHeight(mode);
+  if (mode === "story") return Math.max(min, Math.round(measure.contentHeight));
+  if (measure.stackHeight <= 0) return min;
+  return Math.max(min, Math.round(measure.stackHeight * (1 - measure.monitorRatio)));
+}
+
+/** C 稿的镜头带视图切换:按章节(默认)/ 按时间(平坦序列)/ 仅缺口(只留有缺口的章)。 */
+export type BandView = "chapter" | "time" | "gaps";
+
+export const BAND_VIEWS: readonly { view: BandView; label: string }[] = [
+  { view: "chapter", label: "按章节" },
+  { view: "time", label: "按时间" },
+  { view: "gaps", label: "仅缺口" },
+];
+
+const BEAT_ROLE_LABELS: Record<NarrativeBeat["role"], string> = {
+  beat: "叙事",
+  montage: "蒙太奇",
+  transition: "过渡",
+};
+
+function beatRoleByClip(board: Storyboard): ReadonlyMap<number, string> {
+  const roles = new Map<number, string>();
+  for (const chapter of board.narrative?.chapters ?? []) {
+    for (const beat of chapter.beats ?? []) roles.set(beat.clip_id, BEAT_ROLE_LABELS[beat.role] ?? beat.role);
+  }
+  return roles;
+}
+
+export interface BandChapter {
+  /** 章在故事板里的 1 基序号;仅缺口视图过滤掉一些章之后,留下的章仍报自己原来的号。 */
+  ordinal: number;
+  chapterId: number | null;
+  title: string;
+  durationTicks: number;
+  gapCount: number;
+  segments: BandSegment[];
+}
+
+/** 没有章节归属的素材落在这一桶里,永远排在最后(与 Storyboard.tsx 的 UNCHAPTERED 同语义)。 */
+const UNCHAPTERED_TITLE = "未分章";
+
+function itemDurationTicks(item: StoryItem): number {
+  return Math.max(0, item.out_ticks - item.in_ticks);
+}
+
+function orderItems(items: readonly StoryItem[]): StoryItem[] {
+  return [...items].sort(
+    (left, right) =>
+      (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER) ||
+      left.key.localeCompare(right.key),
+  );
+}
+
+function activeGapsFor(gaps: readonly StoryGap[], chapterId: number | null): StoryGap[] {
+  if (chapterId === null) return [];
+  return gaps.filter(
+    (gap) =>
+      gap.chapter_id === chapterId &&
+      ACTIVE_GAP_STATUSES.includes(gap.status) &&
+      GENERATABLE_SLOTS.includes(gap.slot),
+  );
+}
+
+/**
+ * Take 列表的展示顺序:真实素材在前,生成片永远在后(R7 §6),组内保持 Stack 自己的顺序 ——
+ * 那就是 best-take 的结论,不该在前端二次排序。带上的「Take n/m」与 Take 条按同一份顺序数。
+ */
+export function orderedTakes(
+  stack: ShotStack,
+  clipsById: ReadonlyMap<number, ClipListItem>,
+): ShotStackMember[] {
+  const real: ShotStackMember[] = [];
+  const generated: ShotStackMember[] = [];
+  for (const member of stack.members ?? []) {
+    (clipsById.get(member.clip_id)?.generated_source ? generated : real).push(member);
+  }
+  return [...real, ...generated];
+}
+
+function stackForClip(stacks: readonly ShotStack[], clipId: number): ShotStack | null {
+  for (const stack of stacks) {
+    if (stack.members?.some((member) => member.clip_id === clipId)) return stack;
+  }
+  return null;
+}
+
+/**
+ * 章节分组 + 全带连续序号。空槽位排在本章真实分段之后 —— 缺口是「这一章还差
+ * 什么」,不是时间轴上的某一刻,插在中间只会让拖排的落点含义不明。
+ */
+export function buildBandChapters(
+  board: Storyboard,
+  gaps: readonly StoryGap[],
+  stacks: readonly ShotStack[],
+  clipsById: ReadonlyMap<number, ClipListItem>,
+): BandChapter[] {
+  const boardChapters = board.chapters ?? [];
+  const boardItems = board.items ?? [];
+  const buckets: { chapterId: number | null; title: string }[] = boardChapters.map((chapter) => ({
+    chapterId: chapter.id,
+    title: chapter.title,
+  }));
+  if (boardItems.some((item) => item.chapter_id === null)) {
+    buckets.push({ chapterId: null, title: UNCHAPTERED_TITLE });
+  }
+
+  const roles = beatRoleByClip(board);
+  let index = 0;
+  return buckets.map((bucket, bucketIndex) => {
+    const segments: BandSegment[] = [];
+    for (const item of orderItems(boardItems.filter((i) => i.chapter_id === bucket.chapterId))) {
+      const stack = stackForClip(stacks, item.clip_id);
+      index += 1;
+      segments.push({
+        key: item.key,
+        kind: "clip",
+        index,
+        clipId: item.clip_id,
+        segmentId: item.segment_id,
+        chapterId: item.chapter_id,
+        slot: null,
+        fileName: item.file_name,
+        durationTicks: itemDurationTicks(item),
+        // Stack 之外的素材就是它自己一条 Take —— 0 会让角标说「0 条候选」。
+        takeCount: stack ? stack.members.length : 1,
+        takeIndex: stack
+          ? Math.max(0, orderedTakes(stack, clipsById).findIndex((member) => member.clip_id === item.clip_id)) + 1
+          : 1,
+        isGenerated: Boolean(clipsById.get(item.clip_id)?.generated_source),
+        coverUrl: clipsById.get(item.clip_id)?.cover_url ?? null,
+        gap: null,
+        slotIndex: segments.length + 1,
+        roleLabel: roles.get(item.clip_id) ?? null,
+      });
+    }
+    const chapterGaps = activeGapsFor(gaps, bucket.chapterId);
+    for (const gap of chapterGaps) {
+      index += 1;
+      segments.push({
+        key: `slot:${gap.chapter_id}:${gap.slot}`,
+        kind: "slot",
+        index,
+        clipId: null,
+        segmentId: null,
+        chapterId: gap.chapter_id,
+        slot: gap.slot,
+        fileName: null,
+        durationTicks: 0,
+        takeCount: 0,
+        takeIndex: 0,
+        isGenerated: false,
+        coverUrl: null,
+        gap,
+        slotIndex: segments.length + 1,
+        roleLabel: null,
+      });
+    }
+    return {
+      ordinal: bucketIndex + 1,
+      chapterId: bucket.chapterId,
+      title: bucket.title,
+      durationTicks: segments.reduce((sum, segment) => sum + segment.durationTicks, 0),
+      gapCount: chapterGaps.length,
+      segments,
+    };
+  });
+}
+
+const TIME_VIEW_TITLE = "按时间";
+
+/**
+ * 视图切换是纯函数:按章节原样返回(同一引用,组件的 memo 不白算);仅缺口只留
+ * `gapCount > 0` 的章;按时间把所有真实分段铺成一条按 `captured_at` 升序的序列
+ * (没有拍摄时间的按原序排在最后),空槽位不进时间轴 —— 缺口不是时间上的某一刻。
+ */
+export function applyBandView(
+  chapters: readonly BandChapter[],
+  view: BandView,
+  clipsById?: ReadonlyMap<number, ClipListItem>,
+): readonly BandChapter[] {
+  if (view === "chapter") return chapters;
+  if (view === "gaps") return chapters.filter((chapter) => chapter.gapCount > 0);
+  const capturedAt = (segment: BandSegment): string | null =>
+    segment.clipId === null ? null : clipsById?.get(segment.clipId)?.captured_at ?? null;
+  const clips = chapters.flatMap((chapter) => chapter.segments.filter((segment) => segment.kind === "clip"));
+  const timed = clips.filter((segment) => capturedAt(segment) !== null);
+  const untimed = clips.filter((segment) => capturedAt(segment) === null);
+  timed.sort((left, right) => capturedAt(left)!.localeCompare(capturedAt(right)!));
+  const segments = [...timed, ...untimed].map((segment, position) => ({
+    ...segment,
+    index: position + 1,
+    slotIndex: position + 1,
+  }));
+  return [
+    {
+      ordinal: 1,
+      chapterId: null,
+      title: TIME_VIEW_TITLE,
+      durationTicks: segments.reduce((sum, segment) => sum + segment.durationTicks, 0),
+      gapCount: 0,
+      segments,
+    },
+  ];
+}
+
+/** 规格 §7 冻结的 AX 名,一字不差。 */
+export function segmentAriaLabel(segment: BandSegment): string {
+  if (segment.kind === "slot") {
+    return `镜头 ${segment.index}：缺口 ${segment.gap ? slotLabelZh(segment.gap) : segment.slot ?? ""}`;
+  }
+  return `镜头 ${segment.index}：${segment.fileName ?? ""}`;
+}
+
+/** 直接取 `gap.slot_label_zh`,不在前端重造映射(后端 story_gap.rs 才是那张表的家)。 */
+export function slotLabelZh(gap: StoryGap): string {
+  return gap.slot_label_zh;
+}
+
+function clampIndex(value: number, total: number): number {
+  return Math.min(Math.max(0, value), Math.max(0, total - 1));
+}
+
+function inclusiveRange(from: number, to: number): number[] {
+  const out: number[] = [];
+  for (let index = from; index <= to; index += 1) out.push(index);
+  return out;
+}
+
+/**
+ * 视口外的章节只渲染带头;拖动期间关闭虚拟化(当前章 ±1 全渲染,规格 §11)。
+ *
+ * 拖动时**不看视口** —— dnd-kit 的落点可能在视口边缘之外几十像素,按视口算会把
+ * 目标章节卸载掉,拖到一半目标消失。当前章 ±1 是固定窗口,与滚动位置无关。
+ */
+export function renderableChapterRange(
+  scrollLeftByChapter: readonly number[],
+  viewportWidth: number,
+  activeChapterIndex: number,
+  dragging: boolean,
+  /**
+   * 视口真实的 scrollLeft。省略时退回「当前章的起点」—— 但那只在滚动位置恰好落在
+   * 章节起点时才对:滚到一个长章的中段,按章起点算一个视口宽,下一章还在
+   * 「视口之外」,右半屏只剩一张折叠卡(R8 设计轮实测)。
+   */
+  scrollLeft?: number,
+): { from: number; to: number; fullyRendered: readonly number[] } {
+  const total = scrollLeftByChapter.length;
+  if (total === 0) return { from: 0, to: -1, fullyRendered: [] };
+  const active = clampIndex(activeChapterIndex, total);
+
+  if (dragging) {
+    const from = clampIndex(active - 1, total);
+    const to = clampIndex(active + 1, total);
+    return { from, to, fullyRendered: inclusiveRange(from, to) };
+  }
+
+  const start = scrollLeft ?? scrollLeftByChapter[active] ?? 0;
+  const end = start + Math.max(0, viewportWidth);
+  let from = active;
+  for (let index = 0; index < total; index += 1) {
+    const chapterEnd = scrollLeftByChapter[index + 1] ?? Number.POSITIVE_INFINITY;
+    if (chapterEnd > start) {
+      from = index;
+      break;
+    }
+  }
+  let to = from;
+  for (let index = from; index < total; index += 1) {
+    if ((scrollLeftByChapter[index] ?? 0) < end) to = index;
+  }
+  return { from, to, fullyRendered: inclusiveRange(from, to) };
+}

@@ -1,0 +1,323 @@
+/* 媒体池(R9 Task 3)。规则挂在 .media-pool 之下,见 pool-monitor.css 头注。 */
+
+/* ---------- 媒体池:筛选条 ---------- */
+
+.media-pool .pool-filters {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-panel);
+}
+
+.media-pool .pool-search {
+  gap: var(--space-1);
+}
+
+.media-pool .pool-search-field {
+  position: relative;
+}
+
+.media-pool .pool-search-icon {
+  position: absolute;
+  top: 50%;
+  left: var(--space-2);
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.media-pool .pool-search-field input {
+  height: var(--control-md);
+  padding: 0 var(--space-2) 0 var(--space-5);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  font-size: var(--text-12);
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+}
+
+.media-pool .pool-search-field input:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--ring);
+}
+
+.media-pool .pool-search-submit {
+  height: var(--control-md);
+  padding: 0 var(--space-3);
+}
+
+.media-pool .pool-chips {
+  gap: var(--space-1);
+}
+
+.media-pool .pool-chip.ui-chip {
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-11);
+}
+
+.media-pool .pool-more-button {
+  color: var(--text-muted);
+}
+
+.media-pool .pool-more-button.active {
+  color: var(--accent-text);
+}
+
+.media-pool .pool-more-count {
+  min-width: 14px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-6);
+  background: var(--accent-tint);
+  color: var(--accent-text);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.media-pool .pool-more-popover {
+  border-radius: var(--radius-10);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+/* ---------- 媒体池:网格与卡片 ---------- */
+
+.media-pool .pool-grid-viewport {
+  padding: var(--space-2);
+  background: var(--surface-ground);
+}
+
+.media-pool .pool-grid-window {
+  gap: var(--space-2);
+}
+
+.media-pool .pool-grid-row {
+  gap: var(--space-2) 6px;
+}
+
+/* 卡片:套件 Card 的皮(圆角 6、卡片阴影),内容贴边 3px;hover 上浮、选中双环。 */
+
+.media-pool .pool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  height: 100%;
+  padding: 3px 3px var(--space-1);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  text-align: left;
+}
+
+.media-pool .pool-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-chrome);
+  box-shadow: var(--shadow-raised);
+  transform: translateY(-1px);
+}
+
+.media-pool .pool-card.ui-card--selected,
+.media-pool .pool-card.ui-card--selected:hover {
+  border-color: var(--accent);
+  background: var(--surface-card);
+  box-shadow: var(--ring-selected);
+}
+
+.media-pool .pool-card.multi:not(.ui-card--selected) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-hair));
+  background: var(--accent-tint);
+}
+
+.media-pool .pool-card:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.media-pool .pool-card-image {
+  /* 行高固定 146,而 16:9 封面随列宽长高:4 列(池 ≥ 420 宽)时封面 ≈ 63px,把文件名
+     第三行挤出卡片(R9 真机 1280 宽验收)。封上限 56px,超出部分靠 object-fit 裁。 */
+  max-height: 56px;
+  border-radius: 3px;
+  background: var(--media-well);
+  transition: box-shadow var(--motion-fast);
+}
+
+.media-pool .pool-card.ui-card--selected .pool-card-image {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* 压在封面上的角标:统一 ink 角标,时长右下、候选 / AI 生成左上、匹配度左下。 */
+
+.media-pool .pool-card-time,
+.media-pool .pool-card-generated,
+.media-pool .pool-card-stack,
+.media-pool .pool-card-match {
+  position: absolute;
+  height: auto;
+  padding: 2px var(--space-1);
+  border-radius: 3px;
+  font-size: var(--text-11);
+  line-height: 1;
+}
+
+.media-pool .pool-card-time {
+  right: 3px;
+  bottom: 3px;
+  font-family: var(--font-mono);
+}
+
+.media-pool .pool-card-generated,
+.media-pool .pool-card-stack {
+  top: 3px;
+  left: 3px;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-weight: 500;
+}
+
+.media-pool .pool-card-generated + .pool-card-stack {
+  top: 3px;
+  right: auto;
+  left: 3px;
+  margin-top: 18px;
+}
+
+.media-pool .pool-card-match {
+  bottom: 3px;
+  left: 3px;
+}
+
+/* 收藏在封面右上落一颗白心;拒绝整张封面盖 45° 斜纹,一眼分出来。 */
+
+.media-pool .pool-card-fav {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: inline-flex;
+  color: var(--media-ink);
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 60%));
+}
+
+.media-pool .pool-card-rejected-veil {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    45deg,
+    color-mix(in srgb, var(--text-primary) 45%, transparent) 0 2px,
+    transparent 2px 6px
+  );
+}
+
+.media-pool .pool-card-rejected-veil::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--media-ink);
+  border-radius: 50%;
+  background: linear-gradient(135deg, transparent 45%, var(--media-ink) 45% 55%, transparent 55%);
+  transform: translate(-50%, -50%);
+}
+
+/* 文件名:等宽、在 `_` 后断行(fileNameLines),每段还可在任意处折;最多三行(36px),
+   超过三行按行裁掉,只在第三行尾出「…」;完整名在 title。 */
+
+.media-pool .pool-card-name {
+  /* 实机 WKWebView 上等宽字的行盒比 12px 高,按 max-height 裁会把第三行字切掉半截
+     (R9 真机验收 1280 宽),改为按行裁:三行整行显示,溢出的第三行尾部才出「…」。 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  min-width: 0;
+  margin: var(--space-1) 2px 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-weight: 500;
+  line-height: 12px;
+  letter-spacing: -0.02em;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.media-pool .pool-card-name-line {
+  display: inline;
+}
+
+.media-pool .pool-card-meta {
+  gap: 2px;
+  margin: 3px 2px 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.media-pool .pool-card-date {
+  color: var(--text-muted);
+  font-size: var(--text-11);
+}
+
+.media-pool .pool-card-date::after {
+  content: " ·";
+  color: var(--text-faint);
+}
+
+.media-pool .pool-card-rating {
+  margin-left: auto;
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.media-pool .pool-card-rating.unrated {
+  color: var(--text-faint);
+}
+
+.media-pool .pool-card-rating.stars {
+  display: inline-flex;
+  gap: 0;
+  color: var(--warn);
+  letter-spacing: 0;
+}
+
+.media-pool .pool-card-rating.stars .ui-icon {
+  margin-left: -2px;
+}
+
+.media-pool .pool-card-rating.ui-badge {
+  height: var(--lh-11);
+  padding: 0 3px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* 分析角标行:压成 14px 的一行,与元信息同高;两个以上只显示前两个(AnalysisBadges compact)。 */
+
+.media-pool .pool-card-badges {
+  margin: 2px 2px 0;
+  line-height: var(--lh-11);
+}
+
+.media-pool .pool-card-badges .analysis-badges {
+  flex-wrap: nowrap;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.media-pool .pool-card-badges .analysis-badge {
+  min-height: 0;
+  height: var(--lh-11);
+  padding: 0 var(--space-1);
+  font-size: var(--text-11);
+  line-height: 12px;
+  white-space: nowrap;
+}

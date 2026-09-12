@@ -14,6 +14,10 @@ const apiMock = vi.hoisted(() => ({
     { id: 7, title: "泰国之旅" },
   ]),
   getClipsRevision: vi.fn().mockResolvedValue("rev-1"),
+  // R8 Task 2:拼音索引改走 useClipsFeed,feed 会一并拉这三条。
+  listShotStacks: vi.fn().mockResolvedValue([]),
+  listStoryGaps: vi.fn().mockResolvedValue([]),
+  listAssetSafety: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("./api", () => apiMock);
 
@@ -74,7 +78,9 @@ describe("CommandPalette", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("01 · 导入素材");
+    expect(container.textContent).toContain("打开导入素材");
+    expect(container.textContent).toContain("切到音乐附属带");
+    expect(container.textContent).not.toContain("去交付页");
     expect(container.querySelector("input")?.getAttribute("placeholder")).toContain("全量搜索");
   });
 

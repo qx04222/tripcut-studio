@@ -8,23 +8,40 @@ import {
 } from "react";
 
 import { HelpOverlay } from "./HelpOverlay";
+import { WORKSPACE_FLAG_KEY, readUiBool } from "./workspace/uiSettings";
+import {
+  DEFAULT_SETTINGS,
+  appearanceAttributes,
+  applyAppearanceSettings,
+} from "./appearance";
+
+// 这三个符号的实现搬去了 `./appearance`(为了不把整张设置页拖进首屏 chunk),
+// 但既有的 `from "./SettingsPage"` 导入点保持可用。
+export { DEFAULT_SETTINGS, appearanceAttributes, applyAppearanceSettings };
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
   clearCacheAndRebuild,
+  clearMinimaxKey,
+  generationAvailability,
+  generationLedgerSummary,
   getAppInfo,
   getComponentStatuses,
   getLlmStatus,
   getSettings,
   getSettingsStatus,
+  hasMinimaxKey,
   listDeviceClocks,
   listLlmLedger,
   openLogsDirectory,
   rollbackComponent,
   runClipSelfCheck,
+  setMinimaxKey,
   setSetting,
   setDeviceClockOffset,
   type AppInfo,
   type ComponentStatus,
+  type GenerationAvailability,
+  type GenerationLedgerSummary,
   type LlmLedgerEntry,
   type LlmStatus,
   type SettingsMap,
@@ -46,36 +63,15 @@ import {
 } from "./updaterClient";
 import type { SettingsSectionId } from "./settingsSections";
 
-export const DEFAULT_SETTINGS: SettingsMap = {
-  "appearance.theme": "system",
-  "appearance.ui_scale": "1.0",
-  "performance.worker_count": "4",
-  "performance.proxy_enabled": "true",
-  "performance.memory_profile": "auto",
-  "tools.ffmpeg_path": "",
-  "tools.ffprobe_path": "",
-  "tools.whisper_path": "",
-  "tools.whisper_model_tier": "large-v3-turbo",
-  "analysis.scene_threshold": "0.35",
-  "analysis.similarity_threshold": "0.25",
-  "analysis.jitter_threshold": "0.15",
-  "best_take.weight.technical": "0.28",
-  "best_take.weight.composition": "0.18",
-  "best_take.weight.motion": "0.20",
-  "best_take.weight.human": "0.14",
-  "best_take.weight.audio": "0.12",
-  "best_take.weight.narrative": "0.08",
-  llm_enabled: "false",
-  llm_provider: "none",
-  llm_monthly_budget: "200",
+
+/** 与后端 `settings::MINIMAX_MONTHLY_BUDGET_MAX` 保持一致——超出即被夹住。 */
+const MINIMAX_MONTHLY_BUDGET_MAX = 500;
+
+const MINIMAX_MODEL_RESOLUTIONS: Record<string, readonly string[]> = {
+  "MiniMax-H3-Max": ["480P", "768P"],
+  "MiniMax-H3": ["768P", "2K"],
 };
 
-const SCALE_DATA: Record<string, string> = {
-  "0.9": "90",
-  "1.0": "100",
-  "1.15": "115",
-  "1.3": "130",
-};
 
 const KEYBOARD_SHORTCUT_COUNT = KEYBOARD_SHORTCUT_GROUPS.reduce(
   (total, group) => total + group.shortcuts.length,
@@ -95,6 +91,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "timeline", label: "旅行时间", eyebrow: "JOURNEY TIME", description: "多设备时钟校正" },
   { id: "tools", label: "工具链", eyebrow: "TOOLCHAIN", description: "本地依赖与模型" },
   { id: "analysis", label: "分析与 AI", eyebrow: "ANALYSIS & AI", description: "阈值、预算与隐私" },
+  { id: "generation", label: "云端补镜", eyebrow: "MINIMAX", description: "API Key、预算与生成账本" },
   { id: "privacy", label: "隐私与诊断", eyebrow: "PRIVACY & DIAGNOSTICS", description: "本地优先、诊断日志与崩溃报告" },
   { id: "about", label: "帮助与关于", eyebrow: "HELP & ABOUT", description: "指南、版本与许可" },
   { id: "cache", label: "缓存与重建", eyebrow: "CACHE & REBUILD", description: "可重建数据管理" },
@@ -107,6 +104,7 @@ function SettingsIcon({ name }: { name: SettingsIconName }) {
     timeline: <><circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" /><path d="M5 4v4H1" /></>,
     tools: <><path d="m14.5 6.5 3-3 3 3-3 3" /><path d="m16.5 8.5-9 9" /><path d="m8.5 15.5-2 5-3-3 5-2" /></>,
     analysis: <><path d="M4 18V9" /><path d="M10 18V5" /><path d="M16 18v-7" /><path d="M3 18h17" /></>,
+    generation: <><path d="M12 3v4" /><path d="m5.6 5.6 2.8 2.8" /><path d="M3 12h4" /><path d="m5.6 18.4 2.8-2.8" /><path d="M12 17v4" /><path d="m18.4 18.4-2.8-2.8" /><path d="M17 12h4" /><path d="m18.4 5.6-2.8 2.8" /></>,
     privacy: <><path d="M12 3 4 6.5V11c0 4.6 3.2 8.9 8 10 4.8-1.1 8-5.4 8-10V6.5Z" /><path d="m9.5 12 1.8 1.8L15 10" /></>,
     about: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5" /><path d="M12 8h.01" /></>,
     cache: <><path d="M5 7c0-2 3-3 7-3s7 1 7 3-3 3-7 3-7-1-7-3Z" /><path d="M5 7v5c0 2 3 3 7 3s7-1 7-3V7" /><path d="M5 12v5c0 2 3 3 7 3s7-1 7-3v-5" /></>,
@@ -153,17 +151,6 @@ function SettingsRow({
   );
 }
 
-export function appearanceAttributes(settings: SettingsMap): {
-  theme: "light" | "dark" | null;
-  uiScale: string;
-} {
-  const theme = settings["appearance.theme"] ?? DEFAULT_SETTINGS["appearance.theme"];
-  const scale = settings["appearance.ui_scale"] ?? DEFAULT_SETTINGS["appearance.ui_scale"];
-  return {
-    theme: theme === "light" || theme === "dark" ? theme : null,
-    uiScale: SCALE_DATA[scale] ?? "100",
-  };
-}
 
 export function llmLedgerStatusLabel(status: LlmLedgerEntry["status"]): string {
   switch (status) {
@@ -175,6 +162,19 @@ export function llmLedgerStatusLabel(status: LlmLedgerEntry["status"]): string {
       return "调用失败";
     case "parse_failed":
       return "解析失败";
+  }
+}
+
+export function generationLedgerStatusLabel(status: string): string {
+  switch (status) {
+    case "draft": return "草稿";
+    case "submitted": return "已提交";
+    case "queued": return "排队中";
+    case "succeeded": return "生成成功";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    case "imported": return "已入库";
+    default: return status;
   }
 }
 
@@ -191,6 +191,19 @@ export function llmLedgerPurposeLabel(purpose: string): string {
   }
 }
 
+/** 月度预算写入前的夹紧——与后端 `clamp_minimax_monthly_budget` 保持同一上限,
+ * 便于在 `onBlur` 阶段就告诉用户"被夹住了",而不是等一次往返后才发现。 */
+export function clampMinimaxBudgetInput(raw: string): { value: number; clamped: boolean } {
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) {
+    // 非法输入(空字符串/非数字)一律当成"需要被纠正"处理,落到 0——宁可保守地
+    // 拒绝，也不让无效输入悄悄绕过预算闸。
+    return { value: 0, clamped: true };
+  }
+  const clampedValue = Math.min(Math.max(parsed, 0), MINIMAX_MONTHLY_BUDGET_MAX);
+  return { value: clampedValue, clamped: clampedValue !== parsed };
+}
+
 function clockSourceLabel(source: DeviceClockSetting["source"]): string {
   switch (source) {
     case "manual": return "人工校正";
@@ -200,13 +213,6 @@ function clockSourceLabel(source: DeviceClockSetting["source"]): string {
   }
 }
 
-export function applyAppearanceSettings(settings: SettingsMap) {
-  const root = document.documentElement;
-  const appearance = appearanceAttributes(settings);
-  if (appearance.theme) root.dataset.theme = appearance.theme;
-  else delete root.dataset.theme;
-  root.dataset.uiScale = appearance.uiScale;
-}
 
 function bytesLabel(bytes: number): string {
   if (bytes < 1_024) return `${bytes} B`;
@@ -342,13 +348,26 @@ function ThresholdRow({
   );
 }
 
-export function SettingsPage() {
+/**
+ * `variant` 区分独立路由页(`"page"`,默认)与嵌进 Task 6 设置 sheet 里的用法
+ * (`"sheet"`)——两者渲染同一套 `settingsSections.ts` 九个分区与侧栏导航,
+ * 只有最外层容器的页面级外框(整页边距/满高滚动)在 sheet 里让位给 sheet 自己
+ * 的滚动容器。
+ */
+export function SettingsPage({ variant = "page" }: { variant?: "page" | "sheet" } = {}) {
   const [settings, setSettings] = useState<SettingsMap>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [status, setStatus] = useState<SettingsStatus | null>(null);
   const [componentStatuses, setComponentStatuses] = useState<ComponentStatus[]>([]);
   const [llmStatus, setLlmStatus] = useState<LlmStatus | null>(null);
   const [llmLedger, setLlmLedger] = useState<LlmLedgerEntry[]>([]);
+  const [minimaxHasKey, setMinimaxHasKey] = useState(false);
+  const [minimaxKeyDraft, setMinimaxKeyDraft] = useState("");
+  const [minimaxKeyBusy, setMinimaxKeyBusy] = useState(false);
+  const [minimaxKeyNotice, setMinimaxKeyNotice] = useState<string | null>(null);
+  const [generationStatus, setGenerationStatus] = useState<GenerationAvailability | null>(null);
+  const [generationLedger, setGenerationLedger] = useState<GenerationLedgerSummary | null>(null);
+  const [minimaxBudgetClampNote, setMinimaxBudgetClampNote] = useState<string | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [deviceClocks, setDeviceClocks] = useState<DeviceClockSetting[]>([]);
   const [clockDrafts, setClockDrafts] = useState<Record<string, string>>({});
@@ -474,6 +493,47 @@ export function SettingsPage() {
     setLlmLedger(nextLedger);
   }, []);
 
+  const refreshGeneration = useCallback(async () => {
+    const [nextHasKey, nextAvailability, nextLedger] = await Promise.all([
+      hasMinimaxKey(),
+      generationAvailability(),
+      generationLedgerSummary(),
+    ]);
+    setMinimaxHasKey(nextHasKey);
+    setGenerationStatus(nextAvailability);
+    setGenerationLedger(nextLedger);
+  }, []);
+
+  const saveMinimaxKey = useCallback(async () => {
+    setMinimaxKeyBusy(true);
+    setMinimaxKeyNotice(null);
+    try {
+      await setMinimaxKey(minimaxKeyDraft);
+      setMinimaxKeyDraft("");
+      await refreshGeneration();
+      setMinimaxKeyNotice("已保存");
+    } catch (error) {
+      setMinimaxKeyNotice(`保存失败：${String(error)}`);
+    } finally {
+      setMinimaxKeyBusy(false);
+    }
+  }, [minimaxKeyDraft, refreshGeneration]);
+
+  const clearMinimaxKeyAction = useCallback(async () => {
+    setMinimaxKeyBusy(true);
+    setMinimaxKeyNotice(null);
+    try {
+      await clearMinimaxKey();
+      setMinimaxKeyDraft("");
+      await refreshGeneration();
+      setMinimaxKeyNotice("已清除");
+    } catch (error) {
+      setMinimaxKeyNotice(`清除失败：${String(error)}`);
+    } finally {
+      setMinimaxKeyBusy(false);
+    }
+  }, [refreshGeneration]);
+
   const refreshDeviceClocks = useCallback(async () => {
     const clocks = await listDeviceClocks();
     setDeviceClocks(clocks);
@@ -493,8 +553,22 @@ export function SettingsPage() {
       listLlmLedger(),
       listDeviceClocks(),
       getComponentStatuses(),
+      hasMinimaxKey(),
+      generationAvailability(),
+      generationLedgerSummary(),
     ])
-      .then(([savedResult, statusResult, infoResult, llmStatusResult, ledgerResult, clocksResult, componentsResult]) => {
+      .then(([
+        savedResult,
+        statusResult,
+        infoResult,
+        llmStatusResult,
+        ledgerResult,
+        clocksResult,
+        componentsResult,
+        minimaxKeyResult,
+        generationStatusResult,
+        generationLedgerResult,
+      ]) => {
         if (!active) return;
         if (savedResult.status === "rejected") {
           setNotice(`核心设置读取失败：${String(savedResult.reason)}；编辑已停用`);
@@ -520,7 +594,19 @@ export function SettingsPage() {
             String(clock.journey_offset_ms / 1_000),
           ])));
         }
-        const optionalFailures = [statusResult, infoResult, llmStatusResult, ledgerResult, clocksResult]
+        if (minimaxKeyResult.status === "fulfilled") setMinimaxHasKey(minimaxKeyResult.value);
+        if (generationStatusResult.status === "fulfilled") setGenerationStatus(generationStatusResult.value);
+        if (generationLedgerResult.status === "fulfilled") setGenerationLedger(generationLedgerResult.value);
+        const optionalFailures = [
+          statusResult,
+          infoResult,
+          llmStatusResult,
+          ledgerResult,
+          clocksResult,
+          minimaxKeyResult,
+          generationStatusResult,
+          generationLedgerResult,
+        ]
           .filter((result) => result.status === "rejected").length;
         setNotice(optionalFailures === 0
           ? "设置已从本地项目载入"
@@ -531,10 +617,17 @@ export function SettingsPage() {
     };
   }, []);
 
-  const save = useCallback(async (key: string, value: string) => {
+  /**
+   * 返回值是"这次写入落盘了没有"(R8 终审 M3)。界面开关必须先等到 true 才敢换壳——
+   * 此前它 `void save(...)` 之后立刻广播换壳事件,写失败时壳照换,重启后又弹回去。
+   */
+  // 开关的方向由设置表里的实际值决定,不由"进来时是哪个壳"决定。
+  const workspaceV2 = readUiBool(settings, WORKSPACE_FLAG_KEY);
+
+  const save = useCallback(async (key: string, value: string): Promise<boolean> => {
     if (!settingsLoaded) {
       setNotice("核心设置尚未载入，暂不能编辑");
-      return;
+      return false;
     }
     const version = (saveVersionRef.current.get(key) ?? 0) + 1;
     saveVersionRef.current.set(key, version);
@@ -554,6 +647,7 @@ export function SettingsPage() {
         [key]: value,
       };
       setNotice(key === "performance.worker_count" ? "已保存，worker 并发将在重启后生效" : "已保存");
+      return true;
     } catch (error) {
       if (saveVersionRef.current.get(key) === version) {
         setSettings((current) => {
@@ -565,6 +659,7 @@ export function SettingsPage() {
         });
       }
       setNotice(`保存失败：${String(error)}`);
+      return false;
     }
   }, [settingsLoaded]);
 
@@ -642,7 +737,10 @@ export function SettingsPage() {
   };
 
   return (
-    <section className="settings-page" aria-label="设置">
+    <section
+      className={variant === "sheet" ? "settings-page settings-page--sheet" : "settings-page"}
+      aria-label="设置"
+    >
       <div className="settings-notice" role="status" aria-live="polite">
         <span aria-hidden="true" />
         {notice}
@@ -728,6 +826,37 @@ export function SettingsPage() {
                 </button>
               ))}
             </div>
+          </SettingsRow>
+          <SettingsRow
+            icon="scale"
+            title="界面"
+            description={
+              workspaceV2
+                ? "旅剪工作台是当前默认界面;需要时可以随时切回旧版四步页面。"
+                : "当前是旧版四步页面;随时可以切回旅剪工作台。"
+            }
+          >
+            {/* 这一行是个真开关,不是单向门(R8 终审 M2):文案与写入值都由当前
+                ui.workspace_v2 决定——旧壳里点它才有路回到新壳。 */}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !workspaceV2;
+                void (async () => {
+                  // 先落盘再换壳(R8 终审 M3)。写失败时 save() 已经把
+                  // 「保存失败：…」摆在设置页顶部的 notice 里,这里就不换壳了。
+                  const saved = await save(WORKSPACE_FLAG_KEY, next ? "true" : "false");
+                  if (!saved) return;
+                  // App.tsx 的 workspaceV2 状态只在启动时读一次 settings——不广播这个事件
+                  // 就只能等下次重启才换壳,不满足"当场换壳,不要求重启"。
+                  window.dispatchEvent(
+                    new CustomEvent("tripcut:workspace-flag-changed", { detail: { workspaceV2: next } }),
+                  );
+                })();
+              }}
+            >
+              {workspaceV2 ? "切回旧界面" : "切换到新界面"}
+            </button>
           </SettingsRow>
           </div>
         </section>
@@ -1151,6 +1280,177 @@ export function SettingsPage() {
                 ))}
               </div>
             )}
+          </div>
+        </section>
+
+        <section className="settings-card generation-card wide" id="settings-panel-generation" data-settings-section="generation">
+          <header>
+            <span>OPTIONAL CLOUD GENERATION</span>
+            <h2>云端补镜（MiniMax）</h2>
+            <p>默认关闭。启用后可对故事板检测到的镜头缺口发起 MiniMax 云端生成，按月度预算熔断，绝不自动提交。</p>
+          </header>
+          <div className="settings-group">
+            <SettingsRow icon="generation" title="启用云端补镜" description="关闭时后端在预算检查与调用之前直接拒绝全部生成请求。">
+              <label className="switch-control">
+                <span className="sr-only">启用云端补镜</span>
+                <input
+                  type="checkbox"
+                  aria-label="启用云端补镜"
+                  checked={settings.minimax_enabled === "true"}
+                  onChange={(event) => {
+                    void save("minimax_enabled", String(event.currentTarget.checked)).then(refreshGeneration);
+                  }}
+                />
+                <span className="switch-track" aria-hidden="true" />
+              </label>
+            </SettingsRow>
+            <SettingsRow
+              icon="generation"
+              title="MiniMax API Key"
+              description="只写入 macOS 钥匙串，界面上永不回显已保存的值。"
+            >
+              <div className="minimax-key-row">
+                <span className={`minimax-key-status${minimaxHasKey ? " configured" : ""}`}>
+                  {minimaxHasKey ? "已配置" : "未配置"}
+                </span>
+                <input
+                  type="password"
+                  aria-label="MiniMax API Key"
+                  autoComplete="off"
+                  placeholder={minimaxHasKey ? "已保存，如需更换请输入新的 Key" : "粘贴 MiniMax API Key"}
+                  value={minimaxKeyDraft}
+                  disabled={minimaxKeyBusy}
+                  onChange={(event) => setMinimaxKeyDraft(event.currentTarget.value)}
+                />
+                <button
+                  type="button"
+                  className="settings-action"
+                  disabled={minimaxKeyBusy || minimaxKeyDraft.trim().length === 0}
+                  onClick={() => void saveMinimaxKey()}
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className="settings-action"
+                  disabled={minimaxKeyBusy || !minimaxHasKey}
+                  onClick={() => void clearMinimaxKeyAction()}
+                >
+                  清除
+                </button>
+              </div>
+            </SettingsRow>
+            {minimaxKeyNotice ? <p className="minimax-key-notice" role="status">{minimaxKeyNotice}</p> : null}
+            <SettingsRow icon="generation" title="默认模型" description="H3-Max 更便宜，H3 支持首尾帧引导与 2K。">
+              <select
+                aria-label="默认模型"
+                value={settings.minimax_model}
+                onChange={(event) => {
+                  const model = event.currentTarget.value;
+                  const resolutions = MINIMAX_MODEL_RESOLUTIONS[model] ?? [];
+                  void save("minimax_model", model).then(refreshGeneration);
+                  if (resolutions.length > 0 && !resolutions.includes(settings.minimax_resolution)) {
+                    void save("minimax_resolution", resolutions[0]).then(refreshGeneration);
+                  }
+                }}
+              >
+                <option value="MiniMax-H3-Max">MiniMax-H3-Max</option>
+                <option value="MiniMax-H3">MiniMax-H3</option>
+              </select>
+            </SettingsRow>
+            <SettingsRow icon="generation" title="默认分辨率" description="可选项随所选模型变化，避免选出模型不支持的组合。">
+              <select
+                aria-label="默认分辨率"
+                value={settings.minimax_resolution}
+                onChange={(event) => {
+                  void save("minimax_resolution", event.currentTarget.value).then(refreshGeneration);
+                }}
+              >
+                {(MINIMAX_MODEL_RESOLUTIONS[settings.minimax_model] ?? ["480P", "768P", "2K"]).map((resolution) => (
+                  <option key={resolution} value={resolution}>{resolution}</option>
+                ))}
+              </select>
+            </SettingsRow>
+            <SettingsRow icon="generation" title="月度预算（USD）" description={`0–${MINIMAX_MONTHLY_BUDGET_MAX} 美元；超出会被夹到上限，不会拒绝保存。`}>
+              <input
+                aria-label="月度预算（USD）"
+                type="number"
+                min="0"
+                max={MINIMAX_MONTHLY_BUDGET_MAX}
+                step="1"
+                value={settings.minimax_monthly_budget_usd}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSettings((current) => ({ ...current, minimax_monthly_budget_usd: value }));
+                }}
+                onBlur={(event) => {
+                  const raw = event.currentTarget.value;
+                  const { value, clamped } = clampMinimaxBudgetInput(raw);
+                  setSettings((current) => ({ ...current, minimax_monthly_budget_usd: String(value) }));
+                  setMinimaxBudgetClampNote(
+                    clamped ? `月度预算已从 ${raw} 调整为 ${value}（上限 ${MINIMAX_MONTHLY_BUDGET_MAX} 美元）` : null,
+                  );
+                  void save("minimax_monthly_budget_usd", String(value)).then(refreshGeneration);
+                }}
+              />
+            </SettingsRow>
+            {minimaxBudgetClampNote ? <p className="minimax-budget-clamp-note" role="status">{minimaxBudgetClampNote}</p> : null}
+          </div>
+          <div className={`llm-budget-status${(generationStatus?.budget_remaining_usd ?? 0) <= 0 ? " exhausted" : ""}`}>
+            <div>
+              <span>本月已用</span>
+              <strong>
+                ${(generationLedger?.spent_usd ?? 0).toFixed(2)} / ${(generationLedger?.budget_usd ?? Number(settings.minimax_monthly_budget_usd)).toFixed(2)}
+              </strong>
+            </div>
+            <div>
+              <span>状态</span>
+              <strong>
+                {!generationStatus?.enabled
+                  ? "已关闭"
+                  : !generationStatus?.has_key
+                    ? "未配置 API Key"
+                    : `剩余 $${generationStatus.budget_remaining_usd.toFixed(2)}`}
+              </strong>
+            </div>
+          </div>
+          <div className="generation-ledger">
+            <div className="generation-ledger-heading">
+              <strong>本月生成账本</strong>
+              <button type="button" onClick={() => void refreshGeneration().catch((error) => setNotice(`账本刷新失败：${String(error)}`))}>
+                刷新
+              </button>
+            </div>
+            {(generationLedger?.entries.length ?? 0) === 0 ? (
+              <p>本月尚无生成记录。</p>
+            ) : (
+              <div className="generation-ledger-table" role="table" aria-label="最近生成账本">
+                <div role="row" className="generation-ledger-header">
+                  <span role="columnheader">时间</span>
+                  <span role="columnheader">章节·slot</span>
+                  <span role="columnheader">模型</span>
+                  <span role="columnheader">秒</span>
+                  <span role="columnheader">预估费用</span>
+                  <span role="columnheader">状态</span>
+                </div>
+                {(generationLedger?.entries ?? []).map((entry) => (
+                  <div role="row" key={`${entry.request_id}-${entry.at}`}>
+                    <time role="cell">{entry.at.replace("T", " ").slice(0, 19)}</time>
+                    <span role="cell">{entry.chapter_title}·{entry.slot}</span>
+                    <span role="cell">{entry.model}（{entry.resolution}）</span>
+                    <span role="cell">{entry.seconds}s</span>
+                    <span role="cell">${entry.cost_usd.toFixed(2)}</span>
+                    <strong role="cell" data-status={entry.status}>{generationLedgerStatusLabel(entry.status)}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="llm-privacy-note">
+            <strong>生成物只进素材库的 generated/ 目录</strong>
+            <p>
+              生成的片段会存到素材库的 generated/ 目录，原素材目录不会被写入；账本记录的是提交时的预估费用，实际扣费以 MiniMax 平台账单为准。
+            </p>
           </div>
         </section>
 

@@ -1,0 +1,387 @@
+/* 镜头带 + 检查器(R9 Task 4,规格 §3.7 / §3.8,基准稿 A「编辑台密度」)。
+   由 workspace.css 顶部 `@import` 进来,所以排在旧分节 8 / 9 之前 —— 每条选择器都以栏根
+   class(`.workspace-shell .shot-band` / `.workspace-shell .inspector`)起头,靠特异性压过旧规则。
+   值只从 tokens.css 取:没有颜色字面量,font-size 只用 --text-*,间距只用六档。 */
+
+/* ---------- 镜头带:栏标题条里的视图切换 ---------- */
+
+.workspace-shell .shot-band .band-views {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+  margin-left: auto;
+}
+
+.workspace-shell .shot-band .workspace-pane-head .band-tabs {
+  margin-left: var(--space-2);
+}
+
+/* ---------- 视口:高钉在内容高,横向滚动条常显 ---------- */
+
+.workspace-shell .shot-band .band-viewport {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  align-items: flex-start;
+  height: var(--band-content-height);
+  min-height: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow-x: scroll;
+  overflow-y: hidden;
+  background: var(--surface-panel);
+  scrollbar-gutter: stable;
+}
+
+.workspace-shell .shot-band .band-viewport::-webkit-scrollbar {
+  height: 10px;
+}
+
+.workspace-shell .shot-band .band-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 栏里多出的高度留在视口外(壳底色),不再是瓦片下方一片白。 */
+.workspace-shell .shot-band.workspace-pane {
+  background: var(--surface-ground);
+}
+
+/* ---------- 章:一行 dense 工具条 + 一排瓦片,章与章之间一条发丝线 ---------- */
+
+.workspace-shell .shot-band .band-chapter {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 0;
+  align-items: stretch;
+}
+
+.workspace-shell .shot-band .band-chapter-head {
+  position: sticky;
+  left: var(--space-3);
+  gap: var(--space-2);
+  width: max-content;
+  max-width: 100%;
+  height: var(--control-md);
+  padding: 0 var(--space-1);
+  overflow: hidden; /* 只有一格宽的章,带头不许溢出到邻章头上(R9 D2 复核) */
+  white-space: nowrap;
+}
+
+.workspace-shell .shot-band .band-chapter-ordinal {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.workspace-shell .shot-band .band-chapter-title {
+  overflow: hidden;
+  max-width: 240px;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .shot-band .band-chapter-meta {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .shot-band .band-chapter-meta::before {
+  content: "·";
+  margin-right: var(--space-2);
+  color: var(--text-faint);
+}
+
+.workspace-shell .shot-band .band-chapter-gaps {
+  margin-left: var(--space-1);
+}
+
+.workspace-shell .shot-band .band-chapter-folded {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px dashed var(--border-hair);
+  border-radius: var(--radius-6);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+}
+
+/* ---------- 瓦片 160×130 = Card interactive ---------- */
+
+.workspace-shell .shot-band .band-segment {
+  position: relative;
+  display: flex;
+  flex: 0 0 160px;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 160px;
+  height: 130px;
+  padding: var(--space-1);
+  overflow: visible;
+}
+
+.workspace-shell .shot-band .band-segment.dragging {
+  opacity: 0.35;
+}
+
+.workspace-shell .shot-band .band-tile-thumb {
+  position: relative;
+  display: block;
+  flex: 0 0 84px;
+  height: 84px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+}
+
+.workspace-shell .shot-band .band-tile-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+.workspace-shell .shot-band .band-tile-badges {
+  position: absolute;
+  top: var(--space-1);
+  left: var(--space-1);
+  display: flex;
+  gap: var(--space-1);
+}
+
+.workspace-shell .shot-band .band-tile-time {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  font-family: var(--font-mono);
+}
+
+.workspace-shell .shot-band .band-tile-take { font-family: var(--font-mono); }
+
+.workspace-shell .shot-band .band-tile-name {
+  overflow: hidden;
+  padding: 0 var(--space-1);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .shot-band .band-tile-meta {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .shot-band .band-tile-slot { font-family: var(--font-mono); }
+
+/* 抓手压在缩略图右上,hover / 选中 / 键盘聚焦时才露出。 */
+.workspace-shell .shot-band .band-segment-grip {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  border-color: transparent;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  cursor: grab;
+  opacity: 0;
+}
+
+.workspace-shell .shot-band .band-segment:hover .band-segment-grip,
+.workspace-shell .shot-band .band-segment.ui-card--selected .band-segment-grip,
+.workspace-shell .shot-band .band-segment-grip:focus-visible {
+  opacity: 1;
+}
+
+.workspace-shell .shot-band .band-segment-grip:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+}
+
+.workspace-shell .shot-band .band-segment-grip:disabled {
+  cursor: default;
+}
+
+/* 插入线:落点瓦片前 / 后一条 2px 强调竖线(章内 8px 缝的正中)。 */
+.workspace-shell .shot-band .band-segment--over-before::before,
+.workspace-shell .shot-band .band-segment--over-after::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.workspace-shell .shot-band .band-segment--over-before::before { left: -5px; }
+.workspace-shell .shot-band .band-segment--over-after::after { right: -5px; }
+
+/* DragOverlay 里的 ghost:同尺寸、半透明、浮层阴影、2° 倾斜。 */
+.workspace-shell .band-drag-ghost,
+.band-drag-ghost {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 160px;
+  height: 130px;
+  padding: var(--space-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-10);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+  opacity: 0.85;
+  transform: rotate(2deg);
+  cursor: grabbing;
+}
+
+.band-drag-ghost .band-tile-thumb {
+  display: block;
+  flex: 0 0 84px;
+  height: 84px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+}
+
+.band-drag-ghost .band-tile-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+.band-drag-ghost .band-tile-name {
+  overflow: hidden;
+  padding: 0 var(--space-1);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 空槽位:虚线 Card,自带「生成候选」 ---------- */
+
+.workspace-shell .shot-band .band-segment.slot {
+  height: 130px;
+  min-height: 0;
+  padding: var(--space-2);
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-shell .shot-band .band-segment.slot:hover,
+.workspace-shell .shot-band .band-segment.slot.ui-card--selected {
+  border-style: dashed;
+  background: var(--surface-card);
+}
+
+.workspace-shell .shot-band .band-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  height: 100%;
+}
+
+.workspace-shell .shot-band .band-slot-title {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+}
+
+.workspace-shell .shot-band .band-slot-title strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .shot-band .band-slot small {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .shot-band .band-slot small.band-slot-index,
+.workspace-shell .shot-band .band-slot small.band-slot-status,
+.workspace-shell .shot-band .band-slot small.read-only-notice {
+  -webkit-line-clamp: 1;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.workspace-shell .shot-band .band-slot small.band-slot-hint { -webkit-line-clamp: 1; color: var(--danger); }
+.workspace-shell .shot-band .band-slot small.band-slot-status-failed { color: var(--danger); }
+
+.workspace-shell .shot-band .band-slot small.band-slot-status-queued,
+.workspace-shell .shot-band .band-slot small.band-slot-status-submitted,
+.workspace-shell .shot-band .band-slot small.band-slot-status-succeeded { color: var(--accent-text); }
+
+.workspace-shell .shot-band .band-slot-buttons {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: auto;
+}
+
+/* ---------- Tab 展开的 Take 条 ---------- */
+
+.workspace-shell .shot-band .band-take-strip {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+}
+
+.workspace-shell .shot-band .band-take-card {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 104px;
+  padding: var(--space-1);
+  cursor: pointer;
+}
+
+.workspace-shell .shot-band .band-take-thumb {
+  position: relative;
+  display: block;
+  width: 96px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+}
+
+.workspace-shell .shot-band .band-take-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+.workspace-shell .shot-band .band-take-generated { position: absolute; top: var(--space-1); left: var(--space-1); }
+.workspace-shell .shot-band .band-take-time { position: absolute; right: var(--space-1); bottom: var(--space-1); font-family: var(--font-mono); }
+
+.workspace-shell .shot-band .band-take-caption {
+  display: flex;
+  gap: var(--space-1);
+  justify-content: space-between;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .shot-band .band-take-order { flex: none; font-family: var(--font-mono); color: var(--text-primary); }
+
+.workspace-shell .shot-band .band-take-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

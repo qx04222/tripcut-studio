@@ -6,24 +6,29 @@
 
 <p align="center"><strong>把一整天的旅途素材，收束成一条可以开始剪的故事。</strong></p>
 
+<p align="center"><strong>v0.3.0：单屏导演台</strong> —— 媒体池 · 预览监视器 + 镜头带 · 检查器，素材、画面、顺序、细节同时在眼前。</p>
+
 <p align="center">
-  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.2.0">下载 v0.2.0</a>
+  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.3.0">下载 v0.3.0</a>
   · <a href="docs/USER_GUIDE.md">用户指南</a>
-  · <a href="docs/releases/v0.2.0.md">版本说明</a>
+  · <a href="docs/releases/v0.3.0.md">版本说明</a>
+  · <a href="docs/design/design-system.md">设计系统</a>
   · <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img alt="Release v0.2.0" src="https://img.shields.io/badge/preview-v0.2.0-f4a261?style=flat-square">
+  <img alt="Release v0.3.0" src="https://img.shields.io/badge/preview-v0.3.0-f4a261?style=flat-square">
   <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=flat-square&amp;logo=apple">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-offline-2a9d8f?style=flat-square">
   <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-3b82f6?style=flat-square">
 </p>
 
 > [!IMPORTANT]
-> v0.2.0 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试；首次启动如遇 Gatekeeper 拦截，右键点击应用图标选择「打开」即可。
+> v0.3.0 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试；首次启动如遇 Gatekeeper 拦截，右键点击应用图标选择「打开」即可。
 >
-> 本版 DMG：`TripCut-Studio_0.2.0_github-preview-v0.2.0-20260907T0029Z_preview_aarch64.dmg`，SHA-256 `8c634e3ce032f76bd03a4d640cf5db818e04f8421c605466c5a1202d9dae527f`。
+> 本版 DMG：[`TripCut-Studio_0.3.0_github-preview-v0.3.0-20260912T1855Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.3.0/TripCut-Studio_0.3.0_github-preview-v0.3.0-20260912T1855Z_preview_aarch64.dmg)，SHA-256 `7af646537ab26eb30274fb7ed9beda9a10a37a481a4b64aabd385baf8d5a925e`。
+>
+> **本版界面改为单屏导演台**；旧的四页界面可在「设置 → 外观 →「切回旧界面」」临时恢复，**下一版移除**。已安装 v0.2.0 的用户可直接在「设置 → 帮助与关于 → 检查更新」应用内升级到本版。
 
 ## 它解决的不是剪辑，而是剪辑前的混乱
 
@@ -60,14 +65,62 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 | AI 建议可能不可靠 | 建议与人工确认分开保存，创作者拥有最终裁量 |
 | 最终仍要在熟悉的软件里精剪 | 默认生成稳定交付包，继续进入剪映专业版 |
 
-## v0.2.0 包含什么
+## v0.3.0 包含什么
 
-### 性能（小内存设备）
+### 界面重做：单屏导演台
+
+<p align="center">
+  <img src="docs/screenshots/v0.3.0-workspace.png" alt="v0.3.0 单屏导演台：左侧媒体池、中间预览监视器与镜头带、右侧检查器" width="100%">
+</p>
+
+原来的「左侧四步导航 + 四个页面」没有了，改成一屏三栏：
+
+- **媒体池**（左）找素材：搜索、筛选 chips、2–4 列缩略图网格，500 条素材走行级虚拟化 + 2 行 overscan；
+- **预览监视器**（中上）看画面：复用同一个 mpv 实例，不再为每条素材销毁重建；播放 / ±1 秒 / 速度 / 音量 / 时间码 / `I`·`O` 打点与保存片段 / `⌘⏎` 沉浸；
+- **镜头带**（中下）排顺序：按章节分组、拖动改序（跨章节拖即改归属）、空槽位点「生成候选」；下面那排分段 〈故事 · 音乐 · 旅程 · 地点卡 · 模板〉决定中下区展开什么；
+- **检查器**（右）改这一条：评级 / 标签 / 章节归属 / Take / AI 描述常驻，技术检查、八维、音轨与 LUT、相似镜头是折叠段，逐段记忆；
+- **后台状态条**（底）：分析 / 转写 / 云端生成 / 缺失素材计数，点它落到导入抽屉的任务分页。
+
+顶栏是两只抽屉加一张 sheet：**导入素材**（`⌘I`）与**生成交付包**从两侧滑出，**设置**（`⌘,`）从下方升起；三者都有可见的「关闭」按钮、可点的遮罩，`Esc` 一次只退一层，关掉后焦点回到触发它的按钮。窗口窄于 1280 自动折检查器、窄于 1040 连媒体池一起折，中栏永不折。
+
+新的全局键位：
+
+| 键位 | 作用 |
+| --- | --- |
+| `F6` / `⇧F6` | 在媒体池 → 预览 → 镜头带 → 检查器之间轮转焦点 |
+| `⌘1` / `⌘2` | 折叠 / 展开媒体池、检查器 |
+| `⌘I` | 打开导入素材抽屉 |
+| `⌘⏎` | 沉浸预览（全屏监视器） |
+| `⌘,` | 设置 sheet |
+| `⌘K` | 命令面板 |
+| `?` | 帮助与键位表 |
+
+界面令牌、组件套件与密度规则见 [设计系统](docs/design/design-system.md)。
+
+### 旧界面与旧链接
+
+旧的四页界面在这一版里完整保留，可从「设置 → 外观 → 界面 →「切回旧界面」」热切换回去，不用重启；**下一版移除**。旧的 `#/import`、`#/deliver`、`#/settings`、`#/review` 链接会自动转接到对应的抽屉 / sheet / 工作区。两套界面同时打包，这一版包体因此偏大。
+
+### 已知限制
+
+- 剪映 11.4 草稿导出已生成，但尚未在真机上人工验证，导入前请先备份剪映草稿目录；
+- MiniMax「生成候选」补镜需自备 API key（设置 → 云端补镜，默认关闭，Key 只写入 macOS 钥匙串），不随安装包分发；
+- 启动恢复页仍是旧风格，镜头带附属区（音乐 / 旅程 / 地点卡 / 模板）默认高度偏矮，可拖动分隔条调整；
+- 1280×800 是最小可用尺寸而非舒适尺寸，三栏在该宽度下都接近各自最小值。
+
+完整变更详见 [v0.3.0 更新说明](docs/releases/v0.3.0.md)。
+
+<details>
+<summary>v0.2.0 包含什么（上一版）</summary>
+
+### v0.2.0
+
+#### 性能（小内存设备）
 
 - 缩略图、分析、胶片条、代理生成全面优先走硬件解码，软解只作回退；封面先缩放再选帧，单素材峰值内存显著下降；
 - 新增内存档位（自动 / 标准 / 省内存），24 GB 以下内存的机器自动走省内存档；系统可用内存跌到过低时会暂停解码与模型任务并提示，恢复后自动继续。
 
-### 筛片新工具
+#### 筛片新工具
 
 - 「相似镜头」面板可比对同组素材并设代表镜头；
 - 「技术检查」面板一处查看色彩空间、横竖屏、多声道音轨与拍摄参数；显示 LUT 仅影响预览，不改原始文件；
@@ -76,18 +129,18 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 - 支持把文件夹或视频直接拖进导入页；
 - 保存精选段后按「删除」，10 秒内可「撤销」恢复。
 
-### 故事板
+#### 故事板
 
 - 「一键 AI 编排」前可选四种故事模板（电影感 / 快节奏 / 安静氛围 / 旅行日记），没有配置大模型时也有确定性兜底；
 - 「音乐与节奏」页签可导入参考音乐查看节拍与段落分布，仅供参考、不会替你重排镜头；
 - 「旅程时间线」页签按跨设备校正过的拍摄时间把素材重排成只读时间线，按天分组，用于核对故事顺序。
 
-### 搜索
+#### 搜索
 
 - 支持拼音 / 首字母搜索中文文件名、标签、章节标题；
 - 每条结果标来源徽章（文件 / 转写 / AI / 标签 / 画面文字 / 拼音）。
 
-### 交付
+#### 交付
 
 - 交付包目录改为编号 01–07，结构更清楚；
 - 新增可选的「联系表.pdf」：A4 网格缩略图 + 序号/文件名 + 入出点 + 章节，内嵌中文字体；
@@ -95,7 +148,7 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 - 「参考粗剪时长」新增 30 秒 / 60 秒 / 3 分钟档位，按 Beat 顺序在预算内截取；
 - 旁白稿按叙事分章生成，已确认的修订标注「已确认」，未经确认的会标注「AI 建议稿，未经人工确认」。
 
-### 系统
+#### 系统
 
 - 电脑睡眠期间的任务在唤醒后自动接着跑完；
 - 交付包生成、批量 AI 分析完成时有 macOS 系统通知；
@@ -104,16 +157,18 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 
 完整变更详见 [v0.2.0 更新说明](docs/releases/v0.2.0.md)。
 
+</details>
+
 ## 自动更新
 
-设置页「帮助与关于 → 检查更新」可发现新版本并下载安装，安装包会做 minisign 签名校验；未签名的预览版仍可能被 Gatekeeper 拦截，请按提示核对来源后放行。
+设置页「帮助与关于 → 检查更新」可发现新版本并下载安装，安装包会做 minisign 签名校验；旧版 0.2.0 可直接应用内更新到 0.3.0；未签名的预览版仍可能被 Gatekeeper 拦截，请按提示核对来源后放行。
 
 ## 下载与第一次使用
 
-1. 前往 [v0.2.0 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.2.0)，下载对应的 DMG 安装包；
+1. 前往 [v0.3.0 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.3.0)，下载 [`TripCut-Studio_0.3.0_github-preview-v0.3.0-20260912T1855Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.3.0/TripCut-Studio_0.3.0_github-preview-v0.3.0-20260912T1855Z_preview_aarch64.dmg)；
 2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256；
 3. 打开 DMG，把“旅剪工作台”拖入 Applications；
-4. 如果 Gatekeeper 阻止首次启动，右键点击应用图标选择「打开」（或在“系统设置 → 隐私与安全性”中确认“仍要打开”）；
+4. 本版为 ad-hoc 签名、未公证：首次启动 Gatekeeper 会拦截，右键点击应用图标选择「打开」（或在“系统设置 → 隐私与安全性”中确认“仍要打开”）；
 5. 按[用户指南](docs/USER_GUIDE.md)用一份有备份的短素材完成第一次“导入 → 筛片 → 选段 → 交付”。
 
 完整安全边界见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。

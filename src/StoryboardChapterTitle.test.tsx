@@ -28,6 +28,13 @@ const apiMocks = vi.hoisted(() => ({
   getNarrativeRevision: vi.fn(async () => null as RevisionInfo | null),
   setRoutineOverride: vi.fn(),
   acceptAllRoutineSuggestions: vi.fn(),
+  listStoryGaps: vi.fn(async () => []),
+  dismissStoryGap: vi.fn(),
+  reopenStoryGap: vi.fn(),
+  retryGeneration: vi.fn(),
+  cancelGeneration: vi.fn(),
+  listGenerationRequests: vi.fn(async () => []),
+  generationAvailability: vi.fn(async () => ({ enabled: false, has_key: false, budget_remaining_usd: 0 })),
 }));
 
 vi.mock("./api", () => apiMocks);

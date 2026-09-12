@@ -675,6 +675,9 @@ fn persist_draft_guarded(
     }
 
     transaction.commit()?;
+    // 新建/重跑 suggested revision 后顺带检一遍缺口;detect() 是幂等的单事务,
+    // 失败也不该拖垮编排本身,但目前没有已知失败路径值得吞掉,直接冒泡。
+    super::story_gap::detect(connection)?;
     Ok(revision_id)
 }
 

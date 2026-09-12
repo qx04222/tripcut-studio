@@ -1,0 +1,41 @@
+/* ---------- Field(B 稿抽屉表单语法:左标签 + 右控件,说明在下) ---------- */
+
+.ui-field {
+  display: grid;
+  gap: var(--space-1) var(--space-4);
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-field--inline {
+  grid-template-columns: minmax(96px, 132px) minmax(0, 1fr);
+  min-height: var(--control-md);
+}
+
+.ui-field--stacked {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ui-field-label {
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.ui-field-control {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-field-help {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.ui-field--inline .ui-field-help {
+  grid-column: 2;
+}

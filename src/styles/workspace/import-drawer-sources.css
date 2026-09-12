@@ -1,0 +1,190 @@
+/*
+ * 导入抽屉 · 来源分页(R9 Task 5):关注文件夹卡、工具链警告卡、拖放区卡、「最近导入」卡。
+ * 由 import-drawer.css 顶部 @import;所有选择器同样挂在 .import-drawer 之下,值只从 tokens.css 取。
+ */
+
+/* ---------- 列表:关注文件夹 / 批次 / 缺失卷 都是 ul > Card(li) ---------- */
+
+.import-drawer .import-watched,
+.import-drawer .import-jobs-list,
+.import-drawer .import-missing-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-drawer .import-watched-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.import-drawer .import-watched-copy,
+.import-drawer .import-job-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.import-drawer .import-missing-volume,
+.import-drawer .import-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.import-drawer .import-watched-copy small,
+.import-drawer .import-job-meta,
+.import-drawer .import-index-sub {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-drawer .import-watched-sync {
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+}
+
+.import-drawer .import-watched-empty,
+.import-drawer .import-jobs-empty,
+.import-drawer .import-missing-empty {
+  padding: var(--space-2);
+  background: var(--surface-panel);
+  box-shadow: none;
+}
+
+/* ---------- 工具链警告卡 ---------- */
+
+.import-drawer .import-toolchain {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border-hair));
+  background: var(--warn-tint);
+}
+
+.import-drawer .import-toolchain-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--warn);
+}
+
+.import-drawer .import-toolchain-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.import-drawer .import-toolchain-copy p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+/* ---------- 来源:拖放区卡(虚线,拖入时整卡高亮)与「最近导入」卡 ---------- */
+
+.import-drawer .import-dropzone {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  border: 2px dashed var(--border-strong);
+  background: var(--surface-panel);
+  box-shadow: none;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+
+.import-drawer .import-dropzone--active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.import-drawer .import-dropzone-icon {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.import-drawer .import-dropzone--active .import-dropzone-icon {
+  color: var(--accent);
+}
+
+.import-drawer .import-dropzone-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.import-drawer .import-dropzone-copy strong {
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.import-drawer .import-dropzone-copy span {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.import-drawer .import-recent {
+  padding: 0 var(--space-3);
+}
+
+.import-drawer .import-recent-empty {
+  margin: 0;
+  padding: var(--space-3) 0;
+  color: var(--text-muted);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.import-drawer .import-recent-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-drawer .import-recent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-3);
+  align-items: center;
+  min-height: calc(var(--control-md) + var(--space-2));
+  border-top: 1px solid var(--border-hair);
+}
+
+.import-drawer .import-recent-row:first-child {
+  border-top: 0;
+}
+
+.import-drawer .import-recent-name {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.import-drawer .import-recent-count {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+}

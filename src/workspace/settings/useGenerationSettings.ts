@@ -1,0 +1,156 @@
+import { useCallback, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+
+import {
+  clearMinimaxKey as clearMinimaxKeyApi,
+  generationAvailability,
+  generationLedgerSummary,
+  hasMinimaxKey,
+  setMinimaxKey,
+  type GenerationAvailability,
+  type GenerationLedgerSummary,
+  type SettingsMap,
+} from "../../api";
+import { MINIMAX_MODEL_RESOLUTIONS, MINIMAX_MONTHLY_BUDGET_MAX, clampMinimaxBudgetInput } from "./settingsModel";
+
+type Settled<T> = PromiseSettledResult<T>;
+type Save = (key: string, value: string) => Promise<boolean>;
+
+export interface GenerationSettings {
+  minimaxHasKey: boolean;
+  minimaxKeyDraft: string;
+  setMinimaxKeyDraft(value: string): void;
+  minimaxKeyBusy: boolean;
+  minimaxKeyNotice: string | null;
+  minimaxBudgetClampNote: string | null;
+  generationStatus: GenerationAvailability | null;
+  generationLedger: GenerationLedgerSummary | null;
+  refreshGeneration(): Promise<void>;
+  saveMinimaxKey(): Promise<void>;
+  clearMinimaxKey(): Promise<void>;
+  saveMinimaxEnabled(enabled: boolean): Promise<void>;
+  saveMinimaxModel(model: string): Promise<void>;
+  saveMinimaxResolution(resolution: string): Promise<void>;
+  saveMinimaxBudget(raw: string): Promise<void>;
+  /** 首次载入时把三条 allSettled 结果落进状态(失败的那条保持默认)。 */
+  applyLoaded(
+    hasKey: Settled<boolean>,
+    availability: Settled<GenerationAvailability>,
+    ledger: Settled<GenerationLedgerSummary>,
+  ): void;
+}
+
+/**
+ * 云端补镜(MiniMax)那一段状态与动作,逐字迁自 SettingsPage.tsx。Key 只经 `setMinimaxKey`
+ * 写进钥匙串,保存后草稿立刻清空——状态里从不留已保存的值,界面也就无从回显。
+ */
+export function useGenerationSettings(
+  saveRef: MutableRefObject<Save>,
+  settingsRef: MutableRefObject<SettingsMap>,
+  setSettings: Dispatch<SetStateAction<SettingsMap>>,
+): GenerationSettings {
+  const [minimaxHasKey, setMinimaxHasKey] = useState(false);
+  const [minimaxKeyDraft, setMinimaxKeyDraft] = useState("");
+  const [minimaxKeyBusy, setMinimaxKeyBusy] = useState(false);
+  const [minimaxKeyNotice, setMinimaxKeyNotice] = useState<string | null>(null);
+  const [generationStatus, setGenerationStatus] = useState<GenerationAvailability | null>(null);
+  const [generationLedger, setGenerationLedger] = useState<GenerationLedgerSummary | null>(null);
+  const [minimaxBudgetClampNote, setMinimaxBudgetClampNote] = useState<string | null>(null);
+
+  const refreshGeneration = useCallback(async () => {
+    const [nextHasKey, nextAvailability, nextLedger] = await Promise.all([
+      hasMinimaxKey(),
+      generationAvailability(),
+      generationLedgerSummary(),
+    ]);
+    setMinimaxHasKey(nextHasKey);
+    setGenerationStatus(nextAvailability);
+    setGenerationLedger(nextLedger);
+  }, []);
+  const saveMinimaxKey = useCallback(async () => {
+    setMinimaxKeyBusy(true);
+    setMinimaxKeyNotice(null);
+    try {
+      await setMinimaxKey(minimaxKeyDraft);
+      setMinimaxKeyDraft("");
+      await refreshGeneration();
+      setMinimaxKeyNotice("已保存");
+    } catch (error) {
+      setMinimaxKeyNotice(`保存失败：${String(error)}`);
+    } finally {
+      setMinimaxKeyBusy(false);
+    }
+  }, [minimaxKeyDraft, refreshGeneration]);
+
+  const clearMinimaxKey = useCallback(async () => {
+    setMinimaxKeyBusy(true);
+    setMinimaxKeyNotice(null);
+    try {
+      await clearMinimaxKeyApi();
+      setMinimaxKeyDraft("");
+      await refreshGeneration();
+      setMinimaxKeyNotice("已清除");
+    } catch (error) {
+      setMinimaxKeyNotice(`清除失败：${String(error)}`);
+    } finally {
+      setMinimaxKeyBusy(false);
+    }
+  }, [refreshGeneration]);
+
+  const applyLoaded = useCallback((
+    hasKey: Settled<boolean>,
+    availability: Settled<GenerationAvailability>,
+    ledger: Settled<GenerationLedgerSummary>,
+  ) => {
+    if (hasKey.status === "fulfilled") setMinimaxHasKey(hasKey.value);
+    if (availability.status === "fulfilled") setGenerationStatus(availability.value);
+    if (ledger.status === "fulfilled") setGenerationLedger(ledger.value);
+  }, []);
+
+  const saveMinimaxEnabled = useCallback(async (enabled: boolean) => {
+    await saveRef.current("minimax_enabled", String(enabled));
+    await refreshGeneration();
+  }, [saveRef, refreshGeneration]);
+
+  const saveMinimaxModel = useCallback(async (model: string) => {
+    const resolutions = MINIMAX_MODEL_RESOLUTIONS[model] ?? [];
+    const currentResolution = settingsRef.current.minimax_resolution;
+    await saveRef.current("minimax_model", model).then(refreshGeneration);
+    if (resolutions.length > 0 && !resolutions.includes(currentResolution)) {
+      await saveRef.current("minimax_resolution", resolutions[0]!).then(refreshGeneration);
+    }
+  }, [saveRef, refreshGeneration]);
+
+  const saveMinimaxResolution = useCallback(async (resolution: string) => {
+    await saveRef.current("minimax_resolution", resolution);
+    await refreshGeneration();
+  }, [saveRef, refreshGeneration]);
+
+  const saveMinimaxBudget = useCallback(async (raw: string) => {
+    const { value, clamped } = clampMinimaxBudgetInput(raw);
+    setSettings((current) => ({ ...current, minimax_monthly_budget_usd: String(value) }));
+    setMinimaxBudgetClampNote(
+      clamped ? `月度预算已从 ${raw} 调整为 ${value}（上限 ${MINIMAX_MONTHLY_BUDGET_MAX} 美元）` : null,
+    );
+    await saveRef.current("minimax_monthly_budget_usd", String(value));
+    await refreshGeneration();
+  }, [saveRef, refreshGeneration]);
+
+  return {
+    minimaxHasKey,
+    minimaxKeyDraft,
+    setMinimaxKeyDraft,
+    minimaxKeyBusy,
+    minimaxKeyNotice,
+    minimaxBudgetClampNote,
+    generationStatus,
+    generationLedger,
+    refreshGeneration,
+    saveMinimaxKey,
+    clearMinimaxKey,
+    saveMinimaxEnabled,
+    saveMinimaxModel,
+    saveMinimaxResolution,
+    saveMinimaxBudget,
+    applyLoaded,
+  };
+}

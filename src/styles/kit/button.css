@@ -1,0 +1,144 @@
+/* ---------- Button ---------- */
+
+.ui-button {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: center;
+  height: var(--control-md);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-12);
+  font-weight: 500;
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.ui-button--sm {
+  gap: var(--space-1);
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.ui-button:hover:not(:disabled) {
+  border-color: var(--text-faint);
+  background: var(--surface-chrome);
+}
+
+.ui-button:active:not(:disabled) {
+  background: var(--surface-chrome-2);
+}
+
+.ui-button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.ui-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 进行中:不做动画(规格 §0),借 A 稿缩略图的斜纹作「在忙」的静态语言。 */
+.ui-button--busy:disabled {
+  opacity: 0.8;
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 4px,
+    color-mix(in srgb, var(--text-primary) 7%, transparent) 4px 8px
+  );
+  cursor: progress;
+}
+
+.ui-button--primary.ui-button--busy:disabled {
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 4px,
+    color-mix(in srgb, var(--accent-ink) 16%, transparent) 4px 8px
+  );
+}
+
+.ui-button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent-ink) 18%, transparent);
+}
+
+.ui-button--primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 86%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent) 86%, var(--text-primary));
+}
+
+.ui-button--primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 76%, var(--text-primary));
+}
+
+.ui-button--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ui-button--ghost:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+
+.ui-button--icon {
+  width: var(--control-md);
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ui-button--icon.ui-button--sm {
+  width: var(--control-sm);
+}
+
+.ui-button--icon:hover:not(:disabled) {
+  border-color: var(--border-hair);
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+
+.ui-button--icon[aria-pressed="true"] {
+  border-color: var(--border-hair);
+  background: var(--surface-card);
+  color: var(--text-primary);
+}
+
+.ui-button--danger {
+  color: var(--danger);
+}
+
+.ui-button--danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+  background: var(--danger-tint);
+}
+
+.ui-button--primary.ui-button--danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--accent-ink);
+}
+
+.ui-button--primary.ui-button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 86%, var(--text-primary));
+}

@@ -6,6 +6,7 @@ export type SettingsSectionId =
   | "timeline"
   | "tools"
   | "analysis"
+  | "generation"
   | "privacy"
   | "about"
   | "cache";

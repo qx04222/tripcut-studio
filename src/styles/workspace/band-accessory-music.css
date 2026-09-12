@@ -1,0 +1,225 @@
+/* 附属区 · 音乐与节奏(band-accessory.css 的分册;约束见那份文件头)。 */
+
+/* ---------- 音乐与节奏:左曲目卡列表,右节拍条 ---------- */
+
+.workspace-shell .band-accessory .music-panel--band {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-areas:
+    "head head"
+    "ro ro"
+    "notice notice"
+    "list analysis";
+  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.workspace-shell .band-accessory .music-panel--band > .ui-section-header {
+  grid-area: head;
+}
+
+.workspace-shell .band-accessory .music-panel--band > .read-only-notice {
+  grid-area: ro;
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.workspace-shell .band-accessory .music-panel--band > .music-panel-notice {
+  grid-area: notice;
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.workspace-shell .band-accessory .music-track-list {
+  display: flex;
+  flex-direction: column;
+  grid-area: list;
+  gap: var(--space-2);
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  list-style: none;
+}
+
+.workspace-shell .band-accessory .music-track-list:empty {
+  display: none;
+}
+
+.workspace-shell .band-accessory .music-panel--band > .music-tracks-empty {
+  grid-area: list / list / analysis / analysis;
+  align-self: center;
+}
+
+.workspace-shell .band-accessory .music-panel--band > .music-analysis-hint {
+  grid-area: analysis;
+  align-self: center;
+  border-left: 1px solid var(--border-hair);
+}
+
+.workspace-shell .band-accessory .music-track {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: var(--control-lg);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+  transition:
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.workspace-shell .band-accessory .music-track:hover {
+  border-color: var(--border-strong);
+}
+
+.workspace-shell .band-accessory .music-track.selected {
+  border-color: var(--accent);
+  box-shadow: var(--ring-selected);
+}
+
+.workspace-shell .band-accessory .music-track-select {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-shell .band-accessory .music-track-select:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-6);
+}
+
+.workspace-shell .band-accessory .music-track-select strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .band-accessory .music-track-select small {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+  opacity: 1;
+}
+
+.workspace-shell .band-accessory .music-track.selected .music-track-select small {
+  color: var(--accent-text);
+}
+
+.workspace-shell .band-accessory .music-track-delete-confirm {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+}
+
+.workspace-shell .band-accessory .music-analysis {
+  display: flex;
+  flex-direction: column;
+  grid-area: analysis;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-left: 1px solid var(--border-hair);
+}
+
+.workspace-shell .band-accessory .music-analysis-summary {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.workspace-shell .band-accessory .music-analysis-summary strong {
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-shell .band-accessory .music-analysis-summary small {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+}
+
+.workspace-shell .band-accessory .music-strip {
+  width: 100%;
+  height: var(--space-6);
+  min-height: var(--space-6);
+  flex: 1 1 auto;
+  max-height: calc(var(--space-6) * 3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .band-accessory .music-section-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.workspace-shell .band-accessory .music-section-legend span {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--control-sm);
+  background: var(--surface-chrome);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .music-copied-notice {
+  margin: 0;
+  color: var(--accent-text);
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--lh-12);
+}
+
+/* 右栏的「选一首曲目」提示要在 100px 高的附属区里放得下:不出图标,行距压紧。 */
+.workspace-shell .band-accessory .music-analysis-hint {
+  padding: var(--space-2) var(--space-3);
+}
+
+.workspace-shell .band-accessory .music-analysis-hint .ui-empty-icon {
+  display: none;
+}
+
+.workspace-shell .band-accessory .music-analysis-hint .ui-empty-title {
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .band-accessory .music-analysis-hint .ui-empty-body {
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}

@@ -26,6 +26,13 @@ const PROJECT_NAME: &str = "旅剪项目";
 
 pub const SUPPORTED_JIANYING_VERSIONS: &[&str] = &["11.3.0"];
 
+/// 已在本机装上、但还没人眼验证过的剪映版本。2026-09-10 实测:11.4.13169(09-12 又自动升到 11.4.13189)把草稿文件改名为
+/// `template-2.tmp` 且连同 `draft_info.json` 一起加密(1164 字节非 JSON),金丝雀的键集比对
+/// 已无从做起;TripCut 写出的明文 11.3.0 草稿在 11.4 里能否打开,只能由业主在剪映里开一次确认。
+/// 在此之前:应用侧照旧按"不支持的版本"拒绝生成草稿(不假装可用);真机金丝雀对这些版本打印
+/// WARN 并跳过键集比对,而不是让整个门禁一直红。确认可用后把版本挪进 `SUPPORTED_JIANYING_VERSIONS`。
+pub const JIANYING_VERSIONS_PENDING_HUMAN_CHECK: &[&str] = &["11.4.13169", "11.4.13189"];
+
 // E0 的 11.3.0 template.tmp 金丝雀确认 new_version/version；其余字段按任务卡
 // 指定的 pyJianYingDraft 经典结构内嵌。这里不读取、include 或复制用户草稿。
 const DRAFT_TEMPLATE_11_3_0: &str = r#"

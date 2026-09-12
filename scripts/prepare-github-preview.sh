@@ -6,7 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DMG="${1:-}"
 VERSION="$(python3 -c "import json;print(json.load(open('$ROOT/src-tauri/tauri.conf.json'))['version'])")"
-OUTPUT="${2:-$ROOT/dist/github-preview/v${VERSION}-preview}"
+# 默认输出不能放在 $ROOT/dist 下:vite build(fast-gates 的 vite-build 步骤)会清空 dist/,
+# 已经发生过一次把组装好的发布目录整个删掉(F-R6-INT-5)。
+OUTPUT="${2:-$HOME/Library/Caches/tripcut-build/github-preview/v${VERSION}-preview}"
 case "$OUTPUT" in
   /*) ;;
   *) OUTPUT="$ROOT/$OUTPUT" ;;

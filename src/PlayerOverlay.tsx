@@ -22,9 +22,34 @@ import {
 } from "./api";
 import { PLAYER_SHORTCUTS } from "./helpContent";
 import { useFocusTrap } from "./useFocusTrap";
+import { rectToPlayerViewport, visibleSurfaceRect } from "./playerViewport";
+import { PLAYER_VIEWPORT_REFRESH_EVENT } from "./workspace/usePlayerOcclusion";
 import "./PlayerOverlay.css";
 
-const STATUS_INTERVAL_MS = 80;
+export const STATUS_INTERVAL_MS = 80;
+
+/**
+ * 规格 §11:拖分隔条时区域矩形每帧都在变,每一帧都去 `set_viewport` 会把
+ * mpv 的渲染线程打满。120ms 防抖——静止后才落一次真正的矩形。
+ */
+export const VIEWPORT_DEBOUNCE_MS = 120;
+
+/** 嵌入模式交给宿主(监视器)的通道:同一个 mpv 实例,命令与刷新都走这里。 */
+export interface EmbeddedPlayerControls {
+  send(commands: PlayerCommand[]): Promise<void>;
+  refresh(): Promise<void>;
+}
+
+/**
+ * 规格 §5:80ms 状态轮询只在「可见且播放中」跑。暂停时画面不动,每 80ms 敲一次
+ * 后端纯属白烧 CPU;还没 ready 时必须继续敲,否则「正在建立链路」永远不翻页。
+ */
+export function shouldPollStatus(status: PlayerStatus | null, hidden: boolean): boolean {
+  if (hidden) return false;
+  if (!status) return true;
+  if (status.phase !== "ready") return true;
+  return status.paused === false;
+}
 
 export function formatTimecode(seconds: number, _fps: number): string {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
@@ -90,32 +115,38 @@ export function waitForLayout(): Promise<void> {
   });
 }
 
-export function rectToPlayerViewport(rect: DOMRect): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-} | null {
-  const values = [rect.left, rect.top, rect.width, rect.height];
-  if (!values.every(Number.isFinite)
-    || rect.left < 0
-    || rect.top < 0
-    || rect.width < 2
-    || rect.height < 2) {
-    return null;
-  }
-  return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
-}
+// 区域矩形的几何(与裁切祖先求交)在 playerViewport.ts;这里保留同名导出给旧调用点。
+export { rectToPlayerViewport } from "./playerViewport";
 
+/**
+ * `onStatusChange` 和 `controlsRef` 是嵌入态专用的接缝(embedded-only seams):
+ * 监视器把同一个 mpv 实例嵌进中上区时,状态轮询与命令通道都要交给宿主 ——
+ * 宿主的控件条读 `onStatusChange` 推来的状态、经 `controlsRef` 发命令,自己
+ * 不直接调 `playerStatus`/`playerCommand`。沉浸态(默认 variant)不传这两个
+ * prop,行为与它们加入前完全一致。
+ */
 export function PlayerOverlay({
   clip,
   onExit,
   onSegmentsChange,
+  variant = "immersive",
+  onRequestImmersive,
+  onStatusChange,
+  controlsRef,
 }: {
   clip: ClipListItem;
   onExit: () => void;
   onSegmentsChange?: () => void;
+  /** 默认沉浸态(旧调用点一个字不改);"embedded" 是监视器区里的同一个 mpv 实例。 */
+  variant?: "immersive" | "embedded";
+  /** 嵌入模式下 ⌘⏎ 的回调。 */
+  onRequestImmersive?: () => void;
+  /** 嵌入模式下把状态推给宿主 —— 控件条由监视器画,但状态只有一份轮询。 */
+  onStatusChange?: (status: PlayerStatus | null) => void;
+  /** 嵌入模式下把命令通道交给宿主,宿主不直接 `playerCommand`,否则轮询无法复位。 */
+  controlsRef?: { current: EmbeddedPlayerControls | null };
 }) {
+  const embedded = variant === "embedded";
   const surfaceRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -134,11 +165,23 @@ export function PlayerOverlay({
   const fps = clipFps(clip);
 
   // O11:整个沉浸播放层是个模态,Tab 不能漏到背后的筛片页。
-  useFocusTrap(overlayRef, true);
+  // 嵌入模式不是模态 —— 它只是中上区的一块画面,抢焦点会把媒体池的键盘操作打断。
+  useFocusTrap(overlayRef, !embedded);
+
+  // 卸载与「换素材」要分开:换素材只 playerOpen,绝不 playerClose 重建实例。
+  // 这条 effect 声明在开流 effect 之前,卸载时它的清理先跑,旗子才来得及立。
+  const unmountingRef = useRef(false);
+  useEffect(() => {
+    unmountingRef.current = false;
+    return () => {
+      unmountingRef.current = true;
+    };
+  }, []);
 
   useEffect(() => {
     statusRef.current = status;
-  }, [status]);
+    onStatusChange?.(status);
+  }, [onStatusChange, status]);
 
   const leave = useCallback(async () => {
     if (closingRef.current) return;
@@ -166,17 +209,20 @@ export function PlayerOverlay({
     let timer: number | undefined;
     const start = async () => {
       try {
-        overlayRef.current?.focus();
+        if (!embedded) overlayRef.current?.focus();
         await waitForLayout();
         const surface = surfaceRef.current;
         if (!surface || !active) return;
-        const viewport = rectToPlayerViewport(surface.getBoundingClientRect());
+        const viewport = rectToPlayerViewport(visibleSurfaceRect(surface));
         if (viewport) await playerSetViewport(viewport);
         const initial = await playerOpen(clip.id as number);
         if (!active) return;
         setStatus(initial);
         setOpening(initial.phase !== "ready");
         timer = window.setInterval(() => {
+          // 规格 §5:不可见或已暂停就停表,别让静止的画面每 80ms 敲一次后端。
+          const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+          if (!shouldPollStatus(statusRef.current, hidden)) return;
           void playerStatus()
             .then((next) => {
               if (!active) return;
@@ -191,7 +237,7 @@ export function PlayerOverlay({
               if (active) void reportFailure(reason);
             });
         }, STATUS_INTERVAL_MS);
-        overlayRef.current?.focus();
+        if (!embedded) overlayRef.current?.focus();
       } catch (reason) {
         if (active) await reportFailure(reason);
       }
@@ -200,37 +246,60 @@ export function PlayerOverlay({
     return () => {
       active = false;
       if (timer !== undefined) window.clearInterval(timer);
-      void playerClose();
+      // 嵌入模式换素材时这条 effect 也会重跑,但那是「同一个实例换源」,
+      // 只有真的卸载才关播放器 —— 否则每换一条素材就重建一次 mpv。
+      if (!embedded || unmountingRef.current) void playerClose();
     };
-  }, [clip.id, reportFailure]);
+  }, [clip.id, embedded, reportFailure]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
     let active = true;
     let frame: number | null = null;
-    const updateViewport = () => {
+    let debounce: number | null = null;
+    const commitViewport = () => {
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = null;
         if (!active) return;
-        const viewport = rectToPlayerViewport(surface.getBoundingClientRect());
+        const viewport = rectToPlayerViewport(visibleSurfaceRect(surface));
         if (!viewport) return;
         void playerSetViewport(viewport).catch((reason) => {
           if (active) void reportFailure(reason);
         });
       });
     };
+    const updateViewport = () => {
+      // 120ms 防抖只用于嵌入态:监视器区里拖分隔条 / 折叠栏会连发几十次 resize,
+      // 每一帧都去 set_viewport 会打满 mpv 渲染线程。沉浸态是全屏模态,resize
+      // 频率低得多,行为必须与去抖引入前完全一致——同步落矩形,不等静止窗口。
+      if (!embedded) {
+        commitViewport();
+        return;
+      }
+      if (debounce !== null) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => {
+        debounce = null;
+        commitViewport();
+      }, VIEWPORT_DEBOUNCE_MS);
+    };
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateViewport);
     observer?.observe(surface);
     window.addEventListener("resize", updateViewport);
+    // 覆盖层收起(R9 D1)/ 舞台尺寸变了(R9 D5)时监视器广播一次:这是一次
+    // 明确的、已经算好的请求,直接按帧提交,不进防抖——防抖会被别的事件源
+    // 一再重置,真机上旅程页签下的矩形就是这样一直提交不出去的(P0-B)。
+    window.addEventListener(PLAYER_VIEWPORT_REFRESH_EVENT, commitViewport);
     return () => {
       active = false;
       observer?.disconnect();
       window.removeEventListener("resize", updateViewport);
+      window.removeEventListener(PLAYER_VIEWPORT_REFRESH_EVENT, commitViewport);
       if (frame !== null) window.cancelAnimationFrame(frame);
+      if (debounce !== null) window.clearTimeout(debounce);
     };
-  }, [clip.id, reportFailure]);
+  }, [clip.id, embedded, reportFailure]);
 
   useEffect(() => {
     let active = true;
@@ -246,16 +315,42 @@ export function PlayerOverlay({
     };
   }, [clip.id]);
 
+  const refreshStatus = useCallback(async () => {
+    try {
+      const next = await playerStatus();
+      if (next.phase === "error" || next.error) {
+        await reportFailure(next.error ?? "播放器渲染线程已退出");
+        return;
+      }
+      setStatus(next);
+      setOpening(next.phase !== "ready");
+    } catch (reason) {
+      await reportFailure(reason);
+    }
+  }, [reportFailure]);
+
   const sendCommands = useCallback(
     async (commands: PlayerCommand[]) => {
       try {
         for (const command of commands) await playerCommand(command);
       } catch (reason) {
         await reportFailure(reason);
+        return;
       }
+      // 停表期间(暂停)发出的 play 不会被轮询看见 —— 命令之后立刻补读一次,
+      // 让 paused 翻成 false,80ms 的表才重新走起来。
+      await refreshStatus();
     },
-    [reportFailure],
+    [refreshStatus, reportFailure],
   );
+
+  useEffect(() => {
+    if (!controlsRef) return;
+    controlsRef.current = { send: sendCommands, refresh: refreshStatus };
+    return () => {
+      controlsRef.current = null;
+    };
+  }, [controlsRef, refreshStatus, sendCommands]);
 
   const saveSegment = useCallback(async () => {
     if (inPoint === null || outPoint === null) {
@@ -302,6 +397,15 @@ export function PlayerOverlay({
       const imeActive = compositionRef.current || event.isComposing || event.keyCode === 229;
       if (imeActive) {
         setComposing(true);
+        return;
+      }
+      if (embedded) {
+        // 嵌入模式只认 ⌘⏎:传输控件与 I/O 打点由监视器自己的控件条接管,
+        // 单键(空格 / L / R)属于媒体池与镜头带的评级键位,这里一个都不能抢。
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          onRequestImmersive?.();
+        }
         return;
       }
       if (event.key === "Escape") {
@@ -357,7 +461,7 @@ export function PlayerOverlay({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [error, leave, saveSegment, savingSegment, seekBySlider, sendCommands]);
+  }, [embedded, error, leave, onRequestImmersive, saveSegment, savingSegment, seekBySlider, sendCommands]);
 
   const beginComposition = (_event: CompositionEvent<HTMLDivElement>) => {
     compositionRef.current = true;
@@ -382,6 +486,26 @@ export function PlayerOverlay({
   const markedDuration = inPoint !== null && outPoint !== null && outPoint > inPoint
     ? outPoint - inPoint
     : null;
+
+  if (embedded) {
+    // 嵌入模式只画画面本体:控件条、时间码、I/O 由 Monitor 的控件条画,
+    // 两边各画一套会出现两条进度条却只有一个 mpv 实例。
+    return (
+      <div className={`player-overlay embedded${error ? " has-error" : ""}`} ref={overlayRef}>
+        <div className="player-native-slot" ref={surfaceRef} aria-hidden="true">
+          {opening && !error ? (
+            <span className="player-opening-mark">正在建立源时间播放链路</span>
+          ) : null}
+        </div>
+        {error ? (
+          <div className="player-error" role="alert">
+            <strong>播放器异常</strong>
+            <p>{error}</p>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div

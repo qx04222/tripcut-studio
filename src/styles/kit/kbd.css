@@ -1,0 +1,21 @@
+/* ---------- Kbd(C 稿的键帽) ---------- */
+
+.ui-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--control-sm) - var(--space-1));
+  height: calc(var(--control-sm) - var(--space-1));
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: calc(var(--radius-6) - 2px);
+  background: var(--surface-card);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}

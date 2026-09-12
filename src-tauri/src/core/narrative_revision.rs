@@ -343,6 +343,8 @@ pub fn apply_op(connection: &mut Connection, episode_id: i64, op: NarrativeOp) -
         ],
     )?;
     transaction.commit()?;
+    // MoveBeat 会改变哪些真实素材落在哪个章节;顺带重新检一遍缺口。
+    super::story_gap::detect(connection)?;
     revision_info(connection, episode_id)?
         .ok_or_else(|| CoreError::Story("修订状态读取失败".to_owned()))
 }
@@ -383,6 +385,8 @@ pub fn undo_last(connection: &mut Connection, episode_id: i64) -> Result<Option<
         [override_id],
     )?;
     transaction.commit()?;
+    // 与 apply_op 对称:撤销可能把真实素材挪走/挪回来,顺带重新检一遍缺口。
+    super::story_gap::detect(connection)?;
     revision_info(connection, episode_id)
 }
 
@@ -559,6 +563,110 @@ mod tests {
             .unwrap();
         assert_eq!(active_revision_id(&connection, episode).unwrap().unwrap(), confirmed);
         let _ = chapter1;
+    }
+
+    /// FINDING 3: `undo_last` 撤销 MoveBeat 后必须像 `apply_op` 一样重新跑
+    /// `story_gap::detect()`。注意:detect() 对"覆盖"是单向冻结的(一旦某个
+    /// chapter_id+slot 的行被判定 dismissed,之后即便不再覆盖也不会被检测器
+    /// 自动重开,只有全新的 chapter_id 才会重新出现缺口——这是模块顶部文档写
+    /// 明的设计),所以本测试断言的是"确实重新跑了 detect() 并产生了可观察的
+    /// 状态变化",而不是要求完整的开合闭环。
+    #[test]
+    fn undo_last_recomputes_gaps_after_move_beat() {
+        use crate::core::story_gap;
+
+        let (_d, mut connection) = setup();
+        let episode: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO narrative_revisions(episode_id, kind, created_at)
+                 VALUES (?1, 'suggested', 'now')",
+                [episode],
+            )
+            .unwrap();
+        let revision = connection.last_insert_rowid();
+        let mut chapters = Vec::new();
+        for (order, title) in [(0, "第一章"), (1, "第二章")] {
+            connection
+                .execute(
+                    "INSERT INTO narrative_chapters(
+                        episode_id, kind, title, \"order\", promoted, score, rationale,
+                        promotion_reason, story_slots_json, missing_slots_json, dh_plan_json, revision_id)
+                     VALUES (?1, 'journey', ?2, ?3, 0, 0.8, 'r', '', '[\"ATMOSPHERE\"]', '[]', 'null', ?4)",
+                    params![episode, title, order, revision],
+                )
+                .unwrap();
+            chapters.push(connection.last_insert_rowid());
+        }
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path, duration_ticks, tb_num, tb_den)
+                 VALUES ('nrv', 'atmo.mov', 1000, 1, 1000)",
+                [],
+            )
+            .unwrap();
+        let clip = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO clip_dimensions(clip_id, dimension, label, score, source)
+                 VALUES (?1, 'function', 'Atmosphere', 0.9, 'test')",
+                [clip],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO narrative_beats(chapter_id, clip_id, role, \"order\", score, rationale)
+                 VALUES (?1, ?2, 'beat', 0, 0.8, 'r')",
+                params![chapters[0], clip],
+            )
+            .unwrap();
+
+        // 起点:第一章有覆盖 ATMOSPHERE 的真实素材,从一开始就被覆盖,从未产生
+        // 过缺口行;第二章没有素材,产生一条 open 缺口。
+        story_gap::detect(&mut connection).unwrap();
+        let gaps = story_gap::list(&connection).unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].chapter_title, "第二章");
+        assert_eq!(gaps[0].status, "open");
+
+        // 把覆盖 ATMOSPHERE 的 beat 挪到第二章(此时仍在 suggested 空间)——
+        // apply_op 会深拷贝出 confirmed 版、在 confirmed 空间执行搬移,并自动
+        // 重跑一次 detect()。
+        let beat_id: i64 = connection
+            .query_row("SELECT id FROM narrative_beats WHERE chapter_id = ?1", [chapters[0]], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        apply_op(
+            &mut connection,
+            episode,
+            NarrativeOp::MoveBeat { beat_id, to_chapter_id: chapters[1], to_order: 0 },
+        )
+        .unwrap();
+        let gaps = story_gap::list(&connection).unwrap();
+        assert_eq!(
+            gaps.len(),
+            1,
+            "confirmed 空间:第一章丢了素材应变 open;第二章第一次被覆盖不产生行: {gaps:?}"
+        );
+        assert_eq!(gaps[0].chapter_title, "第一章");
+        assert_eq!(gaps[0].status, "open");
+
+        // 撤销:beat 挪回第一章。若 undo_last 没有重新跑 detect(),第一章会
+        // 原地停留在撤销前的 open,证明不了 detect() 真的跑过了。
+        undo_last(&mut connection, episode).unwrap();
+        let gaps = story_gap::list(&connection).unwrap();
+        assert_eq!(
+            gaps.len(),
+            2,
+            "撤销后应重新检出两条缺口行(第一章重新被覆盖 dismissed,第二章重新 open): {gaps:?}"
+        );
+        let first = gaps.iter().find(|g| g.chapter_title == "第一章").unwrap();
+        let second = gaps.iter().find(|g| g.chapter_title == "第二章").unwrap();
+        assert_eq!(first.status, "dismissed", "撤销后素材应重新覆盖第一章");
+        assert_eq!(second.status, "open", "撤销后第二章应重新出现缺口");
     }
 
     #[test]

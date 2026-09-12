@@ -1,0 +1,59 @@
+/* ---------- EmptyState ---------- */
+
+.ui-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: center;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.ui-empty--pane {
+  justify-content: center;
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-6) var(--space-5);
+}
+
+.ui-empty--inline {
+  padding: var(--space-4);
+}
+
+.ui-empty-icon {
+  margin-bottom: var(--space-2);
+  color: var(--text-faint);
+}
+
+.ui-empty-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.ui-empty-body {
+  max-width: 36em;
+  margin: 0;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.ui-empty-action {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.ui-empty--dark {
+  color: color-mix(in srgb, var(--media-ink) 70%, transparent);
+}
+
+.ui-empty--dark .ui-empty-icon {
+  color: color-mix(in srgb, var(--media-ink) 45%, transparent);
+}
+
+.ui-empty--dark .ui-empty-title {
+  color: var(--media-ink);
+}

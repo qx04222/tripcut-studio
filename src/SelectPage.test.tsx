@@ -742,3 +742,48 @@ describe("R6 终审 P1-8: tripcut:select-clip must clear a stale viewingEpisode"
     }
   });
 });
+
+describe("R7 Task 7: AI 生成素材徽章", () => {
+  const mounted: Array<{ container: HTMLDivElement; root: ReturnType<typeof createRoot> }> = [];
+
+  afterEach(async () => {
+    while (mounted.length > 0) {
+      const current = mounted.pop();
+      if (!current) continue;
+      await act(async () => current.root.unmount());
+      current.container.remove();
+    }
+    vi.clearAllMocks();
+  });
+
+  it('shows "AI 生成" only for clips with generated_source set, not real footage', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const realClip = clip(1);
+    const generatedClip: ClipListItem = { ...clip(2), generated_source: "minimax" };
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.listClips.mockResolvedValue([realClip, generatedClip]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listSelectSegments.mockResolvedValue([]);
+    apiMocks.getSettings.mockResolvedValue({ llm_enabled: "false" });
+    apiMocks.getLlmStatus.mockResolvedValue({ enabled: false });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(<SelectPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const realCard = container.querySelector("#select-clip-1");
+    const generatedCard = container.querySelector("#select-clip-2");
+    expect(realCard?.querySelector(".generated-source-badge")).toBeNull();
+    expect(generatedCard?.querySelector(".generated-source-badge")).not.toBeNull();
+    expect(generatedCard?.textContent).toContain("AI 生成");
+  });
+});

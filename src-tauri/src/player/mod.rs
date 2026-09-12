@@ -19,10 +19,10 @@ use libmpv2::events::{Event, PropertyData};
 use libmpv2::render::{mpv_render_update, OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
 use libmpv2::{Format, Mpv};
 use objc2::rc::Retained;
-use objc2::MainThreadMarker;
+use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSOpenGLContext, NSOpenGLPixelFormat,
-    NSOpenGLPixelFormatAttribute, NSOpenGLProfileVersion3_2Core, NSOpenGLView, NSWindow,
+    NSOpenGLPixelFormatAttribute, NSOpenGLProfileVersion3_2Core, NSOpenGLView, NSView, NSWindow,
     NSWindowOrderingMode,
 };
 use objc2_foundation::{NSPoint as CGPoint, NSRect as CGRect, NSSize as CGSize};
@@ -265,6 +265,11 @@ pub struct PlayerManager {
 
 struct ManagerState {
     viewport: PlayerViewport,
+    /// 原生视图是否被 DOM 覆盖层(popover / 抽屉 / 命令面板)遮住。原生 NSView
+    /// 永远画在 WKWebView 之上,所以覆盖层打开时必须把它 setHidden,否则视频会
+    /// 盖住覆盖层(R9 实机 D1)。存在这里是为了:遮挡中打开的会话一出生就隐藏,
+    /// Resize 也不会把它露出来。
+    occluded: bool,
     session: Option<PlayerSession>,
 }
 
@@ -294,6 +299,7 @@ enum WorkerMessage {
     RenderWake,
     ForceRedraw,
     Resize(PlayerViewport, mpsc::Sender<Result<(), String>>),
+    SetOccluded(bool, mpsc::Sender<Result<(), String>>),
     EventsWake,
     Command(PlayerCommand, mpsc::Sender<Result<(), String>>),
     Shutdown(mpsc::Sender<()>),
@@ -305,6 +311,7 @@ impl PlayerManager {
             window,
             state: Arc::new(Mutex::new(ManagerState {
                 viewport: PlayerViewport::default(),
+                occluded: false,
                 session: None,
             })),
             operation: Arc::new(Mutex::new(())),
@@ -334,6 +341,28 @@ impl PlayerManager {
             .map_err(|_| "播放器区域更新超时".to_owned())?
     }
 
+    /// 覆盖层开合时切换原生视图的可见性。播放状态不动:只是 setHidden,
+    /// 覆盖层收起后画面从当前位置继续。没有会话时只记下旗标。
+    pub fn set_occluded(&self, occluded: bool) -> Result<(), String> {
+        let _operation = lock(&self.operation);
+        let sender = record_occlusion(&mut lock(&self.state), occluded);
+        let Some(sender) = sender else {
+            return Ok(());
+        };
+        let (reply_sender, reply_receiver) = mpsc::channel();
+        sender
+            .send(WorkerMessage::SetOccluded(occluded, reply_sender))
+            .map_err(|_| "播放器渲染线程已退出".to_owned())?;
+        reply_receiver
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| "播放器遮挡更新超时".to_owned())?
+    }
+
+    /// 当前遮挡旗标(测试与诊断用)。
+    pub fn is_occluded(&self) -> bool {
+        lock(&self.state).occluded
+    }
+
     pub fn open(
         &self,
         path: PathBuf,
@@ -344,7 +373,10 @@ impl PlayerManager {
         reap_orphans(&mut lock(&self.orphans));
         self.stop_current()?;
 
-        let viewport = lock(&self.state).viewport;
+        let (viewport, occluded) = {
+            let state = lock(&self.state);
+            (state.viewport, state.occluded)
+        };
         let status = Arc::new(Mutex::new(PlayerStatus::loading(clip_id)));
         let (sender, receiver) = mpsc::channel();
         let (started_sender, started_receiver) = mpsc::channel();
@@ -357,6 +389,7 @@ impl PlayerManager {
                 worker_entry(
                     window,
                     viewport,
+                    occluded,
                     path,
                     time_mapper,
                     worker_status,
@@ -469,6 +502,17 @@ impl PlayerManager {
     }
 }
 
+/// 记下遮挡旗标;只有旗标真的变了且有活动会话时才返回要通知的渲染线程。
+/// 重复同值不打扰渲染线程;没有会话时只记旗标,留给下一次 open() 用。
+fn record_occlusion(state: &mut ManagerState, occluded: bool) -> Option<mpsc::Sender<WorkerMessage>> {
+    let changed = state.occluded != occluded;
+    state.occluded = occluded;
+    if !changed {
+        return None;
+    }
+    state.session.as_ref().map(|session| session.sender.clone())
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -551,6 +595,69 @@ fn create_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<Re
         .map_err(|_| "创建播放器原生视图超时".to_owned())?
 }
 
+#[link(name = "OpenGL", kind = "framework")]
+extern "C" {
+    fn CGLLockContext(ctx: *mut c_void) -> i32;
+    fn CGLUnlockContext(ctx: *mut c_void) -> i32;
+}
+
+/// `NSOpenGLContext.CGLContextObj`:objc2-app-kit 把它关在 objc2-open-gl feature
+/// 后面,这里直接 msg_send 取裸指针,不引新 crate。
+fn cgl_context(context: &NSOpenGLContext) -> *mut c_void {
+    unsafe { msg_send![context, CGLContextObj] }
+}
+
+/// 持有 CGLLockContext 的作用域守卫。渲染线程画帧、AppKit 主线程 update drawable
+/// 两边都拿这把锁——Apple 文档对「从副线程渲染的 NSOpenGLView」的硬性要求。
+struct CglLock(*mut c_void);
+
+impl CglLock {
+    fn acquire(context: &NSOpenGLContext) -> Self {
+        let ctx = cgl_context(context);
+        if !ctx.is_null() {
+            // SAFETY: ctx 来自活着的 NSOpenGLContext;CGL 锁是递归的,同线程重入安全。
+            unsafe {
+                CGLLockContext(ctx);
+            }
+        }
+        Self(ctx)
+    }
+}
+
+impl Drop for CglLock {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: 与 acquire 配对。
+            unsafe {
+                CGLUnlockContext(self.0);
+            }
+        }
+    }
+}
+
+define_class!(
+    // SAFETY: NSOpenGLView 没有额外的子类化要求;本类型不实现 Drop,也没有 ivar。
+    //
+    // 为什么要子类:AppKit 在窗口活动缩放期间会自己改 view 的 frame / 全局位置,
+    // 然后在主线程上调 `-update` 重建 GL drawable。渲染线程此时若正在
+    // `mpv_render_context_render`(glClear),就撞进被拆掉一半的 drawable
+    // (R9 真机 P0-A:AppleMetalOpenGLRenderer GLRResourceList::addResource SIGSEGV)。
+    // Apple 文档的规定动作就是:重写 `-update`,拿 CGLLockContext 再调 super。
+    #[unsafe(super(NSOpenGLView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TripcutPlayerGLView"]
+    struct PlayerGlView;
+
+    impl PlayerGlView {
+        #[unsafe(method(update))]
+        fn update_locked(&self) {
+            let _lock = self.openGLContext().map(|context| CglLock::acquire(&context));
+            // SAFETY: 调 NSOpenGLView 自己的 -update,签名无参无返回。
+            let _: () = unsafe { msg_send![super(self), update] };
+        }
+    }
+);
+
 fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<RenderSurface, String> {
     let mtm = MainThreadMarker::new().ok_or_else(|| "播放器视图未运行在 AppKit 主线程".to_owned())?;
     let ns_window_ptr = window
@@ -567,7 +674,7 @@ fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<Ren
         .ok_or_else(|| "Tauri 窗口缺少 contentView".to_owned())?;
     content_view.setAutoresizesSubviews(true);
 
-    let frame = viewport_frame(content_view.bounds(), viewport)?;
+    let frame = viewport_frame(webview_area(&ns_window, &content_view), viewport)?;
 
     let mut attributes: [NSOpenGLPixelFormatAttribute; 9] = [
         NS_OPEN_GLPFA_ACCELERATED,
@@ -591,8 +698,13 @@ fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<Ren
         )
     }
     .ok_or_else(|| "NSOpenGLPixelFormat 创建失败".to_owned())?;
-    let gl_view = NSOpenGLView::initWithFrame_pixelFormat(mtm.alloc(), frame, Some(&pixel_format))
-        .ok_or_else(|| "NSOpenGLView 创建失败".to_owned())?;
+    // SAFETY: -initWithFrame:pixelFormat: 是 NSOpenGLView 的指定初始化器,子类未改签名。
+    let gl_view: Option<Retained<PlayerGlView>> = unsafe {
+        msg_send![mtm.alloc::<PlayerGlView>(), initWithFrame: frame, pixelFormat: &*pixel_format]
+    };
+    let gl_view: Retained<NSOpenGLView> = gl_view
+        .ok_or_else(|| "NSOpenGLView 创建失败".to_owned())?
+        .into_super();
     gl_view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
@@ -609,19 +721,30 @@ fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<Ren
     })
 }
 
-fn viewport_frame(bounds: CGRect, viewport: PlayerViewport) -> Result<CGRect, String> {
-    let width = viewport.width.min((bounds.size.width - viewport.x).max(1.0));
-    let height = viewport.height.min((bounds.size.height - viewport.y).max(1.0));
+/// DOM 矩形 → AppKit frame。`area` 是 **WKWebView 在 contentView 坐标系里的矩形**,
+/// 不是 contentView.bounds:Tauri 的 contentView 是全尺寸的(含 32px 标题栏),
+/// 而 webview 挂在标题栏下面 —— 直接用 bounds 会把原生视图整体抬高一个标题栏
+/// (真机复核三:视频盖住「预览监视器」栏标题条)。DOM 的 (0,0) 是 area 的左上角。
+fn viewport_frame(area: CGRect, viewport: PlayerViewport) -> Result<CGRect, String> {
+    let width = viewport.width.min((area.size.width - viewport.x).max(1.0));
+    let height = viewport.height.min((area.size.height - viewport.y).max(1.0));
     if width < 2.0 || height < 2.0 {
         return Err("播放器区域超出 Tauri 内容窗口".to_owned());
     }
     Ok(CGRect {
         origin: CGPoint {
-            x: viewport.x,
-            y: (bounds.size.height - viewport.y - height).max(0.0),
+            x: area.origin.x + viewport.x,
+            y: (area.origin.y + area.size.height - viewport.y - height).max(area.origin.y),
         },
         size: CGSize { width, height },
     })
+}
+
+/// DOM 真正占据的区域,换算到 contentView 坐标系。Tauri 的 contentView 与 WKWebView
+/// 都是全尺寸的(含标题栏),但 WebKit 会自动把页面内容缩进到标题栏之下 —— DOM 的
+/// (0,0) 在 `contentLayoutRect` 的左上角,不在 contentView 的左上角。
+fn webview_area(ns_window: &NSWindow, content_view: &NSView) -> CGRect {
+    content_view.convertRect_fromView(ns_window.contentLayoutRect(), None)
 }
 
 /// The surface is created on AppKit's main thread, then moved exactly once to
@@ -673,18 +796,18 @@ fn resize_surface(
                 let content_view = ns_window
                     .contentView()
                     .ok_or_else(|| "Tauri 窗口缺少 contentView".to_owned())?;
-                let frame = viewport_frame(content_view.bounds(), viewport)?;
+                let frame = viewport_frame(webview_area(&ns_window, &content_view), viewport)?;
                 let view = view;
                 let MainThreadView(inner) = view;
                 inner.setFrame(frame);
                 // AppKit 硬性要求:view 几何变化后必须同步 GL drawable,
                 // 否则渲染线程在失配的 framebuffer 上 glClear 会段错误(实报 SIGSEGV)。
+                // 走 view 的 -update(子类里带 CGL 锁),而不是直接 context.update:
+                // 渲染线程可能正拿着锁在画,必须排队等它画完。
                 // 2021 闭包精确捕获会只捕字段绕过 unsafe Send,必须先整值捕获再解构。
                 let context = context;
-                let MainThreadContext(gl) = context;
-                let mtm = MainThreadMarker::new()
-                    .ok_or_else(|| "播放器视图未运行在 AppKit 主线程".to_owned())?;
-                gl.update(mtm);
+                let MainThreadContext(_gl) = context;
+                inner.update();
                 Ok(())
             }))
             .unwrap_or_else(|payload| {
@@ -701,6 +824,35 @@ fn resize_surface(
         .map_err(|_| "更新播放器原生视图超时".to_owned())?
 }
 
+/// 在 AppKit 主线程上切换原生视图的 hidden。只改可见性,不动 frame、
+/// GL context 或 mpv 播放状态。
+fn set_surface_hidden(
+    window: &WebviewWindow,
+    surface: &RenderSurface,
+    hidden: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let view = MainThreadView(surface.gl_view.clone());
+    window
+        .run_on_main_thread(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let view = view;
+                let MainThreadView(inner) = view;
+                inner.setHidden(hidden);
+                // 重新露出来时 drawable 可能已经被 AppKit 拆掉,先同步再让渲染线程画。
+                if !hidden {
+                    inner.update();
+                }
+            }))
+            .map_err(|payload| format!("切换播放器原生视图可见性时 panic：{}", panic_text(payload)));
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("无法派发播放器遮挡更新：{error}"))?;
+    receiver
+        .recv_timeout(COMMAND_TIMEOUT)
+        .map_err(|_| "更新播放器原生视图可见性超时".to_owned())?
+}
+
 struct CurrentContextGuard<'a>(&'a NSOpenGLContext);
 
 impl Drop for CurrentContextGuard<'_> {
@@ -714,6 +866,7 @@ impl Drop for CurrentContextGuard<'_> {
 fn worker_entry(
     window: WebviewWindow,
     viewport: PlayerViewport,
+    occluded: bool,
     path: PathBuf,
     time_mapper: Option<crate::core::canonical_time::ProxyTimeMapper>,
     status: Arc<Mutex<PlayerStatus>>,
@@ -735,10 +888,20 @@ fn worker_entry(
         lock(&status).fail(error);
         return;
     };
+    // 遮挡中打开的会话一出生就隐藏,不能先闪一帧再藏。
+    if occluded {
+        if let Err(error) = set_surface_hidden(&window, &surface, true) {
+            let _ = started.send(Err(error.clone()));
+            lock(&status).fail(error);
+            schedule_surface_removal(&window, removal);
+            return;
+        }
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_worker(
             &window,
             &surface,
+            occluded,
             &path,
             time_mapper.as_ref(),
             &status,
@@ -773,6 +936,7 @@ fn worker_entry(
 fn run_worker(
     window: &WebviewWindow,
     surface: &RenderSurface,
+    occluded: bool,
     path: &Path,
     time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
     status: &Arc<Mutex<PlayerStatus>>,
@@ -836,6 +1000,7 @@ fn run_worker(
             }),
         ])
         .map_err(|error| format!("mpv OpenGL render context 创建失败：{error}"))?;
+    let redraw_sender = callback_sender.clone();
     let render_sender = callback_sender;
     let render_flag = Arc::clone(&render_pending);
     render_context.set_update_callback(move || {
@@ -856,6 +1021,9 @@ fn run_worker(
     // call or `seeking` property polling participates in this measurement.
     let mut pending_seek: Option<Instant> = None;
     let mut seek_samples = Vec::new();
+    // 隐藏期间不往 GL drawable 画:AppKit 对 hidden 的 NSOpenGLView 不保证
+    // drawable 有效。解除遮挡时补画一帧,画面立刻接上。
+    let mut hidden = occluded;
     let shutdown_reply = loop {
         // mpv 的 render 回调在播放时可持续以帧率灌入 RenderWake。若只在
         // recv_timeout 超时时轮询事件，队列一直有渲染消息时就永远不会超时，
@@ -877,14 +1045,39 @@ fn run_worker(
                 let flags = render_context
                     .update()
                     .map_err(|error| format!("mpv render update 失败：{error}"))?;
-                if flags & mpv_render_update::Frame != 0 {
+                if flags & mpv_render_update::Frame != 0 && !hidden {
                     render_frame(&render_context, surface)?;
                 }
             }
-            WorkerMessage::ForceRedraw => render_frame(&render_context, surface)?,
+            WorkerMessage::ForceRedraw => {
+                if !hidden {
+                    render_frame(&render_context, surface)?;
+                }
+            }
+            WorkerMessage::SetOccluded(occluded, reply) => {
+                let result = set_surface_hidden(window, surface, occluded).and_then(|()| {
+                    hidden = occluded;
+                    if hidden {
+                        Ok(())
+                    } else {
+                        render_frame(&render_context, surface)
+                    }
+                });
+                let failure = result.as_ref().err().cloned();
+                let _ = reply.send(result);
+                if let Some(error) = failure {
+                    lock(status).fail(error.clone());
+                    return Err(error);
+                }
+            }
             WorkerMessage::Resize(viewport, reply) => {
-                let result = resize_surface(window, surface, viewport)
-                    .and_then(|()| render_frame(&render_context, surface));
+                // setFrame 不会碰 hidden 旗标,遮挡状态跨过 Resize 保持不变。
+                // 不在这里同步画帧:先把回复还给调用方,下一轮循环再 ForceRedraw ——
+                // 连续 Resize 时中间的帧根本不必画,也让主线程的 drawable 重建先落地。
+                let result = resize_surface(window, surface, viewport);
+                if result.is_ok() && !hidden {
+                    let _ = redraw_sender.send(WorkerMessage::ForceRedraw);
+                }
                 let failure = result.as_ref().err().cloned();
                 let _ = reply.send(result);
                 if let Some(error) = failure {
@@ -921,9 +1114,16 @@ fn run_worker(
 }
 
 fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> Result<(), String> {
+    // 整个画帧 + 交换都在 CGL 锁里:主线程的 -update(窗口缩放、setFrame、
+    // 取消隐藏)要等这一帧画完才能重建 drawable,反过来也一样。
+    let _lock = CglLock::acquire(&surface.gl_context);
     let bounds = surface.gl_view.convertRectToBacking(surface.gl_view.bounds());
-    let width = bounds.size.width.round().max(1.0) as i32;
-    let height = bounds.size.height.round().max(1.0) as i32;
+    let width = bounds.size.width.round() as i32;
+    let height = bounds.size.height.round() as i32;
+    if width < 2 || height < 2 {
+        // 零尺寸 / 被裁到看不见的 drawable 上 glClear 没有意义,也是撞坏资源表的路径之一。
+        return Ok(());
+    }
     render_context
         .render::<()>(0, width, height, true)
         .map_err(|error| format!("mpv render 失败：{error}"))?;
@@ -1169,6 +1369,49 @@ mod tests {
     }
 
     #[test]
+    fn occluded_flag_is_remembered_without_a_session() {
+        // 覆盖层在没有会话时开合:旗标必须记住,后续 open() 才能一出生就隐藏。
+        let mut state = ManagerState {
+            viewport: PlayerViewport::default(),
+            occluded: false,
+            session: None,
+        };
+        assert!(record_occlusion(&mut state, true).is_none());
+        assert!(state.occluded);
+        assert!(record_occlusion(&mut state, false).is_none());
+        assert!(!state.occluded);
+    }
+
+    #[test]
+    fn occlusion_notifies_the_session_only_when_the_flag_changes() {
+        // 有会话时:旗标变化才通知渲染线程;重复同值不打扰它。
+        let (sender, receiver) = channel();
+        let mut state = ManagerState {
+            viewport: PlayerViewport::default(),
+            occluded: false,
+            session: Some(PlayerSession {
+                sender,
+                status: Arc::new(Mutex::new(PlayerStatus::closed())),
+                worker: None,
+            }),
+        };
+        let mut notified = Vec::new();
+        for next in [true, true, false, false] {
+            if let Some(sender) = record_occlusion(&mut state, next) {
+                let (reply, _) = channel();
+                sender.send(WorkerMessage::SetOccluded(next, reply)).unwrap();
+                notified.push(next);
+            }
+        }
+        assert_eq!(notified, vec![true, false]);
+        let mut seen = Vec::new();
+        while let Ok(WorkerMessage::SetOccluded(flag, _)) = receiver.try_recv() {
+            seen.push(flag);
+        }
+        assert_eq!(seen, vec![true, false]);
+    }
+
+    #[test]
     fn viewport_rejects_non_finite_or_empty_geometry() {
         assert!(PlayerViewport { width: f64::NAN, ..PlayerViewport::default() }.validate().is_err());
         assert!(PlayerViewport { height: 0.0, ..PlayerViewport::default() }.validate().is_err());
@@ -1190,6 +1433,32 @@ mod tests {
         assert_eq!(frame.origin.y, 422.0);
         assert_eq!(frame.size.width, 640.0);
         assert_eq!(frame.size.height, 360.0);
+    }
+
+    #[test]
+    fn viewport_frame_offsets_by_the_webview_area_not_the_full_content_view() {
+        // 全尺寸 contentView 1000 高,webview 挂在 32px 标题栏下面:area = (0,0 1600×968)。
+        // DOM y=75 的井,frame 顶必须在标题栏下 75px 处,即 AppKit y = 968 − 75 − 358 = 535,
+        // 而不是按 1000 算出的 567(真机复核三:视频抬高一个标题栏盖住栏标题条)。
+        let area = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize { width: 1_600.0, height: 968.0 },
+        };
+        let frame = viewport_frame(
+            area,
+            PlayerViewport { x: 471.0, y: 75.0, width: 638.0, height: 358.0 },
+        ).unwrap();
+        assert_eq!(frame.origin.y, 535.0);
+        assert_eq!(frame.size.height, 358.0);
+
+        // area 自己带偏移(webview 不从 contentView 左下角开始)也一并算进去。
+        let shifted = CGRect {
+            origin: CGPoint { x: 10.0, y: 20.0 },
+            size: CGSize { width: 800.0, height: 600.0 },
+        };
+        let frame = viewport_frame(shifted, PlayerViewport { x: 5.0, y: 8.0, width: 100.0, height: 50.0 }).unwrap();
+        assert_eq!(frame.origin.x, 15.0);
+        assert_eq!(frame.origin.y, 20.0 + 600.0 - 8.0 - 50.0);
     }
 
     #[test]

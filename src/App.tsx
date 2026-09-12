@@ -1,83 +1,62 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 
-import { DeliverPage } from "./DeliverPage";
-import { FirstRunGuide } from "./FirstRunGuide";
-import { ImportPage } from "./ImportPage";
 import { CommandPalette } from "./CommandPalette";
-import { LibraryPanel } from "./LibraryPanel";
-import { EpisodePanel } from "./EpisodePanel";
-import { SetupWizard } from "./SetupWizard";
-import { SidebarSearch } from "./SidebarSearch";
+import { FirstRunGuide } from "./FirstRunGuide";
 import { RecoveryPage } from "./RecoveryPage";
-import { SelectPage } from "./SelectPage";
-import { SettingsPage, applyAppearanceSettings } from "./SettingsPage";
-import { getDoctorReport, getSettings, type DoctorReport } from "./api";
+import { applyAppearanceSettings } from "./appearance";
+import { getDoctorReport, getSettings, type DoctorReport, type SettingsMap } from "./api";
+import { NAVIGATION, documentTitleForRoute, routeFromHash, type RoutePath } from "./routes";
+import { WorkspaceShell } from "./workspace/WorkspaceShell";
+import { dispatchWorkspace, type BandMode } from "./workspace/WorkspaceStore";
+import { WORKSPACE_FLAG_KEY, readUiBool } from "./workspace/uiSettings";
 
-export type RoutePath = "/import" | "/review" | "/deliver" | "/settings";
+export { NAVIGATION, documentTitleForRoute };
+export type { RoutePath };
 
-interface NavigationItem {
-  path: RoutePath;
-  step: string;
-  label: string;
-  eyebrow: string;
+/**
+ * 旧四页壳整体懒加载。此前 App.tsx 静态 import 了 ImportPage/DeliverPage/
+ * SettingsPage 给旧壳用,rolldown 于是把 `WorkspaceShell` 里那三个 `lazy()` 的
+ * 目标一起提升进首屏 chunk——产物里一条 dynamic import 都没有(R8 终审 M1)。
+ * 现在旧壳自己也是一个 `lazy()` 目标,两个壳各自成块;**不要**从本文件静态
+ * 引用 `./LegacyShell` 里的任何符号。
+ */
+const LazyLegacyShell = lazy(() =>
+  import("./LegacyShell").then((module) => ({ default: module.AppShell })),
+);
+
+const BAND_MODES: readonly BandMode[] = ["story", "music", "journey", "destination", "template"];
+
+function isBandMode(value: string): value is BandMode {
+  return (BAND_MODES as readonly string[]).includes(value);
 }
 
-export const NAVIGATION: readonly NavigationItem[] = [
-  { path: "/import", step: "01", label: "导入", eyebrow: "INGEST" },
-  { path: "/review", step: "02", label: "筛片", eyebrow: "SELECT" },
-  { path: "/deliver", step: "03", label: "交付", eyebrow: "DELIVER" },
-  { path: "/settings", step: "04", label: "设置", eyebrow: "SETTINGS" },
-] as const;
-
-const PAGE_CONTENT: Record<
-  RoutePath,
-  { kicker: string; title: string; description: string; emptyTitle: string; emptyBody: string }
-> = {
-  "/import": {
-    kicker: "素材入口",
-    title: "把旅途带进来",
-    description: "连接相机卡、移动硬盘或本地文件夹，建立只读素材索引。",
-    emptyTitle: "等待第一批素材",
-    emptyBody: "导入与校验能力将在后续任务卡接入；当前页面仅提供工作流占位。",
-  },
-  "/review": {
-    kicker: "故事选择",
-    title: "留下真正值得看的",
-    description: "按场景浏览、评级与标记，把冗长素材收束为清晰故事。",
-    emptyTitle: "筛片台尚未装载",
-    emptyBody: "播放器与评级交互将在后续任务卡接入；缩略图与波形已可在导入页检查。",
-  },
-  "/deliver": {
-    kicker: "成片出口",
-    title: "把选择交付出去",
-    description: "从已确认的片段生成清单、稳定包或后续剪辑工程。",
-    emptyTitle: "还没有可交付项目",
-    emptyBody: "导出与剪映工程将在后续任务卡实现；这里保留完整工作流终点。",
-  },
-  "/settings": {
-    kicker: "工作台控制",
-    title: "把工具调到顺手",
-    description: "统一管理外观、性能、分析工具与本地缓存，设置保存在这台 Mac 上。",
-    emptyTitle: "设置尚未载入",
-    emptyBody: "本地设置读取失败时仍会使用安全默认值。",
-  },
-};
-
-export function documentTitleForRoute(route: RoutePath): string {
-  const labels: Record<RoutePath, string> = {
-    "/import": "导入素材",
-    "/review": "筛片工作台",
-    "/deliver": "交付",
-    "/settings": "设置与帮助",
-  };
-  return `${labels[route]} · 旅剪`;
-}
-
-function routeFromHash(hash: string): RoutePath {
-  const candidate = hash.replace(/^#/, "");
-  return NAVIGATION.some((item) => item.path === candidate)
-    ? (candidate as RoutePath)
-    : "/import";
+/**
+ * 新壳下 `CommandPalette` 的 `onNavigate` 目标——命令集本身(§ CommandPalette.tsx)
+ * 已经是面向新 IA 的动作字符串(`open-*`/`band-*`),这里只负责把它们翻译成
+ * `dispatchWorkspace` 调用,不复用旧壳按 hash 路由的 `onNavigate`。
+ */
+function navigateWorkspace(action: string): void {
+  if (action === "open-import") {
+    dispatchWorkspace({ type: "open-drawer", drawer: "import" });
+    return;
+  }
+  if (action === "open-deliver") {
+    dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
+    return;
+  }
+  if (action === "open-settings") {
+    dispatchWorkspace({ type: "open-drawer", drawer: "settings" });
+    return;
+  }
+  if (action === "open-help") {
+    // 帮助浮层的开关是壳的局部 state,不在 store 里 —— 跟 `?` 走同一个事件。
+    window.dispatchEvent(new CustomEvent("tripcut:open-help"));
+    return;
+  }
+  if (action.startsWith("band-")) {
+    const mode = action.slice("band-".length);
+    if (isBandMode(mode)) dispatchWorkspace({ type: "set-band-mode", mode });
+  }
 }
 
 function useHashRoute(): RoutePath {
@@ -88,8 +67,10 @@ function useHashRoute(): RoutePath {
   useEffect(() => {
     const syncRoute = () => setRoute(routeFromHash(window.location.hash));
     window.addEventListener("hashchange", syncRoute);
+    // 空 hash 落到 `#/`:新壳把它当工作区本体(不弹任何抽屉);旧壳的 routeFromHash
+    // 对未知路径本就回落到 /import,两边都不需要 `#/import` 这个会弹导入抽屉的默认值。
     if (!window.location.hash) {
-      window.history.replaceState(null, "", "#/import");
+      window.history.replaceState(null, "", "#/");
     }
     return () => window.removeEventListener("hashchange", syncRoute);
   }, []);
@@ -97,227 +78,27 @@ function useHashRoute(): RoutePath {
   return route;
 }
 
-function BrandMark() {
-  return (
-    <span className="brand-mark" aria-hidden="true">
-      <span />
-      <span />
-      <span />
-    </span>
-  );
-}
-
-function EmptyState({ children }: { children: ReactNode }) {
-  return (
-    <div className="empty-state">
-      <div className="frame-corners" aria-hidden="true" />
-      {children}
-    </div>
-  );
-}
-
-export function AppShell({ route }: { route: RoutePath }) {
-  const [deliverAvailable, setDeliverAvailable] = useState(false);
-  useEffect(() => {
-    if (route !== "/deliver") {
-      setDeliverAvailable(false);
-      return;
-    }
-    const onAvailability = (event: Event) => {
-      setDeliverAvailable(Boolean((event as CustomEvent<boolean>).detail));
-    };
-    window.addEventListener("tripcut:deliver-availability", onAvailability);
-    return () => window.removeEventListener("tripcut:deliver-availability", onAvailability);
-  }, [route]);
-
-  const [wizardOpen, setWizardOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem("tripcut.wizard.done") !== "1"; } catch { return true; }
-  });
-  const closeWizard = () => {
-    try { localStorage.setItem("tripcut.wizard.done", "1"); } catch { /* per-viewer convenience */ }
-    setWizardOpen(false);
-  };
-  useEffect(() => {
-    const onOpen = () => setWizardOpen(true);
-    window.addEventListener("tripcut:open-wizard", onOpen);
-    return () => window.removeEventListener("tripcut:open-wizard", onOpen);
-  }, []);
-
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try { return localStorage.getItem("tripcut.sidebar.collapsed") === "1"; } catch { return false; }
-  });
-  const toggleSidebar = () => {
-    setSidebarCollapsed((value) => {
-      const next = !value;
-      try { localStorage.setItem("tripcut.sidebar.collapsed", next ? "1" : "0"); } catch { /* per-viewer convenience only */ }
-      return next;
-    });
-  };
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "\\" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        toggleSidebar();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
-
-  const content = PAGE_CONTENT[route];
-
-  return (
-    <div className="app-shell">
-      <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
-        <button
-          type="button"
-          className="sidebar-toggle"
-          title="收起/展开侧栏(⌘\\)"
-          aria-label="收起或展开侧栏"
-          onClick={toggleSidebar}
-        >
-          {sidebarCollapsed ? "»" : "«"}
-        </button>
-        <a className="brand" href="#/import" aria-label="旅剪工作台首页">
-          <BrandMark />
-          <span>
-            <strong>旅剪</strong>
-            <small>TRIPCUT STUDIO</small>
-          </span>
-        </a>
-
-        {sidebarCollapsed ? null : (
-          <>
-            <SidebarSearch
-              onSelectClip={(clipId) => {
-                window.location.hash = "/review";
-                window.setTimeout(() => {
-                  window.dispatchEvent(new CustomEvent("tripcut:select-clip", { detail: clipId }));
-                }, 120);
-              }}
-            />
-            <LibraryPanel />
-            <EpisodePanel />
-          </>
-        )}
-
-        <nav className="workflow-nav" aria-label="工作流导航">
-          {NAVIGATION.map((item) => {
-            const active = item.path === route;
-            return (
-              <a
-                className={active ? "nav-item active" : "nav-item"}
-                href={`#${item.path}`}
-                aria-current={active ? "page" : undefined}
-                key={item.path}
-              >
-                <span className="nav-step">{item.step}</span>
-                <span className="nav-copy">
-                  <strong>{item.label}</strong>
-                  <small>{item.eyebrow}</small>
-                </span>
-                <span className="nav-arrow" aria-hidden="true">
-                  ↗
-                </span>
-              </a>
-            );
-          })}
-        </nav>
-
-        <div className="sidebar-footer">
-          <span className="status-dot" aria-hidden="true" />
-          <span>
-            <strong>本地项目</strong>
-            <small>LOCAL SQLITE</small>
-          </span>
-        </div>
-      </aside>
-
-      {wizardOpen ? <SetupWizard onClose={closeWizard} /> : null}
-      <CommandPalette
-        onNavigate={(path) => { window.location.hash = path; }}
-        onSelectClip={(clipId) => {
-          window.location.hash = "/review";
-          window.setTimeout(() => {
-            window.dispatchEvent(new CustomEvent("tripcut:select-clip", { detail: clipId }));
-          }, 120);
-        }}
-      />
-      <main className="workspace">
-        <header className="workspace-header compact">
-          <div className="page-crumb">
-            <span className="kicker">{content.kicker}</span>
-            <strong>{documentTitleForRoute(route).split(" · ")[0]}</strong>
-            <p className="page-hint">{content.description}</p>
-          </div>
-          <div className="header-actions">
-            {route === "/review" ? (
-              <button
-                type="button"
-                className="header-primary-action"
-                title="为当前过滤下尚无描述的素材逐条生成 AI 描述(走预算确认)"
-                onClick={() => window.dispatchEvent(new CustomEvent("tripcut:action", { detail: "select-describe-all" }))}
-              >一键 AI 全读</button>
-            ) : route === "/import" ? (
-              <button
-                type="button"
-                className="header-primary-action"
-                onClick={() => window.dispatchEvent(new CustomEvent("tripcut:action", { detail: "import-pick" }))}
-              >＋ 选择素材文件夹</button>
-            ) : route === "/deliver" ? (
-              <button
-                type="button"
-                className="header-primary-action"
-                disabled={!deliverAvailable}
-                title={deliverAvailable ? "生成稳定交付包" : "请先收藏整条素材或保存精选片段"}
-                onClick={() => window.dispatchEvent(new CustomEvent("tripcut:action", { detail: "deliver-export" }))}
-              >生成交付包</button>
-            ) : null}
-            <button
-              type="button"
-              className="palette-hint"
-              title="打开命令面板"
-              onClick={() => window.dispatchEvent(new CustomEvent("tripcut:open-command-palette"))}
-            >
-              <kbd>⌘K</kbd> 命令面板
-            </button>
-          </div>
-        </header>
-
-        {route === "/import" ? (
-          <ImportPage />
-        ) : route === "/review" ? (
-          <SelectPage />
-        ) : route === "/deliver" ? (
-          <DeliverPage />
-        ) : route === "/settings" ? (
-          <SettingsPage />
-        ) : (
-          <EmptyState>
-            <span className="empty-index">{NAVIGATION.findIndex((item) => item.path === route) + 1}</span>
-            <div className="empty-copy">
-              <span className="empty-kicker">PLACEHOLDER VIEW</span>
-              <h2>{content.emptyTitle}</h2>
-              <p>{content.emptyBody}</p>
-            </div>
-            <span className="empty-rule" aria-hidden="true" />
-          </EmptyState>
-        )}
-
-        <footer className="workspace-footer">
-          <span>TRIPCUT / LOCAL-FIRST</span>
-          <span>素材只读 · 项目可恢复</span>
-        </footer>
-      </main>
-    </div>
-  );
-}
-
 export default function App() {
   const route = useHashRoute();
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [doctorError, setDoctorError] = useState<string | undefined>();
   const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
+  const [workspaceV2, setWorkspaceV2] = useState(true);
+  // 旗的取值在 getSettings() 落地前一律不算数(R8 终审 L4):此前默认 true 会先渲染
+  // 一帧新壳,旗其实是 false 的用户于是每次启动都看见新壳闪一下再被换掉。落地前
+  // 渲染一块中性骨架——两个壳的专属元素一个都不出现。
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
+  useEffect(() => {
+    // 设置 sheet 里的界面开关写完 ui.workspace_v2 后广播这个事件,让旗状态当场
+    // 更新——不这样做就得等下次重启才生效,不满足"不要求重启"。
+    const onFlagChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceV2: boolean }>).detail;
+      setWorkspaceV2(detail.workspaceV2);
+    };
+    window.addEventListener("tripcut:workspace-flag-changed", onFlagChanged);
+    return () => window.removeEventListener("tripcut:workspace-flag-changed", onFlagChanged);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -340,15 +121,30 @@ export default function App() {
       && (!doctorReport.abnormal_exit || recoveryAcknowledged),
   );
 
+  // 同一份 getSettings 结果既喂外观又判旗,不为了读一个键多发一次请求。
   useEffect(() => {
     if (!workbenchReady) return;
+    let active = true;
+    const apply = (settings: SettingsMap) => {
+      applyAppearanceSettings(settings);
+      if (!active) return;
+      setWorkspaceV2(readUiBool(settings, WORKSPACE_FLAG_KEY));
+      dispatchWorkspace({ type: "hydrate", settings });
+      // 读失败也算"落地"——回落到前端默认值,总比一直卡在骨架上强。
+      setSettingsLoaded(true);
+    };
     void getSettings()
-      .then(applyAppearanceSettings)
-      .catch(() => applyAppearanceSettings({}));
+      .then(apply)
+      .catch(() => apply({}));
+    return () => {
+      active = false;
+    };
   }, [workbenchReady]);
+
   useEffect(() => {
     document.title = documentTitleForRoute(route);
   }, [route]);
+
   if (!workbenchReady) {
     return (
       <RecoveryPage
@@ -359,10 +155,27 @@ export default function App() {
       />
     );
   }
+
+  if (!settingsLoaded) {
+    // 中性骨架:没有顶栏、没有四步导航、没有媒体池——任何"哪个壳"的线索都不给。
+    return <div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台" />;
+  }
+
+  // 旗默认开(ui.workspace_v2 不在 Rust defaults() 里,没写过就是前端默认值 "true",
+  // 见 UI_SETTING_DEFAULTS)。设置 sheet 的界面开关写回显式 "false" 才落到旧四页壳。
+  if (workspaceV2) {
+    return (
+      <>
+        <WorkspaceShell />
+        <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
+        <FirstRunGuide />
+      </>
+    );
+  }
   return (
-    <>
-      <AppShell route={route} />
+    <Suspense fallback={<div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台" />}>
+      <LazyLegacyShell route={route} />
       <FirstRunGuide />
-    </>
+    </Suspense>
   );
 }

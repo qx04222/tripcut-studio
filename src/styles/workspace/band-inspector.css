@@ -1,0 +1,5 @@
+/* R9 Task 4 的样式桶:镜头带 + 检查器各一文件(每文件 < 400 行),workspace.css 顶部只
+   `@import` 这一个文件。 */
+@import "./band.css";
+@import "./band-empty.css";
+@import "./inspector.css";

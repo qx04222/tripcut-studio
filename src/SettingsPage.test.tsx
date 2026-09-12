@@ -1,14 +1,70 @@
-import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
 
-import { AppShell } from "./App";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { AppShell } from "./LegacyShell";
 import { helpTopicForSection } from "./helpContent";
 import { downloadProgressLabel, updateFoundMessage, updaterErrorMessage } from "./updaterClient";
+
+const apiMocks = vi.hoisted(() => ({
+  clearCacheAndRebuild: vi.fn(async () => ({ removed_database_rows: 0, reset_jobs: 0, removed_disk_bytes: 0 })),
+  clearMinimaxKey: vi.fn(async () => undefined),
+  generationAvailability: vi.fn(async () => ({ enabled: false, has_key: false, budget_remaining_usd: 10 })),
+  generationLedgerSummary: vi.fn(async () => ({ month: "2026-09", spent_usd: 0, budget_usd: 10, entries: [] })),
+  getAppInfo: vi.fn(async () => ({ version: "0.0.0", db_schema_version: 41, worker_count: 4, read_only: false })),
+  getComponentStatuses: vi.fn(async () => []),
+  getLlmStatus: vi.fn(async () => ({
+    enabled: false,
+    provider: "none",
+    monthly_budget: 200,
+    calls_this_month: 0,
+    remaining_calls: 200,
+    budget_exhausted: false,
+    providers: [],
+  })),
+  getSettings: vi.fn(async () => ({})),
+  getSettingsStatus: vi.fn(async () => ({
+    ffmpeg: { configured_path: "", resolved_path: "ffmpeg", available: true, version: "6.0", note: null },
+    ffprobe: { configured_path: "", resolved_path: "ffprobe", available: true, version: "6.0", note: null },
+    whisper: {
+      binary: { configured_path: "", resolved_path: "whisper-cli", available: true, version: "1.0", note: null },
+      model_tier: "large-v3-turbo",
+      model_path: "",
+      model_available: true,
+      models_directory: "",
+    },
+    clip_sidecar: {
+      venv_path: "",
+      service_path: "",
+      setup_script: "",
+      available: true,
+      service_available: true,
+      note: "",
+    },
+    cache: { database_bytes: 0, disk_bytes: 0 },
+  })),
+  hasMinimaxKey: vi.fn(async () => false),
+  listDeviceClocks: vi.fn(async () => []),
+  listLlmLedger: vi.fn(async () => []),
+  openLogsDirectory: vi.fn(async () => undefined),
+  rollbackComponent: vi.fn(async () => ({})),
+  runClipSelfCheck: vi.fn(async () => ({})),
+  setMinimaxKey: vi.fn(async () => undefined),
+  setSetting: vi.fn(async () => undefined),
+  setDeviceClockOffset: vi.fn(async () => undefined),
+}));
+
+vi.mock("./api", () => apiMocks);
+
 import {
   DEFAULT_SETTINGS,
   SETTINGS_SECTIONS,
   SettingsPage,
   appearanceAttributes,
+  clampMinimaxBudgetInput,
 } from "./SettingsPage";
 
 describe("P5-F5 settings page redesign", () => {
@@ -28,7 +84,7 @@ describe("P5-F5 settings page redesign", () => {
   it("renders every settings group and the destructive cache confirmation entry", () => {
     const markup = renderToStaticMarkup(<SettingsPage />);
 
-    for (const heading of ["外观", "性能", "设备时钟校正", "工具链", "分析阈值", "订阅大模型增强", "隐私与诊断", "缓存", "帮助", "关于"]) {
+    for (const heading of ["外观", "性能", "设备时钟校正", "工具链", "分析阈值", "订阅大模型增强", "云端补镜（MiniMax）", "隐私与诊断", "缓存", "帮助", "关于"]) {
       expect(markup).toContain(heading);
     }
     expect(markup).toContain("清空缓存并重建");
@@ -52,15 +108,20 @@ describe("P5-F5 settings page redesign", () => {
     expect(DEFAULT_SETTINGS.llm_enabled).toBe("false");
     expect(DEFAULT_SETTINGS.llm_provider).toBe("none");
     expect(DEFAULT_SETTINGS.llm_monthly_budget).toBe("200");
+    expect(DEFAULT_SETTINGS.minimax_enabled).toBe("false");
+    expect(DEFAULT_SETTINGS.minimax_model).toBe("MiniMax-H3-Max");
+    expect(DEFAULT_SETTINGS.minimax_resolution).toBe("768P");
+    expect(DEFAULT_SETTINGS.minimax_monthly_budget_usd).toBe("10");
   });
 
-  it("defines the eight sidebar categories including canonical journey time and privacy", () => {
+  it("defines the nine sidebar categories including canonical journey time, cloud generation and privacy", () => {
     expect(SETTINGS_SECTIONS.map((section) => section.id)).toEqual([
       "appearance",
       "performance",
       "timeline",
       "tools",
       "analysis",
+      "generation",
       "privacy",
       "about",
       "cache",
@@ -189,5 +250,85 @@ describe("R6-T1 in-app updater", () => {
     expect(updateFoundMessage("0.1.2", "QA 更新链路验证")).toContain("0.1.2");
     expect(updateFoundMessage("0.1.2", "QA 更新链路验证")).toContain("QA 更新链路验证");
     expect(updateFoundMessage("0.1.2", "   ")).toBe("发现新版本 0.1.2，当前版本可继续使用。");
+  });
+});
+
+describe("R7 Task 7: 云端补镜（MiniMax）设置分区", () => {
+  it("renders disabled-by-default state, the persistent generated/ note, and never echoes a stored key", () => {
+    const markup = renderToStaticMarkup(<SettingsPage />);
+
+    expect(markup).toContain("云端补镜（MiniMax）");
+    expect(markup).toContain("未配置");
+    expect(markup).not.toContain("已保存，如需更换请输入新的 Key");
+    expect(markup).toContain('type="password"');
+    expect(markup).toContain("生成的片段会存到素材库的 generated/ 目录，原素材目录不会被写入");
+    expect(markup).toContain("扣费以 MiniMax 平台账单为准");
+    expect(markup).toContain("本月尚无生成记录");
+  });
+
+  it("clamps the monthly budget input to 500 and reports the clamp", () => {
+    expect(clampMinimaxBudgetInput("10")).toEqual({ value: 10, clamped: false });
+    expect(clampMinimaxBudgetInput("999999")).toEqual({ value: 500, clamped: true });
+    expect(clampMinimaxBudgetInput("-5")).toEqual({ value: 0, clamped: true });
+    expect(clampMinimaxBudgetInput("not-a-number")).toEqual({ value: 0, clamped: true });
+  });
+
+  const mounted: Array<{ container: HTMLDivElement; root: ReturnType<typeof createRoot> }> = [];
+
+  afterEach(async () => {
+    while (mounted.length > 0) {
+      const current = mounted.pop();
+      if (!current) continue;
+      await act(async () => current.root.unmount());
+      current.container.remove();
+    }
+    vi.clearAllMocks();
+  });
+
+  async function mountSettingsPage() {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+    await act(async () => {
+      root.render(<SettingsPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return container;
+  }
+
+  it("only shows 已配置 (never the key) after a successful save, and calls setMinimaxKey", async () => {
+    apiMocks.hasMinimaxKey.mockResolvedValueOnce(false);
+    const container = await mountSettingsPage();
+
+    const input = container.querySelector('input[aria-label="MiniMax API Key"]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(container.textContent).toContain("未配置");
+
+    apiMocks.hasMinimaxKey.mockResolvedValue(true);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        "sk-test-secret-value",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const saveButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "保存");
+    expect(saveButton).toBeTruthy();
+    await act(async () => {
+      saveButton!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.setMinimaxKey).toHaveBeenCalledWith("sk-test-secret-value");
+    expect(container.textContent).toContain("已配置");
+    expect(container.innerHTML).not.toContain("sk-test-secret-value");
+    const inputAfter = container.querySelector('input[aria-label="MiniMax API Key"]') as HTMLInputElement;
+    expect(inputAfter.value).toBe("");
   });
 });

@@ -1,0 +1,1669 @@
+/*
+ * R8 导演台工作区的样式。本轮所有新壳样式都往这里加 —— styles.css 有 8000 多行,
+ * 不重写它。颜色一律用 styles.css 顶部已有的 token,这里不新增任何颜色字面量。
+ * 密度按规格 §6:正文 13px/行高 1.45、元信息 12px、栏标题 12px 加粗、控件 28px、
+ * 顶栏按钮 30px、顶栏 44px、状态条 28px。
+ *
+ * 视觉语言 = 旧四页壳的那一套:暖白底、白面板卡 + 1px 发丝边 + 8px 圆角、一种绿色
+ * 强调色、中文栏标题。栏与栏之间是 6px 可见分隔条(带抓手),栏内是白色面板。
+ */
+
+/*
+ * 分节索引(改动请落到对应分节里,不要在文件尾部追加):
+ *   1. 壳与设计令牌
+ *   2. 顶栏与集切换
+ *   3. 三栏、分隔条、折叠竖条、栏标题条
+ *   4. 状态条
+ *   5. 抽屉 / 设置 sheet 外壳
+ *   6. 媒体池(左栏)
+ *   7. 预览监视器(中栏上)
+ *   8. 镜头带与附属带(中栏下)
+ *   9. 检查器(右栏)
+ *   10. 其它
+ */
+
+/*
+ * R9 主屏 chrome(顶栏 / 栏标题条 / 分隔条 / 状态条)在 workspace/chrome.css。
+ * CSS 规定 @import 必须在所有规则之前(放文件尾会被 postcss-import 原样丢掉,
+ * 产物里一条都没有 —— vite build 会警告),所以挂在这里;chrome.css 里的选择器
+ * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
+ */
+@import "./workspace/chrome.css";
+/* 封面占位(R9 D4),跨栏共用,同样只能排在这里。 */
+@import "./workspace/cover.css";
+/* R9 Task 3:媒体池卡片与监视器的新皮(覆盖分节 6、7 的同名选择器)。CSS 规定
+   @import 必须先于所有规则,放在文件尾会被 vite/postcss-import 静默丢弃(2026-09-12
+   实测:build 产物里既没有内联也没有 @import 语句),所以它只能在这里。 */
+@import "./workspace/pool-monitor.css";
+/* 分节 5 的交付抽屉本体(R9 Task 6)独立成文件;@import 按 CSS 规则必须在所有规则之前,
+   所以接在这里而不是文件尾。 */
+@import "./workspace/deliver-drawer.css";
+/* 镜头带 + 检查器的 R9 样式(分节 8 / 9 的替代)。@import 必须排在所有规则之前,
+   否则 postcss-import 会原样留下这一行而浏览器忽略它(实测:放在文件尾部时整份不进 bundle)。
+   它排在前面,所以那两份里的选择器都以栏根 class 起头,靠特异性压过下面的旧规则。 */
+@import "./workspace/band-inspector.css";
+/* 分节 5 的原生导入抽屉样式在自己的文件里(R9 Task 5)。@import 必须落在第一条规则
+   之前:放文件尾部时 postcss 只给一句 warning,规则整条不进产物(2026-09-12 实测)。 */
+@import "./workspace/import-drawer.css";
+@import "./workspace/settings-sheet.css";
+/* 镜头带附属区四个面板的套件皮(R9 Task 8a),同样只能在这里 @import。 */
+@import "./workspace/band-accessory.css";
+
+/* ---------- 1. 壳与设计令牌 ---------- */
+
+.workspace-shell {
+  --workspace-topbar-height: 44px;
+  --workspace-status-height: 28px;
+  --workspace-rail-width: 44px;
+  --workspace-control-height: 28px;
+  --workspace-handle-size: 6px;
+  --workspace-radius: 8px;
+  --workspace-radius-sm: 6px;
+  --workspace-pane-head-height: 32px;
+  --workspace-lift: 0 1px 2px var(--sheen-line), 0 6px 18px var(--card-shadow);
+
+  display: flex;
+  flex-direction: column;
+  /*
+   * 608 = 折叠竖条 44 + 中栏 min 520 + 折叠竖条 44 —— 收缩顺序能保证的地板。
+   * 这里写 1280(窗口最小值)是错的:窄窗把两侧栏折起来正是为了不出横向滚动条,
+   * 壳自己却按 1280 撑着,滚动条照样回来。窗口最小值归 tauri.conf.json 管。
+   */
+  min-width: 608px;
+  height: 100vh;
+  overflow: hidden; /* 栏内各自滚动,整窗不出现纵向滚动条 */
+  background: var(--bg);
+  color: var(--text-primary);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+}
+
+.workspace-shell button,
+.workspace-shell input,
+.workspace-shell select {
+  font: inherit;
+}
+
+/*
+ * 焦点环(规格 §6/§7):键盘可达的每个控件都画同一圈,颜色只用那一种强调色。
+ * 用 `:focus-visible` 而不是 `:focus` —— 鼠标点一下不该留下一圈框。
+ */
+
+.workspace-shell :focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: 4px;
+}
+
+/* 栏内滚动条:细、跟随主题,不抢面板的白。 */
+
+.workspace-shell *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.workspace-shell *::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+.workspace-shell *::-webkit-scrollbar-track {
+  background: var(--sheen);
+}
+
+/* ---------- 2. 顶栏与集切换 ---------- */
+
+.workspace-topbar {
+  display: flex;
+  flex: 0 0 var(--workspace-topbar-height);
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--workspace-topbar-height);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.workspace-topbar-left, .workspace-topbar-right, .workspace-topbar-center {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.workspace-topbar-left, .workspace-topbar-right {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.workspace-topbar-right {
+  justify-content: flex-end;
+}
+
+.workspace-topbar-center {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.workspace-brand {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  margin-right: 8px;
+  padding-right: 12px;
+  border-right: 1px solid var(--border);
+}
+
+/* 三条弧线的品牌标记 —— 与旧壳 `.brand-mark` 同一个形,按 44px 顶栏缩到 22px。 */
+
+.workspace-brand-mark {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  transform: rotate(-8deg);
+}
+
+.workspace-brand-mark span {
+  position: absolute;
+  width: 15px;
+  height: 5px;
+  border: 1.5px solid var(--accent);
+  border-radius: 999px;
+}
+
+.workspace-brand-mark span:nth-child(1) { top: 2px; left: 1px; }
+.workspace-brand-mark span:nth-child(2) { top: 8px; left: 5px; }
+.workspace-brand-mark span:nth-child(3) { top: 14px; left: 2px; }
+
+.workspace-wordmark {
+  font-size: var(--font-sm);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.workspace-episode-switcher {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* 集切换是顶栏正中的一颗胶囊。 */
+
+.workspace-episode-trigger {
+  gap: 8px;
+  max-width: 420px;
+  padding: 0 12px 0 14px;
+  border-radius: 999px;
+  background: var(--sheen);
+  font-weight: 600;
+}
+
+.workspace-episode-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-episode-caret {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.workspace-episode-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 30;
+  display: flex;
+  width: 340px;
+  max-height: 70vh;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--workspace-radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--workspace-lift);
+  outline: none;
+}
+
+.workspace-episode-popover-footer {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- 3. 三栏、分隔条、折叠竖条、栏标题条 ---------- */
+
+.workspace-columns {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.workspace-center-stack {
+  min-width: 0;
+  height: 100%;
+}
+
+.workspace-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-elevated);
+}
+
+.workspace-pool,
+.workspace-inspector,
+.workspace-center {
+  min-width: 0;
+}
+
+/*
+ * 分隔条。react-resizable-panels 的 Separator 内联了 `flex-basis: auto`,
+ * 所以尺寸只能靠 width/height 给 —— 写在 flex 上会被压成 0(R8 视觉审计 §1)。
+ * 6px 宽、面板底色,中间一枚 2×22 的抓手;hover/拖动时整条变强调色。
+ */
+
+.workspace-handle {
+  position: relative;
+  z-index: 1;
+  width: var(--workspace-handle-size);
+  background: var(--bg);
+  cursor: col-resize;
+  transition: background-color 120ms ease;
+}
+
+.workspace-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transform: translate(-50%, -50%);
+  transition: background-color 120ms ease, height 120ms ease, width 120ms ease;
+}
+
+.workspace-handle.horizontal {
+  width: auto;
+  height: var(--workspace-handle-size);
+  cursor: row-resize;
+}
+
+.workspace-handle.horizontal::after {
+  width: 22px;
+  height: 2px;
+}
+
+.workspace-handle:hover,
+.workspace-handle[data-separator][data-active],
+.workspace-handle:focus-visible {
+  background: var(--accent-tint);
+  outline: none;
+}
+
+.workspace-handle:hover::after,
+.workspace-handle[data-separator][data-active]::after,
+.workspace-handle:focus-visible::after {
+  height: 40px;
+  background: var(--accent);
+}
+
+.workspace-handle.horizontal:hover::after,
+.workspace-handle.horizontal[data-separator][data-active]::after,
+.workspace-handle.horizontal:focus-visible::after {
+  width: 40px;
+  height: 2px;
+}
+
+/* 折叠竖条:44px 宽,图标在上,栏名竖排。 */
+
+.workspace-rail {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  width: var(--workspace-rail-width);
+  height: 100%;
+  padding-top: 6px;
+  background: var(--bg-elevated);
+}
+
+.workspace-rail-button {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  width: 32px;
+  padding: 6px 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--workspace-radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.workspace-rail-icon {
+  display: block;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.workspace-rail-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+}
+
+.workspace-rail-button:hover {
+  border-color: var(--border);
+  background: var(--sheen);
+  color: var(--accent);
+}
+
+/* 媒体池顶部的"只读查看某历史集"范围条(R8 终审 L6)。 */
+
+.workspace-pool-scope {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warning);
+  background: var(--warning-tint);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- 4. 状态条 ---------- */
+
+.workspace-status {
+  display: flex;
+  flex: 0 0 var(--workspace-status-height);
+  gap: 0;
+  align-items: center;
+  height: var(--workspace-status-height);
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-status-main, .workspace-status-phrase.link {
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.workspace-status-main {
+  margin-left: -6px;
+  font-weight: 600;
+}
+
+.workspace-status-main:hover,
+.workspace-status-phrase.link:hover {
+  background: var(--sheen);
+  color: var(--accent);
+}
+
+.workspace-status-phrases {
+  display: flex;
+  align-items: center;
+}
+
+/* 短语之间用一个点隔开(规格 §3.6),链接短语也一样。 */
+
+.workspace-status-phrase::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--text-faint);
+}
+
+.workspace-status-phrase.link {
+  padding-left: 0;
+}
+
+.workspace-status-phrase.link::before {
+  margin-right: 6px;
+}
+
+.workspace-status-ime {
+  margin-left: auto;
+  color: var(--warning);
+  font-size: var(--font-xs);
+}
+
+.workspace-status-library {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 16px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ---------- 5. 抽屉 / 设置 sheet 外壳 ---------- */
+
+/* R9 起三个模态各自成文件(import-drawer / deliver-drawer / settings-sheet,见顶部
+   @import),外壳走 kit.css 的 `.ui-modal-*`;旧 `.workspace-drawer-*` 与
+   `.settings-page--sheet` 已无消费者,Task 8a 清掉。这一节只留索引位。 */
+
+/* ---------- 6. 媒体池(左栏) ---------- */
+
+.media-pool {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.pool-filters {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.pool-search {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.pool-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pool-search-field input {
+  width: 100%;
+  height: var(--workspace-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--font-sm);
+}
+
+.pool-search-field input::placeholder {
+  color: var(--text-faint);
+}
+
+.pool-search-submit {
+  flex: 0 0 auto;
+  height: var(--workspace-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.pool-search-submit:hover {
+  border-color: var(--border-strong);
+  background: var(--sheen);
+}
+
+.pool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.pool-chip {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.pool-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.pool-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pool-more {
+  position: relative;
+  margin-left: auto;
+}
+
+.pool-more-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--workspace-lift);
+}
+
+.pool-more-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--font-xs);
+}
+
+.pool-more-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pool-more-check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: var(--font-xs);
+}
+
+.pool-grid-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  background: var(--bg-elevated);
+}
+
+.pool-grid-canvas {
+  position: relative;
+}
+
+.pool-grid-window {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-content: start;
+}
+
+/* ARIA 要求 gridcell 有 row 祖先(没有它 WebKit 会把整棵 AXTable 剪空)。
+   这层**必须是真实盒子**:早先写的是 `display: contents`,那层在渲染树里
+   不存在,WebKit 的 AX 映射跟着把它连同 role=row 一起剪掉 —— 500 条素材的
+   媒体池在真机上只暴露出 1 个 AXRow / 1 个 AXCell(R8 真机 #3)。
+   列模板由 MediaPool.tsx 按当前列数写在行的内联样式上,行高固定(150 - 10 间距),
+   卡片撑满行高 —— 卡片高度由行决定,长文件名再也撑不高它。 */
+
+.pool-grid-row {
+  display: grid;
+  gap: 10px;
+}
+
+/* 卡片:白底、发丝边、6px 圆角;选中 = 强调色描边 + 光晕;hover = 微抬。 */
+
+.pool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+  height: 100%;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.pool-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 2px 8px var(--card-shadow);
+  transform: translateY(-1px);
+}
+
+.pool-card.selected,
+.pool-card.selected:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.pool-card.multi:not(.selected) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-tint);
+}
+
+.pool-card:focus-visible {
+  outline-offset: 1px;
+}
+
+.pool-card-image {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border-radius: 4px;
+  background: var(--media-well);
+}
+
+.pool-card-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pool-card-missing,
+.pool-card-time,
+.pool-card-generated,
+.pool-card-stack,
+.pool-card-match {
+  position: absolute;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pool-card-missing {
+  inset: 0;
+  display: grid;
+  background: transparent;
+  color: var(--text-muted);
+  place-items: center;
+}
+
+.pool-card-time { right: 3px; bottom: 3px; }
+
+.pool-card-generated { top: 3px; left: 3px; }
+
+/* 「n 条候选」是层级信息,放左上并换成强调色底,与时长角标分开两角、两种样式。 */
+
+.pool-card-stack {
+  top: 3px;
+  left: 3px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+
+.pool-card-generated + .pool-card-stack { left: auto; right: 3px; }
+
+.pool-card-match { bottom: 3px; left: 3px; }
+
+/* 文件名一行:头部按宽度截、尾部固定 7 字(扩展名总在),整体就是"中段省略"。 */
+
+.pool-card-name {
+  display: flex;
+  min-width: 0;
+  padding: 0 1px;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.pool-card-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0 1px;
+  line-height: 16px;
+}
+
+.pool-card-date {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-card-rating {
+  margin-left: auto;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.pool-card-rating.unrated { color: var(--text-faint); }
+
+.pool-card-rating.stars {
+  color: var(--accent);
+  letter-spacing: -0.04em;
+}
+
+.pool-card-rating.chip {
+  padding: 0 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.pool-card-rating.favorite {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.pool-card-rating.rejected {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+
+.pool-card-badges {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.pool-card-badges .analysis-pending {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.pool-empty,
+.pool-error {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  text-align: center;
+}
+
+/* ---------- 7. 预览监视器(中栏上) ---------- */
+
+/* 预览监视器(规格 §3.2):标题条 → 16:9 暗井居中 → 一条控件条贴底。 */
+
+.monitor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-elevated);
+}
+
+/* 舞台是尺寸容器,井按 cqh 算出 16:9 下能放下的最大宽 —— 纯 CSS 的 letterbox。 */
+
+.monitor-stage {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  container-type: size;
+}
+
+.monitor-well {
+  position: relative;
+  width: min(100%, calc(100cqh * 16 / 9));
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius);
+  background:
+    radial-gradient(ellipse at center, var(--sheen) 0%, transparent 60%),
+    var(--media-well);
+  box-shadow: inset 0 0 0 1px var(--sheen-line);
+}
+
+.monitor-well-name {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 1;
+  max-width: calc(100% - 20px);
+  overflow: hidden;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.monitor-cover {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.monitor-cover img {
+  max-width: 100%;
+  max-height: 70%;
+  object-fit: contain;
+}
+
+/* 控件条:一行 28px 控件,分成走带组 / 时间码 / 打点组 / 状态字 / 全屏。 */
+
+.monitor-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: var(--font-xs);
+}
+
+.monitor-mark-value {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.monitor-timecode {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  color: var(--text-primary);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.monitor-duration {
+  color: var(--text-muted);
+}
+
+.monitor-marked {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.monitor-fullscreen {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.monitor-fullscreen kbd {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* ---------- 8. 镜头带与附属带(中栏下) ---------- */
+
+.shot-band {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.band-viewport {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 8px;
+  align-items: flex-start;
+  /* 一排瓦片 130 + 章节头 24 + 上下 padding 20 = 174:附属带再高也不许把瓦片挤扁。 */
+  min-height: 176px;
+  padding: 10px 12px;
+  overflow-x: scroll;
+  overflow-y: hidden;
+  background: var(--bg-elevated);
+  scrollbar-gutter: stable;
+}
+
+.band-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/*
+ * 一章 = 上面一行章节头,下面一排瓦片。章节之间是一条竖发丝线,画在伪元素上、
+ * 不占横向宽度 —— 这样任意两个相邻瓦片的节距都是 160 + 8,音乐刻度轨的序号轴
+ * (BAND_SEGMENT_PITCH)才对得上。
+ */
+
+.band-chapter {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.band-chapter + .band-chapter::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 1px;
+  background: var(--border);
+}
+
+/* 章节头钉在章节的左缘:滚进一个长章的中段,标题也还在视口里。 */
+
+.band-chapter-head {
+  position: sticky;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: max-content;
+  max-width: 100%;
+  height: 18px;
+  padding: 0 2px;
+  white-space: nowrap;
+}
+
+.band-chapter-head strong {
+  overflow: hidden;
+  max-width: 220px;
+  font-size: var(--font-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+}
+
+.band-chapter-head small, .band-chapter-folded {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.band-chapter-folded {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--workspace-radius-sm);
+}
+
+.band-chapter-segments {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* 瓦片:160 × (90 缩略图 + 40 文字)。 */
+
+.band-segment {
+  display: flex;
+  position: relative;
+  flex: 0 0 160px;
+  flex-direction: column;
+  width: 160px;
+  height: 130px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.band-segment:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 2px 8px var(--card-shadow);
+}
+
+.band-segment.selected,
+.band-segment.selected:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.band-segment.dragging { opacity: 0.4; }
+
+/* 抓手只在 hover / 选中 / 键盘聚焦时露出来,平时不抢缩略图。 */
+
+.band-segment-grip {
+  position: absolute;
+  top: 66px;
+  right: 4px;
+  height: 20px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 3px;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-size: 10px;
+  line-height: 20px;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.band-segment:hover .band-segment-grip,
+.band-segment.selected .band-segment-grip,
+.band-segment-grip:focus-visible {
+  opacity: 1;
+}
+
+.band-segment-grip:disabled {
+  cursor: default;
+}
+
+/* 空槽位卡片(规格 §3.3):虚线描边 + 槽位中文名 + reason 一行 + 生成入口。 */
+
+.band-segment.slot {
+  height: auto;
+  min-height: 130px;
+  padding: 8px;
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: var(--bg);
+}
+
+.band-segment.slot.selected {
+  border-style: dashed;
+}
+
+.band-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding-right: 18px;
+}
+
+.band-slot strong {
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  font-weight: 700;
+}
+
+.band-slot small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.band-slot-reason,
+.band-slot-hint {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.band-slot small.band-slot-hint { color: var(--danger); }
+
+.band-slot-status {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.band-slot small.band-slot-status-failed { color: var(--danger); }
+
+.band-slot small.band-slot-status-queued,
+.band-slot small.band-slot-status-submitted,
+.band-slot small.band-slot-status-succeeded { color: var(--accent); }
+
+.band-slot-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.band-slot-actions button {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.band-slot-actions button + button {
+  border-color: var(--border);
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.band-slot-actions button:disabled {
+  border-color: var(--border);
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.band-take {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  height: 36px;
+  padding: 0 10px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.band-take-thumb {
+  width: 48px;
+  height: 27px;
+  border-radius: 3px;
+  object-fit: cover;
+  background: var(--media-well);
+}
+
+.band-take.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+
+.band-toast {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  align-items: center;
+  margin: 0;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--accent-tint);
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+}
+
+.band-toast button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+/* 提示文案本身就是关闭键:看起来还是一行字,点一下即消失。 */
+
+.band-toast-text {
+  padding: 0;
+  color: inherit;
+  text-align: left;
+}
+
+.band-empty {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+}
+
+.band-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  align-items: center;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.band-tabs button {
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.band-tabs button:hover {
+  color: var(--text-primary);
+}
+
+.band-tabs button.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 36px 刻度轨:刻度按序号轴像素定位,与镜头带共用同一条时间轴。 */
+
+.band-ruler {
+  display: block;
+  position: relative;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 12px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+}
+
+/*
+ * 刻度轨的内层就是镜头带那条序号轴:宽度 = 分段数 × BAND_SEGMENT_PITCH,再按镜头带的
+ * scrollLeft 做 translateX —— 两条轴同一套坐标,刻度才真的落在镜头上。
+ * left: 12px 与 .band-viewport 的 padding-left 同一个数。
+ */
+
+.band-ruler-track {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  height: 100%;
+  will-change: transform;
+}
+
+.band-ruler-beat,
+.band-ruler-section {
+  position: absolute;
+  top: 20px;
+  width: 1px;
+  background: var(--text-muted);
+}
+
+.band-ruler-beat { height: 8px; opacity: 0.45; }
+
+.band-ruler-section { top: 12px; height: 24px; background: var(--accent); }
+
+.band-ruler-suggestion {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  padding: 0 3px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.band-ruler-suggestion:hover { transform: translateX(-50%) scale(1.3); }
+
+.band-ruler-suggestion.active { color: var(--danger); }
+
+.band-ruler-legend {
+  position: absolute;
+  right: 12px;
+  bottom: 3px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.band-ruler-empty {
+  margin: 0;
+  padding: 10px 0;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+}
+
+.band-accessory {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  max-height: 45%;
+  padding: 10px 12px 12px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.band-accessory-notice {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+}
+
+.band-template-cards {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.band-template-cards button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  font-size: var(--font-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.band-template-cards button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+/* ---------- 9. 检查器(右栏) ---------- */
+
+.inspector {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.inspector-clip,
+.inspector-gap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+/* 默认层四段各是一张白卡。 */
+
+.inspector-default-section {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius);
+  background: var(--bg-elevated);
+}
+
+.inspector-default-section h3 {
+  margin: 0 0 8px;
+  font-size: var(--font-xs, 12px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.inspector-default-section p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-xs);
+}
+
+.inspector-tag-add {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+}
+
+.inspector-tag-add:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.inspector-take {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  width: 104px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.inspector-take-thumb {
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border-radius: 3px;
+  background: var(--media-well);
+}
+
+.inspector-take-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.inspector-take-name {
+  overflow: hidden;
+  padding: 0 2px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.inspector-take small {
+  padding: 0 2px;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.inspector-take.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+
+/* 折叠段:一行 36px 的 details 行,左 chevron、中标题、右状态字。 */
+
+.inspector-collapsible {
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius);
+  background: var(--bg-elevated);
+}
+
+.inspector-collapsible + .inspector-collapsible {
+  margin-top: -4px;
+}
+
+.inspector-collapsible summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: var(--font-xs, 12px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  list-style: none;
+  user-select: none;
+}
+
+.inspector-collapsible summary::-webkit-details-marker {
+  display: none;
+}
+
+.inspector-collapsible summary:hover {
+  color: var(--accent);
+}
+
+.inspector-section-title {
+  flex: 1 1 auto;
+}
+
+.inspector-section-status {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-section-body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--border);
+  font-size: var(--font-xs);
+}
+
+.inspector-section-body .inspector-section {
+  padding: 8px 0 0;
+}
+
+/* 折叠段里那份 AnalysisBadges 没角标时渲染的「—」占位:段标题右侧已经写了「正常」。 */
+
+.inspector-section-body > .analysis-pending {
+  display: none;
+}
+
+.inspector-section-body p {
+  margin: 8px 0;
+}
+
+/* 「技术检查」与「音轨与 LUT」两个折叠段各挂一份完整的 TechCheckPanel(组件本体
+   不能改一行),按各自的作用域裁掉不属于自己的那半——分辨率/编码等放技术检查,
+   音轨/LUT 放另一段,两边看起来才不是同一段内容的复制。 */
+
+.inspector-techcheck-scope .tech-check-audio,
+.inspector-techcheck-scope .tech-check-lut {
+  display: none;
+}
+
+.inspector-audio-scope .tech-check-basics {
+  display: none;
+}
+
+.inspector-dimensions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin: 8px 0 0;
+}
+
+.inspector-dimensions-grid > div {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.inspector-dimensions-grid dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.inspector-dimensions-grid dd {
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.inspector-gap-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.inspector-gap-actions button {
+  height: var(--workspace-control-height);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.inspector-gap-actions button:first-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+
+.inspector-empty-note {
+  display: grid;
+  flex: 1 1 auto;
+  place-content: center;
+  gap: 4px;
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  text-align: center;
+}
+
+.inspector-empty-note strong {
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+}
+
+.inspector-empty-note p {
+  margin: 0;
+}
+
+/* ---------- 10. 其它 ---------- */
+
+.visually-hidden {
+  position: absolute;
+  overflow: hidden;
+  clip-path: inset(50%);
+  width: 1px;
+  height: 1px;
+  white-space: nowrap;
+}
+
+/* 设置还没读回来时的中性骨架(R8 终审 L4)。刻意不带任何一个壳的特征——
+   既没有顶栏也没有四步导航,所以旗是 true 还是 false 都不会先闪一下。 */
+
+.app-boot-skeleton {
+  display: block;
+  width: 100%;
+  height: 100vh;
+  background: var(--bg);
+}

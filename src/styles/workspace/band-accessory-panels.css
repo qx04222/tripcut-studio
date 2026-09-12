@@ -1,0 +1,346 @@
+/* 附属区 · 旅程 / 地点卡 / 模板(band-accessory.css 的分册;约束见那份文件头)。 */
+
+/* ---------- 旅程时间线:按天分组,一行一条 ---------- */
+
+.workspace-shell .band-accessory .journey-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.workspace-shell .band-accessory .journey-timeline > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .band-accessory .journey-day {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.workspace-shell .band-accessory .journey-day-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--space-1) var(--space-2);
+  background: var(--surface-panel);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-shell .band-accessory .journey-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: var(--control-md);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-6);
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  transition: background-color var(--motion-fast);
+}
+
+.workspace-shell .band-accessory .journey-row:hover {
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .band-accessory .journey-row time {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .band-accessory .journey-clip-cover {
+  display: block;
+  flex: none;
+  width: calc(var(--space-6) + var(--space-2));
+  height: var(--space-5);
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--well-bg);
+}
+
+.workspace-shell .band-accessory .journey-clip-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-shell .band-accessory .journey-clip-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .band-accessory .journey-milestone-marker {
+  flex: none;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin: 0 var(--space-4) 0 var(--space-4);
+  border-radius: var(--space-2);
+  background: var(--accent);
+  box-shadow: var(--ring-selected);
+}
+
+.workspace-shell .band-accessory .journey-milestone-body {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.workspace-shell .band-accessory .journey-milestone-body strong {
+  font-weight: 600;
+}
+
+.workspace-shell .band-accessory .journey-milestone-title {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 地点卡:两列字段的卡片 ---------- */
+
+.workspace-shell .band-accessory .destination-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-shell .band-accessory .destination-card > header {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.workspace-shell .band-accessory .destination-card > header > span {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--warn);
+  border-radius: var(--control-sm);
+  background: var(--warn-tint);
+  color: var(--warn);
+  font-size: var(--text-11);
+  font-weight: 600;
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .band-accessory .destination-card > header > span.verified {
+  border-color: var(--ok);
+  background: var(--ok-tint);
+  color: var(--accent-text);
+}
+
+.workspace-shell .band-accessory .destination-card > header small {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-shell .band-accessory .destination-card label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .destination-card label:last-of-type {
+  grid-column: 1 / -1;
+}
+
+.workspace-shell .band-accessory .destination-card label > span {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-weight: 500;
+}
+
+.workspace-shell .band-accessory .destination-card .field-state {
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--control-sm) - var(--space-1));
+  margin: 0;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--control-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  cursor: pointer;
+  transition: border-color var(--motion-fast), color var(--motion-fast);
+}
+
+.workspace-shell .band-accessory .destination-card .field-state:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.workspace-shell .band-accessory .destination-card .field-state.verified {
+  border-color: var(--ok);
+  background: var(--ok-tint);
+  color: var(--accent-text);
+}
+
+.workspace-shell .band-accessory .destination-card .field-state.rejected {
+  border-color: var(--danger);
+  background: var(--danger-tint);
+  color: var(--danger);
+  text-decoration: line-through;
+}
+
+.workspace-shell .band-accessory .destination-card input,
+.workspace-shell .band-accessory .destination-card textarea {
+  width: 100%;
+  min-height: var(--control-md);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  resize: vertical;
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+}
+
+.workspace-shell .band-accessory .destination-card textarea {
+  min-height: calc(var(--lh-13) * 2 + var(--space-2));
+}
+
+.workspace-shell .band-accessory .destination-card input:focus-visible,
+.workspace-shell .band-accessory .destination-card textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.workspace-shell .band-accessory .destination-card details {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .destination-card summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.workspace-shell .band-accessory .destination-card ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+}
+
+.workspace-shell .band-accessory .destination-card-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.workspace-shell .band-accessory .destination-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-md);
+  min-height: 0;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+
+.workspace-shell .band-accessory .destination-card-actions button:first-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.workspace-shell .band-accessory .destination-card-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.workspace-shell .band-accessory .destination-card-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- 故事模板:一排可点的卡 ---------- */
+
+.workspace-shell .band-accessory .band-templates {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-shell .band-accessory .band-template-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-2);
+}
+
+.workspace-shell .band-accessory .band-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+  text-align: left;
+}
+
+.workspace-shell .band-accessory .band-template-card strong {
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .band-accessory .band-template-card span {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .band-template-card.ui-card--selected strong {
+  color: var(--accent-text);
+}
+
+.workspace-shell .band-accessory .band-template-card.ui-card--selected {
+  background: var(--accent-tint);
+}

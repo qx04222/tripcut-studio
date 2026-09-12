@@ -1,0 +1,41 @@
+/* ---------- Toolbar ---------- */
+
+.ui-toolbar {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: 0;
+  height: var(--control-md);
+}
+
+.ui-toolbar--dense {
+  gap: 0;
+}
+
+.ui-toolbar-divider {
+  flex: none;
+  align-self: center;
+  width: 1px;
+  height: var(--space-4);
+  margin: 0 var(--space-1);
+  background: var(--border-hair);
+}
+
+.ui-toolbar-spacer {
+  flex: 1;
+}
+
+/* C 稿的分组传输条:一个带边的槽,子项贴着排。 */
+.ui-toolbar--framed {
+  height: calc(var(--control-md) + var(--space-2));
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.ui-toolbar--framed .ui-toolbar-divider {
+  height: 100%;
+  margin: 0 var(--space-1);
+}

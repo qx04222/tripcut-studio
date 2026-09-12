@@ -1,0 +1,119 @@
+import { useId, type JSX } from "react";
+import type { TargetPlatform } from "../../api";
+import { Badge, Card, Field, SectionHeader, Select, Toggle, type BadgeTone } from "../ui";
+import {
+  PLATFORM_LABELS,
+  PLATFORM_OPTIONS,
+  ROUGH_CUT_TARGET_LABELS,
+  ROUGH_CUT_TARGET_OPTIONS,
+  roughCutTargetFromKey,
+  roughCutTargetKey,
+} from "./deliverModel";
+import type { DeliverForm as DeliverFormState } from "./useDeliverForm";
+
+export interface DeliverFormProps {
+  form: DeliverFormState;
+  /** 剪映草稿开关(抽屉本地状态:打开时主按钮走 generateNative)。 */
+  useJianyingDraft: boolean;
+  onUseJianyingDraftChange(next: boolean): void;
+}
+
+/** 剪映一行的状态字:后端 reason 原样(「已检测到剪映专业版 11.4」/ 拒绝原因),没有就按版本号拼。 */
+function jianyingStatusText(form: DeliverFormState): string {
+  if (form.jianying.reason) return form.jianying.reason;
+  if (form.jianying.installed_version) return `已检测到剪映 ${form.jianying.installed_version}`;
+  return "未检测到剪映";
+}
+
+/** 剪映一行的角标:未装 → 未检测;装了但版本没人工核对 → 待核对;可用 → 版本号。 */
+function jianyingBadge(form: DeliverFormState): { tone: BadgeTone; text: string } {
+  if (!form.jianying.installed_version) return { tone: "neutral", text: "未检测" };
+  if (!form.jianying.supported) return { tone: "warn", text: "待核对" };
+  return { tone: "accent", text: form.jianying.installed_version };
+}
+
+/** 交付目标(平台 / 时长)+ 输出格式(联系表 / 剪映草稿)两节(规格 §4.2 第 1 条)。 */
+export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }: DeliverFormProps): JSX.Element {
+  const platformId = useId();
+  const targetId = useId();
+  const contactId = useId();
+  const jianyingId = useId();
+
+  return (
+    <>
+      <section className="deliver-section" aria-labelledby={`${platformId}-section`}>
+        <SectionHeader
+          title={<span id={`${platformId}-section`}>交付目标</span>}
+          meta={`本集设置:${PLATFORM_LABELS[form.episodePlatform]}`}
+        />
+        <Card className="deliver-fields" padding={4}>
+          <Field label="本次交付平台" htmlFor={platformId} help="只影响本次输出的画布与码率">
+            <Select
+              id={platformId}
+              aria-label="本次交付平台"
+              value={form.overridePlatform}
+              onChange={(event) => form.setOverridePlatform(event.currentTarget.value as TargetPlatform)}
+            >
+              {PLATFORM_OPTIONS.map((platform) => (
+                <option key={platform} value={platform}>
+                  {PLATFORM_LABELS[platform]}
+                  {platform === form.episodePlatform ? "(本集设置)" : ""}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="参考粗剪时长" htmlFor={targetId} help="按平台时长预算预选">
+            <Select
+              id={targetId}
+              aria-label="参考粗剪时长"
+              value={roughCutTargetKey(form.targetSeconds)}
+              onChange={(event) => form.setTargetSeconds(roughCutTargetFromKey(event.currentTarget.value))}
+            >
+              {ROUGH_CUT_TARGET_OPTIONS.map((option) => (
+                <option key={roughCutTargetKey(option)} value={roughCutTargetKey(option)}>
+                  {ROUGH_CUT_TARGET_LABELS[roughCutTargetKey(option)]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </Card>
+      </section>
+
+      <section className="deliver-section" aria-labelledby={`${contactId}-section`}>
+        <SectionHeader title={<span id={`${contactId}-section`}>输出格式</span>} />
+        <Card className="deliver-switch-rows" padding={4}>
+          <div className="deliver-switch-row">
+            <div className="deliver-switch-copy">
+              <label className="deliver-switch-title" htmlFor={contactId}>
+                联系表.pdf
+              </label>
+              <p className="deliver-switch-help">A4 网格联系表:封面缩略图 + 序号 / 入出点 / 章节,按本次交付平台的画布方向排横版或竖版</p>
+            </div>
+            <Toggle id={contactId} label="联系表.pdf" checked={form.includeContactSheet} onChange={form.setIncludeContactSheet} />
+          </div>
+          <div className="deliver-switch-row">
+            <div className="deliver-switch-copy">
+              <span className="deliver-switch-title-row">
+                <label className="deliver-switch-title" htmlFor={jianyingId}>
+                  剪映草稿
+                </label>
+                <Badge tone={jianyingBadge(form).tone}>{jianyingBadge(form).text}</Badge>
+              </span>
+              <p className="deliver-switch-help">
+                <span>{jianyingStatusText(form)}</span>
+                {form.jianying.supported ? <span> · 只新增一份草稿,不改剪映既有草稿;自检不过会自动降级为稳定包</span> : null}
+              </p>
+            </div>
+            <Toggle
+              id={jianyingId}
+              label="剪映草稿"
+              checked={useJianyingDraft && form.jianying.supported}
+              disabled={!form.jianying.supported}
+              onChange={onUseJianyingDraftChange}
+            />
+          </div>
+        </Card>
+      </section>
+    </>
+  );
+}

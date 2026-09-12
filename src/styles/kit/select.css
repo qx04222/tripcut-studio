@@ -1,0 +1,56 @@
+/* ---------- Select:原生 select + chevron 覆层 ---------- */
+
+.ui-select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ui-select-native {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-md);
+  margin: 0;
+  padding: 0 var(--space-5) 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  appearance: none;
+  transition:
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast),
+    background-color var(--motion-fast);
+}
+
+.ui-select-native:hover:not(:disabled) {
+  border-color: var(--text-faint);
+  background: var(--surface-chrome);
+}
+
+.ui-select-native:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--ring);
+}
+
+.ui-select-native:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-select-chevron {
+  position: absolute;
+  top: 50%;
+  right: var(--space-2);
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}

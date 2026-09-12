@@ -6,6 +6,7 @@ import {
   SETTINGS_HELP_TOPICS,
   WORKFLOW_STEPS,
 } from "./helpContent";
+import { isTopModal, popModal, pushModal } from "./workspace/modalStack";
 
 interface HelpOverlayProps {
   open: boolean;
@@ -19,6 +20,18 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
+  // 帮助层之上还能开命令面板(Cmd+K)。两层的 Esc 监听都挂在 document 上,
+  // `stopPropagation()` 管不到同一节点上的兄弟监听,于是一次 Esc 会把两层一起
+  // 关掉。改成只有自己是模态栈顶层时才响应,和 Drawer/CommandPalette 同一套
+  // 模式(R8 终审 L9)。
+  const modalToken = useRef({});
+  useEffect(() => {
+    if (!open) return;
+    const token = modalToken.current;
+    pushModal(token);
+    return () => popModal(token);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const previousFocus = document.activeElement instanceof HTMLElement
@@ -28,6 +41,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (!isTopModal(modalToken.current)) return;
         event.preventDefault();
         onClose();
         return;
@@ -72,7 +86,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
       >
         <header className="help-dialog-header">
           <div>
-            <span>FIELD GUIDE / 中文帮助</span>
+            <span>中文帮助</span>
             <h2 id="help-dialog-title">从一堆旅途素材，到可继续精剪的故事</h2>
             <p>所有说明都对应本机工作流；快捷键列表直接由界面共用常量生成。</p>
           </div>
@@ -91,10 +105,10 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
         <div className="help-dialog-scroll">
           <section className="help-section workflow-help" aria-labelledby="workflow-help-title">
             <div className="help-section-heading">
-              <span>01 / WORKFLOW</span>
+              <span>01 · 界面导览</span>
               <div>
-                <h3 id="workflow-help-title">五步工作流</h3>
-                <p>先收束，再组织，最后交给熟悉的剪辑工具。</p>
+                <h3 id="workflow-help-title">一屏三栏</h3>
+                <p>顶栏进出，三栏分工：左边找素材，中间看画面、排顺序，右边改这一条。</p>
               </div>
             </div>
             <ol className="workflow-map">
@@ -116,7 +130,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
 
           <section className="help-section" aria-labelledby="shortcut-help-title">
             <div className="help-section-heading">
-              <span>02 / SHORTCUTS</span>
+              <span>02 · 快捷键</span>
               <div>
                 <h3 id="shortcut-help-title">快捷键总表</h3>
                 <p>中文输入法正在组词时，单键操作会自动暂停。</p>
@@ -148,7 +162,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
 
           <section className="help-section settings-help" aria-labelledby="settings-help-title">
             <div className="help-section-heading">
-              <span>03 / SETTINGS</span>
+              <span>03 · 设置</span>
               <div>
                 <h3 id="settings-help-title">设置页导览</h3>
                 <p>每个分区做什么、隐私与诊断信息去了哪里。</p>
@@ -172,7 +186,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
 
           <section className="help-section faq-help" aria-labelledby="faq-help-title">
             <div className="help-section-heading">
-              <span>04 / FAQ</span>
+              <span>04 · 常见问题</span>
               <div>
                 <h3 id="faq-help-title">常见问题</h3>
                 <p>围绕本机工具链、剪映交付和素材安全。</p>

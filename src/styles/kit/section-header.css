@@ -1,0 +1,71 @@
+/* ---------- SectionHeader ---------- */
+
+.ui-section-header {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ui-section-header-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.ui-section-header-title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ui-section-header-meta {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-weight: 500;
+  line-height: var(--lh-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-section-header-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  margin-left: auto;
+}
+
+.ui-section-header-description {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+/* pane = 32px 铬条(A 稿 .pane-h):比面板暗半档,底边发丝线。 */
+.ui-section-header--pane {
+  flex: none;
+  justify-content: center;
+  height: var(--space-6);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--surface-chrome);
+}
+
+.ui-section-header--pane .ui-section-header-title {
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.ui-section-header--section {
+  margin-bottom: var(--space-2);
+}
+
+.ui-section-header--section .ui-section-header-title {
+  font-size: var(--text-15);
+  line-height: var(--lh-15);
+}

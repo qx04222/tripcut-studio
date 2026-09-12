@@ -207,6 +207,8 @@ export interface ClipListItem {
   display_lut_path?: string | null;
   selected_transcribe_track?: number | null;
   selected_monitor_track?: number | null;
+  /** `null` = 真实素材;`"minimax"` = MiniMax 云端补镜生成物。 */
+  generated_source?: string | null;
   tz_guess?: string | null;
   tz_conflict?: boolean;
   device_model?: string | null;
@@ -708,6 +710,55 @@ export function listLlmLedger(): Promise<LlmLedgerEntry[]> {
   return invoke<LlmLedgerEntry[]>("list_llm_ledger");
 }
 
+// R7 Task 7:「云端补镜（MiniMax）」设置分区。Key 只经 Keychain 往返——
+// `setMinimaxKey`/`clearMinimaxKey` 不返回 key 本身,`hasMinimaxKey` 只回答
+// 是否已配置,永不回显存的值。
+export function setMinimaxKey(key: string): Promise<void> {
+  return invoke<void>("set_minimax_key", { key });
+}
+
+export function clearMinimaxKey(): Promise<void> {
+  return invoke<void>("clear_minimax_key");
+}
+
+export function hasMinimaxKey(): Promise<boolean> {
+  return invoke<boolean>("has_minimax_key");
+}
+
+export interface GenerationAvailability {
+  enabled: boolean;
+  has_key: boolean;
+  budget_remaining_usd: number;
+}
+
+export interface GenerationLedgerEntry {
+  at: string;
+  request_id: number;
+  chapter_title: string;
+  slot: string;
+  seconds: number;
+  images: number;
+  cost_usd: number;
+  model: string;
+  resolution: string;
+  status: string;
+}
+
+export interface GenerationLedgerSummary {
+  month: string;
+  spent_usd: number;
+  budget_usd: number;
+  entries: GenerationLedgerEntry[];
+}
+
+export function generationAvailability(): Promise<GenerationAvailability> {
+  return invoke<GenerationAvailability>("generation_availability");
+}
+
+export function generationLedgerSummary(): Promise<GenerationLedgerSummary> {
+  return invoke<GenerationLedgerSummary>("generation_ledger_summary");
+}
+
 export function describeClipWithAi(clipId: number): Promise<AiDescriptionResult> {
   return invoke<AiDescriptionResult>("describe_clip_with_ai", { clipId });
 }
@@ -1047,6 +1098,14 @@ export function playerSetViewport(viewport: PlayerViewport): Promise<void> {
   return invoke<void>("player_set_viewport", { viewport });
 }
 
+/**
+ * 覆盖层(popover / 抽屉 / 命令面板 / 帮助)开合时藏起或恢复原生视频视图。
+ * 原生 NSView 永远画在 WKWebView 之上,不藏就会盖住覆盖层;播放状态不动。
+ */
+export function playerSetOccluded(occluded: boolean): Promise<void> {
+  return invoke<void>("player_set_occluded", { occluded });
+}
+
 export function playerOpen(clipId: number): Promise<PlayerStatus> {
   return invoke<PlayerStatus>("player_open", { clipId });
 }
@@ -1157,6 +1216,88 @@ export async function applyNarrativeOp(op: NarrativeOpPayload): Promise<Revision
 
 export async function undoNarrativeOp(): Promise<RevisionInfo | null> {
   return invoke<RevisionInfo | null>("undo_narrative_op");
+}
+
+export interface GenerationRequestSummary {
+  id: number;
+  status: "draft" | "submitted" | "queued" | "succeeded" | "failed" | "cancelled" | "imported";
+  error: string | null;
+  estimated_cost_usd: number;
+  actual_cost_usd: number | null;
+  result_clip_id: number | null;
+}
+
+export interface StoryGap {
+  id: number;
+  chapter_id: number;
+  chapter_title: string;
+  beat_id: number | null;
+  slot: string;
+  slot_label_zh: string;
+  reason: string;
+  status: "open" | "requested" | "filled" | "dismissed";
+  latest_request: GenerationRequestSummary | null;
+}
+
+export async function listStoryGaps(): Promise<StoryGap[]> {
+  return invoke<StoryGap[]>("list_story_gaps");
+}
+
+export async function detectStoryGaps(): Promise<number> {
+  return invoke<number>("detect_story_gaps");
+}
+
+export async function dismissStoryGap(gapId: number): Promise<void> {
+  return invoke<void>("dismiss_story_gap", { gapId });
+}
+
+export async function reopenStoryGap(gapId: number): Promise<void> {
+  return invoke<void>("reopen_story_gap", { gapId });
+}
+
+export interface GenerationDraftPreview {
+  mode: "t2v" | "i2v" | "fl2v" | "r2v";
+  model: "MiniMax-H3" | "MiniMax-H3-Max";
+  resolution: "480P" | "768P" | "2K";
+  duration_s: number;
+  ratio: string;
+  prompt: string;
+  refs: { path: string; role: string; preview_url: string | null }[];
+  estimated_cost_usd: number;
+  notes: string[];
+}
+
+export interface GenerationOverrides {
+  prompt?: string;
+  model?: string;
+  resolution?: string;
+  duration_s?: number;
+}
+
+export async function previewGeneration(
+  gapId: number,
+  overrides: GenerationOverrides,
+): Promise<GenerationDraftPreview> {
+  return invoke<GenerationDraftPreview>("preview_generation", { gapId, overrides });
+}
+
+export async function submitGeneration(
+  gapId: number,
+  overrides: GenerationOverrides,
+): Promise<GenerationRequestSummary> {
+  return invoke<GenerationRequestSummary>("submit_generation", { gapId, overrides });
+}
+
+export async function retryGeneration(requestId: number): Promise<GenerationRequestSummary> {
+  return invoke<GenerationRequestSummary>("retry_generation", { requestId });
+}
+
+export async function cancelGeneration(requestId: number): Promise<void> {
+  return invoke<void>("cancel_generation", { requestId });
+}
+
+export async function listGenerationRequests(): Promise<GenerationRequestSummary[]> {
+  return invoke<GenerationRequestSummary[]>("list_generation_requests");
 }
 
 export async function setRoutineOverride(

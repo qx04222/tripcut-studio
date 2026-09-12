@@ -11,14 +11,13 @@ import {
   type UIEvent,
 } from "react";
 
-import {
-  AnalysisBadges,
-  analysisBadgeKinds,
-  motionClassLabel,
-  type AnalysisBadgeKind,
-} from "./AnalysisPanel";
+import { AnalysisBadges, motionClassLabel } from "./AnalysisPanel";
 import { SimilarGroupsPanel } from "./SimilarGroupsPanel";
 import { TechCheckPanel } from "./TechCheckPanel";
+// R8 Task 5:评级与 AI 描述的渲染搬到 `workspace/inspectorFields.tsx`,供新壳
+// `Inspector.tsx` 共用(同 poolModel.ts 的技术);此处只 import,行为不变。
+import { AiDescriptionSection, RatingDisplay } from "./workspace/inspectorFields";
+import { activeRatingValue, ratingLabelFor } from "./workspace/inspectorModel";
 import { formatTimecode, PlayerOverlay } from "./PlayerOverlay";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { StoryboardView } from "./Storyboard";
@@ -64,18 +63,46 @@ import {
   listOcrHits,
   type OcrTextHit,
 } from "./api";
+// R8 Task 2:这些纯函数搬到了 `workspace/poolModel.ts`,新壳的媒体池与旧壳的
+// 胶片墙共用同一份实现。此处只 import + re-export —— 旗关时本文件的行为与
+// 断言一字不变,两边也不会各自改歪一份筛选逻辑。
+import {
+  FILM_GRID_MIN_WIDTH,
+  GRID_OVERSCAN_ROWS,
+  GRID_ROW_HEIGHT,
+  STACK_DETAIL_HEIGHT,
+  buildShotStackWallItems,
+  filmGridColumnCount,
+  filmRowAtOffset,
+  filmRowTop,
+  filterClipsByDimension,
+  filterClipsByOrientation,
+  filterSelectionClips,
+  isPortraitClip,
+  isSuspectedWaste,
+  type OrientationFilter,
+  type SelectionFilter,
+  type ShotStackWallItem,
+} from "./workspace/poolModel";
 
-export type SelectionFilter = "all" | "favorite" | "unrated" | "rejected";
+export {
+  FILM_GRID_MIN_WIDTH,
+  buildShotStackWallItems,
+  filmGridColumnCount,
+  filmRowAtOffset,
+  filmRowTop,
+  filterClipsByDimension,
+  filterClipsByOrientation,
+  filterSelectionClips,
+  isPortraitClip,
+  isSuspectedWaste,
+};
+export type { OrientationFilter, SelectionFilter, ShotStackWallItem };
+
 export type RatingAction =
   | { kind: "binary"; value: -1 | 1 }
   | { kind: "star"; value: 1 | 2 | 3 | 4 | 5 }
   | { kind: "clear" };
-
-export interface ShotStackWallItem {
-  clip: ClipListItem;
-  stack?: ShotStack;
-  semanticScore?: number;
-}
 
 export function isFilmGridShortcutTarget(
   target: EventTarget | null,
@@ -89,39 +116,6 @@ export function filterSearchHitsToVisibleClips<T extends { clip_id: number }>(
   visibleClipIds: ReadonlySet<number>,
 ): T[] {
   return hits.filter((hit) => visibleClipIds.has(hit.clip_id));
-}
-
-const SUSPECT_BADGES = new Set<AnalysisBadgeKind>([
-  "dark",
-  "overexposed",
-  "clipped",
-  "soft_focus",
-]);
-const GRID_GAP = 14;
-export const FILM_GRID_MIN_WIDTH = 280;
-const GRID_ROW_HEIGHT = 260;
-const STACK_DETAIL_HEIGHT = 300;
-
-export function filmRowTop(row: number, expandedRow: number | null): number {
-  return row * GRID_ROW_HEIGHT + (expandedRow !== null && row > expandedRow ? STACK_DETAIL_HEIGHT : 0);
-}
-
-export function filmRowAtOffset(offset: number, expandedRow: number | null): number {
-  if (expandedRow === null || offset < (expandedRow + 1) * GRID_ROW_HEIGHT) {
-    return Math.max(0, Math.floor(offset / GRID_ROW_HEIGHT));
-  }
-  if (offset < (expandedRow + 1) * GRID_ROW_HEIGHT + STACK_DETAIL_HEIGHT) return expandedRow;
-  return Math.max(0, Math.floor((offset - STACK_DETAIL_HEIGHT) / GRID_ROW_HEIGHT));
-}
-const GRID_OVERSCAN_ROWS = 2;
-const GRID_HORIZONTAL_PADDING = 24;
-
-export function filmGridColumnCount(viewportWidth: number): number {
-  const contentWidth = Math.max(0, viewportWidth - GRID_HORIZONTAL_PADDING);
-  return Math.max(
-    1,
-    Math.floor((contentWidth + GRID_GAP) / (FILM_GRID_MIN_WIDTH + GRID_GAP)),
-  );
 }
 
 const FILTER_LABELS: Record<SelectionFilter, string> = {
@@ -145,72 +139,10 @@ const DIMENSION_LABELS: Record<ClipDimensionKey, string> = {
 const DIMENSION_KEYS = Object.keys(DIMENSION_LABELS) as ClipDimensionKey[];
 const TIME_STAGE_LABELS = ["出发", "路上", "到达", "探索", "吃饭", "活动", "日落夜景", "返回"];
 
+// R8 Task 5:主体逻辑搬到 `workspace/inspectorModel.ts`(同 poolModel.ts 的技术),
+// 这里只剩委托——调用点一行不改,行为不变。
 function activeRating(value: number | null): number | null {
-  return value === 0 ? null : value;
-}
-
-export function isSuspectedWaste(clip: ClipListItem): boolean {
-  return analysisBadgeKinds(clip).some((kind) => SUSPECT_BADGES.has(kind));
-}
-
-export function filterSelectionClips(
-  clips: ClipListItem[],
-  filter: SelectionFilter,
-  excludeSuspect: boolean,
-  qualityExemptClipIds: ReadonlySet<number> = new Set(),
-): ClipListItem[] {
-  return clips.filter((clip) => {
-    if (clip.id === null || clip.status !== "ready") return false;
-    if (excludeSuspect && isSuspectedWaste(clip) && !qualityExemptClipIds.has(clip.id)) {
-      return false;
-    }
-    const binary = activeRating(clip.binary_rating);
-    const star = activeRating(clip.star_rating);
-    switch (filter) {
-      case "favorite":
-        return binary === 1;
-      case "unrated":
-        return binary === null && star === null;
-      case "rejected":
-        return binary === -1;
-      default:
-        return true;
-    }
-  });
-}
-
-export function filterClipsByDimension(
-  clips: ClipListItem[],
-  dimensions: ClipDimension[],
-  dimension: ClipDimensionKey | "",
-  label: string,
-): ClipListItem[] {
-  if (!dimension || !label) return clips;
-  const matchingIds = new Set(
-    dimensions
-      .filter((item) => item.dimension === dimension && item.label === label)
-      .map((item) => item.clip_id),
-  );
-  return clips.filter((clip) => clip.id !== null && matchingIds.has(clip.id));
-}
-
-export type OrientationFilter = "all" | "portrait" | "landscape";
-
-// G4：rotation 与 width/height 都是 ffprobe 探测出的解码前（旋转前）尺寸——
-// 90/270 会把 landscape 的解码尺寸转成竖屏画面，反之亦然。用 XOR：
-// 已经是竖屏尺寸 且 旋转不是 90/270 → 仍是竖屏；反之同理。
-export function isPortraitClip(clip: Pick<ClipListItem, "rotation" | "width" | "height">): boolean {
-  const rotatesQuarterTurn = clip.rotation === 90 || clip.rotation === 270;
-  const tallerThanWide = (clip.height ?? 0) > (clip.width ?? 0);
-  return rotatesQuarterTurn !== tallerThanWide;
-}
-
-export function filterClipsByOrientation(
-  clips: ClipListItem[],
-  orientation: OrientationFilter,
-): ClipListItem[] {
-  if (orientation === "all") return clips;
-  return clips.filter((clip) => isPortraitClip(clip) === (orientation === "portrait"));
+  return activeRatingValue(value);
 }
 
 export function replaceShotStackMemberState(
@@ -249,57 +181,6 @@ export function replaceShotStackMemberState(
     }
     return { ...stack, members };
   });
-}
-
-export function buildShotStackWallItems(
-  filteredClips: ClipListItem[],
-  allClips: ClipListItem[],
-  stacks: ShotStack[],
-  hideCandidates: boolean,
-  semanticScores: ReadonlyMap<number, number> = new Map(),
-): ShotStackWallItem[] {
-  const clipsById = new Map(
-    allClips
-      .filter((clip): clip is ClipListItem & { id: number } => clip.id !== null)
-      .map((clip) => [clip.id, clip] as const),
-  );
-  const filteredIds = new Set(
-    filteredClips
-      .map((clip) => clip.id)
-      .filter((clipId): clipId is number => clipId !== null),
-  );
-  const stackByClipId = new Map<number, ShotStack>();
-  stacks.forEach((stack) => {
-    stack.members.forEach((member) => stackByClipId.set(member.clip_id, stack));
-  });
-  const emitted = new Set<number>();
-  const items: ShotStackWallItem[] = [];
-  filteredClips.forEach((clip) => {
-    if (clip.id === null) return;
-    const stack = stackByClipId.get(clip.id);
-    if (!stack) {
-      items.push({ clip, semanticScore: semanticScores.get(clip.id) });
-      return;
-    }
-    if (emitted.has(stack.id)) return;
-    emitted.add(stack.id);
-    const preferred =
-      stack.members.find((member) => member.is_preferred && filteredIds.has(member.clip_id)) ??
-      stack.members.find((member) => filteredIds.has(member.clip_id)) ??
-      stack.members[0];
-    const hasPreferred = stack.members.some((member) => member.is_preferred);
-    const representative = clipsById.get(preferred.clip_id) ?? clip;
-    items.push({
-      clip: representative,
-      stack:
-        (hideCandidates && !stack.quality_exempt && hasPreferred) ||
-        (stack.members.length === 1 && !stack.quality_exempt && hasPreferred)
-          ? undefined
-          : stack,
-      semanticScore: representative.id === null ? undefined : semanticScores.get(representative.id),
-    });
-  });
-  return items;
 }
 
 export function nextShotStackClipId(
@@ -400,11 +281,7 @@ export function transcriptTimeLabel(match: TranscriptMatch): string {
 }
 
 function ratingLabel(clip: ClipListItem): string {
-  const binary = activeRating(clip.binary_rating);
-  if (binary === 1) return "收藏";
-  if (binary === -1) return "拒绝";
-  const star = activeRating(clip.star_rating);
-  return star === null ? "未评" : `${star} 星`;
+  return ratingLabelFor(clip);
 }
 
 function RatingMarks({ clip }: { clip: ClipListItem }) {
@@ -509,6 +386,9 @@ function FilmCard({
           <span className="film-card-strip" style={stripStyle} aria-hidden="true" />
         ) : null}
         <span className="film-card-time">{durationLabel(clip)}</span>
+        {clip.generated_source ? (
+          <span className="generated-source-badge" title="MiniMax 云端补镜生成，非原始素材">AI 生成</span>
+        ) : null}
         {semanticScore !== undefined ? (
           <span className="film-card-match">匹配度 {matchPercentage(semanticScore)}%</span>
         ) : null}
@@ -818,7 +698,6 @@ function SelectionInspector({
       </aside>
     );
   }
-  const star = activeRating(clip.star_rating);
   return (
     <aside className="selection-inspector" aria-label={`${clip.file_name} 素材信息`}>
       <div className="inspector-heading">
@@ -826,17 +705,7 @@ function SelectionInspector({
         <strong title={clip.file_name}>{clip.file_name}</strong>
         <small title={clip.path}>{clip.path}</small>
       </div>
-      <div className="inspector-rating">
-        <span>评级</span>
-        <strong>{ratingLabel(clip)}</strong>
-        <div aria-label={star === null ? "未评星" : `${star} 星`}>
-          {Array.from({ length: 5 }, (_, index) => (
-            <span className={star !== null && index < star ? "filled" : undefined} key={index}>
-              ★
-            </span>
-          ))}
-        </div>
-      </div>
+      <RatingDisplay clip={clip} />
       <div className="inspector-section">
         <span>L1 质量角标</span>
         <AnalysisBadges clip={clip} />
@@ -966,35 +835,13 @@ function SelectionInspector({
           </p>
         </div>
       ) : null}
-      <div className="inspector-section inspector-ai-description">
-        <span>AI 描述 · L3 可选增强</span>
-        {aiDescription ? (
-          <div className="ai-description-result">
-            <p>{aiDescription.description}</p>
-            <div>
-              {aiDescription.tags.map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-            <small>由 {aiDescription.provider} 返回；3 个标签已写入 ai_l3</small>
-          </div>
-        ) : (
-          <p>
-            {!llmEnabled
-              ? "设置页开启后才可调用。"
-              : llmBudgetExhausted
-                ? "本月预算已用尽，后端熔断且不会启动 CLI。"
-                : "只发送文件名和 L1 / 运镜数值，不发送帧或原片。"}
-          </p>
-        )}
-        <button type="button" disabled={!llmEnabled || llmBudgetExhausted || aiBusy} onClick={onDescribe}>
-          {aiBusy
-            ? "生成中…"
-            : llmBudgetExhausted
-              ? "预算已熔断"
-              : aiDescription
-                ? "重新生成 AI 描述"
-                : "生成 AI 描述"}
-        </button>
-      </div>
+      <AiDescriptionSection
+        aiDescription={aiDescription}
+        llmEnabled={llmEnabled}
+        llmBudgetExhausted={llmBudgetExhausted}
+        aiBusy={aiBusy}
+        onDescribe={onDescribe}
+      />
       <div className="inspector-section inspector-segments">
         <span>精选片段 · {segments.length}</span>
         {segments.length === 0 ? (

@@ -12,6 +12,10 @@ const apiMocks = vi.hoisted(() => ({
   getCurrentEpisode: vi.fn().mockResolvedValue({ id: 100 }),
   listEpisodes: vi.fn().mockResolvedValue([{ id: 100, title: "当前集" }, { id: 7, title: "泰国之旅" }]),
   getClipsRevision: vi.fn().mockResolvedValue("rev-1"),
+  // R8 Task 2:拼音索引改走 useClipsFeed,feed 会一并拉这三条。
+  listShotStacks: vi.fn().mockResolvedValue([]),
+  listStoryGaps: vi.fn().mockResolvedValue([]),
+  listAssetSafety: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("./api", () => apiMocks);
 

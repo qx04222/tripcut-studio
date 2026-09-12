@@ -1,0 +1,67 @@
+/* ---------- Chip ---------- */
+
+.ui-chip {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--control-sm);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.ui-chip-count {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-chip--button {
+  cursor: pointer;
+}
+
+.ui-chip--button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+
+.ui-chip--button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.ui-chip--button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-chip--selected,
+.ui-chip--button.ui-chip--selected:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.ui-chip--selected .ui-chip-count {
+  color: inherit;
+}
+
+.ui-chip--warn { color: var(--warn); }
+.ui-chip--danger { color: var(--danger); }
+.ui-chip--accent { color: var(--accent-text); }
+
+.ui-chip--warn.ui-chip--selected { border-color: var(--warn); background: var(--warn-tint); color: var(--warn); }
+.ui-chip--danger.ui-chip--selected { border-color: var(--danger); background: var(--danger-tint); color: var(--danger); }

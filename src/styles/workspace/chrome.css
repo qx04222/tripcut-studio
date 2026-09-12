@@ -1,0 +1,333 @@
+/*
+ * R9 主屏 chrome(Task 2):顶栏、栏标题条、分隔条、状态条。视觉按 A 稿「编辑台密度」:
+ * 顶栏是面板白 + 发丝线 + 卡片阴影,从米色壳底上抬起来;每栏 32px 铬条(比面板暗半档);
+ * 栏之间 6px 分隔条,中间一枚点纹抓手,hover / 拖动时抓手变强调色;状态条 28px,短语带图标。
+ * 顶栏融入 C 稿:⌘I / ⌘⏎ / ⌘K 键帽提示。
+ *
+ * 值只从 tokens.css 取(没有颜色字面量)。这份文件由 workspace.css 顶部一条 @import 挂进来,
+ * CSS 要求它排在所有规则之前,于是这里每条都加 `.workspace-shell` 前缀抬一级特异性,
+ * 覆盖分节 2/3/4 里的同名旧样式,不靠声明顺序。
+ */
+
+/* 栏标题条高度。之前只有引用没有定义:height 取到无效值退成 auto,WKWebView 实机上
+   条只有 19px(真机复核三 AX 实测),舞台随之多出 13px。规格 §3.2 是 32px。 */
+.workspace-shell {
+  --workspace-pane-chrome-height: 32px;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.workspace-shell .workspace-topbar {
+  position: relative;
+  z-index: 3;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-shell .workspace-brand {
+  gap: var(--space-2);
+  margin-right: var(--space-1);
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border-hair);
+}
+
+/* 品牌记号:22px 井底深色方块 + 强调色播放三角(A 稿),不再画三根线。 */
+.workspace-shell .workspace-brand-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--well-bg);
+  color: var(--accent);
+  box-shadow: var(--shadow-inset-well);
+  transform: none;
+}
+
+.workspace-shell .workspace-brand-mark .ui-icon {
+  fill: currentColor;
+}
+
+.workspace-shell .workspace-wordmark {
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  letter-spacing: 0.02em;
+}
+
+/* 键帽提示压在按钮里:16px 高、淡色;主按钮上翻成白字半透明底。 */
+.workspace-shell .workspace-topbar .ui-button .ui-kbd {
+  min-width: 16px;
+  height: 16px;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  font-size: var(--text-11);
+  color: inherit;
+  opacity: 0.72;
+}
+
+.workspace-shell .workspace-topbar .ui-button--primary .ui-kbd {
+  border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent);
+  background: color-mix(in srgb, var(--accent-ink) 14%, transparent);
+  color: var(--accent-ink);
+  opacity: 1;
+}
+
+/* 顶栏右侧「命令面板 ⌘K」提示:纯视觉,不是控件。 */
+.workspace-shell .workspace-topbar-hint {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  margin-right: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+}
+
+/* 集切换胶囊:铬底 + 强边,右端 chevron;标题与平台之间一个淡点。 */
+.workspace-shell .workspace-episode-trigger.ui-button {
+  height: var(--control-md);
+  max-width: 420px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-radius: 999px;
+  background: var(--surface-chrome);
+  font-weight: 500;
+}
+
+.workspace-shell .workspace-episode-trigger.ui-button:hover {
+  background: var(--surface-chrome-2);
+}
+
+.workspace-shell .workspace-episode-trigger .ui-button-label {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-shell .workspace-episode-trigger .workspace-episode-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .workspace-episode-sep {
+  color: var(--text-faint);
+}
+
+.workspace-shell .workspace-episode-trigger .workspace-episode-caret {
+  color: var(--text-muted);
+}
+
+/* ---------- 栏标题条(32px 铬条;类名 workspace-pane-chrome,避开分节 3 里旧 .workspace-pane-head 的 display:flex 行布局) ---------- */
+
+.workspace-shell .workspace-pane-chrome.ui-section-header--pane {
+  height: var(--workspace-pane-chrome-height);
+  padding: 0 var(--space-3);
+}
+
+.workspace-shell .workspace-pane-chrome .ui-section-header-row {
+  gap: var(--space-2);
+}
+
+/* 栏标题(「检查器」「预览监视器」)永远完整:长文件名 meta 只能压自己,
+   不能把标题挤到 0(R9 实机 D3:检查器条只剩「· dubai_walk_…mp4」)。 */
+.workspace-shell .workspace-pane-chrome .ui-section-header-title {
+  flex: none;
+}
+
+.workspace-shell .workspace-pane-chrome .ui-section-header-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .workspace-pane-chrome .ui-section-header-meta::before {
+  content: "· ";
+  color: var(--text-faint);
+}
+
+/* 文件名类 meta 用等宽 11px(A 稿 .fn)。 */
+.workspace-shell .workspace-pane-chrome.mono-meta .ui-section-header-meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  color: var(--text-secondary);
+}
+
+/* ---------- 分隔条:6px 铬底,居中点纹抓手 ---------- */
+
+.workspace-shell .workspace-handle {
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid var(--border-hair);
+  border-left: 1px solid var(--border-hair);
+  background: var(--surface-chrome-2);
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
+}
+
+.workspace-shell .workspace-handle.horizontal {
+  border-top: 1px solid var(--border-hair);
+  border-right: 0;
+  border-bottom: 1px solid var(--border-hair);
+  border-left: 0;
+}
+
+.workspace-shell .workspace-handle::after {
+  content: none;
+}
+
+.workspace-shell .workspace-handle-grip {
+  display: block;
+  width: 2px;
+  height: 26px;
+  border-radius: 999px;
+  background: repeating-linear-gradient(180deg, var(--border-strong) 0 2px, transparent 2px 4px);
+  transition: background var(--motion-fast), height var(--motion-fast), width var(--motion-fast);
+}
+
+.workspace-shell .workspace-handle.horizontal .workspace-handle-grip {
+  width: 26px;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, var(--border-strong) 0 2px, transparent 2px 4px);
+}
+
+.workspace-shell .workspace-handle:hover,
+.workspace-shell .workspace-handle[data-separator][data-active],
+.workspace-shell .workspace-handle:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  outline: none;
+}
+
+.workspace-shell .workspace-handle:hover .workspace-handle-grip,
+.workspace-shell .workspace-handle[data-separator][data-active] .workspace-handle-grip,
+.workspace-shell .workspace-handle:focus-visible .workspace-handle-grip {
+  height: 40px;
+  background: var(--accent);
+}
+
+.workspace-shell .workspace-handle.horizontal:hover .workspace-handle-grip,
+.workspace-shell .workspace-handle.horizontal[data-separator][data-active] .workspace-handle-grip,
+.workspace-shell .workspace-handle.horizontal:focus-visible .workspace-handle-grip {
+  width: 40px;
+  height: 2px;
+}
+
+/* ---------- 状态条(28px) ---------- */
+
+.workspace-shell .workspace-status {
+  gap: var(--space-3);
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+}
+
+.workspace-shell .workspace-status-main.ui-button {
+  margin-left: calc(-1 * var(--space-2));
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  font-weight: 600;
+}
+
+.workspace-shell .workspace-status-phrases {
+  gap: var(--space-3);
+}
+
+.workspace-shell .workspace-status-phrase {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.workspace-shell .workspace-status-phrase::before {
+  content: none;
+}
+
+.workspace-shell .workspace-status-phrase .ui-icon {
+  color: var(--text-muted);
+}
+
+.workspace-shell .workspace-status-phrase.done .ui-icon {
+  color: var(--ok);
+}
+
+/* 分析进度:96×4 的细条,填充宽度由 --progress 灌入。 */
+.workspace-shell .workspace-status-progress {
+  position: relative;
+  width: 96px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border-hair);
+}
+
+.workspace-shell .workspace-status-progress::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--progress, 0%);
+  background: var(--accent);
+}
+
+.workspace-shell .workspace-status-phrase.link.ui-button {
+  height: 22px;
+  padding: 0 var(--space-1);
+  color: var(--warn);
+  font-size: var(--text-12);
+  font-weight: 500;
+}
+
+.workspace-shell .workspace-status-phrase.link.ui-button .ui-icon {
+  color: var(--warn);
+}
+
+.workspace-shell .workspace-status-phrase.link.ui-button:hover {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+
+.workspace-shell .workspace-status-library {
+  gap: var(--space-1);
+  margin-left: 0;
+  font-size: var(--text-12);
+}
+
+/* 库名前的「已连接」记号:14px 圆,tint 底 + 强调色勾。 */
+.workspace-shell .workspace-status-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+/* ---------- 镜头带 Panel:故事模式贴内容高,附属模式撑满 ---------- */
+
+/* Panel 本身刷面板色:分隔条拖出的那点余量也是面板白,不露壳底色。 */
+.workspace-shell .workspace-band {
+  background: var(--surface-panel);
+}
+
+.workspace-shell .workspace-band-fit {
+  height: 100%;
+  min-height: 0;
+}
+
+/* 故事模式:auto 高 —— `.shot-band` 的 height:100% 落到内容高,ResizeObserver 量它喂给 Panel。 */
+.workspace-shell .workspace-band-fit--content {
+  height: auto;
+}

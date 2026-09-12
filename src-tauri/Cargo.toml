@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.2.0"
+version = "0.3.0"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -14,6 +14,10 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 tauri-plugin-dialog = "2"
+# R7 Task 5：把参考帧 JPEG 编成 data URI 喂给 MiniMax。0.22.1 已经是
+# Cargo.lock 里锁定的传递版本(reqwest 等间接依赖带入),这里只是把它提升为
+# 直接依赖,不引入新版本、不动锁文件里其它包。
+base64 = "=0.22.1"
 # 应用内自动更新(R6 Task 1)。=2.11.0 是与 tauri =2.11.5 兼容的最新版
 # (2.10+ 要求 tauri ^2.10);process 用于更新装好后重启进程(=2.3.1 要求 tauri ^2.8.2)。
 tauri-plugin-process = "=2.3.1"
@@ -61,6 +65,18 @@ objc2-app-kit = { version = "=0.3.2", features = [
 # 只需 jpeg 解码 + 字体/文本 Op。
 printpdf = { version = "=0.12.8", default-features = false, features = ["jpeg"] }
 rfd = "=0.17.2"
+# R7 Task 4：MiniMax v2 视频生成客户端。=0.13.4 是 Cargo.lock 已锁定的版本；
+# default-features=false 关掉默认 TLS 后端(openssl),用 rustls 避免系统 OpenSSL
+# 依赖；blocking 给出同步包装。曾经还开了 "stream"(给 download() 边下边写用
+# reqwest 的异步字节流适配器),但安全修复批次把 download() 改成 blocking
+# Read + 后台线程 + mpsc 逐块卡死检测(见 core/minimax.rs 的
+# `download`/`TempFileGuard`),不再调用 bytes_stream/wrap_stream——全仓
+# grep 确认没有别处用到,已去掉这个 feature。
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "blocking"] }
+# R7 Task 4：Retry-After 头的 RFC 1123 HTTP-date 形式解析。已经是
+# hyper 的传递依赖(Cargo.lock 锁定 1.0.3),这里显式声明成直接依赖才能在
+# core/minimax.rs 里 `use httpdate::parse_http_date`。
+httpdate = "=1.0.3"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # R5 Task 1 音乐节拍分析：纯 Rust FFT，无 C 依赖、无 RUSTSEC 通告。
 rustfft = "=6.4.1"

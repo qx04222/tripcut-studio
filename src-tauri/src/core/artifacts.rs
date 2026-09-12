@@ -643,6 +643,74 @@ fn cover_args(
     args
 }
 
+/// R7 Task 3:精确到 tick 的单帧抽取——不同于 `cover_args` 的
+/// `thumbnail=90`(在 90 帧候选里挑"代表帧"，实际落点飘移)，这里 `-ss`
+/// 直接由 `tick / tb_den * tb_num` 换算成秒，取的就是那一帧。用于
+/// MiniMax 首尾帧参考图：相邻镜头的确切边界帧，不能有代表帧那种漂移。
+pub fn frame_at_tick_args(
+    source: &Path,
+    tick: i64,
+    timebase: (i64, i64),
+    output: &Path,
+    hardware_decode: bool,
+    manual_rotation: Option<i64>,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-hide_banner"), OsString::from("-loglevel"), OsString::from("error")];
+    if hardware_decode {
+        args.extend(hardware_decode_prefix());
+    }
+    let (tb_num, tb_den) = timebase;
+    let seconds = tick_to_seconds(tick, tb_num, tb_den);
+    args.extend([
+        OsString::from("-ss"), OsString::from(format!("{seconds:.6}")),
+        OsString::from("-i"), source.as_os_str().to_owned(),
+        OsString::from("-map"), OsString::from("0:v:0"),
+        OsString::from("-frames:v"), OsString::from("1"),
+    ]);
+    if let Some(rotate_prefix) = rotation_prefix_filter(manual_rotation) {
+        args.extend([
+            OsString::from("-vf"),
+            OsString::from(rotate_prefix.trim_end_matches(',').to_owned()),
+        ]);
+    }
+    args.extend([
+        OsString::from("-c:v"), OsString::from("mjpeg"), OsString::from("-q:v"), OsString::from("3"),
+        OsString::from("-f"), OsString::from("image2"), OsString::from("-y"), output.as_os_str().to_owned(),
+    ]);
+    args
+}
+
+/// `tick / tb_den * tb_num`——见 `canonical_time::ticks_to_micros` 的同一换算，
+/// 这里只需要秒级精度给 ffmpeg `-ss`，用不到那边的整数微秒防溢出路径。
+fn tick_to_seconds(tick: i64, tb_num: i64, tb_den: i64) -> f64 {
+    if tb_den <= 0 {
+        return 0.0;
+    }
+    (tick.max(0) as f64) * (tb_num as f64) / (tb_den as f64)
+}
+
+/// 精确抽帧的执行入口：硬解带软解回退,镜像 `run_thumbnail_with` 的调用形状。
+/// 失败(找不到 ffmpeg、两次解码都失败、输出为空)一律返回 `Err`——调用方
+/// (`generation.rs` 的降级链 fl2v → i2v → t2v)据此决定要不要退化模式。
+pub fn extract_frame_at_tick(
+    ffmpeg: &OsStr,
+    source: &Path,
+    tick: i64,
+    timebase: (i64, i64),
+    output: &Path,
+    manual_rotation: Option<i64>,
+    timeout: Duration,
+) -> Result<()> {
+    run_ffmpeg_file_with_fallback(
+        ffmpeg,
+        |hardware_decode| {
+            frame_at_tick_args(source, tick, timebase, output, hardware_decode, manual_rotation)
+        },
+        timeout,
+        output,
+    )
+}
+
 fn strip_args(
     source: &Path,
     duration_seconds: f64,
@@ -2106,6 +2174,68 @@ mod tests {
         let second = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false);
         assert_eq!(first, second);
         assert!(!first.iter().any(|a| a.to_string_lossy().contains("transpose")));
+    }
+
+    #[test]
+    fn frame_at_tick_args_seeks_by_ticks_not_by_thumbnail_filter() {
+        // 24000/1001 timebase(常见 23.976 fps 情形的 tb_num/tb_den 记法),
+        // tick=48048 → 48048*1001/24000 = 2004.002 秒。
+        let args = frame_at_tick_args(
+            Path::new("/x.mp4"),
+            48_048,
+            (1001, 24_000),
+            Path::new("/tmp/f.jpg"),
+            true,
+            None,
+        );
+        let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("-hwaccel videotoolbox"));
+        assert!(joined.contains("-ss 2004.002000"));
+        assert!(joined.contains("-frames:v 1"));
+        assert!(!joined.contains("thumbnail="));
+
+        let software = frame_at_tick_args(
+            Path::new("/x.mp4"),
+            48_048,
+            (1001, 24_000),
+            Path::new("/tmp/f.jpg"),
+            false,
+            None,
+        );
+        assert!(!software.iter().any(|a| a == "-hwaccel"));
+
+        let rotated = frame_at_tick_args(
+            Path::new("/x.mp4"),
+            0,
+            (1, 30),
+            Path::new("/tmp/f.jpg"),
+            false,
+            Some(90),
+        );
+        let rotated_joined = rotated.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(rotated_joined.contains("-vf transpose=1"));
+    }
+
+    #[test]
+    fn extract_frame_at_tick_falls_back_to_software_on_hardware_failure() {
+        // ffmpeg 可执行文件本身不存在:硬解与软解两次都失败,必须合并报错而不是 panic。
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tripcut-frame-at-tick-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let output = temp_dir.join("out.jpg");
+        let result = extract_frame_at_tick(
+            OsStr::new("/nonexistent/ffmpeg-does-not-exist"),
+            Path::new("/x.mp4"),
+            0,
+            (1, 30),
+            &output,
+            None,
+            Duration::from_secs(1),
+        );
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

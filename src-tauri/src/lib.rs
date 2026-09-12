@@ -25,6 +25,7 @@ use crate::core::clip_search::ClipSearchHit;
 use crate::core::deliver::ExportStatus;
 use crate::core::doctor::DoctorReport;
 use crate::core::error::{CoreError, Result};
+use crate::core::generation_settings::{GenerationAvailability, GenerationLedgerSummary};
 use crate::core::import::{ClipListItem, ImportProgress, ImportStart};
 use crate::core::jianying::{JianyingAvailability, JianyingDraftResult};
 use crate::core::llm::{
@@ -361,6 +362,47 @@ fn undo_narrative_op(
     core::narrative_revision::undo_last(&mut connection, episode.id).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn list_story_gaps(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::story_gap::StoryGap>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story_gap::list(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn detect_story_gaps(state: tauri::State<'_, RuntimeState>) -> std::result::Result<usize, String> {
+    if state.read_only {
+        return Err("只读窗口不能检测缺口".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story_gap::detect(&mut connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn dismiss_story_gap(
+    gap_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    if state.read_only {
+        return Err("只读窗口不能忽略缺口".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story_gap::dismiss(&mut connection, gap_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reopen_story_gap(
+    gap_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    if state.read_only {
+        return Err("只读窗口不能恢复缺口".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story_gap::reopen(&mut connection, gap_id).map_err(|error| error.to_string())
+}
+
 
 struct InstallTask {
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -654,6 +696,50 @@ fn list_llm_ledger(
 ) -> std::result::Result<Vec<LlmLedgerEntry>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::llm::recent_ledger(&connection).map_err(|error| error.to_string())
+}
+
+// R7 Task 7:「云端补镜（MiniMax）」设置分区——Key 只经 Keychain 往返,永不
+// 落库、永不出现在日志或这几个命令的返回值里。`generation_availability` /
+// `generation_ledger_summary` 与 Task 5 缺口检测车道同名共享,这里先落地
+// 读取端与设置页需要的形状,后续任务接线时按同名函数去重。
+#[tauri::command]
+fn set_minimax_key(
+    key: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    core::generation_settings::guard_writable(state.read_only).map_err(|error| error.to_string())?;
+    let trimmed = core::generation_settings::validate_key_input(&key).map_err(|error| error.to_string())?;
+    core::secret::store_minimax_key(&trimmed).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_minimax_key(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    core::generation_settings::guard_writable(state.read_only).map_err(|error| error.to_string())?;
+    core::secret::clear_minimax_key().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn has_minimax_key() -> std::result::Result<bool, String> {
+    core::secret::has_minimax_key().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn generation_availability(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<GenerationAvailability, String> {
+    let has_key = core::secret::has_minimax_key().map_err(|error| error.to_string())?;
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::generation_settings::availability(&connection, has_key).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn generation_ledger_summary(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<GenerationLedgerSummary, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::generation_settings::ledger_summary(&connection).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1455,6 +1541,123 @@ fn cancel_job(
     core::jobs::request_cancel(&mut connection, job_id).map_err(|error| error.to_string())
 }
 
+/// R7 Task 5 命令层:`preview_generation`/`submit_generation`/
+/// `retry_generation`/`cancel_generation`/`list_generation_requests` 的名字
+/// 与参数形状对齐 `src/api.ts`(Task 6 的 `GenerationDialog.tsx`/
+/// `Storyboard.tsx` 已经按这套契约写好界面与测试)。首尾帧参考的抽取与
+/// "该拿哪个相邻镜头的哪一帧"这条业务规则不在本任务范围内(需要走
+/// `narrative_beats`/`segments`/tick-timebase 换算,留给后续任务接线)——
+/// `core::generation::draft_for_gap` 目前总是以 `t2v`/降级路径产出草稿,
+/// 见该函数上的注释。
+#[derive(Debug, Clone, serde::Serialize)]
+struct GenerationRefPreview {
+    path: String,
+    role: String,
+    preview_url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct GenerationDraftPreview {
+    mode: String,
+    model: String,
+    resolution: String,
+    duration_s: u32,
+    ratio: String,
+    prompt: String,
+    refs: Vec<GenerationRefPreview>,
+    estimated_cost_usd: f64,
+    notes: Vec<String>,
+}
+
+impl From<core::generation::GenerationRequestDraft> for GenerationDraftPreview {
+    fn from(draft: core::generation::GenerationRequestDraft) -> Self {
+        Self {
+            mode: draft.mode,
+            model: draft.model,
+            resolution: draft.resolution,
+            duration_s: draft.duration_s,
+            ratio: draft.ratio.unwrap_or_default(),
+            prompt: draft.prompt,
+            refs: draft
+                .refs
+                .into_iter()
+                .map(|reference| GenerationRefPreview {
+                    path: reference.path,
+                    role: reference.role,
+                    // 预览缩略图(把参考帧路径转成媒体服务器可访问的 URL)不在本任务
+                    // 范围内——留给界面接线的后续任务。
+                    preview_url: None,
+                })
+                .collect(),
+            estimated_cost_usd: draft.estimated_cost_usd,
+            notes: draft.notes,
+        }
+    }
+}
+
+#[tauri::command]
+fn preview_generation(
+    gap_id: i64,
+    overrides: core::generation::GenerationOverrides,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<GenerationDraftPreview, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let draft = core::generation::draft_for_gap(&connection, gap_id, &overrides)
+        .map_err(|error| error.to_string())?;
+    Ok(GenerationDraftPreview::from(draft))
+}
+
+#[tauri::command]
+fn submit_generation(
+    gap_id: i64,
+    overrides: core::generation::GenerationOverrides,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::generation::GenerationRequestSummary, String> {
+    core::generation::guard_writable(state.read_only).map_err(|error| error.to_string())?;
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let draft = core::generation::draft_for_gap(&connection, gap_id, &overrides)
+        .map_err(|error| error.to_string())?;
+    let request_id =
+        core::generation::submit_request(&mut connection, draft).map_err(|error| error.to_string())?;
+    core::generation::generation_request_summary(&connection, request_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn retry_generation(
+    request_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::generation::GenerationRequestSummary, String> {
+    core::generation::guard_writable(state.read_only).map_err(|error| error.to_string())?;
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let new_id = core::generation::retry_generation(&mut connection, request_id)
+        .map_err(|error| error.to_string())?;
+    core::generation::generation_request_summary(&connection, new_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_generation(
+    request_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    core::generation::guard_writable(state.read_only).map_err(|error| error.to_string())?;
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::generation::cancel_generation(&mut connection, request_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_generation_requests(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::generation::GenerationRequestSummary>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let episode_id: i64 = connection
+        .query_row("SELECT id FROM episodes WHERE status='active'", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    core::generation::list_generation_requests(&connection, episode_id).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn reveal_export(
     job_id: i64,
@@ -1581,6 +1784,20 @@ async fn player_set_viewport(
     // 而 worker 的 resize_surface 又 run_on_main_thread 等主线程——环形死锁。
     let player = player.inner().clone();
     tauri::async_runtime::spawn_blocking(move || player.set_viewport(viewport))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// 覆盖层(popover / 抽屉 / 命令面板)开合时隐藏或恢复原生视频视图(R9 D1)。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn player_set_occluded(
+    occluded: bool,
+    player: tauri::State<'_, PlayerManager>,
+) -> std::result::Result<(), String> {
+    // 同 player_set_viewport:worker 要回主线程 setHidden,同步命令会环形死锁。
+    let player = player.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || player.set_occluded(occluded))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -2149,6 +2366,10 @@ pub fn run() {
             get_narrative_revision,
             apply_narrative_op,
             undo_narrative_op,
+            list_story_gaps,
+            detect_story_gaps,
+            dismiss_story_gap,
+            reopen_story_gap,
             list_watched_folders,
             set_watched_folder_sync,
             remove_watched_folder,
@@ -2169,6 +2390,11 @@ pub fn run() {
             set_setting,
             get_llm_status,
             list_llm_ledger,
+            set_minimax_key,
+            clear_minimax_key,
+            has_minimax_key,
+            generation_availability,
+            generation_ledger_summary,
             get_ai_description,
             describe_clip_with_ai,
             ask_director,
@@ -2241,11 +2467,18 @@ pub fn run() {
             get_export_status,
             cancel_export,
             cancel_job,
+            preview_generation,
+            submit_generation,
+            retry_generation,
+            cancel_generation,
+            list_generation_requests,
             reveal_export,
             get_jianying_availability,
             generate_jianying_draft,
             #[cfg(target_os = "macos")]
             player_set_viewport,
+            #[cfg(target_os = "macos")]
+            player_set_occluded,
             #[cfg(target_os = "macos")]
             player_open,
             #[cfg(target_os = "macos")]
@@ -2272,6 +2505,34 @@ pub fn run() {
             }
         }
     });
+}
+
+/// R7 Task 5 复审 P1-2:三个花钱/改状态的生成命令必须都过只读闸。
+/// Tauri 命令的 `State<RuntimeState>` 在单元测试里造不出来,所以这里用
+/// 源文本当检测器——闸被谁删掉、或新加的生成命令忘了带闸,这条会红。
+/// (`guard_writable` 自身的行为由
+/// `core::generation::tests::guard_writable_refuses_read_only_window` 钉住。)
+#[cfg(test)]
+mod generation_command_guard_tests {
+    const SOURCE: &str = include_str!("lib.rs");
+
+    fn command_body(name: &str) -> &'static str {
+        let marker = format!("\nfn {name}(");
+        let start = SOURCE.find(&marker).unwrap_or_else(|| panic!("找不到命令 {name}"));
+        let rest = &SOURCE[start..];
+        let end = rest[1..].find("\n#[tauri::command]").map(|at| at + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn generation_mutating_commands_all_guard_read_only_windows() {
+        for name in ["submit_generation", "retry_generation", "cancel_generation"] {
+            assert!(
+                command_body(name).contains("core::generation::guard_writable(state.read_only)"),
+                "命令 {name} 缺少只读窗口闸"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
