@@ -148,14 +148,99 @@ struct Candidate {
     tag_text: String,
     unexpected_chapter: bool,
     safety_flag: String,
+    // R10 U-02:分组键的四个物理维度——分辨率档、长宽比、来源子文件夹、拍摄时刻。
+    width: Option<i64>,
+    height: Option<i64>,
+    rotation: Option<i64>,
+    folder_label: Option<String>,
+    rel_path: String,
+    captured_at_epoch: Option<i64>,
 }
 
+/// R10 U-02:同镜头 Take 的分组键。语义四轴之外再要求分辨率档、长宽比、来源
+/// 子文件夹、拍摄时间桶都一致;任一语义轴缺失(「不确定」)时该片单独成栈
+/// (`solo = Some(clip_id)`),21 条没分析过的片不再合成一张「21 条候选」。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StackKey {
     subject: String,
     function: String,
     shot_size: String,
     movement: String,
+    resolution_tier: &'static str,
+    aspect: &'static str,
+    source_folder: String,
+    time_bucket: i64,
+    solo: Option<i64>,
+}
+
+/// 相邻两条拍摄时刻相差 ≤ 120 s 归同一时间桶(按时间排序滚动)。
+const TIME_BUCKET_GAP_SECONDS: i64 = 120;
+
+/// 没有拍摄时刻的片共用这个桶——它们之间没法按时间分开,只能靠其它维度。
+const UNDATED_TIME_BUCKET: i64 = -1;
+
+/// 来源子文件夹:优先导入时记下的 `folder_label`,否则取 `rel_path` 的父目录。
+fn source_folder(folder_label: Option<&str>, rel_path: &str) -> String {
+    if let Some(label) = folder_label.map(str::trim).filter(|label| !label.is_empty()) {
+        return label.to_owned();
+    }
+    std::path::Path::new(rel_path)
+        .parent()
+        .and_then(|parent| parent.to_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// 按拍摄时刻滚动分桶:排序后相邻差值 > 120 s 就开新桶。返回 clip_id → 桶号。
+fn time_buckets(candidates: &[&Candidate]) -> HashMap<i64, i64> {
+    let mut dated = candidates
+        .iter()
+        .filter_map(|candidate| candidate.captured_at_epoch.map(|epoch| (epoch, candidate.clip_id)))
+        .collect::<Vec<_>>();
+    dated.sort_unstable();
+    let mut buckets = HashMap::new();
+    let mut bucket = 0;
+    let mut previous: Option<i64> = None;
+    for (epoch, clip_id) in dated {
+        if previous.is_some_and(|last| epoch - last > TIME_BUCKET_GAP_SECONDS) {
+            bucket += 1;
+        }
+        buckets.insert(clip_id, bucket);
+        previous = Some(epoch);
+    }
+    buckets
+}
+
+fn stack_key(candidate: &Candidate, buckets: &HashMap<i64, i64>) -> StackKey {
+    let labels = [
+        candidate.subject_label.as_str(),
+        candidate.function_label.as_str(),
+        candidate.shot_size_label.as_str(),
+        candidate.movement_label.as_str(),
+    ];
+    let solo = labels
+        .iter()
+        .any(|label| label.is_empty() || *label == UNKNOWN_LABEL)
+        .then_some(candidate.clip_id);
+    StackKey {
+        subject: candidate.subject_label.clone(),
+        function: candidate.function_label.clone(),
+        shot_size: candidate.shot_size_label.clone(),
+        movement: candidate.movement_label.clone(),
+        resolution_tier: super::orientation::resolution_tier(candidate.width, candidate.height),
+        aspect: super::orientation::clip_orientation(
+            candidate.width,
+            candidate.height,
+            candidate.rotation,
+        )
+        .as_str(),
+        source_folder: source_folder(candidate.folder_label.as_deref(), &candidate.rel_path),
+        time_bucket: buckets
+            .get(&candidate.clip_id)
+            .copied()
+            .unwrap_or(UNDATED_TIME_BUCKET),
+        solo,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,15 +301,11 @@ pub fn rebuild(connection: &mut Connection) -> Result<usize> {
         )?;
         let scene_id = transaction.last_insert_rowid();
 
+        let buckets = time_buckets(&scene_candidates);
         let mut grouped = BTreeMap::<StackKey, Vec<&Candidate>>::new();
         for candidate in scene_candidates {
             grouped
-                .entry(StackKey {
-                    subject: candidate.subject_label.clone(),
-                    function: candidate.function_label.clone(),
-                    shot_size: candidate.shot_size_label.clone(),
-                    movement: candidate.movement_label.clone(),
-                })
+                .entry(stack_key(candidate, &buckets))
                 .or_default()
                 .push(candidate);
         }
@@ -309,7 +390,22 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
                 COALESCE(size.label, '不确定'), COALESCE(movement.label, '不确定'),
                 member.clip_id, member.segment_id, member.best_take_score,
                 member.score_breakdown_json, member.user_state,
-                clip.generated_source IS NOT NULL
+                clip.generated_source IS NOT NULL,
+                COALESCE((
+                    SELECT binary.value FROM ratings binary
+                    JOIN segments rated ON rated.id = binary.segment_id
+                    WHERE rated.clip_id = clip.id AND COALESCE(rated.kind, 'whole') != 'select'
+                      AND rated.tombstone = 0 AND binary.rating_type = 'binary'
+                    ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
+                ), 0) = 1,
+                COALESCE((
+                    SELECT star.value FROM ratings star
+                    JOIN segments rated ON rated.id = star.segment_id
+                    WHERE rated.clip_id = clip.id AND COALESCE(rated.kind, 'whole') != 'select'
+                      AND rated.tombstone = 0 AND star.rating_type = 'star'
+                    ORDER BY star.rated_at DESC, star.id DESC LIMIT 1
+                ), 0),
+                clip.captured_at
          FROM shot_stacks stack
          JOIN scenes scene ON scene.id = stack.scene_id
          JOIN shot_stack_members member ON member.stack_id = stack.id
@@ -336,10 +432,18 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
             row.get::<_, String>(10)?,
             row.get::<_, String>(11)?,
             row.get::<_, bool>(12)?,
+            HeroPreference {
+                favorite: row.get::<_, bool>(13)?,
+                stars: row.get::<_, i64>(14)?,
+                captured_at: row.get::<_, Option<String>>(15)?,
+            },
         ))
     })?;
 
     let mut stacks = BTreeMap::<i64, ShotStack>::new();
+    // R10 U-23:没有手动 hero 时的默认首选 = 收藏 > 星级 > 拍摄时间(早的在前),
+    // best-take 分只在这三样都平手时才说话。按 clip_id 记在旁边,不进 ShotStackMember 的序列化。
+    let mut hero_preferences = HashMap::<i64, HeroPreference>::new();
     let memory_reader = super::channel_memory::ChannelMemoryReader::for_project(connection)?;
     for row in rows {
         let (
@@ -356,7 +460,9 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
             breakdown_json,
             user_state,
             is_generated,
+            hero_preference,
         ) = row?;
+        hero_preferences.insert(clip_id, hero_preference);
         let score_breakdown: BestTakeBreakdown = serde_json::from_str(&breakdown_json).map_err(|error| {
             CoreError::InvalidSchema(format!(
                 "shot_stack_members.score_breakdown_json 无效：{error}"
@@ -420,6 +526,10 @@ pub fn list(connection: &Connection) -> Result<Vec<ShotStack>> {
                 // 素材之后——除非业主手动 hero/locked 已经把它提到更高档位
                 // (那时 member_rank 已经分出胜负,这里的比较不会被用到)。
                 .then_with(|| generated_tier(left).cmp(&generated_tier(right)))
+                .then_with(|| {
+                    HeroPreference::rank(hero_preferences.get(&left.clip_id))
+                        .cmp(&HeroPreference::rank(hero_preferences.get(&right.clip_id)))
+                })
                 .then_with(|| {
                     right
                         .best_take_score
@@ -712,7 +822,9 @@ fn load_candidates(connection: &Connection, episode_id: i64) -> Result<Vec<Candi
                     WHERE beat.clip_id = c.id AND narrative_chapter.kind = 'unexpected'
                       AND narrative_chapter.episode_id = ?1
                 ),
-                c.safety_flag
+                c.safety_flag,
+                c.width, c.height, c.rotation, c.folder_label, c.rel_path,
+                CAST(strftime('%s', c.captured_at) AS INTEGER)
          FROM clips c
          LEFT JOIN chapters chapter ON chapter.id = c.chapter_id
            AND chapter.tombstone = 0 AND chapter.episode_id = ?1
@@ -774,6 +886,12 @@ fn load_candidates(connection: &Connection, episode_id: i64) -> Result<Vec<Candi
             tag_text: row.get(30)?,
             unexpected_chapter: row.get::<_, i64>(31)? == 1,
             safety_flag: row.get(32)?,
+            width: row.get(33)?,
+            height: row.get(34)?,
+            rotation: row.get(35)?,
+            folder_label: row.get(36)?,
+            rel_path: row.get(37)?,
+            captured_at_epoch: row.get(38)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1212,6 +1330,28 @@ fn parse_metric(metadata: &str, key: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+/// R10 U-23:默认首选的三把尺(见 `list()` 里的排序)。
+#[derive(Debug, Clone, Default)]
+struct HeroPreference {
+    favorite: bool,
+    stars: i64,
+    captured_at: Option<String>,
+}
+
+impl HeroPreference {
+    /// 越小越靠前:收藏的先于未收藏,星多的先于星少的,拍得早的先于拍得晚的
+    /// (ISO-8601 字符串可以直接比;没有拍摄时间的排最后)。
+    fn rank(preference: Option<&HeroPreference>) -> (u8, i64, u8, String) {
+        let preference = preference.cloned().unwrap_or_default();
+        (
+            u8::from(!preference.favorite),
+            -preference.stars,
+            u8::from(preference.captured_at.is_none()),
+            preference.captured_at.unwrap_or_default(),
+        )
+    }
+}
+
 fn member_rank(user_state: &str) -> u8 {
     match user_state {
         "hero" => 0,
@@ -1261,6 +1401,16 @@ mod tests {
                     (SELECT id FROM episodes WHERE status = 'active')
                  )",
                 params![id, format!("clip-{id}.mov")],
+            )
+            .unwrap();
+        // R10 U-02:分组键多了分辨率/长宽比/来源/时间桶——既有测试里的片默认
+        // 同一档 1080p 横版、同一目录、同一拍摄时刻,语义四轴仍是唯一变量。
+        connection
+            .execute(
+                "UPDATE clips SET width = 1920, height = 1080, rotation = 0,
+                        captured_at = '2026-09-01T12:00:00Z'
+                  WHERE id = ?1",
+                [id],
             )
             .unwrap();
         for (dimension, label, score) in [
@@ -1492,6 +1642,12 @@ mod tests {
             tag_text: String::new(),
             unexpected_chapter: false,
             safety_flag: "normal".to_owned(),
+            width: None,
+            height: None,
+            rotation: None,
+            folder_label: None,
+            rel_path: "clip-1.mov".to_owned(),
+            captured_at_epoch: None,
         };
         let balanced = motion_score(&candidate, 0.6).score.unwrap();
         let uneven = motion_score(&Candidate {
@@ -1692,6 +1848,53 @@ mod tests {
         assert_eq!(stack.members[1].user_state, "rejected");
     }
 
+    /// R10 U-23:没有手动 hero 时首选按 收藏 > 星级 > 拍摄时间;best-take 分只做末位平手。
+    #[test]
+    fn default_hero_prefers_favorite_then_stars_then_earliest_capture() {
+        use crate::core::ratings::{rate_clip, BINARY_RATING, STAR_RATING};
+        let (_directory, mut connection) = database();
+        for id in [1, 2, 3] {
+            insert_clip(&connection, id, "风景", "Atmosphere");
+        }
+        // 同一时间桶(≤120 s)里错开拍摄时刻:3 最早、1 其次、2 最晚;分数故意让 2 最高。
+        for (id, captured_at, score) in [
+            (1, "2026-09-01T12:00:30Z", 0.5),
+            (2, "2026-09-01T12:01:00Z", 0.9),
+            (3, "2026-09-01T12:00:00Z", 0.5),
+        ] {
+            connection
+                .execute(
+                    "UPDATE clips SET captured_at = ?2 WHERE id = ?1",
+                    params![id, captured_at],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE clip_dimensions SET score = ?2 WHERE clip_id = ?1",
+                    params![id, score],
+                )
+                .unwrap();
+        }
+        rebuild(&mut connection).unwrap();
+        let stacks = list(&connection).unwrap();
+        assert_eq!(stacks.len(), 1, "三条片语义相同,应在同一栈");
+        let hero = |connection: &Connection| {
+            list(connection).unwrap().remove(0).members.iter().find(|m| m.is_preferred).unwrap().clip_id
+        };
+        // 什么都没标:拍得最早的 3 是首选(不是分最高的 2)。
+        assert_eq!(hero(&connection), 3);
+        // 1 给三星:星级压过拍摄时间。
+        rate_clip(&mut connection, 1, STAR_RATING, 3).unwrap();
+        assert_eq!(hero(&connection), 1);
+        // 2 收藏:收藏压过星级。
+        rate_clip(&mut connection, 2, BINARY_RATING, 1).unwrap();
+        assert_eq!(hero(&connection), 2);
+        // 手动 hero 仍然压过一切。
+        let stack_id = stacks[0].id;
+        set_user_state(&mut connection, stack_id, 3, None, "hero").unwrap();
+        assert_eq!(hero(&connection), 3);
+    }
+
     #[test]
     fn an_all_rejected_stack_has_no_preferred_member() {
         let (_directory, mut connection) = database();
@@ -1798,11 +2001,203 @@ mod tests {
             tag_text: String::new(),
             unexpected_chapter: false,
             safety_flag: "normal".to_owned(),
+            width: Some(1920),
+            height: Some(1080),
+            rotation: None,
+            folder_label: None,
+            rel_path: "clip-1.mov".to_owned(),
+            captured_at_epoch: None,
         };
         assert_eq!(
             scene_name(Some(2), &[&candidate]),
             "冰原大道 · 主体=风景 · 功能=Establishing · 景别=广角 · 视角=平视 · 运镜=Static · 阶段=路上 · 声音=Natural Sound"
         );
+    }
+
+    // ---- R10 U-02:分组键加物理维度 ----
+
+    /// 只插 clips 行、不插任何 clip_dimensions(= 走查里「未分析」的 21 条)。
+    fn insert_bare_clip(
+        connection: &Connection,
+        id: i64,
+        rel_path: &str,
+        folder_label: Option<&str>,
+        (width, height): (i64, i64),
+        captured_at: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO volumes(uuid, label) VALUES ('v', 'test')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(
+                    id, volume_uuid, rel_path, folder_label, tb_num, tb_den, duration_ticks,
+                    width, height, rotation, captured_at, imported_at, missing_since, episode_id
+                 ) VALUES (
+                    ?1, 'v', ?2, ?3, 1, 1000, 10000, ?4, ?5, 0, ?6,
+                    '2026-09-13T14:40:00Z', NULL,
+                    (SELECT id FROM episodes WHERE status = 'active')
+                 )",
+                params![id, rel_path, folder_label, width, height, captured_at],
+            )
+            .unwrap();
+    }
+
+    fn label_clip(connection: &Connection, id: i64) {
+        for (dimension, label) in [
+            ("subject", "风景"),
+            ("function", "Atmosphere"),
+            ("shot_size", "广角"),
+            ("movement", "Static"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO clip_dimensions(clip_id, dimension, label, score, source)
+                     VALUES (?1, ?2, ?3, 0.8, 'test')",
+                    params![id, dimension, label],
+                )
+                .unwrap();
+        }
+    }
+
+    /// 走查 U-02 复现:21 条同一拍摄时刻、三种分辨率、两个子目录、没有任何标签
+    /// → 以前是一张「21 条候选」;现在任一语义轴缺失就单片成栈,21 栈。
+    #[test]
+    fn twenty_one_unlabelled_clips_with_one_timestamp_do_not_fold_into_one_stack() {
+        let (_directory, mut connection) = database();
+        let sizes = [(704, 1280), (1080, 1920), (3840, 2160)];
+        for id in 1..=21_i64 {
+            let folder = if id <= 10 { "DAY1" } else { "DAY2" };
+            insert_bare_clip(
+                &connection,
+                id,
+                &format!("walk-media/{folder}/IMG_{id:04}.mov"),
+                Some(folder),
+                sizes[(id % 3) as usize],
+                "2026-09-13T14:40:00Z",
+            );
+        }
+        let stacks = rebuild(&mut connection).unwrap();
+        assert!(stacks >= 6, "期望 ≥ 6 个栈,得到 {stacks}");
+        assert_ne!(stacks, 1);
+        assert_eq!(stacks, 21, "没有标签的片必须单片成栈");
+    }
+
+    /// 同上但每条都有完整语义标签:三种分辨率档 × 两个子目录 = 6 栈。
+    #[test]
+    fn resolution_and_source_folder_split_labelled_takes_into_six_stacks() {
+        let (_directory, mut connection) = database();
+        let sizes = [(704, 1280), (1080, 1920), (3840, 2160)];
+        for id in 1..=21_i64 {
+            let folder = if id <= 10 { "DAY1" } else { "DAY2" };
+            insert_bare_clip(
+                &connection,
+                id,
+                &format!("walk-media/{folder}/IMG_{id:04}.mov"),
+                Some(folder),
+                sizes[(id % 3) as usize],
+                "2026-09-13T14:40:00Z",
+            );
+            label_clip(&connection, id);
+        }
+        assert_eq!(rebuild(&mut connection).unwrap(), 6);
+    }
+
+    /// 长宽比也是分组维度:同档 1080p 的横版与竖版不合栈。
+    #[test]
+    fn aspect_ratio_splits_same_tier_takes() {
+        let (_directory, mut connection) = database();
+        insert_bare_clip(&connection, 1, "a/1.mov", None, (1920, 1080), "2026-09-13T14:40:00Z");
+        insert_bare_clip(&connection, 2, "a/2.mov", None, (1080, 1920), "2026-09-13T14:40:00Z");
+        // 编码横版 + rotation 90 = 显示竖版,和 2 号同栈。
+        insert_bare_clip(&connection, 3, "a/3.mov", None, (1920, 1080), "2026-09-13T14:40:00Z");
+        connection.execute("UPDATE clips SET rotation = 90 WHERE id = 3", []).unwrap();
+        for id in 1..=3 {
+            label_clip(&connection, id);
+        }
+        assert_eq!(rebuild(&mut connection).unwrap(), 2);
+        let stacks = list(&connection).unwrap();
+        let with_two = stacks.iter().find(|stack| stack.members.len() == 2).unwrap();
+        let ids = with_two.members.iter().map(|m| m.clip_id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![2, 3]);
+    }
+
+    /// 没有 folder_label 时用 rel_path 的父目录当来源子文件夹。
+    #[test]
+    fn source_folder_falls_back_to_rel_path_parent() {
+        assert_eq!(source_folder(Some("DAY1"), "x/y/z.mov"), "DAY1");
+        assert_eq!(source_folder(Some("  "), "walk-media/DAY2/z.mov"), "walk-media/DAY2");
+        assert_eq!(source_folder(None, "z.mov"), "");
+    }
+
+    /// 拍摄时间桶按排序滚动:相邻 ≤120 s 归同桶,超过就开新桶;没时刻的片同一桶。
+    #[test]
+    fn capture_time_buckets_roll_over_gaps_larger_than_two_minutes() {
+        let (_directory, mut connection) = database();
+        let times = [
+            "2026-09-13T10:00:00Z",
+            "2026-09-13T10:01:30Z", // +90 s → 同桶
+            "2026-09-13T10:03:00Z", // +90 s → 同桶(滚动)
+            "2026-09-13T10:10:00Z", // +420 s → 新桶
+        ];
+        for (index, time) in times.iter().enumerate() {
+            let id = index as i64 + 1;
+            insert_bare_clip(&connection, id, "a/x.mov", None, (1920, 1080), time);
+            connection
+                .execute("UPDATE clips SET rel_path = ?2 WHERE id = ?1", params![id, format!("a/{id}.mov")])
+                .unwrap();
+            label_clip(&connection, id);
+        }
+        assert_eq!(rebuild(&mut connection).unwrap(), 2);
+        let stacks = list(&connection).unwrap();
+        let sizes = {
+            let mut sizes = stacks.iter().map(|stack| stack.members.len()).collect::<Vec<_>>();
+            sizes.sort_unstable();
+            sizes
+        };
+        assert_eq!(sizes, vec![1, 3]);
+    }
+
+    /// §4.2 数据零破坏:设过 hero / rejected 的片,分组键变了(片挪到新栈)重建后状态仍在。
+    #[test]
+    fn hero_and_rejected_states_follow_the_clip_into_a_new_stack_after_rebuild() {
+        let (_directory, mut connection) = database();
+        for id in 1..=3 {
+            insert_bare_clip(
+                &connection,
+                id,
+                &format!("a/{id}.mov"),
+                None,
+                (1920, 1080),
+                "2026-09-13T14:40:00Z",
+            );
+            label_clip(&connection, id);
+        }
+        assert_eq!(rebuild(&mut connection).unwrap(), 1);
+        let stack = list(&connection).unwrap().remove(0);
+        set_user_state(&mut connection, stack.id, 2, None, "hero").unwrap();
+        set_user_state(&mut connection, stack.id, 3, None, "rejected").unwrap();
+
+        // 2 号被重新探测成 4K——它必须离开原栈,但 hero 跟着走。
+        connection
+            .execute("UPDATE clips SET width = 3840, height = 2160 WHERE id = 2", [])
+            .unwrap();
+        assert_eq!(rebuild(&mut connection).unwrap(), 2);
+        let stacks = list(&connection).unwrap();
+        let hero_stack = stacks
+            .iter()
+            .find(|stack| stack.members.iter().any(|m| m.clip_id == 2))
+            .unwrap();
+        assert_eq!(hero_stack.members.len(), 1);
+        assert_eq!(hero_stack.members[0].user_state, "hero");
+        assert!(hero_stack.members[0].is_preferred);
+        let other = stacks.iter().find(|stack| stack.id != hero_stack.id).unwrap();
+        let rejected = other.members.iter().find(|m| m.clip_id == 3).unwrap();
+        assert_eq!(rejected.user_state, "rejected");
+        assert!(!rejected.is_preferred);
     }
 
     // R7 Task 5:MiniMax 补镜产出的生成片进 Stack 时永远是非主选——见

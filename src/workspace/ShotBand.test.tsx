@@ -309,7 +309,9 @@ describe("镜头带", () => {
     for (const section of [first, second]) {
       const placeholder = within(section).getByText("本章还没有镜头");
       expect(placeholder).toBeTruthy();
-      expect(within(section).getByText("从媒体池拖入或生成候选")).toBeTruthy();
+      // R10 U-17:占位上是可点的入口,不再是一句「从媒体池拖入或生成候选」。
+      expect(within(section).getByRole("button", { name: "从媒体池选择…" })).toBeTruthy();
+      expect(within(section).getByRole("button", { name: "生成候选" })).toHaveProperty("disabled", true);
       expect(within(section).queryByText(/个镜头/)).toBeNull();
     }
     expect(screen.getAllByText("本章还没有镜头")).toHaveLength(2);
@@ -570,7 +572,8 @@ describe("镜头带空槽位按请求状态分叉(镜像 R7 StoryGapCard)", () =
     withRequest(request("imported"));
     const cell = await renderSlot();
     expect(within(cell).getByText("已入库")).toBeTruthy();
-    expect(within(cell).queryByRole("button")).toBeNull();
+    // R10 U-30 起缺口说明是一个可展开的 disclosure 按钮,它不是写入按钮,排除后其余必须为空。
+    expect(within(cell).queryAllByRole("button").filter((button) => !button.classList.contains("band-slot-reason"))).toEqual([]);
   });
 
   it("只读历史集:生成/忽略全禁用,并说明「历史集为只读档案」", async () => {
@@ -682,7 +685,9 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
     expect(head.className).toContain("ui-toolbar");
     expect(head.querySelector(".ui-badge--accent")!.textContent).toBe("02");
     expect(head.querySelector(".ui-badge--warn")!.textContent).toContain("1 处缺口");
-    expect(head.textContent).toContain("2 镜");
+    // R10 U-29:镜与缺口分列 —— 1 条素材 + 1 个空槽位是「1 镜 · 1 缺口」,不再把缺口算成镜。
+    expect(head.textContent).toContain("1 镜 · 1 缺口");
+    expect(head.textContent).not.toContain("2 镜");
     // 第 1 章没有缺口:不渲染缺口 Badge(空段隐藏)。
     expect(screen.getAllByRole("rowgroup")[0]!.querySelector(".ui-badge--warn")).toBeNull();
   });
@@ -699,13 +704,13 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
     expect(screen.getByRole("gridcell", { name: "镜头 1：A.MP4" }).className).toContain("ui-card--selected");
   });
 
-  it("Take n/m 与「AI 生成」是 Badge;单条素材不出候选角标", async () => {
+  it("「第 n/m 条」(原 Take n/m)与「AI 生成」是 Badge;单条素材不出候选角标", async () => {
     apiMocks.listClips.mockResolvedValue([
       clip(1, "A.MP4"), clip(2, "B.MP4"), clip(3, "C.MP4"), clip(4, "D.MP4"), clip(5, "E.MP4"), clip(6, "F.MP4"), clip(9, "GEN.MP4", true),
     ]);
     apiMocks.getStoryboard.mockResolvedValue({ ...board, items: [...board.items, item(9, 2, "GEN.MP4", 6)] });
     await renderBand();
-    expect(within(screen.getByRole("gridcell", { name: "镜头 1：A.MP4" })).getByText("Take 1/3").className).toContain("ui-badge");
+    expect(within(screen.getByRole("gridcell", { name: "镜头 1：A.MP4" })).getByText("第 1/3 条").className).toContain("ui-badge");
     expect(within(screen.getByRole("gridcell", { name: "镜头 3：C.MP4" })).queryByText(/^Take/)).toBeNull();
     expect(within(screen.getByRole("gridcell", { name: "镜头 7：GEN.MP4" })).getByText("AI 生成").className).toContain("ui-badge");
   });

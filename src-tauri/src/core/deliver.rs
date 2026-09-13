@@ -20,8 +20,20 @@ use super::platform;
 
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 集标题为空 / 全是非法字符时的兜底集名(R10 U-20)。
 const PROJECT_NAME: &str = "旅剪项目";
-const PACKAGE_SUFFIX: &str = "剪映交付";
+/// 交付包文件夹:`<集名>_交付_<YYYY-MM-DD>`(R10 U-20;旧名「旅剪项目_剪映交付_日期」退役)。
+const PACKAGE_SUFFIX: &str = "交付";
+/// R11 车道 E:快速导出的文件夹叫 `<集名>_导出_<YYYY-MM-DD>`,同名追加 `-2`(规格 §2;
+/// 集名清洗与交付包共用 [`package_project_name`])。
+const QUICK_SUFFIX: &str = "导出";
+/// 快速导出的目标目录不存在 / 不可写时错误文本的前缀:前端按它回落到保存面板,
+/// 别的失败(没有精选、磁盘不够)不带这个前缀,不能被当成"换个文件夹就好"。
+pub const QUICK_EXPORT_DEST_UNAVAILABLE: &str = "dest_unavailable";
+const MODE_FULL: &str = "full";
+const MODE_QUICK: &str = "quick";
+/// 文件系统里集名最长保留多少个字符(Finder 显示 + 路径长度都受得了)。
+const PACKAGE_TITLE_MAX_CHARS: usize = 40;
 const SELECTED_DIRECTORY: &str = "01_精选原片";
 const NARRATION_DIRECTORY: &str = "02_环境声与旁白"; // R2 G10 写旁白稿.txt 用
 const SUBTITLE_DIRECTORY: &str = "03_字幕";
@@ -144,6 +156,59 @@ struct ExportPlatformInfo {
     canvas_height: i64,
     /// 0 表示不限时长。
     duration_budget_seconds: i64,
+    /// R10 U-05:画布方向的来源(`override`/`episode`/`preset`/`clips`/`fallback`),
+    /// 见 `platform::ResolvedPlatform::orientation_source`。旧负载没有这个字段,按
+    /// 「集记录」回退。
+    #[serde(default = "default_orientation_source")]
+    orientation_source: String,
+}
+
+fn default_orientation_source() -> String {
+    "episode".to_owned()
+}
+
+/// R10 U-05:交付画布——抽屉里「画布 1080×1920」那一行的数据源。`get_export_status`
+/// 的 idle 态和 `preview_export_canvas` 都返回它。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExportCanvas {
+    pub platform: String,
+    pub display_name: String,
+    pub orientation: String,
+    pub orientation_source: String,
+    pub width: i64,
+    pub height: i64,
+}
+
+impl From<&ExportPlatformInfo> for ExportCanvas {
+    fn from(info: &ExportPlatformInfo) -> Self {
+        ExportCanvas {
+            platform: info.platform.clone(),
+            display_name: info.display_name.clone(),
+            orientation: info.orientation.clone(),
+            orientation_source: info.orientation_source.clone(),
+            width: info.canvas_width,
+            height: info.canvas_height,
+        }
+    }
+}
+
+/// 抽屉预览:按本次将要传给 `start_export_with_canvas` 的参数解析画布,不建任务。
+pub fn preview_export_canvas(
+    connection: &Connection,
+    override_platform: Option<&str>,
+    override_orientation: Option<&str>,
+) -> Result<ExportCanvas> {
+    let episode_id: i64 = connection
+        .query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+        .map_err(|_| CoreError::Export("没有进行中的 Episode".to_owned()))?;
+    let info: ExportPlatformInfo = platform::resolve_platform_with_orientation(
+        connection,
+        episode_id,
+        override_platform,
+        override_orientation,
+    )?
+    .into();
+    Ok(ExportCanvas::from(&info))
 }
 
 /// Mirrors the `general` row seeded by migration 0031; must be kept in sync.
@@ -157,6 +222,7 @@ fn default_platform_info() -> ExportPlatformInfo {
         canvas_width: 1920,
         canvas_height: 1080,
         duration_budget_seconds: 0,
+        orientation_source: default_orientation_source(),
     }
 }
 
@@ -171,6 +237,7 @@ impl From<platform::ResolvedPlatform> for ExportPlatformInfo {
             canvas_width,
             canvas_height,
             duration_budget_seconds: resolved.duration_budget_seconds(),
+            orientation_source: resolved.orientation_source.to_owned(),
         }
     }
 }
@@ -207,6 +274,10 @@ struct ExportJobPayload {
     /// 创建交付任务时校验并冻结，任务恢复/重跑都不会变。
     #[serde(default)]
     target_seconds: Option<u32>,
+    /// R11 车道 E:`full`(交付包,旧任务负载缺这个字段时的回退)或 `quick`(只 remux
+    /// 精选段与整条收藏,平铺在文件夹根目录,不出粗剪 / 镜头表 / 联系表 / 交付说明)。
+    #[serde(default = "default_mode")]
+    mode: String,
     /// 参考粗剪实际拼出来的总时长，统一换算到毫秒 tick 记账；粗剪转码完成前是 `None`。
     #[serde(default)]
     rough_cut_actual_ticks: Option<i64>,
@@ -218,6 +289,43 @@ struct ExportJobPayload {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_mode() -> String {
+    MODE_FULL.to_owned()
+}
+
+/// R11 车道 E:快速导出只导这些段 / 素材;两项都缺 = 本集全部精选段 + 收藏。
+/// `clip_ids` 命中的是该素材名下的全部精选段(没有精选段时是它的整条收藏)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuickExportSelection {
+    #[serde(default)]
+    pub segment_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    pub clip_ids: Option<Vec<i64>>,
+}
+
+impl QuickExportSelection {
+    /// 没给任何过滤 = 导全部。给了空数组算"选了个空集",要报错而不是静默导全部。
+    fn is_unfiltered(&self) -> bool {
+        self.segment_ids.is_none() && self.clip_ids.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuickExportSkipped {
+    pub reason: String,
+}
+
+/// `quick_export` / `plan_quick_export` 的结果:`job_id` 只在真的排了任务时有值;
+/// `dir` 是将要写的文件夹(有目标目录时是全路径,否则只有文件夹名);`files` 是
+/// 文件夹里将出现的文件名,顺序与交付项一致。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QuickExportOutcome {
+    pub job_id: Option<i64>,
+    pub dir: String,
+    pub files: Vec<String>,
+    pub skipped: Vec<QuickExportSkipped>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +390,11 @@ pub struct ExportStatus {
     pub rough_cut_actual_ticks: Option<i64>,
     pub rough_cut_actual_tb_num: Option<i64>,
     pub rough_cut_actual_tb_den: Option<i64>,
+    /// R10 U-05:本次交付(或 idle 时「将要」)用的画布。任务负载里冻结的那份;
+    /// idle 态按当前集与平台预设现算,解析失败时为 `None`。
+    pub canvas: Option<ExportCanvas>,
+    /// R11 车道 E:任务的模式(`quick` / `full`);idle 态为 `None`。
+    pub mode: Option<String>,
 }
 
 #[derive(Debug)]
@@ -466,6 +579,180 @@ pub fn start_export(
     include_contact_sheet: bool,
     target_seconds: Option<u32>,
 ) -> Result<ExportStatus> {
+    start_export_with_canvas(
+        connection,
+        destination,
+        override_platform,
+        None,
+        include_contact_sheet,
+        target_seconds,
+    )
+}
+
+/// R10 U-05:`start_export` + 本次交付手动指定的画布方向(`portrait`/`landscape`;
+/// `None` 按 `platform::resolve_platform` 的优先级落定)。
+pub fn start_export_with_canvas(
+    connection: &mut Connection,
+    destination: &Path,
+    override_platform: Option<&str>,
+    override_orientation: Option<&str>,
+    include_contact_sheet: bool,
+    target_seconds: Option<u32>,
+) -> Result<ExportStatus> {
+    let job_id = enqueue_export(
+        connection,
+        destination,
+        override_platform,
+        override_orientation,
+        include_contact_sheet,
+        target_seconds,
+        MODE_FULL,
+        None,
+    )?;
+    get_export_status(connection, Some(job_id))
+}
+
+/// R11 车道 E:快速导出——只 remux 精选段与整条收藏到 `<集名>_导出_<日期>`,进度沿用
+/// 交付任务那套(同一个 `export_package` 作业,负载 `mode = quick`)。目标目录不存在 /
+/// 不可写时报 [`QUICK_EXPORT_DEST_UNAVAILABLE`] 前缀的错误,前端据此回落到保存面板。
+pub fn start_quick_export(
+    connection: &mut Connection,
+    destination: &Path,
+    selection: Option<&QuickExportSelection>,
+) -> Result<QuickExportOutcome> {
+    ensure_writable_directory(destination)?;
+    let plan = plan_quick_export(connection, Some(destination), selection)?;
+    let job_id = enqueue_export(connection, destination, None, None, false, None, MODE_QUICK, selection)?;
+    Ok(QuickExportOutcome {
+        job_id: Some(job_id),
+        ..plan
+    })
+}
+
+/// 只算不排:快速导出将写哪个文件夹、哪些文件、哪些 id 被跳过。抽屉的清单读它。
+pub fn plan_quick_export(
+    connection: &Connection,
+    destination: Option<&Path>,
+    selection: Option<&QuickExportSelection>,
+) -> Result<QuickExportOutcome> {
+    let episode_title: String = connection
+        .query_row("SELECT title FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+        .map_err(|_| CoreError::Export("没有进行中的 Episode，无法导出".to_owned()))?;
+    let (clips, skipped) = filter_quick_selection(selected_clips(connection)?, selection)?;
+    let date: String = connection.query_row(
+        "SELECT strftime('%Y-%m-%d', 'now', 'localtime')",
+        [],
+        |row| row.get(0),
+    )?;
+    let project_name = package_project_name(&episode_title);
+    let dir = match destination {
+        // 与任务运行时同一条规范化路径(/var → /private/var),前端拿到的就是最终会出现的那个。
+        Some(destination) => unique_quick_path(
+            &destination.canonicalize().unwrap_or_else(|_| destination.to_path_buf()),
+            &project_name,
+            &date,
+        )
+        .to_string_lossy()
+        .into_owned(),
+        None => quick_folder_name(&project_name, &date),
+    };
+    Ok(QuickExportOutcome {
+        job_id: None,
+        dir,
+        files: clips
+            .iter()
+            .enumerate()
+            .map(|(index, clip)| export_file_name(index + 1, &clip.file_name))
+            .collect(),
+        skipped,
+    })
+}
+
+/// 按 `selection` 裁剪交付项:段 id 命中的段、素材 id 命中的段 / 整条收藏。命不中的 id
+/// 记进 `skipped`;裁完为空(或给了空集)报错,不能静默退回"导全部"。
+fn filter_quick_selection(
+    clips: Vec<ExportClip>,
+    selection: Option<&QuickExportSelection>,
+) -> Result<(Vec<ExportClip>, Vec<QuickExportSkipped>)> {
+    let Some(selection) = selection.filter(|selection| !selection.is_unfiltered()) else {
+        if clips.is_empty() {
+            return Err(CoreError::Export(
+                "当前没有精选段或收藏素材；请先打点保存片段，或用 F 收藏整条素材".to_owned(),
+            ));
+        }
+        return Ok((clips, Vec::new()));
+    };
+    let segment_ids = selection.segment_ids.clone().unwrap_or_default();
+    let clip_ids = selection.clip_ids.clone().unwrap_or_default();
+    let mut skipped = Vec::new();
+    for segment_id in &segment_ids {
+        if !clips.iter().any(|clip| clip.segment_id == Some(*segment_id)) {
+            skipped.push(QuickExportSkipped {
+                reason: format!("精选段 {segment_id} 不在本集的导出项里"),
+            });
+        }
+    }
+    for clip_id in &clip_ids {
+        if !clips.iter().any(|clip| clip.clip_id == *clip_id) {
+            skipped.push(QuickExportSkipped {
+                reason: format!("素材 {clip_id} 没有精选段也没有收藏"),
+            });
+        }
+    }
+    let kept: Vec<ExportClip> = clips
+        .into_iter()
+        .filter(|clip| {
+            clip.segment_id.is_some_and(|id| segment_ids.contains(&id)) || clip_ids.contains(&clip.clip_id)
+        })
+        .collect();
+    if kept.is_empty() {
+        return Err(CoreError::Export(
+            "所选的素材里没有精选段或收藏；先打点保存片段,或按 F 收藏整条素材".to_owned(),
+        ));
+    }
+    Ok((kept, skipped))
+}
+
+/// 目标目录必须存在、是文件夹、且真的写得进去(实际落一个探针文件再删)。
+fn ensure_writable_directory(destination: &Path) -> Result<()> {
+    let unavailable = |detail: String| {
+        CoreError::Export(format!(
+            "{QUICK_EXPORT_DEST_UNAVAILABLE}: 上次的文件夹现在用不了（{}）：{detail}",
+            destination.display()
+        ))
+    };
+    if !destination.is_dir() {
+        return Err(unavailable("文件夹不存在".to_owned()));
+    }
+    let probe = destination.join(format!(
+        ".tripcut-write-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    match File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(error) => Err(unavailable(error.to_string())),
+    }
+}
+
+/// 交付包 / 快速导出共用的排队逻辑;`mode` 决定文件夹命名与任务运行时跳过的阶段。
+#[allow(clippy::too_many_arguments)]
+fn enqueue_export(
+    connection: &mut Connection,
+    destination: &Path,
+    override_platform: Option<&str>,
+    override_orientation: Option<&str>,
+    include_contact_sheet: bool,
+    target_seconds: Option<u32>,
+    mode: &str,
+    selection: Option<&QuickExportSelection>,
+) -> Result<i64> {
     validate_rough_cut_target(target_seconds)?;
     let destination = destination.canonicalize().map_err(|error| {
         CoreError::Export(format!(
@@ -483,21 +770,21 @@ pub fn start_export(
     // Freeze Episode identity, narrative selection and the queued job under one write lock.
     // Archiving in another connection cannot splice EP01 clips into an EP02 payload.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (episode_id, episode_memory_id): (i64, String) = transaction
+    let (episode_id, episode_memory_id, episode_title): (i64, String, String) = transaction
         .query_row(
-            "SELECT id, memory_id FROM episodes WHERE status = 'active'",
+            "SELECT id, memory_id, title FROM episodes WHERE status = 'active'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| CoreError::Export("没有进行中的 Episode，无法创建交付任务".to_owned()))?;
-    let platform_info: ExportPlatformInfo =
-        platform::resolve_platform(&transaction, episode_id, override_platform)?.into();
-    let clips = selected_clips(&transaction)?;
-    if clips.is_empty() {
-        return Err(CoreError::Export(
-            "当前没有精选段或收藏素材；请先打点保存片段，或用 F 收藏整条素材".to_owned(),
-        ));
-    }
+    let platform_info: ExportPlatformInfo = platform::resolve_platform_with_orientation(
+        &transaction,
+        episode_id,
+        override_platform,
+        override_orientation,
+    )?
+    .into();
+    let (clips, _skipped) = filter_quick_selection(selected_clips(&transaction)?, selection)?;
     let selected_bytes = clips.iter().map(selected_estimated_bytes).sum::<u64>();
     let required_bytes = estimated_required_bytes(selected_bytes);
     let available_bytes = available_space_bytes(&destination)?;
@@ -525,7 +812,7 @@ pub fn start_export(
         episode_id: Some(episode_id),
         episode_memory_id: Some(episode_memory_id),
         destination: destination.to_string_lossy().into_owned(),
-        project_name: PROJECT_NAME.to_owned(),
+        project_name: package_project_name(&episode_title),
         date,
         selected_bytes,
         clips,
@@ -543,6 +830,7 @@ pub fn start_export(
         contact_sheet_glyph_fallbacks: None,
         contact_sheet_cover_failures: None,
         target_seconds,
+        mode: mode.to_owned(),
         rough_cut_actual_ticks: None,
         rough_cut_actual_tb_num: None,
         rough_cut_actual_tb_den: None,
@@ -574,7 +862,7 @@ pub fn start_export(
         )?
     };
     transaction.commit()?;
-    get_export_status(connection, Some(job_id))
+    Ok(job_id)
 }
 
 pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result<ExportStatus> {
@@ -640,6 +928,8 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
             rough_cut_actual_ticks: None,
             rough_cut_actual_tb_num: None,
             rough_cut_actual_tb_den: None,
+            canvas: preview_export_canvas(connection, None, None).ok(),
+            mode: None,
         });
     };
     let payload = parse_payload(&payload_json)?;
@@ -663,6 +953,8 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
         rough_cut_actual_ticks: payload.rough_cut_actual_ticks,
         rough_cut_actual_tb_num: payload.rough_cut_actual_tb_num,
         rough_cut_actual_tb_den: payload.rough_cut_actual_tb_den,
+        canvas: Some(ExportCanvas::from(&payload.platform_info)),
+        mode: Some(payload.mode.clone()),
     })
 }
 
@@ -892,25 +1184,29 @@ fn run_export_package_with(
         available_space_bytes(&destination)?,
     )?;
 
-    let final_path = unique_package_path(
-        &destination,
-        &payload.project_name,
-        &payload.date,
-    );
+    // R11 车道 E:快速导出平铺在 `<集名>_导出_<日期>` 根目录,不建交付包的分层目录。
+    let quick = payload.mode == MODE_QUICK;
+    let final_path = if quick {
+        unique_quick_path(&destination, &payload.project_name, &payload.date)
+    } else {
+        unique_package_path(&destination, &payload.project_name, &payload.date)
+    };
     let staging_path = staging_path(&final_path, job.id, job.attempt);
     if staging_path.exists() {
         std::fs::remove_dir_all(&staging_path)?;
     }
     std::fs::create_dir(&staging_path)?;
     let mut staging = StagingDirectory::new(staging_path.clone());
-    std::fs::create_dir(staging_path.join(SELECTED_DIRECTORY))?;
-    for directory in [
-        NARRATION_DIRECTORY,
-        ROUGH_CUT_DIRECTORY,
-        SHOT_LIST_DIRECTORY,
-        COLOR_NOTES_DIRECTORY,
-    ] {
-        std::fs::create_dir(staging_path.join(directory))?;
+    if !quick {
+        std::fs::create_dir(staging_path.join(SELECTED_DIRECTORY))?;
+        for directory in [
+            NARRATION_DIRECTORY,
+            ROUGH_CUT_DIRECTORY,
+            SHOT_LIST_DIRECTORY,
+            COLOR_NOTES_DIRECTORY,
+        ] {
+            std::fs::create_dir(staging_path.join(directory))?;
+        }
     }
 
     payload.output_path = Some(final_path.to_string_lossy().into_owned());
@@ -932,9 +1228,13 @@ fn run_export_package_with(
         ));
         persist_progress(connection, job, &payload)?;
 
-        let output_path = staging_path
-            .join(SELECTED_DIRECTORY)
-            .join(&payload.progress.items[index].output_name);
+        let output_path = if quick {
+            staging_path.join(&payload.progress.items[index].output_name)
+        } else {
+            staging_path
+                .join(SELECTED_DIRECTORY)
+                .join(&payload.progress.items[index].output_name)
+        };
         let temporary_path = jobs::temporary_output_path(&output_path, job.attempt);
         remove_file_if_exists(&temporary_path)?;
         match export_clip(
@@ -962,7 +1262,7 @@ fn run_export_package_with(
             Err(error) => {
                 let _ = std::fs::remove_file(&temporary_path);
                 payload.progress.items[index].status = "failed".to_owned();
-                payload.progress.items[index].note = Some(error.to_string());
+                payload.progress.items[index].note = Some(failure_note(&error));
                 payload.progress.failed_items += 1;
             }
         }
@@ -975,34 +1275,97 @@ fn run_export_package_with(
         ));
     }
 
-    payload.progress.stage = "rough_cut".to_owned();
-    payload.progress.message = Some("正在转码 1080p H.264 参考粗剪".to_owned());
+    if !quick {
+        write_package_extras(connection, job, &mut payload, &successful, &staging_path, ffmpeg, ffprobe, &cancellation.flag)?;
+    }
+
+    check_cancelled(&cancellation.flag)?;
+    payload.progress.stage = "finalizing".to_owned();
+    payload.progress.message = Some("正在完成原子交付".to_owned());
     persist_progress(connection, job, &payload)?;
+    payload.progress.stage = "complete".to_owned();
+    payload.progress.message = Some(completion_message(&payload));
+    payload.output_path = Some(final_path.to_string_lossy().into_owned());
+    write_completion_marker(
+        &staging_path,
+        job.id,
+        job.attempt,
+        &payload_hash,
+    )?;
+    finalize_export(
+        connection,
+        job,
+        payload,
+        &successful,
+        staging_path,
+        &mut staging,
+        &final_path,
+        &cancellation.flag,
+    )
+}
+
+/// 交付完成的一句话:快速导出报文件数,交付包报"已生成"(失败条数照旧点出来)。
+fn completion_message(payload: &ExportJobPayload) -> String {
+    let failed = payload.progress.failed_items;
+    if payload.mode == MODE_QUICK {
+        if failed == 0 {
+            format!("已导出 {} 个文件", payload.progress.completed_items)
+        } else {
+            format!("已导出 {} 个文件；{failed} 条没导出来", payload.progress.completed_items)
+        }
+    } else if failed == 0 {
+        "交付包已生成".to_owned()
+    } else {
+        format!("交付包已生成；{failed} 条素材失败，详情见镜头表")
+    }
+}
+
+/// 交付包独有的产物:参考粗剪、字幕、镜头表、联系表、地点卡、旁白稿、交付说明。
+/// 快速导出整段跳过(规格 §2)。
+#[allow(clippy::too_many_arguments)]
+fn write_package_extras(
+    connection: &mut Connection,
+    job: &Job,
+    payload: &mut ExportJobPayload,
+    successful: &[SuccessfulClip],
+    staging_path: &Path,
+    ffmpeg: &OsStr,
+    ffprobe: &OsStr,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    payload.progress.stage = "rough_cut".to_owned();
+    let rough_cut_canvas = ExportCanvas::from(&payload.platform_info);
+    payload.progress.message = Some(format!(
+        "正在转码 {}×{} H.264 参考粗剪",
+        rough_cut_canvas.width, rough_cut_canvas.height
+    ));
+    persist_progress(connection, job, payload)?;
     let rough_cut_path = staging_path.join(ROUGH_CUT_FILE);
     let rough_cut_temporary = jobs::temporary_output_path(&rough_cut_path, job.attempt);
     remove_file_if_exists(&rough_cut_temporary)?;
-    let (rough_cut_clips, rough_cut_summary) = select_rough_cut(&successful, payload.target_seconds)?;
+    let (rough_cut_clips, rough_cut_summary) = select_rough_cut(successful, payload.target_seconds)?;
     transcode_rough_cut(
         ffmpeg,
         ffprobe,
         &rough_cut_clips,
         &rough_cut_temporary,
-        &cancellation.flag,
+        &rough_cut_canvas,
+        cancellation,
     )?;
     std::fs::rename(&rough_cut_temporary, &rough_cut_path)?;
     payload.rough_cut_actual_ticks = Some(rough_cut_summary.actual_ticks);
     payload.rough_cut_actual_tb_num = Some(rough_cut_summary.actual_tb_num);
     payload.rough_cut_actual_tb_den = Some(rough_cut_summary.actual_tb_den);
 
-    check_cancelled(&cancellation.flag)?;
+    check_cancelled(cancellation)?;
     payload.progress.stage = "documents".to_owned();
     payload.progress.message = Some("正在写入镜头表与交付说明".to_owned());
-    persist_progress(connection, job, &payload)?;
+    persist_progress(connection, job, payload)?;
     let subtitle_count = copy_subtitles(
         connection,
         &payload.clips,
         &payload.progress.items,
-        &staging_path,
+        staging_path,
     )?;
     let csv = build_shot_list_csv(&payload.clips, &payload.progress.items, &payload.platform_info);
     write_synced(&staging_path.join(SHOT_LIST_FILE), csv.as_bytes())?;
@@ -1010,7 +1373,7 @@ fn run_export_package_with(
         .episode_id
         .ok_or_else(|| CoreError::Export("交付任务缺少 Episode 归属".to_owned()))?;
     let contact_sheet_outcome = if payload.include_contact_sheet {
-        match write_contact_sheet(connection, &staging_path, episode_id, &payload) {
+        match write_contact_sheet(connection, staging_path, episode_id, payload) {
             Ok(stats) => {
                 payload.contact_sheet_glyph_fallbacks = Some(stats.glyph_fallbacks as u64);
                 payload.contact_sheet_cover_failures = Some(stats.cover_failures as u64);
@@ -1029,39 +1392,34 @@ fn run_export_package_with(
     } else {
         ContactSheetOutcome::Disabled
     };
-    let destination_count = write_destination_cards(connection, &staging_path, episode_id)?;
-    let narration_outcome = write_narration_script(connection, &staging_path, episode_id)?;
+    let destination_count = write_destination_cards(connection, staging_path, episode_id)?;
+    let narration_outcome = write_narration_script(connection, staging_path, episode_id)?;
     let instructions = build_instructions(
-        &payload,
+        payload,
         subtitle_count,
         destination_count,
         narration_outcome,
         &contact_sheet_outcome,
     );
     write_synced(&staging_path.join(README_FILE), instructions.as_bytes())?;
+    Ok(())
+}
 
-    check_cancelled(&cancellation.flag)?;
-    payload.progress.stage = "finalizing".to_owned();
-    payload.progress.message = Some("正在完成原子交付".to_owned());
-    persist_progress(connection, job, &payload)?;
-    payload.progress.stage = "complete".to_owned();
-    payload.progress.message = Some(if payload.progress.failed_items == 0 {
-        "交付包已生成".to_owned()
-    } else {
-        format!(
-            "交付包已生成；{} 条素材失败，详情见镜头表",
-            payload.progress.failed_items
-        )
-    });
-    payload.output_path = Some(final_path.to_string_lossy().into_owned());
-    write_completion_marker(
-        &staging_path,
-        job.id,
-        job.attempt,
-        &payload_hash,
-    )?;
-    check_cancelled(&cancellation.flag)?;
-    std::fs::rename(&staging_path, &final_path)?;
+/// 原子提交:staging → 最终文件夹 rename,再在一个事务里落 exports 行、频道记忆 outbox 与
+/// 作业终态(取消赢在 rename 之后的窄窗时把文件夹删回去)。
+#[allow(clippy::too_many_arguments)]
+fn finalize_export(
+    connection: &mut Connection,
+    job: &Job,
+    payload: ExportJobPayload,
+    successful: &[SuccessfulClip],
+    staging_path: PathBuf,
+    staging: &mut StagingDirectory,
+    final_path: &Path,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    check_cancelled(cancellation)?;
+    std::fs::rename(&staging_path, final_path)?;
     staging.promoted = true;
     if let Some(parent) = final_path.parent() {
         let _ = File::open(parent).and_then(|directory| directory.sync_all());
@@ -1124,7 +1482,7 @@ fn run_export_package_with(
         // A cancellation can win in the narrow window after filesystem rename
         // but before the database CAS. This directory is uniquely owned by this
         // job/attempt, so never leave a cancelled package looking successful.
-        let _ = std::fs::remove_dir_all(&final_path);
+        let _ = std::fs::remove_dir_all(final_path);
         return Err(CoreError::InvalidTransition(format!(
             "export job {} changed during finalization",
             job.id
@@ -1849,6 +2207,30 @@ struct BoundaryFingerprint {
 }
 
 const SOURCE_PROBE_ROLLBACK_SECONDS: f64 = 10.0;
+/// 出点之后多解这么久:B 帧重排下 `-read_intervals` 的尾部会少吐最后几帧,出点只能靠
+/// 「末帧 + 时长」推断,短 1 帧;多读一段让真正的出点帧被解出来(V-03)。
+const SOURCE_PROBE_TAIL_SECONDS: f64 = 1.0;
+/// mp4 封装把 AAC 编码器延迟(1024 采样,44.1 kHz ≈ 23 ms)用 `make_zero` 整体前推,
+/// 输出视频首帧 pts 因而不是 0。这是封装偏移不是裁错帧,首帧校验放这么多(V-03)。
+const MUX_SHIFT_ALLOWANCE_SECONDS: f64 = 0.05;
+
+/// ffprobe `-read_intervals` 的区间串。起点回退到 0 时**不写起点**(`%end`):写 `0%`
+/// 会让 ffprobe 向前 seek 到第一个非负关键帧,iPhone / `ffmpeg -ss` 剪出来的片子首个
+/// 关键帧 pts 为负(edit list),0.5 s 的入点就被跳过去了(真机 IMG_0822「入点差 12000」)。
+fn source_probe_interval(probe_start: f64, probe_end: f64) -> String {
+    if probe_start <= 0.0 {
+        format!("%{probe_end:.9}")
+    } else {
+        format!("{probe_start:.9}%{probe_end:.9}")
+    }
+}
+
+fn mux_shift_allowance_ticks(tb_num: i64, tb_den: i64) -> i64 {
+    if tb_num <= 0 || tb_den <= 0 {
+        return 0;
+    }
+    (MUX_SHIFT_ALLOWANCE_SECONDS * tb_den as f64 / tb_num as f64).ceil() as i64
+}
 
 fn verify_segment_pts(
     ffmpeg: &OsStr,
@@ -1896,11 +2278,11 @@ fn verify_segment_pts(
     let frame_seconds = clip_frame_seconds(clip);
     let bounds = parse_pts_bounds(&output.stdout, frame_seconds)?;
     let mapped_output = map_output_bounds_to_source_ticks(clip, bounds)?;
-    validate_source_pts_bounds(
+    validate_output_pts_bounds(
         mapped_output,
-        source_bounds.first,
-        source_bounds.end,
+        source_bounds,
         clip_frame_ticks(clip),
+        mux_shift_allowance_ticks(clip.tb_num.unwrap_or(0), clip.tb_den.unwrap_or(0)),
     )?;
     verify_boundary_content(ffmpeg, clip, output_path, cancellation)?;
     Ok(pts_boundary_warning(
@@ -1920,7 +2302,7 @@ fn probe_source_tick_bounds(
     let start_seconds = clip_start_seconds(clip)?;
     let end_seconds = start_seconds + clip_duration_seconds(clip);
     let probe_start = (start_seconds - SOURCE_PROBE_ROLLBACK_SECONDS).max(0.0);
-    let probe_end = end_seconds + clip_frame_seconds(clip) * 2.0;
+    let probe_end = end_seconds + clip_frame_seconds(clip) * 2.0 + SOURCE_PROBE_TAIL_SECONDS;
     let source_args = [
         OsString::from("-v"),
         OsString::from("error"),
@@ -1930,7 +2312,7 @@ fn probe_source_tick_bounds(
         // ffprobe seeks intervals to an earlier keyframe. Use an absolute end and
         // filter decoded frame PTS below instead of assuming start%+duration begins
         // exactly at the requested non-keyframe timestamp.
-        OsString::from(format!("{probe_start:.9}%{probe_end:.9}")),
+        OsString::from(source_probe_interval(probe_start, probe_end)),
         OsString::from("-show_entries"),
         OsString::from("frame=best_effort_timestamp,pkt_duration,duration"),
         OsString::from("-of"),
@@ -2031,11 +2413,45 @@ fn validate_source_pts_bounds(
     let first_delta = bounds.first.abs_diff(expected_in) as i64;
     let end_delta = bounds.end.abs_diff(expected_out) as i64;
     if first_delta > tolerance || end_delta > tolerance {
-        return Err(CoreError::Export(format!(
-            "源片 PTS 边界与精选段不符（入点差 {first_delta} tick，出点差 {end_delta} tick，容差 {tolerance} tick）"
-        )));
+        return Err(pts_mismatch_error(first_delta, end_delta, tolerance));
     }
     Ok(())
+}
+
+/// 输出侧校验:首帧允许「1 帧 + 封装偏移」(见 `MUX_SHIFT_ALLOWANCE_SECONDS`),
+/// 段长(尾 − 首)仍只容 1 帧 —— 偏移是整体平移,段长错了才是真裁错。
+fn validate_output_pts_bounds(
+    output: TickBounds,
+    source: TickBounds,
+    tolerance_ticks: i64,
+    shift_allowance_ticks: i64,
+) -> Result<()> {
+    let tolerance = tolerance_ticks.max(1);
+    let first_delta = output.first.abs_diff(source.first) as i64;
+    let span_delta = (output.end - output.first).abs_diff(source.end - source.first) as i64;
+    if first_delta > tolerance + shift_allowance_ticks.max(0) || span_delta > tolerance {
+        return Err(pts_mismatch_error(first_delta, span_delta, tolerance));
+    }
+    Ok(())
+}
+
+/// 给用户看的话:不出 PTS / tick,差多少按帧说,并告诉他现在怎么办。
+fn pts_mismatch_error(first_delta_ticks: i64, end_delta_ticks: i64, frame_ticks: i64) -> CoreError {
+    let frames = |ticks: i64| (ticks as f64 / frame_ticks.max(1) as f64 * 10.0).round() / 10.0;
+    CoreError::Export(format!(
+        "这段的起止点和视频帧对不上（入点差 {} 帧，出点差 {} 帧），请在监视器里把入出点微调一下再导出",
+        frames(first_delta_ticks),
+        frames(end_delta_ticks)
+    ))
+}
+
+/// 进度项的 note 是直接给用户看的一句话:`CoreError::Export` 已经是人话,去掉
+/// `export failed:` 这种英文前缀;其它错误保留原文(至少不丢信息)。
+fn failure_note(error: &CoreError) -> String {
+    match error {
+        CoreError::Export(message) => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn verify_boundary_content(
@@ -2444,6 +2860,7 @@ fn transcode_rough_cut(
     ffprobe: &OsStr,
     clips: &[SuccessfulClip],
     output_path: &Path,
+    canvas: &ExportCanvas,
     cancellation: &AtomicBool,
 ) -> Result<()> {
     let audio_presence = clips
@@ -2453,7 +2870,7 @@ fn transcode_rough_cut(
             None => probe_has_audio(ffprobe, &item.path, cancellation),
         })
         .collect::<Result<Vec<_>>>()?;
-    let args = rough_cut_args(clips, &audio_presence, output_path);
+    let args = rough_cut_args(clips, &audio_presence, output_path, canvas);
     run_media_command(
         ffmpeg,
         &args,
@@ -2488,7 +2905,11 @@ fn rough_cut_args(
     clips: &[SuccessfulClip],
     audio_presence: &[bool],
     output_path: &Path,
+    canvas: &ExportCanvas,
 ) -> Vec<OsString> {
+    // R10 R-03:画布来自本次交付解析出的 `ExportCanvas`(竖版 1080×1920 等),
+    // 不再写死 1920×1080——否则竖版交付的参考粗剪会变成横片两侧黑边。
+    let (canvas_w, canvas_h) = (canvas.width.max(2), canvas.height.max(2));
     let mut args = vec![
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
@@ -2526,7 +2947,7 @@ fn rough_cut_args(
         let duration = clip_duration_seconds(&clip.clip).max(0.001);
         let rotate_prefix = rough_cut_rotation_prefix(clip.clip.manual_rotation).unwrap_or("");
         filters.push(format!(
-            "[{index}:v:0]{rotate_prefix}scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
+            "[{index}:v:0]{rotate_prefix}scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
         ));
         if audio_presence[index] {
             filters.push(format!(
@@ -3049,7 +3470,10 @@ fn build_instructions(
     let mut steps: Vec<String> = vec![
         "打开剪映专业版，新建草稿。".to_owned(),
         format!("将“{SELECTED_DIRECTORY}”拖入素材区；文件名前三位就是推荐顺序。"),
-        format!("“{ROUGH_CUT_FILE}”是 1080p H.264/AAC 参考粗剪，可直接预览故事顺序。"),
+        format!(
+            "“{ROUGH_CUT_FILE}”是 {}×{} H.264/AAC 参考粗剪，可直接预览故事顺序。",
+            payload.platform_info.canvas_width, payload.platform_info.canvas_height
+        ),
         subtitle_step,
         shot_list_step,
         narration_step,
@@ -3116,8 +3540,10 @@ fn build_instructions(
         "旅剪工作台 · 稳定交付包\n\n\
          {numbered_steps}\n\n\
          本包不会修改原片。用户打点的精选段按源 time_base 入出点重编码，并回读首尾 PTS；超过 1 帧的偏差会在镜头表中以“⚠ 黄标”注明。没有精选段但用 F 收藏的素材仍按整条 remux。\n\
-         参考粗剪统一为 30fps 1080p，使用 macOS VideoToolbox，并允许系统提供的软件编码路径。\n\
+         参考粗剪统一为 30fps、画布 {}×{}，使用 macOS VideoToolbox，并允许系统提供的软件编码路径。\n\
          本次精选 {} 条，成功 {} 条，失败 {} 条。失败原因见镜头表“备注”列。\n",
+        payload.platform_info.canvas_width,
+        payload.platform_info.canvas_height,
         payload.clips.len(),
         payload.progress.completed_items,
         payload.progress.failed_items
@@ -3360,6 +3786,29 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// 交付包文件夹里的集名:去掉路径分隔符与 macOS / Windows 都不接受的字符,压掉首尾空白与点
+/// (以点开头会变隐藏目录),截到 [`PACKAGE_TITLE_MAX_CHARS`] 个字符;什么都不剩就回落「旅剪项目」。
+fn package_project_name(episode_title: &str) -> String {
+    const FORBIDDEN: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
+    let cleaned: String = episode_title
+        .chars()
+        .filter(|ch| !FORBIDDEN.contains(ch) && !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .chars()
+        .take(PACKAGE_TITLE_MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    if cleaned.is_empty() {
+        PROJECT_NAME.to_owned()
+    } else {
+        cleaned
+    }
+}
+
 fn unique_package_path(destination: &Path, project_name: &str, date: &str) -> PathBuf {
     let base = format!("{project_name}_{PACKAGE_SUFFIX}_{date}");
     let first = destination.join(&base);
@@ -3368,6 +3817,26 @@ fn unique_package_path(destination: &Path, project_name: &str, date: &str) -> Pa
     }
     for suffix in 2_u64.. {
         let candidate = destination.join(format!("{base}_{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn quick_folder_name(project_name: &str, date: &str) -> String {
+    format!("{project_name}_{QUICK_SUFFIX}_{date}")
+}
+
+/// 快速导出的文件夹:`<集名>_导出_<日期>`,同名追加 `-2`、`-3`(规格 §2)。
+fn unique_quick_path(destination: &Path, project_name: &str, date: &str) -> PathBuf {
+    let base = quick_folder_name(project_name, date);
+    let first = destination.join(&base);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2_u64.. {
+        let candidate = destination.join(format!("{base}-{suffix}"));
         if !candidate.exists() {
             return candidate;
         }
@@ -3578,6 +4047,7 @@ mod tests {
             contact_sheet_glyph_fallbacks: None,
             contact_sheet_cover_failures: None,
             target_seconds: None,
+            mode: MODE_FULL.to_owned(),
             rough_cut_actual_ticks: None,
             rough_cut_actual_tb_num: None,
             rough_cut_actual_tb_den: None,
@@ -3662,6 +4132,10 @@ mod tests {
         assert!(text.contains("等 2 条"), "rendered instructions:\n{text}");
     }
 
+    fn landscape_canvas() -> ExportCanvas {
+        ExportCanvas::from(&default_platform_info())
+    }
+
     fn douyin_portrait_platform_info() -> ExportPlatformInfo {
         ExportPlatformInfo {
             platform: "douyin".to_owned(),
@@ -3670,6 +4144,7 @@ mod tests {
             canvas_width: 1080,
             canvas_height: 1920,
             duration_budget_seconds: 60,
+            orientation_source: "episode".to_owned(),
         }
     }
 
@@ -3685,6 +4160,42 @@ mod tests {
         assert!(text.contains("1080×1920"), "rendered instructions:\n{text}");
         assert!(text.contains("竖版"), "rendered instructions:\n{text}");
         assert!(text.contains("≤ 60 s"), "rendered instructions:\n{text}");
+    }
+
+    /// R10 R-03:参考粗剪要按解析出的画布缩放/补边,交付说明第 3 条也要写真画布。
+    #[test]
+    fn rough_cut_args_scale_and_pad_to_portrait_canvas() {
+        let clips = [SuccessfulClip {
+            clip: export_clip_fixture("clip.mov", 0, 3_000, 1, 1_000),
+            path: PathBuf::from("selected.mp4"),
+        }];
+        let canvas = ExportCanvas::from(&douyin_portrait_platform_info());
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &canvas);
+        let joined = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:"),
+            "rough cut must use the portrait canvas: {joined}"
+        );
+        assert!(!joined.contains("1920:1080"), "no landscape leftovers: {joined}");
+    }
+
+    #[test]
+    fn build_instructions_rough_cut_step_states_real_canvas() {
+        let clip = export_clip_fixture("clip.mov", 0, 1_000, 1, 1_000);
+        let payload = ExportJobPayload {
+            platform_info: douyin_portrait_platform_info(),
+            ..export_payload_fixture(vec![clip])
+        };
+        let text = build_instructions(&payload, 0, 0, NarrationOutcome::NotWritten, &ContactSheetOutcome::Disabled);
+        assert!(
+            text.contains("1080×1920 H.264/AAC 参考粗剪"),
+            "rendered instructions:\n{text}"
+        );
+        assert!(!text.contains("1080p"), "rendered instructions:\n{text}");
     }
 
     #[test]
@@ -3759,6 +4270,7 @@ mod tests {
                 canvas_width: 1920,
                 canvas_height: 1080,
                 duration_budget_seconds: 600,
+                orientation_source: "episode".to_owned(),
             },
             ..export_payload_fixture(vec![clip])
         };
@@ -3899,6 +4411,23 @@ mod tests {
                 "3",
                 "-c:a",
                 "aac",
+            ])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// 8 s 25p,2 s GOP,B 帧(libx264 缺省 bf=3),带 48 kHz AAC(封装偏移的来源)。
+    fn generate_b_frame_fixture(ffmpeg: &OsStr, path: &Path) -> bool {
+        Command::new(ffmpeg)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=8",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
+                "-shortest",
+                "-c:v", "libx264", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0", "-bf", "3",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
             ])
             .arg(path)
             .status()
@@ -4194,14 +4723,30 @@ mod tests {
     #[test]
     fn conflicting_package_directory_gets_incrementing_suffix() {
         let directory = TestDirectory::new();
-        let first = directory.path().join("旅剪项目_剪映交付_2026-08-31");
-        let second = directory.path().join("旅剪项目_剪映交付_2026-08-31_2");
+        let first = directory.path().join("旅剪项目_交付_2026-08-31");
+        let second = directory.path().join("旅剪项目_交付_2026-08-31_2");
         std::fs::create_dir(&first).unwrap();
         std::fs::create_dir(&second).unwrap();
 
         assert_eq!(
             unique_package_path(directory.path(), "旅剪项目", "2026-08-31"),
-            directory.path().join("旅剪项目_剪映交付_2026-08-31_3")
+            directory.path().join("旅剪项目_交付_2026-08-31_3")
+        );
+    }
+
+    /// R10 U-20:交付包文件夹叫 `<集名>_交付_<日期>`,集名按文件系统清洗,空则回落「旅剪项目」。
+    #[test]
+    fn package_folder_is_named_after_the_episode_title() {
+        assert_eq!(package_project_name("北海道冬日"), "北海道冬日");
+        assert_eq!(package_project_name("  Day 1 / 出发: 机场?  "), "Day 1  出发 机场");
+        assert_eq!(package_project_name(""), "旅剪项目");
+        assert_eq!(package_project_name(" ../ "), "旅剪项目");
+        assert_eq!(package_project_name("a\u{0}b<>|"), "ab");
+        let long = "长".repeat(80);
+        assert_eq!(package_project_name(&long).chars().count(), PACKAGE_TITLE_MAX_CHARS);
+        assert_eq!(
+            unique_package_path(Path::new("/tmp"), &package_project_name("北海道冬日"), "2026-09-13"),
+            PathBuf::from("/tmp/北海道冬日_交付_2026-09-13")
         );
     }
 
@@ -4685,7 +5230,7 @@ esac
             clip,
             path: PathBuf::from("selected.mp4"),
         }];
-        let rough = rough_cut_args(&successful, &[true], Path::new("rough.mp4"));
+        let rough = rough_cut_args(&successful, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let whole = whole
             .iter()
             .map(|value| value.to_string_lossy())
@@ -4717,7 +5262,7 @@ esac
         rotated.clip.manual_rotation = Some(90);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -4736,7 +5281,7 @@ esac
         rotated.clip.manual_rotation = Some(180);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -4755,7 +5300,7 @@ esac
         rotated.clip.manual_rotation = Some(270);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -4777,7 +5322,7 @@ esac
         assert_eq!(clip.clip.manual_rotation, None);
         let clips = [clip];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"));
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -4931,7 +5476,7 @@ esac
             clip: export_clip_fixture("rough.mov", 0, 3_000, 1, 1_000),
             path: PathBuf::from("selected.mp4"),
         }];
-        let rough = rough_cut_args(&rough_clips, &[true], Path::new("rough.mp4"));
+        let rough = rough_cut_args(&rough_clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
         let rough_joined = rough
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5012,6 +5557,9 @@ esac
         assert_eq!(finished.completed_items, 1);
         assert_eq!(finished.failed_items, 1);
         let output = PathBuf::from(finished.output_path.unwrap());
+        // R10 U-20:文件夹名带当前集标题(db::open_project 的默认集叫「EP01」)。
+        let folder = output.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(folder.starts_with("EP01_交付_20"), "{folder}");
         assert!(output.join(ROUGH_CUT_FILE).is_file());
         let csv = std::fs::read_to_string(output.join(SHOT_LIST_FILE)).unwrap();
         assert!(csv.contains("精选片段 remux失败"));
@@ -5302,7 +5850,7 @@ esac
             .unwrap()
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .any(|name| name.contains("剪映交付") || name.contains(".tmp-"));
+            .any(|name| name.contains("_交付_") || name.contains(".tmp-"));
         assert!(!unexpected);
         let outbox_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM channel_memory_outbox", [], |row| row.get(0))
@@ -5375,6 +5923,54 @@ esac
         assert!(started.job_id.is_some());
     }
 
+    /// 走查 U-05:集没选过方向,选小红书交付 → 负载里画布 1080×1920,状态里带 canvas。
+    #[test]
+    fn xiaohongshu_export_freezes_a_portrait_canvas_and_reports_it() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"placeholder").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, &source, "2026-08-31T11:00:00Z", &[1], None);
+
+        let idle = get_export_status(&connection, None).unwrap();
+        let preview = preview_export_canvas(&connection, Some("xiaohongshu"), None).unwrap();
+        assert_eq!((preview.width, preview.height), (1080, 1920));
+        assert_eq!(preview.orientation_source, "preset");
+        assert!(idle.canvas.is_some(), "idle 态也要能告诉抽屉将要用的画布");
+
+        let started =
+            start_export(&mut connection, directory.path(), Some("xiaohongshu"), true, None).unwrap();
+        let canvas = started.canvas.expect("任务状态带画布");
+        assert_eq!(canvas.platform, "xiaohongshu");
+        assert_eq!(canvas.orientation, "portrait");
+        assert_eq!((canvas.width, canvas.height), (1080, 1920));
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        let payload = parse_payload(&job.payload).unwrap();
+        assert_eq!(payload.platform_info.orientation, "portrait");
+        assert_eq!(payload.platform_info.canvas_height, 1920);
+
+        // 抽屉手动切横版 → 本次按横版,集记录不动。
+        let forced = start_export_with_canvas(
+            &mut connection,
+            directory.path(),
+            Some("xiaohongshu"),
+            Some("landscape"),
+            true,
+            None,
+        );
+        // 上一个任务还在排队时会被拒(单任务约束)或成功——两种情况都只看画布解析,
+        // 所以这里用 preview 代替再起一个任务。
+        drop(forced);
+        let preview = preview_export_canvas(&connection, Some("xiaohongshu"), Some("landscape")).unwrap();
+        assert_eq!(preview.orientation, "landscape");
+        assert_eq!(preview.orientation_source, "override");
+        assert_eq!((preview.width, preview.height), (1920, 1080));
+        let orientation: String = connection
+            .query_row("SELECT canvas_orientation FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orientation, "both");
+    }
+
     #[test]
     fn start_export_override_leaves_episode_record_untouched() {
         let directory = TestDirectory::new();
@@ -5434,7 +6030,8 @@ esac
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("源片 PTS 边界"));
+        assert!(error.to_string().contains("起止点和视频帧对不上"), "{error}");
+        assert!(!error.to_string().contains("PTS") && !error.to_string().contains("tick"), "文案不出术语:{error}");
     }
 
     #[test]
@@ -5450,7 +6047,76 @@ esac
         .unwrap();
 
         let error = validate_source_pts_bounds(mapped, 1_000, 2_000, 40).unwrap_err();
-        assert!(error.to_string().contains("源片 PTS 边界"));
+        assert!(error.to_string().contains("起止点和视频帧对不上"), "{error}");
+    }
+
+    /// V-03:mp4 封装把 AAC 编码器延迟(1024 采样 ≈ 23 ms)用 make_zero 整体前推,输出视频
+    /// 首帧 pts 不是 0。这是封装偏移不是裁错帧:首帧允许「1 帧 + 封装偏移上限」,段长仍按 1 帧比。
+    /// 60 fps(1 帧 = 320 tick @ 1/19200)+ 44.1 kHz(446 tick)此前必炸。
+    #[test]
+    fn output_bounds_tolerate_muxer_shift_but_not_a_wrong_span() {
+        let source = TickBounds { first: 38_400, end: 115_200 };
+        let tolerance = 320;
+        let allowance = mux_shift_allowance_ticks(1, 19_200);
+        assert!(allowance >= 446, "{allowance}");
+        // 整体前推 446 tick、段长分毫不差:通过。
+        validate_output_pts_bounds(TickBounds { first: 38_846, end: 115_646 }, source, tolerance, allowance).unwrap();
+        // 前推之外还多出 2 帧:段长错了,拒。
+        let error = validate_output_pts_bounds(TickBounds { first: 38_846, end: 116_286 }, source, tolerance, allowance).unwrap_err();
+        assert!(error.to_string().contains("起止点和视频帧对不上"), "{error}");
+        // 首帧偏了 0.5 s:不是封装偏移,拒。
+        assert!(validate_output_pts_bounds(TickBounds { first: 48_000, end: 124_800 }, source, tolerance, allowance).is_err());
+    }
+
+    /// V-03:进度项的 note 直接给用户看,不带 `export failed:` 英文前缀。
+    #[test]
+    fn failed_item_note_is_plain_words_without_the_error_prefix() {
+        let note = failure_note(&CoreError::Export("这段的起止点和视频帧对不上".to_owned()));
+        assert_eq!(note, "这段的起止点和视频帧对不上");
+        let io = failure_note(&CoreError::Io(std::io::Error::other("disk")));
+        assert!(!io.starts_with("export failed:"), "{io}");
+    }
+
+    /// V-03 真机根因 1:iPhone / ffmpeg -ss 剪出来的片子首个关键帧 pts 为负(edit list),
+    /// ffprobe `-read_intervals 0%…` 会**向前**找到第一个非负关键帧,0.5 s 的入点因此
+    /// 「入点差 12000 tick」。根因 2:B 帧重排让区间尾部少解出最后几帧,出点被推断短 1 帧,
+    /// 再叠上输出侧 23 ms 的封装偏移就超容差。夹具:libx264 2 s GOP + B 帧 + AAC,
+    /// `-ss 1.1 -c copy` 剪出带 edit list 的副本;入点 0.5 s 落在第一个非负关键帧之前。
+    #[test]
+    fn edit_list_trimmed_b_frame_source_exports_a_segment_starting_before_first_positive_keyframe() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let original = directory.path().join("bframes.mp4");
+        if !generate_b_frame_fixture(&ffmpeg, &original) {
+            eprintln!("skipping edit-list fixture: libx264 unavailable");
+            return;
+        }
+        let source = directory.path().join("trimmed.mp4");
+        let trimmed = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-ss", "1.1", "-i"])
+            .arg(&original)
+            .args(["-c", "copy"])
+            .arg(&source)
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(trimmed, "edit list 副本");
+        let meta = crate::core::import::probe_media(&source).unwrap();
+        let per_sec = meta.tb_den / meta.tb_num;
+        let (win_in, win_out) = (per_sec / 2, per_sec * 4);
+        let mut clip = export_clip_fixture("trimmed.mp4", win_in, win_out, meta.tb_num, meta.tb_den);
+        clip.source_path = source.to_string_lossy().into_owned();
+        clip.fps_num = Some(25);
+        clip.fps_den = Some(1);
+        let cancel = AtomicBool::new(false);
+
+        let bounds = probe_source_tick_bounds(&ffprobe, &clip, win_in, win_out, &cancel).unwrap();
+        let frame_ticks = per_sec / 25;
+        assert!(bounds.first.abs_diff(win_in) as i64 <= frame_ticks, "first={} win_in={win_in}", bounds.first);
+        assert_eq!(bounds.end, win_out, "B 帧尾部不能少解一帧");
+
+        let output = directory.path().join("segment.mp4");
+        transcode_select_segment(&ffmpeg, &clip, &output, &cancel).unwrap();
+        verify_segment_pts(&ffmpeg, &ffprobe, &clip, &output, &cancel).unwrap();
     }
 
     #[test]
@@ -5750,5 +6416,166 @@ esac
 
         // Verify that clip2's tracks are NOT included (the key assertion)
         assert!(!clips[0].audio_tracks.iter().any(|track| track.role_guess.as_deref() == Some("backup")));
+    }
+
+    // ---------- R11 车道 E:快速导出 ----------
+
+    /// 两段精选 + 一条整条收藏 → 文件夹里恰好三个文件,平铺在根目录;没有粗剪 / 镜头表 /
+    /// 联系表 / 交付说明;文件夹叫 `<集名>_导出_<日期>`;状态带 `mode = quick`。
+    #[test]
+    fn quick_export_writes_only_remuxed_segments_and_favorites() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let segmented = directory.path().join("segmented.mp4");
+        let whole = directory.path().join("whole.mp4");
+        if !generate_fixture(&ffmpeg, &segmented) || !generate_fixture(&ffmpeg, &whole) {
+            eprintln!("skipping quick export fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let whole_id = insert_clip(&connection, &whole, "2026-08-31T10:00:00Z", &[1], None);
+        let segmented_id = insert_clip(&connection, &segmented, "2026-08-31T11:00:00Z", &[1], None);
+        // insert_clip 硬写 1/1000 时基;精选段要帧精确回读 PTS,时基与时长必须是真探出来的。
+        let meta = crate::core::import::probe_media(&segmented).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET tb_num = ?1, tb_den = ?2, duration_ticks = ?3 WHERE id = ?4",
+                params![meta.tb_num, meta.tb_den, meta.duration_ticks, segmented_id],
+            )
+            .unwrap();
+        let frame = meta.tb_den / meta.tb_num / 25;
+        insert_select_segment(&connection, segmented_id, 0, frame * 10, 0);
+        insert_select_segment(&connection, segmented_id, frame * 12, frame * 22, 0);
+        let dest = directory.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+
+        let outcome = start_quick_export(&mut connection, &dest, None).unwrap();
+        assert_eq!(outcome.files.len(), 3, "{outcome:?}");
+        assert!(outcome.skipped.is_empty());
+        let job_id = outcome.job_id.expect("quick export enqueues a job");
+        let queued = get_export_status(&connection, Some(job_id)).unwrap();
+        assert_eq!(queued.mode.as_deref(), Some("quick"));
+        assert_eq!(queued.selected_segment_count, 2);
+        assert_eq!(queued.selected_whole_count, 1);
+
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+        let finished = get_export_status(&connection, Some(job_id)).unwrap();
+        assert_eq!(finished.status, "done", "{:?}", finished.error);
+        assert_eq!(finished.completed_items, 3, "{:?}", finished.items);
+        assert_eq!(finished.failed_items, 0);
+        let output = PathBuf::from(finished.output_path.unwrap());
+        let folder = output.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(folder.starts_with("EP01_导出_20"), "{folder}");
+        assert_eq!(output, PathBuf::from(&outcome.dir));
+        let mut entries: Vec<String> = std::fs::read_dir(&output)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != COMPLETION_MARKER_FILE)
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 3, "{entries:?}");
+        assert!(entries.iter().all(|name| name.ends_with(".mp4")), "{entries:?}");
+        assert!(!output.join(ROUGH_CUT_DIRECTORY).exists());
+        assert!(!output.join(SELECTED_DIRECTORY).exists());
+        assert!(!output.join(SHOT_LIST_FILE).exists());
+        assert!(!output.join(README_FILE).exists());
+        assert_eq!(finished.items.iter().filter(|item| item.clip_id == whole_id).count(), 1);
+    }
+
+    /// 目标目录不存在 / 不可写 → 带 `dest_unavailable` 前缀的错误,前端据此回落到保存面板。
+    #[test]
+    fn quick_export_rejects_unwritable_destination() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        insert_clip(&connection, Path::new("whole.mov"), "2026-08-31T10:00:00Z", &[1], None);
+
+        let missing = directory.path().join("nope");
+        // CoreError 的 Display 带「export failed: 」前缀,前端按 contains 判。
+        let error = start_quick_export(&mut connection, &missing, None).unwrap_err().to_string();
+        assert!(error.contains(QUICK_EXPORT_DEST_UNAVAILABLE), "{error}");
+
+        let locked = directory.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = start_quick_export(&mut connection, &locked, None);
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        // root 跑测试时 0555 也写得进去;只在真的被拒时断言错误码,不假绿也不假红。
+        if let Err(error) = result {
+            assert!(error.to_string().contains(QUICK_EXPORT_DEST_UNAVAILABLE), "{error}");
+        }
+        let pending: i64 = connection
+            .query_row("SELECT count(*) FROM jobs WHERE kind = 'export_package'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pending, 0, "不可写目录不能留下排队任务");
+    }
+
+    /// 同名文件夹追加 `-2`、`-3`(规格 §2;交付包那边的 `_2` 不动)。
+    #[test]
+    fn quick_export_folder_conflict_appends_dash_suffix() {
+        let directory = TestDirectory::new();
+        assert_eq!(
+            unique_quick_path(directory.path(), "北海道", "2026-09-13"),
+            directory.path().join("北海道_导出_2026-09-13")
+        );
+        std::fs::create_dir(directory.path().join("北海道_导出_2026-09-13")).unwrap();
+        assert_eq!(
+            unique_quick_path(directory.path(), "北海道", "2026-09-13"),
+            directory.path().join("北海道_导出_2026-09-13-2")
+        );
+        std::fs::create_dir(directory.path().join("北海道_导出_2026-09-13-2")).unwrap();
+        assert_eq!(
+            unique_quick_path(directory.path(), "北海道", "2026-09-13"),
+            directory.path().join("北海道_导出_2026-09-13-3")
+        );
+    }
+
+    /// `selection` 只导指定的段 / 素材;不在本集精选里的 id 进 `skipped` 而不是报错。
+    #[test]
+    fn quick_export_selection_filters_segments_and_clips() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let whole = insert_clip(&connection, Path::new("whole.mov"), "2026-08-31T10:00:00Z", &[1], None);
+        let segmented = insert_clip(&connection, Path::new("segmented.mov"), "2026-08-31T11:00:00Z", &[1], None);
+        let first = insert_select_segment(&connection, segmented, 0, 400, 0);
+        let _second = insert_select_segment(&connection, segmented, 500, 900, 0);
+
+        let all = plan_quick_export(&connection, None, None).unwrap();
+        assert_eq!(all.files.len(), 3);
+        assert_eq!(all.job_id, None);
+        assert!(all.dir.starts_with("EP01_导出_"), "{}", all.dir);
+
+        let by_segment = plan_quick_export(
+            &connection,
+            None,
+            Some(&QuickExportSelection { segment_ids: Some(vec![first, 9_999]), clip_ids: None }),
+        )
+        .unwrap();
+        assert_eq!(by_segment.files.len(), 1);
+        assert_eq!(by_segment.skipped.len(), 1);
+        assert!(by_segment.skipped[0].reason.contains("9999"), "{:?}", by_segment.skipped);
+
+        let by_clip = plan_quick_export(
+            &connection,
+            None,
+            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![segmented]) }),
+        )
+        .unwrap();
+        assert_eq!(by_clip.files.len(), 2, "该素材的两段精选");
+        let by_whole_clip = plan_quick_export(
+            &connection,
+            None,
+            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![whole]) }),
+        )
+        .unwrap();
+        assert_eq!(by_whole_clip.files.len(), 1, "整条收藏");
+
+        let nothing = plan_quick_export(
+            &connection,
+            None,
+            Some(&QuickExportSelection { segment_ids: Some(vec![]), clip_ids: Some(vec![]) }),
+        );
+        assert!(nothing.is_err(), "选了个空集要报错,不能静默导出全部");
     }
 }

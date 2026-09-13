@@ -1,0 +1,145 @@
+/* ---------- R11 车道 E:交付抽屉的「快速导出」模式 ----------
+   顶部两枚模式 chip + 一句引导 + 文件清单卡 + 完成 toast。只用 tokens.css 的令牌,
+   选择器都挂在 .deliver-drawer / .quick-export 根类下,不碰交付包那套的规则。 */
+
+.deliver-drawer .deliver-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3) var(--space-5) 0;
+}
+
+.deliver-drawer .deliver-mode-hint {
+  margin-left: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.quick-export {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* 引导句是这一屏最显眼的一句话:15px 正文,文件夹名加粗。 */
+.quick-export .quick-export-lead {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  line-height: var(--lh-15);
+}
+
+.quick-export .quick-export-scope {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.quick-export .quick-export-summary {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.quick-export .quick-export-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quick-export .quick-export-file {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-hair);
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+.quick-export .quick-export-file:first-child { border-top: 0; }
+.quick-export .quick-export-file .ui-icon { flex: none; color: var(--text-muted); }
+
+.quick-export .quick-export-file-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-export .quick-export-folder {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+/* 空态:一句话说清现在怎么办。 */
+.quick-export .quick-export-empty-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.quick-export .quick-export-empty-body {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+/* 完成 toast:沿用结果卡的 ok tint,主按钮「在 Finder 中显示」靠右。 */
+.quick-export .quick-export-toast .ui-button { align-self: center; }
+
+/* ----- 套件 Menu(最小右键菜单)与媒体池的宿主 ----- */
+
+.pool-context-menu-host { display: contents; }
+
+.ui-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+.ui-menu .ui-menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-menu .ui-menu-item:hover,
+.ui-menu .ui-menu-item:focus-visible { background: var(--surface-chrome); outline: none; }
+.ui-menu .ui-menu-item:focus-visible { box-shadow: 0 0 0 2px var(--border-focus); }
+.ui-menu .ui-menu-item:disabled { color: var(--text-muted); cursor: default; }
+
+/* 检查器精选段区的「导出所选…」:靠右一颗 ghost。 */
+.inspector-segments > .ui-button--ghost { align-self: flex-end; margin-top: var(--space-1); }

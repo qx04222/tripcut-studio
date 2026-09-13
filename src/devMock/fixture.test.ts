@@ -71,3 +71,37 @@ describe("devMock fixture", () => {
     expect((handleMockCommand("player_status", {}) as { pos: number }).pos).toBe(2);
   });
 });
+
+// R11 车道 B:时刻分 / 建议段 / 自动挑选的假后端形状与撤销语义。
+describe("devMock moments (R11 lane B)", () => {
+  beforeEach(() => __resetMockForTests());
+
+  it("serves ≤200 moment points with plain-Chinese reasons and ≤3 suggestions inside the clip", () => {
+    const moments = handleMockCommand("get_clip_moments", { clipId: 1 }) as Array<{ score: number; reasons: string[]; t_end_ticks: number }>;
+    expect(moments.length).toBeGreaterThan(0);
+    expect(moments.length).toBeLessThanOrEqual(200);
+    expect(moments.every((m) => m.score >= 0 && m.score <= 1)).toBe(true);
+    const allowed = new Set(["清晰", "运动适中", "曝光正常", "有人声", "有声音"]);
+    expect(moments.every((m) => m.reasons.every((r) => allowed.has(r)))).toBe(true);
+    const suggestions = handleMockCommand("suggest_segments", { clipId: 1, targetSecs: null }) as Array<{ in_ticks: number; out_ticks: number; score: number }>;
+    expect(suggestions.length).toBeGreaterThanOrEqual(1);
+    expect(suggestions.length).toBeLessThanOrEqual(3);
+    const last = moments[moments.length - 1]!;
+    expect(suggestions.every((s) => s.in_ticks >= 0 && s.out_ticks <= last.t_end_ticks && s.out_ticks > s.in_ticks)).toBe(true);
+  });
+
+  it("auto-selects within budget, covers more than one chapter, and undo removes only that batch", () => {
+    const before = (handleMockCommand("list_clips", {}) as ClipListItem[]).reduce((sum, clip) => sum + clip.select_count, 0);
+    const outcome = handleMockCommand("auto_select_episode", { budgetSecs: 30, scope: null }) as { created: number[]; total_secs: number; chapters_covered: number; batch_id: string };
+    expect(outcome.created.length).toBeGreaterThanOrEqual(4);
+    expect(outcome.total_secs).toBeLessThanOrEqual(30);
+    expect(outcome.chapters_covered).toBeGreaterThanOrEqual(2);
+    const manual = handleMockCommand("create_select_segment", { clipId: 2, inSeconds: 1, outSeconds: 3 }) as { id: number };
+    const removed = handleMockCommand("undo_auto_select", { batchId: outcome.batch_id });
+    expect(removed).toBe(outcome.created.length);
+    const after = (handleMockCommand("list_clips", {}) as ClipListItem[]).reduce((sum, clip) => sum + clip.select_count, 0);
+    expect(after).toBe(before + 1);
+    const segments = handleMockCommand("list_select_segments", { clipId: 2 }) as Array<{ id: number }>;
+    expect(segments.some((segment) => segment.id === manual.id)).toBe(true);
+  });
+});

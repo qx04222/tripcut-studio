@@ -18,7 +18,10 @@ export interface ImportSources {
   notice: string | null;
   /** 导入失败;后台刷新成功也不清它(旧壳测试「keeps an import failure visible」)。 */
   error: string | null;
+  /** 系统选文件夹面板开着(还没选任何东西)——按钮显示「选择中…」。 */
   choosing: boolean;
+  /** 选完了,后端正在扫描 / 入队——按钮显示「扫描中…」。两者分开记(R10 U-07)。 */
+  scanning: boolean;
   dragActive: boolean;
   toolchainMissing: boolean;
   /** 本次会话里最近一次手选的文件夹。 */
@@ -46,6 +49,7 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [toolchainMissing, setToolchainMissing] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
@@ -78,19 +82,31 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
     setChoosing(true);
     setError(null);
     setNotice(null);
+    let selected: string | null;
     try {
-      const selected = await pickImportFolder();
-      if (!selected) return;
-      setFolder(selected);
+      selected = await pickImportFolder();
+    } catch (pickError) {
+      setError(String(pickError));
+      setChoosing(false);
+      return;
+    }
+    setChoosing(false);
+    if (!selected) return;
+    setFolder(selected);
+    setScanning(true);
+    try {
       const started = await startImport(selected);
       setNotice(importNotice(started.total, started.enqueued, started.skipped));
+      // 添加成功当场把关注文件夹列出来(后端在 start_import 里登记了它)——走查 U-07:
+      // 此前要重启才看得到,来源分页一直写着「还没有关注的文件夹」。
+      await refreshWatched();
       onImportedRef.current?.();
     } catch (importError) {
       setError(String(importError));
     } finally {
-      setChoosing(false);
+      setScanning(false);
     }
-  }, []);
+  }, [refreshWatched]);
 
   useEffect(() => {
     const onAction = (event: Event) => {
@@ -172,5 +188,5 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
     }
   }, [refreshWatched]);
 
-  return { watched, notice, error, choosing, dragActive, toolchainMissing, folder, chooseFolder, rescan, setAutoSync, remove, refreshWatched };
+  return { watched, notice, error, choosing, scanning, dragActive, toolchainMissing, folder, chooseFolder, rescan, setAutoSync, remove, refreshWatched };
 }

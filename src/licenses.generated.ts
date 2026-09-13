@@ -136,6 +136,13 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "sha2",
+    "version": "=0.10.9",
+    "license": "MIT OR Apache-2.0",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
     "name": "tauri",
     "version": "=2.11.5",
     "license": "Apache-2.0 OR MIT",

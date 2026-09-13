@@ -17,7 +17,11 @@ describe("四栏空状态(EmptyState)", () => {
     render(<PoolEmpty />);
     expect(screen.getByText("还没有素材").tagName).toBe("P");
     expect(document.querySelector(".ui-empty svg[data-icon=\"import\"]")).not.toBeNull();
-    screen.getByRole("button", { name: "导入素材" }).click();
+    // R10 U-06:AX 名改为「导入第一批素材」(「导入素材」是顶栏冻结名,空池时不能撞名);可见文字仍是「导入素材」。
+    const button = screen.getByRole("button", { name: "导入第一批素材" });
+    expect(button.textContent).toBe("导入素材");
+    expect(button.className).toContain("ui-button--primary");
+    button.click();
     expect(getWorkspaceSnapshot().openDrawer).toBe("import");
     expect(getWorkspaceSnapshot().importTab).toBe("source");
   });
@@ -51,5 +55,23 @@ describe("四栏空状态(EmptyState)", () => {
     ]);
     render(<InspectorEmpty />);
     expect(screen.queryByRole("heading")).toBeNull();
+  });
+});
+
+describe("R11 简化专项 #5:空态一句话 + 一个按钮", () => {
+  it("镜头带无章节:「打开导入」打开导入抽屉的来源分页", () => {
+    render(<BandEmpty />);
+    expect(screen.getByText("还没有章节")).toBeTruthy();
+    const open = screen.getByRole("button", { name: "打开导入" });
+    open.click();
+    expect(getWorkspaceSnapshot().openDrawer).toBe("import");
+    expect(getWorkspaceSnapshot().importTab).toBe("source");
+  });
+  it("仅缺口视图没有缺口:「回到按章节」", () => {
+    let called = 0;
+    render(<BandEmpty variant="no-gaps" onAction={() => { called += 1; }} />);
+    expect(screen.getByText("所有章节都没有缺口")).toBeTruthy();
+    screen.getByRole("button", { name: "回到按章节" }).click();
+    expect(called).toBe(1);
   });
 });

@@ -114,6 +114,8 @@ struct AnalysisComputation {
     signals: ParsedSignals,
     focus_scores: Vec<f64>,
     tool_versions: Value,
+    /// R11:同一份 ffmpeg 日志按 0.5 s 窗口拆出的画面/声音信号,供时刻分落盘。
+    windows: super::moments::WindowSignals,
 }
 
 struct CommandOutput {
@@ -239,6 +241,24 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
     .clamp(0.0, 1.0);
     let computation = analyze_source(&source, &ffmpeg, &ffprobe, scene_threshold)?;
     persist_analysis(connection, &source, &computation)?;
+    // R11:时刻分是 L1 的后续步骤,用的是同一份日志(不再解码第二次)。
+    // 它失败不能连累已经落盘的分析结果——记日志,交给启动时的「补齐时刻分」重跑。
+    let cuts = normalized_scene_cuts(&computation.signals.scene_cuts, source.duration_ticks);
+    if let Err(error) = super::moments::persist_for_clip(
+        connection,
+        &super::moments::MomentSource {
+            clip_id: source.clip_id,
+            quick_hash: source.quick_hash.clone(),
+            tb_num: source.tb_num,
+            tb_den: source.tb_den,
+            duration_ticks: source.duration_ticks,
+            has_audio: computation.signals.has_audio,
+        },
+        &computation.windows,
+        &cuts,
+    ) {
+        tracing::warn!(%error, clip_id = source.clip_id, "时刻分未能写入,留给补齐任务重跑");
+    }
     super::motion::enqueue_for_clip(
         connection,
         source.clip_id,
@@ -371,12 +391,25 @@ fn analysis_args(
     has_audio: bool,
     hardware_decode: bool,
 ) -> Vec<OsString> {
-    let filter = format!(
+    let mut filter = format!(
         "[0:v:0]fps=2,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
          [scene_src]select='eq(n,0)+gt(scene,{scene_threshold})',showinfo[scene_out];\
          [stats_src]signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
          metadata=mode=print[stats_out]"
     );
+    if has_audio {
+        // R11 时刻分:同一次解码里把音频分成两路——整条汇总(原有 Peak/动态范围)
+        // 与每 0.5 s 一窗的 RMS/峰值/熵(`asetnsamples` 按重采样后的 8 kHz 切 4000 样本)。
+        filter.push_str(&format!(
+            ";[0:a:0]asplit=2[a_all][a_win];\
+             [a_all]astats=metadata=1:reset=0:measure_overall=Peak_level+Peak_count+Dynamic_range[a_all_out];\
+             [a_win]aresample={rate},asetnsamples=n={samples},\
+             astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level+Entropy,\
+             ametadata=mode=print[a_win_out]",
+            rate = super::moments::AUDIO_WINDOW_SAMPLE_RATE,
+            samples = super::moments::AUDIO_WINDOW_SAMPLES,
+        ));
+    }
     let mut args = vec![OsString::from("-hide_banner"), OsString::from("-nostdin")];
     if hardware_decode {
         args.extend(super::artifacts::hardware_decode_prefix());
@@ -400,18 +433,16 @@ fn analysis_args(
         OsString::from("-"),
     ]);
     if has_audio {
-        args.extend([
-            OsString::from("-map"),
-            OsString::from("0:a:0"),
-            OsString::from("-vn"),
-            OsString::from("-af"),
-            OsString::from(
-                "astats=metadata=1:reset=0:measure_overall=Peak_level+Peak_count+Dynamic_range",
-            ),
-            OsString::from("-f"),
-            OsString::from("null"),
-            OsString::from("-"),
-        ]);
+        for label in ["[a_all_out]", "[a_win_out]"] {
+            args.extend([
+                OsString::from("-map"),
+                OsString::from(label),
+                OsString::from("-vn"),
+                OsString::from("-f"),
+                OsString::from("null"),
+                OsString::from("-"),
+            ]);
+        }
     }
     args
 }
@@ -519,11 +550,47 @@ fn analyze_source(
         }
     });
 
+    let windows = super::moments::WindowSignals::parse(&log);
+
     Ok(AnalysisComputation {
         signals,
         focus_scores,
         tool_versions,
+        windows,
     })
+}
+
+/// R11 「补齐时刻分」任务用:只跑一次同样的扫描,拿回窗口信号与场景切点,
+/// 不重写 `clip_analysis`(老库里已有的分析结果原样保留)。
+pub(crate) fn scan_windows(
+    path: &Path,
+    tb_num: i64,
+    tb_den: i64,
+    ffmpeg: &OsStr,
+    ffprobe: &OsStr,
+    scene_threshold: f64,
+) -> Result<(super::moments::WindowSignals, Vec<i64>, bool)> {
+    let has_audio = probe_has_audio(path, ffprobe)?;
+    let log = run_analysis_ffmpeg(ffmpeg, path, scene_threshold, has_audio)?;
+    let cuts = scene_cuts_from_log(&log, tb_num, tb_den);
+    Ok((super::moments::WindowSignals::parse(&log), cuts, has_audio))
+}
+
+/// v4:场景检测挪到 fps=2 降采样之后,showinfo 报告的 raw `pts:` 落在 fps 滤镜
+/// 自己选的输出时基里(实测 time_base=1/2,pts=2 表示 t=1s),不再等于源流的
+/// tb_num/tb_den。改用 `pts_time:`(滤镜链任何一段都以秒为单位、与源时基无关)
+/// 再乘回源 tb_den/tb_num 换算成素材自己的 tick。
+fn scene_cuts_from_log(log: &str, tb_num: i64, tb_den: i64) -> Vec<i64> {
+    let mut scene_cuts = log
+        .lines()
+        .filter(|line| line.contains("showinfo") && line.contains("pts_time:"))
+        .filter_map(|line| token_prefixed_f64(line, "pts_time:"))
+        .filter(|seconds| *seconds > 0.0)
+        .map(|seconds| seconds_to_ticks(seconds, tb_num, tb_den))
+        .collect::<Vec<_>>();
+    scene_cuts.sort_unstable();
+    scene_cuts.dedup();
+    scene_cuts
 }
 
 fn parse_signal_log(
@@ -613,19 +680,7 @@ fn parse_signal_log(
     };
     let out_of_focus_ratio = out_of_focus_frames as f64 / frames.max(1) as f64;
 
-    // v4:场景检测挪到 fps=2 降采样之后,showinfo 报告的 raw `pts:` 落在 fps 滤镜
-    // 自己选的输出时基里(实测 time_base=1/2,pts=2 表示 t=1s),不再等于源流的
-    // tb_num/tb_den。改用 `pts_time:`(滤镜链任何一段都以秒为单位、与源时基无关)
-    // 再乘回源 tb_den/tb_num 换算成素材自己的 tick。
-    let mut scene_cuts = log
-        .lines()
-        .filter(|line| line.contains("showinfo") && line.contains("pts_time:"))
-        .filter_map(|line| token_prefixed_f64(line, "pts_time:"))
-        .filter(|seconds| *seconds > 0.0)
-        .map(|seconds| seconds_to_ticks(seconds, tb_num, tb_den))
-        .collect::<Vec<_>>();
-    scene_cuts.sort_unstable();
-    scene_cuts.dedup();
+    let scene_cuts = scene_cuts_from_log(log, tb_num, tb_den);
 
     let peak_values = values_after_colon(log, "Peak level dB");
     let peak_counts = values_after_colon(log, "Peak count");
@@ -1064,6 +1119,7 @@ mod tests {
             },
             focus_scores: vec![12.5, 61.0, 88.75],
             tool_versions: json!({"pipeline": "test"}),
+            windows: crate::core::moments::WindowSignals::default(),
         }
     }
 
@@ -1597,5 +1653,146 @@ lavfi.signalstats.YHIGH=250
             .query_row("SELECT COUNT(*) FROM clip_analysis", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod moments_fixture_tests {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    use super::*;
+    use crate::core::moments::{compute_moments, MomentSource, MomentWeights};
+    use crate::core::smart_select::{suggest_from_moments, MAX_SUGGESTIONS};
+    use crate::core::test_support::TestDirectory;
+
+    fn ffmpeg_tools() -> Option<(OsString, OsString)> {
+        let connection = Connection::open_in_memory().unwrap();
+        let ffmpeg = crate::core::settings::configured_executable(
+            &connection,
+            crate::core::settings::FFMPEG_PATH_KEY,
+            "FFMPEG_PATH",
+            "ffmpeg",
+        )
+        .unwrap();
+        let ffprobe = crate::core::settings::configured_ffprobe(&connection, &ffmpeg).unwrap();
+        for tool in [&ffmpeg, &ffprobe] {
+            let available = Command::new(tool)
+                .arg("-version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if !available {
+                eprintln!("skipping ffmpeg fixture: {} unavailable", Path::new(tool).display());
+                return None;
+            }
+        }
+        Some((ffmpeg, ffprobe))
+    }
+
+    /// 12 s 合成素材:前 3 s 黑场静帧、中间 6 s 清晰运动(testsrc2)、后 3 s 纯白过曝;
+    /// 全程 440 Hz 正弦(有声音、不是人声)。
+    fn synthetic_clip(ffmpeg: &OsStr, path: &Path) -> bool {
+        Command::new(ffmpeg)
+            .args(["-y", "-v", "error"])
+            .args(["-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=3"])
+            .args(["-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=6"])
+            .args(["-f", "lavfi", "-i", "color=c=white:s=320x180:r=25:d=3"])
+            .args(["-f", "lavfi", "-i", "sine=f=440:d=12"])
+            .args(["-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]"])
+            .args(["-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn synthetic_black_good_white_clip_suggests_the_bright_moving_middle() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let path = directory.path().join("synthetic.mp4");
+        assert!(synthetic_clip(&ffmpeg, &path), "合成素材生成失败");
+        let metadata = crate::core::import::probe_media(&path).unwrap();
+        let (windows, cuts, has_audio) =
+            scan_windows(&path, metadata.tb_num, metadata.tb_den, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+        assert!(has_audio);
+        assert!(windows.video.len() >= 22 && windows.video.len() <= 25, "0.5 s 一窗:{}", windows.video.len());
+        assert!(windows.audio.len() >= 22, "声音窗口:{}", windows.audio.len());
+        let cuts = normalized_scene_cuts(&cuts, metadata.duration_ticks);
+        assert_eq!(cuts.len(), 2, "3 s 与 9 s 两个切点:{cuts:?}");
+
+        let source = MomentSource {
+            clip_id: 1,
+            quick_hash: "synthetic".to_owned(),
+            tb_num: metadata.tb_num,
+            tb_den: metadata.tb_den,
+            duration_ticks: metadata.duration_ticks,
+            has_audio,
+        };
+        let moments = compute_moments(&source, &windows, &cuts, &MomentWeights::default());
+        let secs = |ticks: i64| crate::core::moments::ticks_to_seconds(ticks, metadata.tb_num, metadata.tb_den);
+        let dark = moments.iter().filter(|m| secs(m.t_start_ticks) < 2.9).map(|m| m.score).fold(0.0, f64::max);
+        let white = moments.iter().filter(|m| secs(m.t_start_ticks) >= 9.1).map(|m| m.score).fold(0.0, f64::max);
+        let middle = moments.iter().filter(|m| (3.1..8.9).contains(&secs(m.t_start_ticks))).map(|m| m.score).fold(1.0, f64::min);
+        assert!(middle > dark && middle > white, "中段最低分 {middle} 应高于黑场 {dark} 与过曝 {white}");
+        assert!(moments.iter().all(|m| !m.speech), "正弦不是人声");
+        assert!(moments.iter().any(|m| m.loud), "正弦有声音");
+
+        let suggestions = suggest_from_moments(&moments, 5.0, MAX_SUGGESTIONS);
+        assert!(!suggestions.is_empty());
+        let best = &suggestions[0];
+        let (in_s, out_s) = (secs(best.in_ticks), secs(best.out_ticks));
+        assert!(in_s >= 2.9 && out_s <= 9.1, "建议段 {in_s:.2}–{out_s:.2} 应落在中段");
+        assert!((out_s - in_s - 5.0).abs() < 0.6, "长度 {:.2}", out_s - in_s);
+        assert!(best.reasons.iter().any(|r| r == "曝光正常"), "{:?}", best.reasons);
+        eprintln!("synthetic suggestions: {suggestions:?}");
+    }
+
+    /// 真素材抽样(只读):`TRIPCUT_MOMENTS_SAMPLE=<路径> cargo test -- real_sample --ignored --nocapture`。
+    #[test]
+    #[ignore = "需要真素材路径,只用于报告抽样"]
+    fn real_sample_suggestions_are_printed() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let Ok(sample) = std::env::var("TRIPCUT_MOMENTS_SAMPLE") else { return };
+        let path = PathBuf::from(sample);
+        let metadata = crate::core::import::probe_media(&path).unwrap();
+        let started = Instant::now();
+        let (windows, cuts, has_audio) =
+            scan_windows(&path, metadata.tb_num, metadata.tb_den, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+        let cuts = normalized_scene_cuts(&cuts, metadata.duration_ticks);
+        let source = MomentSource {
+            clip_id: 0,
+            quick_hash: String::new(),
+            tb_num: metadata.tb_num,
+            tb_den: metadata.tb_den,
+            duration_ticks: metadata.duration_ticks,
+            has_audio,
+        };
+        let moments = compute_moments(&source, &windows, &cuts, &MomentWeights::default());
+        let secs = |ticks: i64| crate::core::moments::ticks_to_seconds(ticks, metadata.tb_num, metadata.tb_den);
+        eprintln!(
+            "sample {} duration {:.2}s windows {} audio {} cuts {:?} scan {:?}",
+            path.display(),
+            secs(metadata.duration_ticks),
+            moments.len(),
+            has_audio,
+            cuts.iter().map(|cut| secs(*cut)).collect::<Vec<_>>(),
+            started.elapsed()
+        );
+        for moment in &moments {
+            eprintln!(
+                "  {:5.1}s score {:.2} sharp {:.2} motion {:.2} exp {} loud {} speech {} cut {} {:?}",
+                secs(moment.t_start_ticks), moment.score, moment.sharp, moment.motion,
+                u8::from(moment.exposure_ok), u8::from(moment.loud), u8::from(moment.speech), u8::from(moment.scene_cut), moment.reasons
+            );
+        }
+        for suggestion in suggest_from_moments(&moments, 5.0, MAX_SUGGESTIONS) {
+            eprintln!(
+                "suggest {:.2}–{:.2}s score {:.2} {:?}",
+                secs(suggestion.in_ticks), secs(suggestion.out_ticks), suggestion.score, suggestion.reasons
+            );
+        }
     }
 }

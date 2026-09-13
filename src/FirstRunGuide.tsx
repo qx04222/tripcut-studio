@@ -1,15 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getSettingsStatus, type SettingsStatus } from "./api";
+import { getSettingsStatus, setFirstRunDone, type SettingsStatus } from "./api";
+import { onboardingSteps, requiredToolsMissing } from "./toolchainSteps";
 
-interface GuideStep {
-  id: string;
-  title: string;
-  description: string;
-  command?: string;
-  commandLabel?: string;
-  tone?: "danger";
-}
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -35,45 +28,13 @@ async function writeClipboard(value: string): Promise<void> {
   if (!copied) throw new Error("当前 WebView 不允许写入剪贴板");
 }
 
-export function onboardingSteps(status: SettingsStatus): GuideStep[] {
-  const steps: GuideStep[] = [];
 
-  if (!status.ffmpeg.available || !status.ffprobe.available || !status.whisper.binary.available) {
-    steps.push({
-      id: "bundled-tools-missing",
-      title: "核心媒体工具不完整",
-      description: "正式安装包应自带 FFmpeg、FFprobe 与 Whisper。请重新安装完整 DMG；不要自行修改 .app 内容，否则会破坏签名。",
-      tone: "danger",
-    });
-  }
-
-  if (!status.whisper.model_available) {
-    steps.push({
-      id: "whisper-model",
-      title: "可选：提供已校验的 Whisper 模型",
-      description: `当前正式版不会联网下载模型。需要本地转写时，请将已合法取得并核验的对应 ggml 模型放到：${status.whisper.model_path}；不安装不会影响导入、筛片、播放与交付。`,
-    });
-  }
-
-  if (!status.clip_sidecar.service_available) {
-    steps.push({
-      id: "sidecar-resource",
-      title: "应用资源不完整",
-      description: `未找到 ${status.clip_sidecar.service_path}。请重新安装完整 DMG；不要在 .app 内手工补文件，否则会破坏签名。`,
-      tone: "danger",
-    });
-  } else if (!status.clip_sidecar.available) {
-    steps.push({
-      id: "clip-sidecar",
-      title: "初始化本地 Chinese-CLIP 环境",
-      description: "正式版不在线安装 Python 运行环境。画面语义搜索将在签名组件包可用后启用；其余核心筛片与交付不受影响。",
-    });
-  }
-
-  return steps;
-}
-
-export function FirstRunGuide() {
+/**
+ * R10 U-22:弹与不弹只看 `onboarding.first_run_done`(由 App 按 settings 判,false 才挂本组件)。
+ * 「暂时进入」/ Esc 把它写成 true 并通过 `onDismiss` 通知 App——本次启动内切新旧壳、恢复页之后都不再重放;
+ * 「打开安装向导」只收起,由向导走完时写 true。工具链齐全没有步骤可讲时也静默写 true,下次启动不再检测。
+ */
+export function FirstRunGuide({ onDismiss }: { onDismiss?: () => void } = {}) {
   const [status, setStatus] = useState<SettingsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
@@ -98,7 +59,27 @@ export function FirstRunGuide() {
   }, [refresh]);
 
   const steps = useMemo(() => (status ? onboardingSteps(status) : []), [status]);
-  const open = !dismissed && (checking || Boolean(error) || steps.length > 0);
+  // R11 简化专项 #1:新用户第一眼看到的是工作区里的三步引导卡,不再是这个弹窗。
+  // 只有 ffmpeg / ffprobe 这种必需组件缺失(没有它们导入导出都做不了)才自动弹;
+  // 检测中 / 检测失败 / 只缺可选组件都不弹 —— 可选项在 设置 → 工具与模型 里能看到。
+  // 一旦因必需组件缺失而弹出,就保持打开直到用户关掉——「重新检测」中途不闪一下。
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!checking && !error && status !== null && requiredToolsMissing(status)) setArmed(true);
+  }, [checking, error, status]);
+  const open = armed && !dismissed;
+
+  const finish = useCallback(() => {
+    setDismissed(true);
+    void setFirstRunDone().catch(() => undefined);
+    onDismiss?.();
+  }, [onDismiss]);
+
+  useEffect(() => {
+    // 必需组件齐全 = 首启引导无事可做:记成已完成,不再每次启动都探一遍工具链。
+    // (可选组件缺不缺都不弹,也一样记完成;检测失败不记,下次启动再探一次。)
+    if (!dismissed && !checking && !error && status && !requiredToolsMissing(status)) finish();
+  }, [checking, dismissed, error, finish, status]);
 
   useEffect(() => {
     if (!open) return;
@@ -110,7 +91,7 @@ export function FirstRunGuide() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setDismissed(true);
+        finish();
         return;
       }
       if (event.key !== "Tab" || !dialog) return;
@@ -135,7 +116,7 @@ export function FirstRunGuide() {
       document.removeEventListener("keydown", handleKeyDown);
       previousFocus?.focus();
     };
-  }, [open]);
+  }, [finish, open]);
 
   if (!open) return null;
 
@@ -150,6 +131,7 @@ export function FirstRunGuide() {
 
   const openSetupWizard = () => {
     setDismissed(true);
+    onDismiss?.();
     window.location.hash = "/settings";
     window.setTimeout(() => window.dispatchEvent(new CustomEvent("tripcut:open-wizard")), 120);
   };
@@ -165,9 +147,9 @@ export function FirstRunGuide() {
         tabIndex={-1}
       >
         <header>
-          <span className="first-run-kicker">FIRST RUN / 本机准备</span>
+          <span className="first-run-kicker">本机准备</span>
           <h2 id="first-run-title">先把本地工具链接好</h2>
-          <p>正式安装包已包含核心媒体工具；可选模型当前不会由应用联网下载。下面的检测不会上传素材。</p>
+          <p>正式安装包已包含核心媒体工具,这次没找到。下面的检测不会上传素材。</p>
         </header>
 
         {checking ? (
@@ -208,7 +190,7 @@ export function FirstRunGuide() {
             <button className="first-run-secondary" type="button" onClick={openSetupWizard}>
               打开安装向导
             </button>
-            <button className="first-run-primary" type="button" onClick={() => setDismissed(true)}>
+            <button className="first-run-primary" type="button" onClick={finish}>
               暂时进入工作台
             </button>
           </div>
@@ -217,3 +199,4 @@ export function FirstRunGuide() {
     </div>
   );
 }
+export { onboardingSteps, type GuideStep } from "./toolchainSteps";

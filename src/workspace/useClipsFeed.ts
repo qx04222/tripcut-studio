@@ -61,6 +61,13 @@ export interface ClipsFeed {
 }
 
 export const CLIPS_FEED_INTERVAL_MS = 2_000;
+/**
+ * 封面签名 URL 的续签周期(R10 R-05)。`cover_url` 只随 `listClips` 一起算,签名
+ * 5 分钟过期(`media_server.rs` 的 SIGNED_URL_TTL),而常规轮询只在修订号变了才
+ * 整表重拉 —— 会话超过 5 分钟后任何重挂载的卡片都拿着过期签名,全部退成占位。
+ * 满 4 分钟就强制重拉一次,新签名在旧的过期前到位。必须小于 TTL。
+ */
+export const COVER_URL_REFRESH_MS = 4 * 60_000;
 
 const EMPTY_EPISODE: ClipsFeedEpisode = {
   activeId: null,
@@ -88,6 +95,8 @@ const EMPTY_FEED: ClipsFeed = {
 let feed: ClipsFeed = EMPTY_FEED;
 let episode: ClipsFeedEpisode = EMPTY_EPISODE;
 let lastRevision: string | undefined;
+/** 上一次整表 `listClips` 的时刻(ms);封面续签按它计时。 */
+let lastClipsFetchAt: number | null = null;
 let inFlight = false;
 // 一次强制刷新(评级写入 / 切集)撞上正在飞的常规轮询时不能直接丢掉——clips 修订号
 // 不一定会动,后续常规轮询也就不会补救。记住它,飞着的那次一结束就补跑。
@@ -175,10 +184,11 @@ export async function refreshClipsFeed(force = false): Promise<void> {
     // 拿修订号本身失败(命令报错)就当作「变了」,退回全量拉取,不能卡死轮询,
     // 也不算错误状态——降级成功了。
     let nextRevision: string | undefined;
-    let shouldFetchClips = force;
+    const coverStale = lastClipsFetchAt === null || Date.now() - lastClipsFetchAt >= COVER_URL_REFRESH_MS;
+    let shouldFetchClips = force || coverStale;
     try {
       nextRevision = await getClipsRevision();
-      shouldFetchClips = force || nextRevision !== lastRevision;
+      shouldFetchClips = force || coverStale || nextRevision !== lastRevision;
     } catch {
       shouldFetchClips = true;
     }
@@ -218,6 +228,7 @@ export async function refreshClipsFeed(force = false): Promise<void> {
         clips = Array.isArray(nextClips) ? nextClips : [];
         clipsById = indexClips(clips);
         lastRevision = nextRevision;
+        lastClipsFetchAt = Date.now();
       } catch (clipsError) {
         error = String(clipsError);
       }
@@ -363,6 +374,7 @@ export function __resetClipsFeedForTests(): void {
   feed = EMPTY_FEED;
   episode = EMPTY_EPISODE;
   lastRevision = undefined;
+  lastClipsFetchAt = null;
   inFlight = false;
   pendingForce = false;
 }

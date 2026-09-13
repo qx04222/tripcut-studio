@@ -8,10 +8,10 @@ import { llmLedgerPurposeLabel, llmLedgerStatusLabel } from "./settingsModel";
 
 const BEST_TAKE_AXES = [
   ["technical", "Technical", "对焦、曝光与画面技术质量"],
-  ["composition", "Composition", "CLIP 构图启发式代理"],
+  ["composition", "Composition", "画面识别估算的构图"],
   ["motion", "Motion", "稳定度与首尾抖动分差"],
-  ["human", "Human", "CLIP 人物自然度启发式代理"],
-  ["audio", "Audio", "astats 与转写清晰度代理"],
+  ["human", "Human", "画面识别估算的人物自然度"],
+  ["audio", "Audio", "音量统计与转写清晰度"],
   ["narrative", "Narrative", "D3 故事位置回填"],
 ] as const;
 
@@ -38,7 +38,7 @@ export function AnalysisSection(): JSX.Element {
         />
         <ThresholdRow
           label="语义相似度"
-          description="低于此值的 Chinese-CLIP 搜索结果不展示"
+          description="低于此值的画面搜索结果不展示"
           settingKey="analysis.similarity_threshold"
           value={settings["analysis.similarity_threshold"]}
           defaultValue={DEFAULT_SETTINGS["analysis.similarity_threshold"]}
@@ -55,7 +55,7 @@ export function AnalysisSection(): JSX.Element {
       </div>
 
       <div className="settings-sheet-subhead">
-        <strong>AI Best Take 六轴权重</strong>
+        <strong>自动选优的六项权重</strong>
         <small>仅对已有轴归一化；Narrative 在 D3 回填前不会稀释总分。</small>
       </div>
       <div className="settings-sheet-group">
@@ -83,8 +83,8 @@ export function AnalysisSection(): JSX.Element {
         className="settings-sheet-section-gap"
       />
       <div className="settings-sheet-group">
-        <SettingsRow title="启用 L3 增强" help="关闭时后端在预算检查和 provider 路由之前拒绝全部 LLM 调用。" align="end">
-          <Toggle label="启用 L3 增强" checked={settings.llm_enabled === "true"} onChange={(next) => void form.setLlmEnabled(next)} />
+        <SettingsRow title="启用增强分析" help="关闭时后端在预算检查和服务商路由之前拒绝全部大模型调用。" align="end">
+          <Toggle label="启用增强分析" checked={settings.llm_enabled === "true"} onChange={(next) => void form.setLlmEnabled(next)} />
         </SettingsRow>
         <SettingsRow title="Provider" help="必须明确锁定单一 provider；失败即报错，不向其他服务自动转发。" htmlFor="settings-llm-provider">
           <Select id="settings-llm-provider" value={settings.llm_provider} onChange={(event) => void form.saveLlmProvider(event.currentTarget.value)}>

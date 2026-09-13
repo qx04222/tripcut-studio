@@ -40,7 +40,27 @@ describe("P5-F2 startup recovery page", () => {
     );
 
     expect(markup).toContain("进入工作台");
-    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>进入工作台<\/button>/);
+    // R10 U-36 起主按钮是套件 Button(图标 + label span),所以按钮标签与文字之间允许有子元素。
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>(?:<[^>]+>|<\/[^>]+>)*进入工作台<\/span><\/button>/);
     expect(markup).toContain("已回收 2 个中断任务");
+  });
+});
+
+describe("R10 U-36:恢复页换设计系统", () => {
+  it("没有英文 kicker,主按钮在吸底操作条里,标题与卡片走套件类", () => {
+    const markup = renderToStaticMarkup(
+      <RecoveryPage report={{ ...report, status: "WARN", abnormal_exit: true }} onContinue={() => undefined} onReport={() => undefined} />,
+    );
+    expect(markup).not.toMatch(/TRIPCUT DOCTOR|STARTUP RECOVERY/);
+    // 可见文本里没有成串大写(kicker 的形状);JSON 是数据格式名,不是 kicker。
+    const visible = markup.replace(/<[^>]+>/g, " ").replace(/JSON/g, "");
+    expect(visible.match(/[A-Z]{3,}/g) ?? []).toEqual([]);
+    expect(markup).toContain('class="recovery-r10"');
+    expect(markup).toMatch(/<footer class="recovery-r10-bar">[\s\S]*进入工作台/);
+    expect(markup).toMatch(/<h1 class="recovery-r10-title">上次会话没有正常结束<\/h1>/);
+    expect(markup).toContain("ui-card");
+    expect(markup).toContain("ui-badge");
+    // WARN 下不阻断:主按钮可点。
+    expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>(?:<[^>]+>|<\/[^>]+>)*进入工作台/);
   });
 });

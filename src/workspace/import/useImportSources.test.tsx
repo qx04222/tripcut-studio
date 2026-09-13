@@ -156,3 +156,47 @@ describe("useImportSources(迁自 ImportPageRuntime.test 的拖放与关注文�
     expect(second.result.current.toolchainMissing).toBe(false);
   });
 });
+
+describe("R10 U-07:选择中 / 扫描中分开,添加后立刻列出关注文件夹", () => {
+  it("面板开着是 choosing,选完在扫是 scanning;两者互斥", async () => {
+    let resolvePick: (value: string | null) => void = () => undefined;
+    let resolveStart: (value: { folder: string; total: number; enqueued: number; skipped: number }) => void = () => undefined;
+    apiMock.pickImportFolder.mockImplementation(() => new Promise((resolve) => { resolvePick = resolve; }));
+    apiMock.startImport.mockImplementation(() => new Promise((resolve) => { resolveStart = resolve; }));
+    const { result } = renderHook(() => useImportSources());
+    let done: Promise<void> = Promise.resolve();
+    act(() => { done = result.current.chooseFolder(); });
+    expect(result.current.choosing).toBe(true);
+    expect(result.current.scanning).toBe(false);
+    await act(async () => { resolvePick("/Volumes/CARD"); await Promise.resolve(); });
+    expect(result.current.choosing).toBe(false);
+    expect(result.current.scanning).toBe(true);
+    await act(async () => { resolveStart({ folder: "/Volumes/CARD", total: 1, enqueued: 1, skipped: 0 }); await done; });
+    expect(result.current.scanning).toBe(false);
+  });
+
+  it("取消选择:choosing 回落,scanning 从没亮过,不调 startImport", async () => {
+    apiMock.pickImportFolder.mockResolvedValue(null);
+    const { result } = renderHook(() => useImportSources());
+    await act(async () => { await result.current.chooseFolder(); });
+    expect(result.current.choosing).toBe(false);
+    expect(result.current.scanning).toBe(false);
+    expect(apiMock.startImport).not.toHaveBeenCalled();
+  });
+
+  it("startImport 成功后重新拉 listWatchedFolders,新文件夹当场出现在 watched 里", async () => {
+    apiMock.listWatchedFolders.mockResolvedValueOnce([]);
+    apiMock.pickImportFolder.mockResolvedValue("/Volumes/CARD/walk-media");
+    apiMock.startImport.mockImplementation(async () => {
+      apiMock.listWatchedFolders.mockResolvedValue([
+        { id: 3, path: "/Volumes/CARD/walk-media", auto_sync: false, last_scan_at: null } as never,
+      ]);
+      return { folder: "/Volumes/CARD/walk-media", total: 21, enqueued: 21, skipped: 0 };
+    });
+    const { result } = renderHook(() => useImportSources());
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.watched).toEqual([]);
+    await act(async () => { await result.current.chooseFolder(); });
+    expect(result.current.watched.map((item) => item.path)).toEqual(["/Volumes/CARD/walk-media"]);
+  });
+});

@@ -128,7 +128,7 @@ export function AnalysisPanel({ clip, onClose }: { clip: ClipListItem; onClose: 
     <aside className="analysis-panel" aria-label={`${clip.file_name} 分析数值`}>
       <div className="analysis-panel-heading">
         <div>
-          <span>L1 / 原始证据</span>
+          <span>基础分析 / 原始数值</span>
           <strong>{clip.file_name}</strong>
         </div>
         <button type="button" onClick={onClose} aria-label="关闭分析面板">
@@ -201,7 +201,7 @@ export function AnalysisPanel({ clip, onClose }: { clip: ClipListItem; onClose: 
         </>
       ) : (
         <div className="analysis-panel-state">
-          <strong>等待 L1 分析</strong>
+          <strong>等待基础分析</strong>
           <span>完成后将在这里显示曝光、音频、失焦与场景原始值。</span>
         </div>
       )}

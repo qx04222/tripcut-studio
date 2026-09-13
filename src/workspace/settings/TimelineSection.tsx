@@ -1,12 +1,32 @@
-import type { JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 
+import { getImportProgress } from "../../api";
 import { Badge, Button, EmptyState, SectionHeader } from "../ui";
 import { useSettingsFormContext } from "./SettingsFormContext";
-import { clockSourceLabel } from "./settingsModel";
+import { clockSourceLabel, deviceClockEmptyCopy, deviceClockLibraryState, type DeviceClockLibraryState } from "./settingsModel";
+
+/** 空态要分「没数据 / 还没跑 / 跑完了没设备信息」(U-35),问一次索引进度就够。 */
+function useLibraryState(enabled: boolean): DeviceClockLibraryState {
+  const [state, setState] = useState<DeviceClockLibraryState>("unknown");
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    void getImportProgress()
+      .then((progress) => {
+        if (alive && progress) setState(deviceClockLibraryState(progress));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [enabled]);
+  return state;
+}
 
 export function TimelineSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { deviceClocks, clockDrafts, busy } = form;
+  const empty = deviceClockEmptyCopy(useLibraryState(deviceClocks.length === 0));
   return (
     <>
       <SectionHeader
@@ -14,12 +34,7 @@ export function TimelineSection(): JSX.Element {
         description="偏移只参与旅行时间轴排序，不会改写素材原始 captured_at。正数让设备时间向后移动，负数向前移动。"
       />
       {deviceClocks.length === 0 ? (
-        <EmptyState
-          icon="settings-timeline"
-          title="尚无可识别设备"
-          body="元数据回填完成后会按 device_model 分组。"
-          size="inline"
-        />
+        <EmptyState icon="settings-timeline" title={empty.title} body={empty.body} size="inline" />
       ) : (
         <div className="settings-sheet-group">
           {deviceClocks.map((clock) => {

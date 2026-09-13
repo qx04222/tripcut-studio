@@ -6,6 +6,7 @@ import {
   getMusicAnalysis,
   importMusicTrack,
   listMusicTracks,
+  MUSIC_ANALYZED_EVENT,
   pickMusicFile,
   type MusicAnalysis,
   type MusicSection,
@@ -117,6 +118,18 @@ export function MusicPanel({ readOnly, variant = "page" }: { readOnly: boolean; 
     setCopiedNotice(null);
     loadAnalysis(trackId);
   };
+
+  // R10 U-19:后台分析落到终态时壳层桥接的 window 事件到这里——重取列表(标签翻成 BPM /
+  // 失败),选中的曲目顺带重取分析,不再靠用户切走再切回来。
+  useEffect(() => {
+    if (episodeId === null) return;
+    const onAnalyzed = () => {
+      void refreshTracks(episodeId);
+      if (selectedTrackId !== null) loadAnalysis(selectedTrackId);
+    };
+    window.addEventListener(MUSIC_ANALYZED_EVENT, onAnalyzed);
+    return () => window.removeEventListener(MUSIC_ANALYZED_EVENT, onAnalyzed);
+  }, [episodeId, loadAnalysis, refreshTracks, selectedTrackId]);
 
   // 轮询：仅在选中曲目分析仍在 pending/running 时每 3 秒重取一次，卸载或切换选中即清理。
   useEffect(() => {

@@ -16,6 +16,22 @@ export const UI_SETTING_DEFAULTS = {
   "ui.inspector.sections_open": "[]",
   "ui.pool.filter": "all",
   "ui.pool.dimension": "",
+  // R10 U-23:最近选中的素材 id(空串 = 没有);启动时核对存在后恢复选中。
+  "ui.selection.last_clip": "",
+  // R10 U-20:交付抽屉记住上次选择(平台 / 参考粗剪时长 / 联系表 / 剪映草稿)。
+  // 平台空串 = 跟随本集设置;时长 "full" = 完整。
+  "ui.deliver.platform": "",
+  "ui.deliver.target_seconds": "",
+  "ui.deliver.contact_sheet": "true",
+  "ui.deliver.jianying_draft": "false",
+  // R11 §1.2 / §3(车道 C):播放器偏好。默认全开,不用进设置页。
+  "ui.player.start_at_best": "true",
+  "ui.player.auto_advance": "true",
+  "ui.player.muted": "false",
+  // R11 车道 E:快速导出上次用的文件夹(空串 = 还没选过;首次或目录不可用时弹一次文件夹面板)。
+  "ui.export.last_dir": "",
+  // R11 简化专项:首启三步引导「看过了」(库里一有素材或点关闭就写 true)。
+  "onboarding.steps_seen": "false",
 } as const satisfies Readonly<Record<string, string>>;
 
 export const WORKSPACE_FLAG_KEY = "ui.workspace_v2";

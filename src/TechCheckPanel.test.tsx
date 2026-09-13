@@ -13,6 +13,8 @@ const apiMock = vi.hoisted(() => ({
   clearDisplayLut: vi.fn(),
   setPlaybackTrack: vi.fn(),
   setTranscribeTrack: vi.fn(),
+  pickLutFile: vi.fn(),
+  importLut: vi.fn(),
 }));
 vi.mock("./api", () => apiMock);
 
@@ -123,6 +125,23 @@ describe("TechCheckPanel", () => {
   it("shows 设备未提供 when ISO is missing", async () => {
     await act(async () => root.render(<TechCheckPanel clip={makeClip({ iso_value: null })} readOnly={false} />));
     expect(container.textContent).toContain("设备未提供");
+  });
+
+  it("R10 U-13: 方向读 clip.orientation(rotation=0 的竖拍手机片显示竖屏), 缺失时回落 rotation", async () => {
+    await act(async () =>
+      root.render(
+        <TechCheckPanel clip={makeClip({ rotation: 0, width: 1080, height: 1920, orientation: "portrait" })} readOnly={false} />,
+      ),
+    );
+    expect(container.textContent).toContain("竖屏 · 0°");
+    await act(async () =>
+      root.render(<TechCheckPanel clip={makeClip({ rotation: 0, width: 1080, height: 1080, orientation: "square" })} readOnly={false} />),
+    );
+    expect(container.textContent).toContain("方屏 · 0°");
+    await act(async () =>
+      root.render(<TechCheckPanel clip={makeClip({ rotation: 90, orientation: undefined })} readOnly={false} />),
+    );
+    expect(container.textContent).toContain("竖屏 · 90°");
   });
 
   it("shows the preview-only LUT hint", async () => {

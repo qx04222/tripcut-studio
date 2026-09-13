@@ -5,14 +5,33 @@ import { EmptyState } from "../ui/EmptyState";
 import { Icon } from "../ui/icons";
 import { SectionHeader } from "../ui/SectionHeader";
 import { Toggle } from "../ui/Toggle";
-import { dispatchWorkspace } from "../WorkspaceStore";
-import { formatSyncTime } from "./importModel";
+import { openSettings } from "../openSettings";
+import { formatSyncTime, splitPathForEllipsis } from "./importModel";
 import { ImportRecentCard } from "./ImportRecentCard";
 import type { ImportSources } from "./useImportSources";
 
+/** 路径中间省略:头段 CSS 尾部省略、末段不收缩(样式在 shell-r10.css)。AX 名仍是整条路径。 */
+function EllipsisPath({ path, className }: { path: string; className?: string }): JSX.Element {
+  const { head, tail } = splitPathForEllipsis(path);
+  return (
+    <span className={`import-path import-path--middle${className ? ` ${className}` : ""}`} title={path} aria-label={path}>
+      <span className="import-path-head" aria-hidden="true">{head}</span>
+      {tail ? <span className="import-path-tail" aria-hidden="true">{tail}</span> : null}
+    </span>
+  );
+}
+
+/** 「添加素材文件夹」的三态文案:面板开着 = 选择中;选完在扫 = 扫描中(U-07)。 */
+function addFolderLabel(choosing: boolean, scanning: boolean): string {
+  if (choosing) return "选择中…";
+  if (scanning) return "扫描中…";
+  return "添加素材文件夹";
+}
+
 /** 来源分页(规格 §4.1):说明 + 添加文件夹;关注文件夹卡;工具链警告;一行结果。 */
 export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.Element {
-  const { watched, notice, error, choosing, dragActive, toolchainMissing, folder } = sources;
+  const { watched, notice, error, choosing, scanning, dragActive, toolchainMissing, folder } = sources;
+  const busy = choosing || scanning;
 
   return (
     <div className="import-tab import-sources">
@@ -21,14 +40,14 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
           title="素材来源"
           description="只建立索引，不复制或改写原片"
           actions={
-            <Button variant="primary" icon="plus" busy={choosing} onClick={() => void sources.chooseFolder()}>
-              {choosing ? "正在扫描…" : "添加素材文件夹"}
+            <Button variant="primary" icon="plus" busy={busy} onClick={() => void sources.chooseFolder()}>
+              {addFolderLabel(choosing, scanning)}
             </Button>
           }
         />
         {folder ? (
           <p className="import-sources-hint">
-            最近添加 <span className="import-path">{folder}</span>
+            最近添加 <EllipsisPath path={folder} />
           </p>
         ) : null}
         {toolchainMissing ? (
@@ -36,7 +55,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
             <Icon name="warning" size={20} className="import-toolchain-icon" />
             <div className="import-toolchain-copy">
               <p>应用内置的媒体工具不可用，暂时无法解析画面与时长。请重新安装完整 DMG；开发调试时也可到设置页「工具链」填写可信的自定义路径。</p>
-              <Button size="sm" onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "settings" })}>
+              <Button size="sm" onClick={() => openSettings("tools")}>
                 去设置
               </Button>
             </div>
@@ -60,8 +79,8 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
             {watched.map((item) => (
               <Card as="li" key={item.id} className="import-watched-row">
                 <div className="import-watched-copy">
-                  <strong className="import-path" title={item.path}>
-                    {item.path}
+                  <strong className="import-watched-path">
+                    <EllipsisPath path={item.path} />
                   </strong>
                   <small>{formatSyncTime(item.last_scan_at)}</small>
                 </div>
@@ -92,7 +111,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
               size="inline"
               icon="import"
               title="还没有关注的文件夹"
-              body="添加素材文件夹后会列在这里；开启自动同步即可让 NAS / 云盘上的新素材自动进库。"
+              body="点右上角「添加素材文件夹」,或把文件夹拖到下面的虚线框里。"
             />
           </Card>
         )}
@@ -105,7 +124,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
             <strong>把文件夹拖到这里</strong>
             <span>或点击选择相机卡 / 移动硬盘 / 本地文件夹;只建立索引,原片不动</span>
           </div>
-          <Button icon="plus" busy={choosing} onClick={() => void sources.chooseFolder()}>
+          <Button icon="plus" busy={busy} onClick={() => void sources.chooseFolder()}>
             选择文件夹
           </Button>
         </Card>

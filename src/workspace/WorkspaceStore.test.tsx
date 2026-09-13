@@ -77,11 +77,17 @@ describe("hydrate 与回写", () => {
     expect(s.poolWidth).toBe(400);
     expect(s.inspectorWidth).toBe(340);
   });
-  it("只有真的变了的键才进回写清单,选择与焦点永不落盘", () => {
+  it("只有真的变了的键才进回写清单,焦点与抽屉永不落盘;选中只落「最近一条」(U-23)", () => {
     const a = reduce(S0, { type: "set-band-mode", mode: "journey" });
     expect(persistedPairs(S0, a)).toEqual([["ui.band.mode", "journey"]]);
+    // R10 U-23:选中本身仍是会话态(多选、锚点都不落),但最近选中的素材 id 要落盘,
+    // 重启后恢复。清除选中 / 选到槽位不改这个键。
     const b = reduce(a, { type: "select-clip", clipId: 9 });
-    expect(persistedPairs(a, b)).toEqual([]);
+    expect(persistedPairs(a, b)).toEqual([["ui.selection.last_clip", "9"]]);
+    const b2 = reduce(b, { type: "clear-selection" });
+    expect(persistedPairs(b, b2)).toEqual([]);
+    const b3 = reduce(b2, { type: "select-slot", chapterId: 1, slot: "a" });
+    expect(persistedPairs(b2, b3)).toEqual([]);
     const c = reduce(b, { type: "focus-pane", pane: "band" });
     expect(persistedPairs(b, c)).toEqual([]);
     const d = reduce(c, { type: "open-drawer", drawer: "import" });
@@ -90,5 +96,35 @@ describe("hydrate 与回写", () => {
   it("水合本身不产生回写(否则一启动就刷一轮设置表)", () => {
     const s = reduce(S0, { type: "hydrate", settings: { "ui.band.mode": "music" } });
     expect(persistedPairs(S0, s)).toEqual([]);
+  });
+});
+
+describe("R10 U-23:启动恢复选中", () => {
+  it("hydrate 把 ui.selection.last_clip 落在 restoreClipId,不直接写 selection;坏值当没有", () => {
+    const s = reduce(S0, { type: "hydrate", settings: { "ui.selection.last_clip": "42" } });
+    expect(s.restoreClipId).toBe(42);
+    expect(s.selection).toBeNull();
+    expect(reduce(S0, { type: "hydrate", settings: {} }).restoreClipId).toBeNull();
+    expect(reduce(S0, { type: "hydrate", settings: { "ui.selection.last_clip": "abc" } }).restoreClipId).toBeNull();
+    expect(reduce(S0, { type: "hydrate", settings: { "ui.selection.last_clip": "-3" } }).restoreClipId).toBeNull();
+  });
+  it("consume-restore-clip 清掉待恢复 id,且本身不回写", () => {
+    const s = reduce(S0, { type: "hydrate", settings: { "ui.selection.last_clip": "42" } });
+    const t = reduce(s, { type: "consume-restore-clip" });
+    expect(t.restoreClipId).toBeNull();
+    expect(persistedPairs(s, t)).toEqual([]);
+    expect(reduce(t, { type: "consume-restore-clip" })).toBe(t);
+  });
+});
+
+describe("R10 U-14:open-drawer 带设置分区", () => {
+  it("open-drawer settings 记下 section;不带 section 就清空;导入抽屉不碰它", () => {
+    const a = reduce(S0, { type: "open-drawer", drawer: "settings", section: "analysis" });
+    expect(a.settingsSection).toBe("analysis");
+    const b = reduce(a, { type: "open-drawer", drawer: "import" });
+    expect(b.settingsSection).toBe("analysis");
+    const c = reduce(b, { type: "open-drawer", drawer: "settings" });
+    expect(c.settingsSection).toBeNull();
+    expect(persistedPairs(S0, a)).toEqual([]);
   });
 });

@@ -39,6 +39,8 @@ pub fn post(sink: &impl NotificationSink, title: &str, body: &str) -> bool {
 pub const EXPORT_COMPLETE_TITLE: &str = "交付完成";
 /// 批量分析完成通知的标题;正文由调用方按批次信息拼。
 pub const BATCH_ANALYSIS_COMPLETE_TITLE: &str = "批量分析完成";
+/// R10 U-25:首个后台任务开始时的一条通知——它的作用是把 macOS 的通知权限弹框固定在这个时机。
+pub const BACKGROUND_STARTED_TITLE: &str = "旅剪已开始后台处理";
 
 #[cfg(test)]
 #[derive(Default)]

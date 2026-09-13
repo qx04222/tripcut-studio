@@ -315,7 +315,8 @@ describe("ui.workspace_v2 旗分流", () => {
       await Promise.resolve();
     });
     expect(window.location.hash).toBe("#/review");
-  });
+  // 全量并行跑时这一条要懒加载旧壳 + 命令面板,曾在负载下超过默认 1 s(1050 ms);只给它 5 s,不改全局。
+  }, 5_000);
 
   it("⌘K 搜到的素材点进去落在媒体池并被选中(与旧壳同一条路径)", async () => {
     vi.mocked(getSettings).mockResolvedValue({ "ui.workspace_v2": "true" });

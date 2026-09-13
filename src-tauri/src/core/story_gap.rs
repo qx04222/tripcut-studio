@@ -37,7 +37,13 @@ pub struct GenerationRequestSummary {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StoryGap {
     pub id: i64,
+    /// `narrative_chapters.id`(叙事章)。**不是**镜头带用的 D2 `chapters.id`。
     pub chapter_id: i64,
+    /// R10(车道 D 发现的 ID 空间碰撞):这个缺口应挂在镜头带的哪一章——D2
+    /// `chapters.id`,按本叙事章 beats 所指素材的 `clips.chapter_id` 多数决(平手取
+    /// 小 id);叙事章没有 beat、或素材都没分章时为 `None`。带上匹配请用它,别用
+    /// `chapter_id`——两张表的 id 相等只是巧合。
+    pub band_chapter_id: Option<i64>,
     pub chapter_title: String,
     pub beat_id: Option<i64>,
     pub slot: String,
@@ -264,7 +270,14 @@ pub fn list(connection: &Connection) -> Result<Vec<StoryGap>> {
     };
     let mut statement = connection.prepare(
         "SELECT g.id, g.chapter_id, c.title, g.beat_id, g.slot, g.reason, g.status,
-                r.id, r.status, r.error
+                r.id, r.status, r.error,
+                (SELECT clip.chapter_id
+                   FROM narrative_beats beat
+                   JOIN clips clip ON clip.id = beat.clip_id
+                  WHERE beat.chapter_id = g.chapter_id AND clip.chapter_id IS NOT NULL
+                  GROUP BY clip.chapter_id
+                  ORDER BY COUNT(*) DESC, clip.chapter_id
+                  LIMIT 1)
            FROM story_gaps g
            JOIN narrative_chapters c ON c.id = g.chapter_id
            LEFT JOIN generation_requests r ON r.id = (
@@ -286,6 +299,7 @@ pub fn list(connection: &Connection) -> Result<Vec<StoryGap>> {
             Ok(StoryGap {
                 id: row.get(0)?,
                 chapter_id: row.get(1)?,
+                band_chapter_id: row.get(10)?,
                 chapter_title: row.get(2)?,
                 beat_id: row.get(3)?,
                 slot_label_zh: slot_label_zh(&slot).to_owned(),
@@ -405,6 +419,67 @@ mod tests {
                 .unwrap();
         }
         (episode, chapter)
+    }
+
+    /// R10 ID 空间碰撞:叙事章 id 与 D2 章 id 不相等时,缺口要挂到 beats 所指素材的
+    /// D2 章上;没 beat 的叙事章 → None。
+    #[test]
+    fn gap_carries_the_band_chapter_id_resolved_through_its_beats() {
+        let (_d, mut connection) = setup();
+        let episode: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        // 先占掉 narrative_chapters 的低位 id,让两套 id 错开:叙事章将是 3,D2 章是 1/2。
+        connection
+            .execute(
+                "INSERT INTO narrative_revisions(episode_id, kind, created_at) VALUES (?1, 'suggested', 'old')",
+                [episode],
+            )
+            .unwrap();
+        let old_revision = connection.last_insert_rowid();
+        for order in 0..2 {
+            connection
+                .execute(
+                    "INSERT INTO narrative_chapters(
+                        episode_id, kind, title, \"order\", promoted, score, rationale,
+                        promotion_reason, story_slots_json, missing_slots_json, dh_plan_json, revision_id)
+                     VALUES (?1, 'journey', 'old', ?2, 0, 0.5, 'r', '', '[]', '[]', 'null', ?3)",
+                    params![episode, order, old_revision],
+                )
+                .unwrap();
+        }
+        for (id, title) in [(1, "第1段"), (2, "第2段")] {
+            connection
+                .execute(
+                    "INSERT INTO chapters(id, title, start_at, end_at, episode_id)
+                     VALUES (?1, ?2, '2026-09-13T14:40:00Z', '2026-09-13T14:41:00Z', ?3)",
+                    params![id, title, episode],
+                )
+                .unwrap();
+        }
+        let (_episode, narrative_chapter) = seed_chapter(
+            &connection,
+            &["REAL/ESTABLISHING"],
+            &[("a.mov", None), ("b.mov", None), ("c.mov", None)],
+        );
+        assert!(narrative_chapter > 2, "夹具前提:叙事章 id 必须与 D2 章 id 错开");
+        // 三条 beat 素材:两条在 D2 章 2,一条在章 1 → 多数决 2。
+        connection
+            .execute("UPDATE clips SET chapter_id = 2 WHERE rel_path IN ('a.mov', 'b.mov')", [])
+            .unwrap();
+        connection
+            .execute("UPDATE clips SET chapter_id = 1 WHERE rel_path = 'c.mov'", [])
+            .unwrap();
+        detect(&mut connection).unwrap();
+        let gaps = list(&connection).unwrap();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].chapter_id, narrative_chapter);
+        assert_eq!(gaps[0].band_chapter_id, Some(2));
+        assert_ne!(gaps[0].band_chapter_id, Some(gaps[0].chapter_id));
+
+        // 素材全部没分章 → None(带上不该凭 chapter_id 乱挂)。
+        connection.execute("UPDATE clips SET chapter_id = NULL", []).unwrap();
+        assert_eq!(list(&connection).unwrap()[0].band_chapter_id, None);
     }
 
     #[test]

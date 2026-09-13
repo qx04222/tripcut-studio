@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 
-import { AnalysisBadges } from "../AnalysisPanel";
 import {
   clearClipRating,
   describeClipWithAi,
@@ -12,18 +11,17 @@ import {
   applyNarrativeOp,
   type AiDescriptionResult,
 } from "../api";
-import { SimilarGroupsPanel } from "../SimilarGroupsPanel";
-import { TechCheckPanel } from "../TechCheckPanel";
 import {
   ChapterSlotSection,
   EmptyInspectorNote,
   RatingControls,
   TagsSection,
   TakeSwitcher,
-  AiDescriptionSection,
 } from "./inspectorFields";
 import { InspectorHeader } from "./InspectorHeader";
-import { CollapsibleSection, DimensionsGrid, GapInspector } from "./InspectorSections";
+import { InspectorCollapsibleSections } from "./InspectorCollapsible";
+import { GapInspector } from "./InspectorSections";
+import { SelectSegmentsSection } from "./InspectorSegments";
 import { PaneHead } from "./PaneHead";
 import {
   chapterSlotOptions,
@@ -48,17 +46,22 @@ export const INSPECTOR_SECTIONS: readonly { id: InspectorSectionId; title: strin
   { id: "similar", title: "相似镜头", icon: "search" },
 ];
 
-/** 默认层四张卡的标题与图标(套件里没有 tag / copy 图标,标签用 search、Take 用 settings-cache 代)。 */
+/** 默认层五张卡的标题与图标(套件里没有 tag / copy 图标,标签用 search、Take 用 settings-cache 代)。 */
 const DEFAULT_SECTION_META: Record<DefaultSectionId, { title: string; icon: IconName }> = {
   rating: { title: "评级与收藏", icon: "star" },
   tags: { title: "标签", icon: "search" },
   chapter: { title: "所属章节 / 槽位", icon: "settings-timeline" },
-  takes: { title: "同镜头 Take 切换", icon: "settings-cache" },
+  segments: { title: "精选段", icon: "mark-in" },
+  takes: { title: "同一镜头的多条", icon: "settings-cache" },
 };
 
-function sectionIcon(id: InspectorSectionId): IconName {
-  return INSPECTOR_SECTIONS.find((section) => section.id === id)?.icon ?? "info";
-}
+/**
+ * 「加载中」的终态窗口(R10 U-27):面板 8 秒内没上报计数就落到「未探测 / 暂无数据」,
+ * 不再一直「加载中」;之后真正的计数到了照样覆盖。
+ */
+export const SECTION_LOADING_TIMEOUT_MS = 8_000;
+/** 计数的哨兵值:超时未上报。与 0 分开,状态字才能说「暂无数据」而不是「无」。 */
+export const COUNT_TIMED_OUT = -1;
 
 /** 默认层的一张卡:铬条标题(图标 + 段名 + 右侧 meta)+ 内容。 */
 function DefaultSectionCard({ id, meta, children }: { id: DefaultSectionId; meta?: string; children: ReactNode }): JSX.Element {
@@ -97,8 +100,17 @@ export function sectionStatusText(id: InspectorSectionId, ctx: InspectorStatusCo
       return ctx.audioTrackCount > 0 ? `${ctx.audioTrackCount} 条音轨` : "未探测";
     case "similar":
       if (ctx.similarGroupCount === null) return "加载中";
+      if (ctx.similarGroupCount < 0) return "暂无数据";
       return ctx.similarGroupCount > 0 ? `${ctx.similarGroupCount} 组` : "无";
   }
+}
+
+/** 折叠段的「安静」状态字:没东西可看 —— 这些段收进一个「更多信息」折叠,不占检查器版面(R11 简化专项 #4)。 */
+export const QUIET_SECTION_STATUS: readonly string[] = ["待判定", "未探测", "暂无数据", "无"];
+
+export function isQuietSection(id: InspectorSectionId, ctx: InspectorStatusContext): boolean {
+  if (id === "techcheck" || id === "ai") return false;
+  return QUIET_SECTION_STATUS.includes(sectionStatusText(id, ctx));
 }
 
 /** 默认层选中一条素材时的检查器主体。 */
@@ -112,8 +124,14 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   const [llmEnabled, setLlmEnabled] = useState(false);
   const [llmBudgetExhausted, setLlmBudgetExhausted] = useState(false);
   const [ratingBusy, setRatingBusy] = useState(false);
-  const [audioTrackCount, setAudioTrackCount] = useState<number | null>(null);
-  const [similarGroupCount, setSimilarGroupCount] = useState<number | null>(null);
+  // 计数带着「是哪条素材的」:换素材不靠 effect 清零 —— 子面板的上报 effect 比父的清零 effect
+  // 先跑,清零会把刚到的计数抹掉,状态字永远「加载中」(U-27 的第二个根因)。
+  const [audioCount, setAudioCount] = useState<{ clipId: number; count: number } | null>(null);
+  const [similarCount, setSimilarCount] = useState<{ clipId: number; count: number } | null>(null);
+  const audioTrackCount = audioCount?.clipId === clipId ? audioCount.count : null;
+  const similarGroupCount = similarCount?.clipId === clipId ? similarCount.count : null;
+  const setAudioTrackCount = useCallback((count: number) => setAudioCount({ clipId, count }), [clipId]);
+  const setSimilarGroupCount = useCallback((count: number) => setSimilarCount({ clipId, count }), [clipId]);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -124,8 +142,12 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   }, []);
 
   useEffect(() => {
-    setAudioTrackCount(null);
-    setSimilarGroupCount(null);
+    // 8 秒没有上报就落终态(U-27);面板真的上报了会把哨兵值盖掉。
+    const timer = window.setTimeout(() => {
+      setAudioCount((current) => (current?.clipId === clipId ? current : { clipId, count: COUNT_TIMED_OUT }));
+      setSimilarCount((current) => (current?.clipId === clipId ? current : { clipId, count: COUNT_TIMED_OUT }));
+    }, SECTION_LOADING_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
   }, [clipId]);
 
   useEffect(() => {
@@ -210,6 +232,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   );
 
   const slots = useMemo(() => chapterSlotOptions(feed.storyboard, clipId), [feed.storyboard, clipId]);
+  const onAddToBand = useCallback(() => slotDrag.insert(clipId), [slotDrag, clipId]);
   const onMoveSlot = useCallback(
     (targetKey: string) => {
       if (feed.storyboard && slots.current !== null) slotDrag.apply(planBandReorder(feed.storyboard, slots.current, targetKey));
@@ -278,6 +301,8 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
             readOnly={feed.episode.viewing !== null}
             onMoveChapter={onMoveChapter}
             onMoveSlot={onMoveSlot}
+            onAddToBand={onAddToBand}
+            addBusy={slotDrag.busy}
           />
           {slotDrag.notice ? (
             <p className="inspector-notice" role="status">
@@ -286,45 +311,31 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
           ) : null}
         </DefaultSectionCard>
       ) : null}
+      {sections.includes("segments") ? (
+        <DefaultSectionCard id="segments" meta={clip.select_count > 0 ? `${clip.select_count} 段` : undefined}>
+          <SelectSegmentsSection clipId={clipId} selectCount={clip.select_count} readOnly={feed.episode.viewing !== null} />
+        </DefaultSectionCard>
+      ) : null}
       {sections.includes("takes") && stack ? (
         <DefaultSectionCard id="takes" meta={`${stack.members.length} 条`}>
           <TakeSwitcher stack={stack} clipsById={feed.clipsById} selectedClipId={clipId} onSelect={selectClip} />
         </DefaultSectionCard>
       ) : null}
 
-      <CollapsibleSection id="techcheck" icon={sectionIcon("techcheck")} title="技术检查" status={sectionStatusText("techcheck", ctx)}>
-        <>
-          <AnalysisBadges clip={clip} compact />
-          <div className="inspector-techcheck-scope">
-            <TechCheckPanel clip={clip} readOnly={false} hideTitle />
-          </div>
-        </>
-      </CollapsibleSection>
-      <CollapsibleSection id="dimensions" icon={sectionIcon("dimensions")} title="八维评分" status={sectionStatusText("dimensions", ctx)}>
-        <DimensionsGrid dimensions={clipDimensions} onTimeStageChange={onTimeStageChange} />
-      </CollapsibleSection>
-      <CollapsibleSection id="ai" icon={sectionIcon("ai")} title="AI 描述" status={sectionStatusText("ai", ctx)}>
-        <AiDescriptionSection
-          aiDescription={aiDescription}
-          llmEnabled={llmEnabled}
-          llmBudgetExhausted={llmBudgetExhausted}
-          aiBusy={aiBusy}
-          onDescribe={onDescribe}
-        />
-      </CollapsibleSection>
-      <CollapsibleSection id="audio" icon={sectionIcon("audio")} title="音轨与 LUT" status={sectionStatusText("audio", ctx)}>
-        <div className="inspector-audio-scope">
-          <TechCheckPanel clip={clip} readOnly={false} hideTitle onCountChange={setAudioTrackCount} />
-        </div>
-      </CollapsibleSection>
-      <CollapsibleSection id="similar" icon={sectionIcon("similar")} title="相似镜头" status={sectionStatusText("similar", ctx)}>
-        <SimilarGroupsPanel
-          clipId={clip.id}
-          readOnly={false}
-          clipsById={feed.clipsById}
-          onCountChange={setSimilarGroupCount}
-        />
-      </CollapsibleSection>
+      <InspectorCollapsibleSections
+        clip={clip}
+        ctx={ctx}
+        clipDimensions={clipDimensions}
+        clipsById={feed.clipsById}
+        aiDescription={aiDescription}
+        llmEnabled={llmEnabled}
+        llmBudgetExhausted={llmBudgetExhausted}
+        aiBusy={aiBusy}
+        onDescribe={onDescribe}
+        onTimeStageChange={onTimeStageChange}
+        onAudioCount={setAudioTrackCount}
+        onSimilarCount={setSimilarGroupCount}
+      />
     </div>
   );
 }

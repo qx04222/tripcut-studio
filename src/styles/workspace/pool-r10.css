@@ -1,0 +1,146 @@
+/*
+ * R10 车道 A(媒体池与键盘)的样式:池内 Stack 展开条(U-02 / U-26)、可点的
+ * 「n 条候选」角标、媒体池空态。选择器一律以 `.workspace-shell .media-pool` 起头。
+ * 只能从 workspace.css 头部 @import(放尾部会被 postcss-import 静默丢弃)。
+ */
+
+/* 「n 条候选」角标可点:指针手型 + 展开态翻转背景(U-02)。 */
+.workspace-shell .media-pool .pool-card-stack.expandable {
+  cursor: pointer;
+}
+
+.workspace-shell .media-pool .pool-card-stack.expandable:hover {
+  filter: brightness(1.08);
+}
+
+.workspace-shell .media-pool .pool-card-stack.expanded {
+  background: var(--text-primary);
+  color: var(--surface-panel);
+}
+
+/* 池内候选条:贴在网格下方,与镜头带 Take 条同一套尺寸(96×54 缩略图)。 */
+.workspace-shell .media-pool .pool-stack-strip {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 44%;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+}
+
+.workspace-shell .media-pool .pool-stack-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.workspace-shell .media-pool .pool-stack-title {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-shell .media-pool .pool-stack-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-start;
+  overflow-y: auto;
+}
+
+.workspace-shell .media-pool .pool-take-card {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 104px;
+  padding: var(--space-1);
+  cursor: pointer;
+}
+
+.workspace-shell .media-pool .pool-take-thumb {
+  position: relative;
+  display: block;
+  width: 96px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: var(--radius-6);
+  background: var(--media-well);
+}
+
+.workspace-shell .media-pool .pool-take-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-shell .media-pool .pool-take-hero { position: absolute; top: var(--space-1); right: var(--space-1); }
+
+.workspace-shell .media-pool .pool-take-time {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  font-family: var(--font-mono);
+}
+
+.workspace-shell .media-pool .pool-take-caption {
+  display: flex;
+  gap: var(--space-1);
+  justify-content: space-between;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .media-pool .pool-take-order { flex: none; font-family: var(--font-mono); color: var(--text-primary); }
+
+.workspace-shell .media-pool .pool-take-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 尾部「还有 n 条」与候选卡等高对齐,一眼看出还有没露出来的。 */
+.workspace-shell .media-pool .pool-take-more {
+  align-self: center;
+  height: 54px;
+  white-space: nowrap;
+}
+
+/* 空态占满网格区并竖直居中(U-06)。R-07:空态是 grid 的**同级**(放在 grid 里 WebKit 会把它
+   从 AX 树剔掉),grid 空时缩成 0 高让位,空态按 flex 子项吃掉剩余高度。 */
+.workspace-shell .media-pool .pool-grid-viewport.is-empty {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 0;
+}
+.workspace-shell .media-pool .ui-empty--pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  text-align: center;
+}
+
+/* 空库的「导入素材」是大号入口(U-06):比套件 md 按钮高一档、字号 13。 */
+.workspace-shell .media-pool .pool-empty-state .ui-empty-action .ui-button {
+  height: 36px;
+  padding: 0 var(--space-5);
+  font-size: var(--text-13);
+}

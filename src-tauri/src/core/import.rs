@@ -78,6 +78,9 @@ pub struct ClipListItem {
     pub captured_at: Option<String>,
     pub audio_sample_rate: Option<i64>,
     pub rotation: Option<i64>,
+    /// R10 U-13:rotation + 像素宽高综合判定的显示方向
+    /// (`landscape`/`portrait`/`square`/`unknown`),见 `core::orientation`。
+    pub orientation: super::orientation::Orientation,
     pub color_transfer: Option<String>,
     pub hdr_flag: bool,
     pub tz_guess: Option<String>,
@@ -105,6 +108,9 @@ pub struct ClipListItem {
     /// `NULL` = 真实素材;`'minimax'` = MiniMax 云端补镜生成物。Select 页据此
     /// 渲染「AI 生成」徽章;见迁移 0041 `clips.generated_source`。
     pub generated_source: Option<String>,
+    /// R11 §1.2 / V-01:该素材已有 ≥1 个时刻分窗口(`clip_moments`),媒体池据此画
+    /// 闪电角标。EXISTS 子查询,不另开一列。
+    pub has_suggestions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,7 +208,32 @@ struct CommandOutput {
 
 struct FrameTimingProbe {
     is_vfr: bool,
+    /// R10 U-13:PTS 采样是否成功拿到 ≥3 个点。成功时它的 `is_vfr` 是权威
+    /// 判定,覆盖容器头 `r_frame_rate ≠ avg_frame_rate` 那道粗判(`-c copy`
+    /// 切段的容器头常把两者写得不一致,而 PTS 明明是恒定的)。
+    sampled: bool,
+    /// 有任何一个区间偏离标称帧周期(掉帧也算)——只要为真就把采样表落库,
+    /// 帧准时间映射不依赖 VFR 标签。
+    irregular: bool,
     samples: Vec<super::canonical_time::VfrTimePoint>,
+}
+
+/// 合并容器头粗判与 PTS 采样:采样成功以采样为准,否则退回粗判。
+fn merge_vfr_verdict(metadata_is_vfr: bool, frame_timing: &FrameTimingProbe) -> bool {
+    if frame_timing.sampled {
+        frame_timing.is_vfr
+    } else {
+        metadata_is_vfr || frame_timing.is_vfr
+    }
+}
+
+fn degraded_frame_timing(metadata_is_vfr: bool) -> FrameTimingProbe {
+    FrameTimingProbe {
+        is_vfr: metadata_is_vfr,
+        sampled: false,
+        irregular: false,
+        samples: Vec::new(),
+    }
 }
 
 pub fn scan_video_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -810,9 +841,9 @@ fn run_import_probe_with(
     let frame_timing = probe_frame_timing_with(&path, ffprobe, timeout, &metadata)
         .unwrap_or_else(|error| {
             eprintln!("vfr sampling degraded for {}: {error}", path.display());
-            FrameTimingProbe { is_vfr: metadata.is_vfr, samples: Vec::new() }
+            degraded_frame_timing(metadata.is_vfr)
         });
-    metadata.is_vfr |= frame_timing.is_vfr;
+    metadata.is_vfr = merge_vfr_verdict(metadata.is_vfr, &frame_timing);
     if metadata.is_vfr && frame_timing.samples.len() < 2 {
         return Err(CoreError::Import(format!(
             "VFR 素材 {} 没有足够的 PTS 采样点",
@@ -966,7 +997,7 @@ fn run_import_probe_with(
     super::canonical_time::replace_vfr_map(
         &transaction,
         clip_id,
-        if metadata.is_vfr {
+        if metadata.is_vfr || frame_timing.irregular {
             &frame_timing.samples
         } else {
             &[]
@@ -1132,9 +1163,9 @@ pub fn run_metadata_backfill(connection: &mut Connection, job: &Job) -> Result<(
     let frame_timing = probe_frame_timing_with(&path, &ffprobe, FFPROBE_TIMEOUT, &metadata)
         .unwrap_or_else(|error| {
             eprintln!("vfr sampling degraded for {}: {error}", path.display());
-            FrameTimingProbe { is_vfr: metadata.is_vfr, samples: Vec::new() }
+            degraded_frame_timing(metadata.is_vfr)
         });
-    metadata.is_vfr |= frame_timing.is_vfr;
+    metadata.is_vfr = merge_vfr_verdict(metadata.is_vfr, &frame_timing);
     if metadata.is_vfr && frame_timing.samples.len() < 2 {
         return Err(CoreError::Import(format!(
             "VFR 素材 {} 没有足够的 PTS 采样点",
@@ -1182,7 +1213,7 @@ pub fn run_metadata_backfill(connection: &mut Connection, job: &Job) -> Result<(
     super::canonical_time::replace_vfr_map(
         &transaction,
         payload.clip_id,
-        if metadata.is_vfr {
+        if metadata.is_vfr || frame_timing.irregular {
             &frame_timing.samples
         } else {
             &[]
@@ -1505,7 +1536,8 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
                 a.motion_mean, a.out_of_focus_ratio,
                 c.iso_value, c.shutter_speed, c.aperture,
                 c.display_lut_path, c.selected_transcribe_track, c.selected_monitor_track,
-                c.generated_source
+                c.generated_source,
+                EXISTS (SELECT 1 FROM clip_moments moment WHERE moment.clip_id = c.id)
          FROM clips c
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
          LEFT JOIN clip_motion m ON m.clip_id = c.id
@@ -1602,6 +1634,11 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             captured_at: row.get(14)?,
             audio_sample_rate: row.get(15)?,
             rotation: row.get(16)?,
+            orientation: super::orientation::clip_orientation(
+                row.get(12)?,
+                row.get(13)?,
+                row.get(16)?,
+            ),
             color_transfer: row.get(17)?,
             hdr_flag: row.get::<_, i64>(18)? == 1,
             tz_guess: row.get(19)?,
@@ -1629,6 +1666,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             selected_transcribe_track: row.get(60)?,
             selected_monitor_track: row.get(61)?,
             generated_source: row.get(62)?,
+            has_suggestions: row.get::<_, i64>(63)? == 1,
         })
     })?;
     for clip in clips {
@@ -1684,6 +1722,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             captured_at: None,
             audio_sample_rate: None,
             rotation: None,
+            orientation: super::orientation::Orientation::Unknown,
             color_transfer: None,
             hdr_flag: false,
             tz_guess: None,
@@ -1713,6 +1752,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             selected_transcribe_track: None,
             selected_monitor_track: None,
             generated_source: None,
+            has_suggestions: false,
         });
     }
     Ok(items)
@@ -1824,12 +1864,19 @@ fn parse_frame_timing_json(value: &Value, metadata: &ProbeMetadata) -> Result<Fr
         metadata.fps_num,
         metadata.fps_den,
     );
+    let irregular = super::canonical_time::frame_timing_has_irregular_interval(
+        &ticks,
+        metadata.tb_num,
+        metadata.tb_den,
+        metadata.fps_num,
+        metadata.fps_den,
+    );
     let samples = super::canonical_time::sample_vfr_time_map(
         &ticks,
         metadata.tb_num,
         metadata.tb_den,
     );
-    Ok(FrameTimingProbe { is_vfr, samples })
+    Ok(FrameTimingProbe { is_vfr, sampled: ticks.len() >= 3, irregular, samples })
 }
 
 pub fn parse_probe_json(value: &Value) -> Result<ProbeMetadata> {
@@ -2508,6 +2555,25 @@ mod tests {
         value["streams"][0]["codec_time_base"] = json!("0/0");
 
         assert!(parse_probe_json(&value).unwrap().is_vfr);
+    }
+
+    /// R10 U-13:容器头说 r_frame_rate ≠ avg_frame_rate(`-c copy` 切段常见),
+    /// 但 PTS 采样是恒定的——采样成功即以采样为准,不再被粗判 OR 成 VFR。
+    #[test]
+    fn constant_pts_sampling_overrides_mismatched_container_rates() {
+        let mut value = cfr_probe_json();
+        value["streams"][0]["avg_frame_rate"] = json!("2647/88");
+        let metadata = parse_probe_json(&value).unwrap();
+        assert!(metadata.is_vfr, "粗判本身仍按帧率不一致报 VFR");
+        let packets = json!({
+            "packets": (0..120).map(|index| json!({"pts": (index * 3003).to_string()})).collect::<Vec<_>>()
+        });
+        let timing = parse_frame_timing_json(&packets, &metadata).unwrap();
+        assert!(timing.sampled);
+        assert!(!timing.is_vfr);
+        assert!(!merge_vfr_verdict(metadata.is_vfr, &timing));
+        // 采样失败(降级)时退回粗判。
+        assert!(merge_vfr_verdict(metadata.is_vfr, &degraded_frame_timing(metadata.is_vfr)));
     }
 
     #[test]

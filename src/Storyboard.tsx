@@ -644,7 +644,8 @@ function StoryGapCard({
 export type NarrateOutcome =
   | { kind: "blocked"; notice: string }
   | { kind: "cancelled" }
-  | { kind: "done"; notice: string };
+  /** `outcome`:LLM 路径排了任务(job),或 LLM 关闭时同步落了一版确定性 revision(R10 U-03 据此决定要不要回写 story_order)。 */
+  | { kind: "done"; outcome: "job" | "revision"; notice: string };
 
 /**
  * 「按模板重新编排」的全部策略:provider 锁定、预算、知情同意 confirm。
@@ -680,6 +681,7 @@ export async function narrateEpisodeWithConsent(template?: StoryTemplate): Promi
   const outcome = await enqueueNarrateEpisode(template);
   return {
     kind: "done",
+    outcome: outcome.kind,
     notice:
       outcome.kind === "job"
         ? `叙事编排任务 #${outcome.id} 已排队；完成前继续显示当前故事板。`

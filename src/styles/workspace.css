@@ -29,6 +29,8 @@
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
 @import "./workspace/chrome.css";
+/* R10 车道 E(壳 / 抽屉 / 设置 / 恢复页)——同样只能在这里 @import。 */
+@import "./workspace/shell-r10.css";
 /* 封面占位(R9 D4),跨栏共用,同样只能排在这里。 */
 @import "./workspace/cover.css";
 /* R9 Task 3:媒体池卡片与监视器的新皮(覆盖分节 6、7 的同名选择器)。CSS 规定
@@ -48,6 +50,20 @@
 @import "./workspace/settings-sheet.css";
 /* 镜头带附属区四个面板的套件皮(R9 Task 8a),同样只能在这里 @import。 */
 @import "./workspace/band-accessory.css";
+/* R10 车道 A:池内 Stack 展开条、可点角标、媒体池空态(同样只能在这里 @import)。 */
+@import "./workspace/pool-r10.css";
+/* 监视器 R10(车道 C:seek bar / 传输条最小宽度 / 四栏焦点环),同样只能在这里 @import。 */
+@import "./workspace/monitor-r10.css";
+/* R10 车道 D(检查器与镜头带)的增补皮:U-03/11/12/17/18/27–32。同样只能在这里 @import。 */
+@import "./workspace/band-inspector-r10.css";
+/* R11 车道 C(播放器与媒体池):热力条 / 建议行 / 悬停刮擦 / 闪电角标 / 自动挑选面板。同样只能在这里 @import。 */
+@import "./workspace/player-r11.css";
+/* R11 车道 E(交付抽屉的快速导出模式)。同样只能在这里 @import。 */
+@import "./workspace/export-r11.css";
+/* R11 简化专项(车道 simplify):三步引导卡 / 设置三分区 / 检查器「更多信息」。同样只能在这里 @import。 */
+@import "./workspace/simplify-r11.css";
+/* R11 真机复核修复车道(fix):只读查看横幅「回到当前集」。同样只能在这里 @import。 */
+@import "./workspace/fix-r11.css";
 
 /* ---------- 1. 壳与设计令牌 ---------- */
 

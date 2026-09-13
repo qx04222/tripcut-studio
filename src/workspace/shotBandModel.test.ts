@@ -181,7 +181,8 @@ describe("镜头带数据模型", () => {
     const chapters = build();
     expect(chapters[0]!.title).toBe("出发");
     expect(chapters[0]!.gapCount).toBe(1 + 1); // 建立镜头 + 氛围镜头
-    expect(chapters[0]!.durationTicks).toBe(
+    // 夹具全是 1/1000 的 tb,ticks 即毫秒;章节时长是各段换算后的毫秒和(R-02)。
+    expect(chapters[0]!.durationMs).toBe(
       chapters[0]!.segments.reduce((sum, segment) => sum + segment.durationTicks, 0),
     );
   });

@@ -138,10 +138,122 @@ pub fn list_display_luts(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// R10 U-28:`.cube` 文件大小上限。65³ 的 3D LUT 文本约 8 MB,64 MiB 足够宽裕;
+/// 再大多半是选错文件。
+const LUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// 只读文件头这么多字节找 `LUT_3D_SIZE` / `LUT_1D_SIZE`,不把整个文件读进内存。
+const LUT_HEADER_PROBE_BYTES: usize = 64 * 1024;
+
+/// R10 U-28:把用户选的 `.cube` 复制进 `luts/`,返回复制后的完整 LUT 列表。
+/// 校验:扩展名 `.cube`(不分大小写)、非空且 ≤ 64 MiB、文件头带 `LUT_3D_SIZE` 或
+/// `LUT_1D_SIZE`(Adobe cube 规范的必填关键字)。同名文件已存在且内容不同时拒绝
+/// (不静默覆盖;改名再导),内容相同则视为已导入。源文件不动。
+pub fn import_display_lut(source: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
+    let is_cube = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(LUT_EXTENSION));
+    if !is_cube {
+        return Err(CoreError::Player("只支持 .cube 格式的 LUT 文件".to_owned()));
+    }
+    if !source.is_file() {
+        return Err(CoreError::Player(format!("LUT 文件不存在:{}", source.display())));
+    }
+    let size = std::fs::metadata(source)?.len();
+    if size == 0 {
+        return Err(CoreError::Player("LUT 文件是空的".to_owned()));
+    }
+    if size > LUT_MAX_BYTES {
+        return Err(CoreError::Player(format!(
+            "LUT 文件过大({} MB,上限 64 MB),多半不是 .cube 查找表",
+            size / (1024 * 1024)
+        )));
+    }
+    let header = {
+        use std::io::Read;
+        let mut file = std::fs::File::open(source)?;
+        let mut buffer = vec![0_u8; LUT_HEADER_PROBE_BYTES.min(size as usize)];
+        let mut filled = 0;
+        while filled < buffer.len() {
+            let read = file.read(&mut buffer[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        buffer.truncate(filled);
+        String::from_utf8_lossy(&buffer).into_owned()
+    };
+    if !header.contains("LUT_3D_SIZE") && !header.contains("LUT_1D_SIZE") {
+        return Err(CoreError::Player(
+            "不是有效的 .cube 文件:文件头没有 LUT_3D_SIZE / LUT_1D_SIZE".to_owned(),
+        ));
+    }
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| CoreError::Player("LUT 文件名无效".to_owned()))?;
+    std::fs::create_dir_all(dir)?;
+    let destination = dir.join(file_name);
+    if destination.is_file() {
+        let same = std::fs::metadata(&destination)?.len() == size
+            && std::fs::read(&destination)? == std::fs::read(source)?;
+        if !same {
+            return Err(CoreError::Player(format!(
+                "luts 目录里已有同名但内容不同的 {},请改名后再导入",
+                file_name.to_string_lossy()
+            )));
+        }
+    } else {
+        std::fs::copy(source, &destination)?;
+    }
+    list_display_luts(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{audio_tracks::AudioStreamProbe, db, test_support::TestDirectory};
+
+    const CUBE_HEADER: &[u8] = b"TITLE \"test\"\nLUT_3D_SIZE 2\n0 0 0\n1 1 1\n";
+
+    #[test]
+    fn import_display_lut_copies_a_valid_cube_and_returns_the_list() {
+        let directory = TestDirectory::new();
+        let luts_dir = directory.path().join("luts");
+        let source = directory.path().join("Downloads").join("Teal.CUBE");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, CUBE_HEADER).unwrap();
+
+        let listed = import_display_lut(&source, &luts_dir).unwrap();
+        assert_eq!(listed, vec![luts_dir.join("Teal.CUBE")]);
+        assert_eq!(std::fs::read(luts_dir.join("Teal.CUBE")).unwrap(), CUBE_HEADER);
+        assert!(source.is_file(), "源文件不动");
+        // 同内容再导一次 = 已导入,不报错。
+        assert_eq!(import_display_lut(&source, &luts_dir).unwrap().len(), 1);
+        // 同名不同内容 → 拒绝,目录里的文件不变。
+        std::fs::write(&source, b"TITLE \"other\"\nLUT_3D_SIZE 2\n1 1 1\n0 0 0\n").unwrap();
+        let error = import_display_lut(&source, &luts_dir).unwrap_err();
+        assert!(error.to_string().contains("同名"), "{error}");
+        assert_eq!(std::fs::read(luts_dir.join("Teal.CUBE")).unwrap(), CUBE_HEADER);
+    }
+
+    #[test]
+    fn import_display_lut_rejects_wrong_extension_empty_and_headerless_files() {
+        let directory = TestDirectory::new();
+        let luts_dir = directory.path().join("luts");
+        let not_cube = directory.path().join("look.3dl");
+        std::fs::write(&not_cube, CUBE_HEADER).unwrap();
+        assert!(import_display_lut(&not_cube, &luts_dir).unwrap_err().to_string().contains(".cube"));
+        let empty = directory.path().join("empty.cube");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(import_display_lut(&empty, &luts_dir).unwrap_err().to_string().contains("空"));
+        let junk = directory.path().join("junk.cube");
+        std::fs::write(&junk, b"hello world").unwrap();
+        assert!(import_display_lut(&junk, &luts_dir).unwrap_err().to_string().contains("LUT_3D_SIZE"));
+        let missing = directory.path().join("missing.cube");
+        assert!(import_display_lut(&missing, &luts_dir).unwrap_err().to_string().contains("不存在"));
+        assert!(list_display_luts(&luts_dir).unwrap().is_empty(), "被拒的文件一个都不该落进 luts/");
+    }
 
     fn test_connection() -> (TestDirectory, Connection) {
         let directory = TestDirectory::new();

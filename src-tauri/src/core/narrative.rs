@@ -821,7 +821,7 @@ fn selected_item_refs(
     connection: &Connection,
     episode_id: i64,
 ) -> Result<HashSet<(i64, Option<i64>)>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "WITH live_selects AS (
              SELECT id, clip_id FROM segments
              WHERE kind = 'select' AND tombstone = 0
@@ -836,15 +836,9 @@ fn selected_item_refs(
          WHERE c.missing_since IS NULL
            AND (c.episode_id = ?1 OR c.episode_id IS NULL)
            AND NOT EXISTS (SELECT 1 FROM live_selects live WHERE live.clip_id = c.id)
-           AND 1 = (
-               SELECT rating.value FROM ratings rating
-               JOIN segments segment ON segment.id = rating.segment_id
-               WHERE segment.clip_id = c.id AND segment.tombstone = 0
-                 AND COALESCE(segment.kind, 'whole') != 'select'
-                 AND rating.rating_type = 'binary'
-               ORDER BY rating.rated_at DESC, rating.id DESC LIMIT 1
-           )",
-    )?;
+           AND {candidate}",
+        candidate = super::story::whole_clip_candidate_predicate("c")
+    ))?;
     let rows = statement.query_map([episode_id], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
     })?;
@@ -1001,7 +995,7 @@ pub fn set_destination_verified(connection: &Connection, card_id: i64, verified:
 }
 
 fn load_prompt_clips(connection: &Connection, episode_id: i64) -> Result<Vec<PromptClip>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "WITH live_selects AS (
              SELECT id, clip_id, in_ticks, out_ticks
              FROM segments WHERE kind = 'select' AND tombstone = 0
@@ -1022,14 +1016,7 @@ fn load_prompt_clips(connection: &Connection, episode_id: i64) -> Result<Vec<Pro
              WHERE c.missing_since IS NULL
                AND (c.episode_id = ?1 OR c.episode_id IS NULL)
                AND NOT EXISTS (SELECT 1 FROM live_selects live WHERE live.clip_id = c.id)
-               AND 1 = (
-                   SELECT rating.value FROM ratings rating
-                   JOIN segments segment ON segment.id = rating.segment_id
-                   WHERE segment.clip_id = c.id AND segment.tombstone = 0
-                     AND COALESCE(segment.kind, 'whole') != 'select'
-                     AND rating.rating_type = 'binary'
-                   ORDER BY rating.rated_at DESC, rating.id DESC LIMIT 1
-               )
+               AND {candidate}
          )
          SELECT selected.clip_id, selected.segment_id, selected.rel_path,
                 selected.captured_at, selected.epoch, selected.gps_lat, selected.gps_lon,
@@ -1046,7 +1033,8 @@ fn load_prompt_clips(connection: &Connection, episode_id: i64) -> Result<Vec<Pro
          ORDER BY story.position IS NULL, story.position,
                   selected.epoch IS NULL, selected.epoch,
                   selected.clip_id, selected.in_ticks, selected.segment_id",
-    )?;
+        candidate = super::story::whole_clip_candidate_predicate("c")
+    ))?;
     let rows = statement.query_map([episode_id], |row| {
         let _path: String = row.get(2)?;
         let in_ticks: i64 = row.get(7)?;
@@ -2520,6 +2508,47 @@ mod tests {
             EnqueueOutcome::Job { id } => assert!(id > 0),
             EnqueueOutcome::Revision { .. } => panic!("LLM 启用时应排队任务而不是同步落地"),
         }
+    }
+
+    /// R10 U-03:叙事/模板候选池 = 收藏 ∪ ≥3 星 ∪ 有精选段——三星未收藏的片也进
+    /// prompt 候选与 selected_item_refs;两星不进。
+    #[test]
+    fn three_star_clips_enter_the_narrative_candidate_pool() {
+        let (_directory, connection) = setup();
+        insert_selected(&connection, 1, "2026-09-01T10:00:00Z", "收藏");
+        for (id, stars) in [(2_i64, 3_i64), (3, 2)] {
+            connection
+                .execute(
+                    "INSERT INTO clips(id, volume_uuid, rel_path, duration_ticks, tb_num, tb_den, captured_at)
+                     VALUES (?1, 'narrative', ?2, 10000, 1, 1000, '2026-09-01T11:00:00Z')",
+                    params![id, format!("{id}.mov")],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind) VALUES (?1, 0, 10000, 'whole')",
+                    [id],
+                )
+                .unwrap();
+            let segment_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO ratings(segment_id, rating_type, value, rated_at)
+                     VALUES (?1, 'star', ?2, '2026-09-01T12:00:00Z')",
+                    params![segment_id, stars],
+                )
+                .unwrap();
+        }
+        let episode = active_episode_id(&connection).unwrap();
+        let ids = load_prompt_clips(&connection, episode)
+            .unwrap()
+            .into_iter()
+            .map(|clip| clip.clip_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![1, 2]);
+        let refs = selected_item_refs(&connection, episode).unwrap();
+        assert!(refs.contains(&(2, None)));
+        assert!(!refs.contains(&(3, None)));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
 import {
   archiveCurrentEpisode,
+  createEpisode,
   getCurrentEpisode,
   listEpisodes,
   renameCurrentEpisode,
@@ -10,18 +11,15 @@ import {
   type EpisodeSummary,
   type TargetPlatform,
 } from "../api";
-import {
-  EpisodeArchiveControls,
-  EpisodeList,
-  EpisodeRenameForm,
-  PLATFORM_LABELS,
-  episodeErrorMessage,
-} from "../EpisodePanel";
-import { openHistoricalEpisode } from "../historyView";
+import { EpisodeArchiveControls, EpisodeList, PLATFORM_LABELS, episodeErrorMessage } from "../EpisodePanel";
+import { WorkspaceEpisodeCreateForm, WorkspaceEpisodeRenameForm } from "./EpisodeForms";
+import { openHistoricalEpisode, returnToActiveEpisode } from "../historyView";
 import { LibraryPanel } from "../LibraryPanel";
 import { useFocusTrap } from "../useFocusTrap";
 import { isTopModal, popModal, pushModal } from "./modalStack";
 import { Button, Icon } from "./ui";
+import { failureText } from "./errorText";
+import { useWorkspace } from "./WorkspaceStore";
 
 /**
  * 顶栏「切换集」popover(规格 §1、Task 6c)。旗开路径下取代 `EpisodePanel` 的
@@ -29,12 +27,14 @@ import { Button, Icon } from "./ui";
  * 只共用它导出的三个展示子组件——两处输出的 markup/行为因此保持一致。
  */
 export function EpisodeSwitcher(): JSX.Element {
+  const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
   const [current, setCurrent] = useState<EpisodeSummary | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [archiveArmed, setArchiveArmed] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftTheme, setDraftTheme] = useState("");
@@ -64,8 +64,15 @@ export function EpisodeSwitcher(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    void refresh().catch((error) => setNotice(String(error)));
+    void refresh().catch((error) => setNotice(failureText("读取集列表", error)));
   }, [refresh]);
+
+  // R10 U-16:走查里弹层写「0 素材」——后端 clip_count 是现算的,这里以前只在挂载时
+  // 读过一次,导入 21 条之后再点开仍是旧值。每次打开都重读一遍。
+  useEffect(() => {
+    if (!open) return;
+    void refresh().catch((error) => setNotice(failureText("读取集列表", error)));
+  }, [open, refresh]);
 
   useEffect(() => {
     if (!open) return;
@@ -142,6 +149,29 @@ export function EpisodeSwitcher(): JSX.Element {
     }
   };
 
+  // R10 U-16:「新建集」。后端按当前集是否为空决定「封存 + 开新集」还是「就地改名复用」;
+  // 两种结果都要派发 tripcut:episode-changed(与封存同一条约定),媒体池 / 镜头带据此换范围。
+  const create = async (title: string) => {
+    setBusy(true);
+    try {
+      const outcome = await createEpisode(title);
+      setCreating(false);
+      setNotice(
+        outcome.reused_empty
+          ? `当前集还是空的,已就地改名为「${outcome.episode.title}」(没有新建档案)`
+          : `已封存「${outcome.archived?.title ?? "上一集"}」,新建并进入「${outcome.episode.title}」`,
+      );
+      window.dispatchEvent(
+        new CustomEvent("tripcut:episode-changed", { detail: { id: outcome.episode.id, title: outcome.episode.title } }),
+      );
+      await refresh().catch(() => setCurrent(outcome.episode));
+    } catch (error) {
+      setNotice(episodeErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const archiveUnavailable = current ? current.clip_count === 0 : true;
 
   return (
@@ -157,6 +187,7 @@ export function EpisodeSwitcher(): JSX.Element {
           setOpen((value) => !value);
           setArchiveArmed(false);
           setEditing(false);
+          setCreating(false);
           setNotice(null);
         }}
       >
@@ -186,7 +217,7 @@ export function EpisodeSwitcher(): JSX.Element {
         >
           {current ? (
             editing ? (
-              <EpisodeRenameForm
+              <WorkspaceEpisodeRenameForm
                 busy={busy}
                 draftTitle={draftTitle}
                 draftTheme={draftTheme}
@@ -202,8 +233,28 @@ export function EpisodeSwitcher(): JSX.Element {
                   setNotice(null);
                 }}
               />
+            ) : creating ? (
+              <WorkspaceEpisodeCreateForm
+                busy={busy}
+                onCreate={(title) => void create(title)}
+                onCancel={() => {
+                  setCreating(false);
+                  setNotice(null);
+                }}
+              />
             ) : (
               <div className="episode-actions">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setCreating(true);
+                    setArchiveArmed(false);
+                    setNotice(null);
+                  }}
+                >
+                  新建集
+                </button>
                 <button
                   type="button"
                   disabled={busy}
@@ -241,6 +292,9 @@ export function EpisodeSwitcher(): JSX.Element {
             onSelectEpisode={(episode) => {
               if (episode.status !== "active") {
                 openHistoricalEpisode(episode.id, episode.title);
+              } else if (viewingEpisode) {
+                // N-2:只读查看历史集时点当前集 = 回到当前集(此前只是关掉弹层,池仍停在历史集)。
+                returnToActiveEpisode();
               }
               setOpen(false);
             }}

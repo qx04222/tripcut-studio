@@ -14,6 +14,12 @@ const apiMock = vi.hoisted(() => ({
   pickExportFolder: vi.fn(),
   revealExport: vi.fn(),
   startExport: vi.fn(),
+  // R10 U-20:useDeliverForm 读 / 写 ui.deliver.*(记住上次选择);旧页共用同一个 hook。
+  getSettings: vi.fn(async () => ({})),
+  setSetting: vi.fn(async () => undefined),
+  // R10 U-05:useDeliverForm 现在还向后端预览画布;旧页不显示它,回 null 即可。
+  previewExportCanvas: vi.fn(async () => null),
+  startExportWithCanvas: vi.fn(),
 }));
 vi.mock("./api", () => apiMock);
 

@@ -18,6 +18,8 @@ import {
   MINIMAX_MONTHLY_BUDGET_MAX,
   noticeTone,
   SETTINGS_TABS,
+  deviceClockEmptyCopy,
+  deviceClockLibraryState,
 } from "./settingsModel";
 
 describe("settingsModel:与旧 SettingsPage 的纯函数逐字对等", () => {
@@ -70,5 +72,20 @@ describe("settingsModel:与旧 SettingsPage 的纯函数逐字对等", () => {
     expect(noticeTone("保存失败：磁盘只读")).toBe("warn");
     expect(noticeTone("核心设置尚未载入，暂不能编辑")).toBe("warn");
     expect(noticeTone("请再次点击确认；评级、片段和原始素材不会被删除")).toBe("warn");
+  });
+});
+
+describe("R10 U-35:旅行时间空态分三种", () => {
+  it("没素材 → empty;还在索引 → indexing;全索引完 → indexed", () => {
+    expect(deviceClockLibraryState({ total: 0, done: 0, failed: 0, running: 0 })).toBe("empty");
+    expect(deviceClockLibraryState({ total: 21, done: 10, failed: 0, running: 2 })).toBe("indexing");
+    expect(deviceClockLibraryState({ total: 21, done: 20, failed: 0, running: 0 })).toBe("indexing");
+    expect(deviceClockLibraryState({ total: 21, done: 20, failed: 1, running: 0 })).toBe("indexed");
+  });
+  it("跑完了仍为空要说清「本批素材没有设备信息」,不再让人等 device_model", () => {
+    expect(deviceClockEmptyCopy("indexed").title).toBe("本批素材没有设备信息");
+    expect(deviceClockEmptyCopy("indexed").body).not.toContain("device_model");
+    expect(deviceClockEmptyCopy("indexing").title).toBe("正在索引素材");
+    expect(deviceClockEmptyCopy("empty").title).toBe("还没有导入素材");
   });
 });

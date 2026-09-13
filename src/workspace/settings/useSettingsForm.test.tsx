@@ -92,7 +92,7 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
       await second;
     });
     expect(result.current.settings["performance.worker_count"]).toBe("8");
-    expect(result.current.notice).toBe("已保存，worker 并发将在重启后生效");
+    expect(result.current.notice).toBe("已保存,后台并行任务数将在重启后生效");
   });
 
   it("单次 save 失败:值回到已确认值,notice 报「保存失败」", async () => {
@@ -105,7 +105,8 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
     });
     expect(ok).toBe(false);
     expect(result.current.settings["performance.worker_count"]).toBe("4");
-    expect(result.current.notice).toBe("保存失败：Error: 磁盘只读");
+    // R11 简化专项 #5:错误一句话,不带 `Error:` 这种内部前缀,并说下一步。
+    expect(result.current.notice).toBe("保存失败:磁盘只读。再试一次");
   });
 
   it("未载入前 save 返回 false 并提示", async () => {
@@ -148,12 +149,12 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
     expect(apiMock.setSetting).toHaveBeenCalledWith("llm_monthly_budget", "50");
   });
 
-  it("provider 未锁定时不许启用 L3 增强", async () => {
+  it("provider 未锁定时不许启用增强分析(原 L3)", async () => {
     const { result } = renderHook(() => useSettingsForm());
     await waitFor(() => expect(result.current.settingsLoaded).toBe(true));
     await act(async () => { await result.current.setLlmEnabled(true); });
     expect(apiMock.setSetting).not.toHaveBeenCalled();
-    expect(result.current.notice).toBe("请先明确锁定一个 LLM provider，再启用 L3 增强");
+    expect(result.current.notice).toBe("请先明确锁定一个 LLM provider,再启用增强分析");
   });
 
   it("设备时钟偏移不是数字时拒绝并提示", async () => {
@@ -231,5 +232,26 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
     await act(async () => { await result.current.rollbackTool("ffmpeg"); });
     expect(result.current.rollbackNotice).toBe("FFmpeg 已回滚到上一版");
     expect(result.current.notice).toBe("设置已从本地项目载入");
+  });
+});
+
+describe("R10 U-34:云端补镜空 Key 与无 Key 启用都要有反馈", () => {
+  it("空 Key 点保存:不调 setMinimaxKey,notice 说明先粘贴", async () => {
+    const { result } = renderHook(useSettingsForm);
+    await act(async () => { await result.current.saveMinimaxKey(); });
+    expect(apiMock.setMinimaxKey).not.toHaveBeenCalled();
+    expect(result.current.minimaxKeyNotice).toBe("请先粘贴 MiniMax API Key，再保存。");
+    act(() => result.current.setMinimaxKeyDraft("   "));
+    await act(async () => { await result.current.saveMinimaxKey(); });
+    expect(apiMock.setMinimaxKey).not.toHaveBeenCalled();
+  });
+  it("没有 Key 时打开开关:仍写 minimax_enabled=true,但 notice 说明现在还不能用;关掉清 notice", async () => {
+    const { result } = renderHook(useSettingsForm);
+    await waitFor(() => expect(result.current.settingsLoaded).toBe(true));
+    await act(async () => { await result.current.saveMinimaxEnabled(true); });
+    expect(apiMock.setSetting).toHaveBeenCalledWith("minimax_enabled", "true");
+    expect(result.current.minimaxKeyNotice).toContain("还没有 API Key");
+    await act(async () => { await result.current.saveMinimaxEnabled(false); });
+    expect(result.current.minimaxKeyNotice).toBeNull();
   });
 });

@@ -1,0 +1,186 @@
+/*
+ * R11 车道 C(播放器与媒体池):§1.2 热力条 + 建议行、§3 变速标签、媒体池悬停刮擦与
+ * 「有建议段」闪电角标。选择器都挂在 .monitor / .pool-card / .shot-band 之下;颜色只用
+ * styles.css 的 token。@import 在 workspace.css 头部(尾部会被 postcss 静默丢掉)。
+ */
+
+/* ---------- §1.2 · seek bar 下的热力条 ---------- */
+
+/* 与 seek 行同一套 flex:左边放一份看不见的时码占位,热力条就和上面的轨道左缘对齐。 */
+.monitor .monitor-heat-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  padding: 0 var(--space-1);
+}
+
+.monitor .monitor-heat-spacer {
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.monitor .monitor-heat-row .monitor-heat {
+  flex: 1 1 0;
+}
+
+.monitor .monitor-heat {
+  display: block;
+  width: 100%;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--accent-tint);
+  overflow: hidden;
+}
+
+.monitor .monitor-heat-bar {
+  fill: var(--accent);
+}
+
+.monitor .monitor-heat-suggestion {
+  fill: var(--accent-glow);
+  stroke: none;
+}
+
+.monitor .monitor-heat-suggestion.active {
+  fill: var(--accent-glow);
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.monitor .monitor-heat-head {
+  stroke: var(--text-primary);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+/* ---------- §1.2 / §3 · 建议状态行:「建议 2/3 · 6.0 s · 清晰·运动适中 ‹ › 按 Enter 采用这段」 ---------- */
+
+.monitor .monitor-suggestion {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: 0;
+  min-height: var(--control-sm);
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  white-space: nowrap;
+}
+
+.monitor .monitor-suggestion-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+}
+
+.monitor .monitor-suggestion-hint {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+
+@container monitor-controls (max-width: 640px) {
+  .monitor .monitor-suggestion-hint {
+    display: none;
+  }
+}
+
+/* ---------- §3 · 变速标签(×1 / ×2 / ×4 / ◀×2)---------- */
+
+.monitor .monitor-speed {
+  min-width: 3.5ch;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- §3 · 媒体池悬停刮擦:帧条铺在封面之上,按鼠标横向位置切帧 ---------- */
+
+.pool-card .pool-card-scrub {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+.pool-card .pool-card-scrub-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent-contrast);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ---------- §1.2 · 「有建议段」闪电角标 ---------- */
+
+/* 规格说右下角,但右下角(3px)已经是时长角标;闪电贴在时长角标左边、同一条底线上。 */
+.pool-card .pool-card-bolt {
+  position: absolute;
+  right: calc(3px + 5ch + 6px);
+  bottom: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  pointer-events: none;
+}
+
+/* ---------- §1.2 · 镜头带工具条「自动挑选精选段」小面板 ---------- */
+
+.shot-band .band-autoselect {
+  position: relative;
+}
+
+.shot-band .band-autoselect-panel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 280px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-raised);
+}
+
+.shot-band .band-autoselect-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.shot-band .band-autoselect-budget {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--text-12);
+  color: var(--text-muted);
+}
+
+.shot-band .band-autoselect-budget input {
+  width: 8ch;
+  height: var(--control-sm);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+}

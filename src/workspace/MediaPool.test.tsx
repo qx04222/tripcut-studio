@@ -18,14 +18,17 @@ const apiMocks = vi.hoisted(() => ({
   searchTranscripts: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
   getCurrentEpisode: vi.fn(),
+  rateClip: vi.fn().mockResolvedValue(undefined),
+  clearClipRating: vi.fn().mockResolvedValue(undefined),
+  setShotStackUserState: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../api", () => apiMocks);
 
-import type { ClipListItem } from "../api";
+import type { ClipListItem, ShotStack } from "../api";
 import { MediaPool } from "./MediaPool";
 import { poolColumnCount } from "./poolModel";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
-import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
+import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
@@ -239,7 +242,7 @@ describe("媒体池 —— 搜索与筛选条", () => {
     expect(screen.queryByText("排除普通疑似废片")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
     expect(screen.getByRole("dialog", { name: "更多筛选" })).toBeTruthy();
-    for (const label of ["八维筛选", "排除普通疑似废片", "只看 Stack 首选", "竖屏"]) {
+    for (const label of ["八维筛选", "排除普通疑似废片", "只看每组首选", "竖屏"]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
   });
@@ -369,5 +372,202 @@ describe("媒体池 —— 网格键盘漫游(roving tabindex)", () => {
     expect(zeros.length).toBe(1);
     expect(zeros[0].id).toBe("pool-clip-2");
     expect(grid.getAttribute("aria-activedescendant")).toBe("pool-clip-2");
+  });
+});
+
+function stackOf(id: number, clipIds: number[]): ShotStack {
+  return {
+    id,
+    scene_id: 1,
+    scene_name: "登机口",
+    stack_type: "visual",
+    subject_label: "未知",
+    function_label: "未知",
+    shot_size_label: "未知",
+    movement_label: "未知",
+    quality_exempt: false,
+    members: clipIds.map((clipId, index) => ({
+      clip_id: clipId,
+      segment_id: null,
+      best_take_score: null,
+      score_breakdown: {} as ShotStack["members"][number]["score_breakdown"],
+      user_state: "none" as ShotStack["members"][number]["user_state"],
+      is_preferred: index === 0,
+      long_term_memory: {} as ShotStack["members"][number]["long_term_memory"],
+    })),
+  };
+}
+
+describe("媒体池 —— 单键评级(U-01)", () => {
+  it("焦点在卡片上按 3 → 三星,按 F → 收藏;搜索框里按 3 不评级", async () => {
+    // 后端写入后 feed 会强制刷新,让 listClips 回显评级,免得刷新把乐观补丁盖回去。
+    apiMocks.rateClip.mockImplementation(async (id: number, kind: string, value: number) => {
+      apiMocks.listClips.mockResolvedValue([
+        clip(1, { file_name: "DJI_0001.MP4", binary_rating: 1 }),
+        clip(2, kind === "star" ? { star_rating: value as 3 } : { binary_rating: value as 1 }),
+        clip(3, { binary_rating: -1 }),
+      ]);
+    });
+    await renderPool();
+    const card = screen.getByRole("gridcell", { name: /clip-2\.mov/ });
+    fireEvent.click(card);
+    await waitFor(() => expect(getWorkspaceSnapshot().anchorClipId).toBe(2));
+    card.focus();
+    fireEvent.keyDown(card, { key: "3", code: "Digit3" });
+    await waitFor(() => expect(apiMocks.rateClip).toHaveBeenCalledWith(2, "star", 3));
+    await waitFor(() =>
+      expect(screen.getByRole("gridcell", { name: "clip-2.mov · 00:12 · 3 星" })).toBeTruthy(),
+    );
+    fireEvent.keyDown(screen.getByRole("gridcell", { name: /clip-2\.mov/ }), { key: "f", code: "KeyF" });
+    await waitFor(() => expect(apiMocks.rateClip).toHaveBeenCalledWith(2, "binary", 1));
+
+    apiMocks.rateClip.mockClear();
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "3", code: "Digit3" });
+    expect(apiMocks.rateClip).not.toHaveBeenCalled();
+  });
+
+  it("焦点在卡片上按 Space → 发出 tripcut:toggle-playback(监视器据此播放/暂停)", async () => {
+    await renderPool();
+    const card = screen.getByRole("gridcell", { name: /clip-2\.mov/ });
+    fireEvent.click(card);
+    await waitFor(() => expect(getWorkspaceSnapshot().anchorClipId).toBe(2));
+    const seen: string[] = [];
+    const listener = () => seen.push("toggle");
+    window.addEventListener("tripcut:toggle-playback", listener);
+    try {
+      expect(fireEvent.keyDown(card, { key: " ", code: "Space" })).toBe(false);
+      expect(seen).toEqual(["toggle"]);
+    } finally {
+      window.removeEventListener("tripcut:toggle-playback", listener);
+    }
+  });
+});
+
+describe("媒体池 —— Stack 展开(U-02 / U-26)", () => {
+  beforeEach(() => {
+    apiMocks.listClips.mockResolvedValue(
+      Array.from({ length: 9 }, (_, index) => clip(index + 1)),
+    );
+    apiMocks.listShotStacks.mockResolvedValue([stackOf(7, [1, 2, 3, 4, 5, 6, 7, 8])]);
+  });
+
+  it("「8 条候选」角标可点展开候选条;卡片 aria-expanded 跟着变", async () => {
+    await renderPool();
+    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    const card = screen.getByRole("gridcell", { name: /clip-1\.mov/ });
+    expect(card.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("group", { name: /登机口 的候选/ })).toBeNull();
+    fireEvent.click(screen.getByText("8 条候选"));
+    expect(await screen.findByRole("group", { name: /登机口 的候选/ })).toBeTruthy();
+    expect(screen.getByRole("gridcell", { name: /clip-1\.mov/ }).getAttribute("aria-expanded")).toBe("true");
+    // 点角标不改变选中(选中仍是点击卡片本体的事)。
+    expect(getWorkspaceSnapshot().selection).toBeNull();
+  });
+
+  it("焦点在 Stack 卡片上按 Tab 也展开;再按 Tab 收起", async () => {
+    await renderPool();
+    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    const card = screen.getByRole("gridcell", { name: /clip-1\.mov/ });
+    fireEvent.click(card);
+    await waitFor(() => expect(getWorkspaceSnapshot().anchorClipId).toBe(1));
+    card.focus();
+    expect(fireEvent.keyDown(card, { key: "Tab", code: "Tab" })).toBe(false);
+    expect(await screen.findByRole("group", { name: /登机口 的候选/ })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("gridcell", { name: /clip-1\.mov/ }), { key: "Tab", code: "Tab" });
+    await waitFor(() => expect(screen.queryByRole("group", { name: /登机口 的候选/ })).toBeNull());
+  });
+
+  it("U-26:候选条先露 6 条,尾部「还有 2 条」点开后全部列出,每条带缩略图", async () => {
+    await renderPool();
+    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    fireEvent.click(screen.getByText("8 条候选"));
+    const strip = await screen.findByRole("group", { name: /登机口 的候选/ });
+    expect(strip.querySelectorAll(".pool-take-card").length).toBe(6);
+    expect(strip.querySelectorAll(".pool-take-card img").length).toBe(6);
+    fireEvent.click(screen.getByRole("button", { name: "还有 2 条" }));
+    expect(strip.querySelectorAll(".pool-take-card").length).toBe(8);
+    expect(screen.queryByRole("button", { name: /还有 \d+ 条/ })).toBeNull();
+  });
+
+  it("点候选条里的一条 → 选中那条素材", async () => {
+    await renderPool();
+    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    fireEvent.click(screen.getByText("8 条候选"));
+    await screen.findByRole("group", { name: /登机口 的候选/ });
+    fireEvent.click(screen.getByRole("button", { name: /Take 3 · clip-3\.mov/ }));
+    await waitFor(() =>
+      expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 3 }),
+    );
+  });
+});
+
+describe("媒体池 —— 空态(U-06)", () => {
+  it("库为空:「还没有素材」+ 大号「导入素材」按钮打开导入抽屉", async () => {
+    apiMocks.listClips.mockResolvedValue([]);
+    render(<MediaPool />);
+    expect(await screen.findByText("还没有素材")).toBeTruthy();
+    expect(screen.queryByText("没有匹配的素材")).toBeNull();
+    // R-07:空态必须在 role=grid 之外 —— WebKit 会把 grid 的非 row 子节点从 AX 树剔掉,按钮按名字找不到。
+    const importButton = screen.getByRole("button", { name: "导入第一批素材" });
+    expect(importButton.closest('[role="grid"]')).toBeNull();
+    expect(importButton.closest(".media-pool")).not.toBeNull();
+    fireEvent.click(importButton);
+    expect(getWorkspaceSnapshot().openDrawer).toBe("import");
+  });
+
+  it("筛选为空:「没有匹配的素材」+「清空筛选」复原,不出现导入按钮", async () => {
+    await renderPool();
+    fireEvent.click(screen.getByRole("button", { name: /^拒绝/ }));
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), {
+      target: { value: "没有这个词" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByText("没有匹配的素材")).toBeTruthy();
+    expect(screen.queryByText("还没有素材")).toBeNull();
+    expect(screen.queryByRole("button", { name: "导入第一批素材" })).toBeNull();
+    const resetButton = screen.getByRole("button", { name: "清空筛选" });
+    expect(resetButton.closest('[role="grid"]')).toBeNull();
+    fireEvent.click(resetButton);
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(3));
+    expect(getWorkspaceSnapshot().query).toBe("");
+  });
+});
+
+describe("媒体池 —— 搜索并入文件名(U-15)", () => {
+  it("后端 0 命中时按文件名子串匹配;输入清空即自动复原", async () => {
+    apiMocks.listClips.mockResolvedValue([
+      clip(1, { file_name: "IMG_0813_登机口.mov" }),
+      clip(2, { file_name: "DJI_0101.MP4" }),
+      clip(3),
+    ]);
+    await renderPool();
+    const box = screen.getByRole("searchbox", { name: "搜索画面或对白关键词" });
+    fireEvent.change(box, { target: { value: "登机" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
+    expect(screen.getByRole("gridcell", { name: /IMG_0813_登机口\.mov/ })).toBeTruthy();
+
+    // 大小写不敏感。
+    fireEvent.change(box, { target: { value: "dji" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(screen.getByRole("gridcell", { name: /DJI_0101\.MP4/ })).toBeTruthy());
+    expect(screen.getAllByRole("gridcell")).toHaveLength(1);
+
+    // 清空输入,不点「搜索」也复原。
+    fireEvent.change(box, { target: { value: "" } });
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(3));
+    expect(getWorkspaceSnapshot().query).toBe("");
+  });
+
+  it("Esc 清掉 store 的搜索词时网格同样复原", async () => {
+    apiMocks.listClips.mockResolvedValue([clip(1, { file_name: "IMG_0813_登机口.mov" }), clip(2)]);
+    await renderPool();
+    const box = screen.getByRole("searchbox", { name: "搜索画面或对白关键词" });
+    fireEvent.change(box, { target: { value: "登机" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
+    dispatchWorkspace({ type: "set-query", query: "" });
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(2));
   });
 });

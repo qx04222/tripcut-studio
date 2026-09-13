@@ -166,3 +166,53 @@ R9 从头到尾**没有改**下列 AX 名（`src/workspace/axNames.test.tsx` 与
 **新增的一处改名**（有意为之，记在这里免得被当成漏改）：缺失素材面板的按钮从旧壳的
 `选择新位置` 改成 `重新定位`（`ImportMissingTab`，规格 §4.1 明确要求；旧壳
 `MissingMediaPanel` 本体不受影响，仍叫旧名，等 R10 删旧壳时一起消失）。
+
+## 7. R10 新组件
+
+> 依据：`docs/superpowers/specs/2026-09-13-r10-usability-design.md`；各车道报告
+> `.superpowers/sdd/r10/lane-*-report.md`；QA 报告 `docs/qa/2026-09-13-unattended-r10.md`。
+
+| 组件 | 文件 | Props 摘要 | 行为 / 视觉 |
+|---|---|---|---|
+| `CoverImage` | `src/workspace/ui/CoverImage.tsx` | `src: string \| null \| undefined`，`fallback?`，`lazy?`，`crossOrigin?`，`className?` | 封面缩略图（源自 R9 D4，本轮首次进入套件文档）：`src` 为空或 `<img>` 加载失败时渲染 `--well-bg` 上的中性占位（胶片图标），绝不显示浏览器的坏图问号；失败记忆只跟着这一条 URL，换素材即重新给一次机会。池卡片、监视器井底 backdrop、Stack 候选条共用它。 |
+| `MonitorSeekBar` | `src/workspace/MonitorSeekBar.tsx` | `status: PlayerStatus \| null`，`inPoint`，`outPoint`，`onSeek(seconds)` | 监视器传输条上的可拖 seek bar（U-09）。原生 `<input type="range">`，AX 角色天然是 `slider`（新 AX 名「播放位置」）；拖动中显示本地值，不被 80ms 状态轮询拉回；`seek_abs` 命令按 `SEEK_THROTTLE_MS=120` 节流，松手补发最终值；键盘/点击一次一发不节流。`isAtEnd()` 用 `END_EPSILON_SECONDS=0.2` 判定播放到尾，供 `Monitor.onPlayPause` 在尾帧时先 `seek_abs 0` 再 `play`。 |
+| `PoolStackStrip`（导出名 `MediaPoolStackStrip.tsx`） | `src/workspace/MediaPoolStackStrip.tsx` | `stack: ShotStack`，`clipsById`，`activeClipId`，`onPick(member)`，`onClose()` | 媒体池 Stack 展开视图（U-02/U-26）：点卡片角标「n 条候选」或在卡片上按 `Tab` 展开，贴在网格**下方**，不塞进虚拟化网格（行高与 `aria-rowcount` 不受影响）。每条候选是 `Card interactive`（`CoverImage` 96×54 + `Take n · 文件名`），先露 `POOL_STACK_PREVIEW=6` 条，尾部「还有 n 条」展开全部。新 AX 名见下节。 |
+
+## 8. R10 新增 AX 名（冻结名一个未动）
+
+R9 §6 的冻结清单本轮未变；以下是 R10 五条车道 + 接线车道新增的控件（均为新控件用新名，不是给旧名改名）：
+
+- **媒体池（车道 A）**：按钮「导入第一批素材」（空池大号入口，与顶栏冻结名「导入素材」是两颗不同控件，只在空池并存）；group「{scene_name} 的候选」；按钮「收起候选」「还有 n 条」；候选卡 button「Take n · {文件名}」；卡片 gridcell 新增 `aria-expanded`（仅 Stack 卡片）。
+- **监视器（车道 C）**：slider「播放位置」（`MonitorSeekBar`；沉浸态 `PlayerOverlay` 的「播放进度」未动）。
+- **检查器 / 镜头带（车道 D）**：按钮「从媒体池选择…」（空章与空槽位）；dialog「从媒体池选择」；按钮「加入 &lt;文件名&gt;」「关闭选择列表」「去媒体池」「去设置」；list「精选段列表」；按钮「复播精选段 n」「删除精选段 n」；按钮「添加标签」（原「添加」，断言已迁移）；按钮「加入当前章节」；按钮「已放好，刷新列表」；form「重命名本集」；group「画布方向」。
+- **壳 / 抽屉 / 设置 / 恢复页（车道 E）**：交付抽屉主按钮改名为「开始生成」（替换抽屉内原「生成交付包」；顶栏「生成交付包」不变）；导入来源「添加素材文件夹」按钮忙态名变为「选择中…」/「扫描中…」；任务分页 list「流水线三阶段」；三个 progressbar「索引进度」「画质分析进度」「运镜分析进度」（原来只有一个「索引进度」）；恢复页新增一条 `status`（自检 notice）。
+- **接线车道**：group「本次交付画布方向」，内 button「横版」「竖版」（`aria-pressed`）；group「Whisper 模型文件」，button「复制下载地址」「导入模型文件…」（忙态名「正在校验并导入…」，`aria-busy`）；集切换 popover 新增 button「新建集」、form「新建集」、textbox「新集标题」、button「创建」「取消」；检查器 AI 描述段新增 button「去设置」（仅未启用时）；状态条新增短语「音乐分析 n/m」（纯文本非控件）；技术检查「方向」新增值「方屏 · n°」；系统通知标题「旅剪已开始后台处理」（非 AX，记在这里便于冒烟识别）。
+
+## 9. R11 新组件
+
+> 依据：`docs/superpowers/specs/2026-09-13-r11-smart-select-design.md`§1–§5；各车道报告
+> `.superpowers/sdd/r11/lane-{moments,player,export,simplify,fix}-report.md`；QA 报告
+> `docs/qa/2026-09-13-unattended-r11.md`。R11 不碰 `player/mod.rs`，原片只读，零模型可用。
+
+| 组件 | 文件 | Props 摘要 | 行为 / 视觉 |
+|---|---|---|---|
+| `MonitorHeatStrip` | `src/workspace/MonitorHeatStrip.tsx` | `moments: ClipMoment[]`，`suggestions: SegmentSuggestion[]`，`activeSuggestionIndex`，`durationSeconds` | 监视器 seek bar 下方的时刻分热力条（SVG，与轨道左缘对齐 ≤6px）：每个时刻分窗口按 `score` 渲染成一段高度不同的竖条（≤200 点，由 `heatPoints` 桶取最高分保证），当前建议段画成半透明高亮块盖在热力条上。新 AX 名 img「时刻热力」。无时刻分数据（老库未补齐）时整条不渲染，不报错。 |
+| `BandAutoSelect` | `src/workspace/BandAutoSelect.tsx` | `episodeId`，`platformBudget?`，`onDone(outcome)` | 镜头带工具条「自动挑选精选段」弹出的小面板：三枚范围 chip（只看收藏 / 收藏 + 3 星以上 / 全部素材，默认「收藏 + 3 星以上」实际发送 `favorites_or_rated3` 并集语义）+ 一个预算数字输入（按当前集平台预算预填，拉不到时兜底 30 秒）+「开始挑选」主按钮。结果反馈是镜头带底部一行 toast「已挑选 n 段 · 共 m s · 覆盖 k 章 · 撤销」，撤销调 `undoAutoSelect(batch_id)`。首启引导卡的「挑选片段」按钮会广播 `tripcut:open-auto-select` 直接打开这个面板。 |
+| `OnboardingCard`（`OnboardingCardView` / `MonitorIdle`） | `src/workspace/OnboardingCard.tsx`（逻辑在 `src/workspace/onboarding.ts`） | `visible`，`hasClips`，`onImport()`，`onAutoSelect()`，`onExport()`，`onClose()` | 替代旧「本机准备」工具链模态的首启三步引导：整个素材库为空且 `onboarding.steps_seen=false` 且本次未关闭时，在监视器空闲态显示一张卡片「1 导入素材 → 2 挑选片段 → 3 导出」，只有第一步是 primary，第 2/3 步在库为空时禁用（`title="先导入素材"`）。库一有素材或点右上角关闭都会写 `steps_seen=true`，下次启动不再出现。新 AX 名 group「三步上手」，button「选择素材文件夹」「自动挑选」「导出片段」「关闭引导」。 |
+| `ui/Menu` | `src/workspace/ui/Menu.tsx` | `trigger`，`items: {label, onSelect, disabled?}[]`，`ariaLabel` | 套件新增的最小右键/下拉菜单组件（R11 前套件里没有菜单原语），供媒体池右键「导出所选…」使用；`role="menu"`/`menuitem"`，Esc 关闭，点击外部关闭。 |
+| 交付抽屉「快速导出」模式 | `src/workspace/DeliverDrawer.tsx` + `DeliverContents.tsx` | 顶部 `role=group「导出方式」` 两枚 chip「快速导出」（默认）/「完整交付包」 | 快速模式正文只有一句引导 + 清单卡（段数/收藏数/总时长 + 文件名列表 + 文件夹名），页脚「关闭」/「更改文件夹…」（ghost）/ 主按钮「导出」（AX 名「导出到上次文件夹」）；首次或目录不可用时弹一次文件夹面板并写 `ui.export.last_dir`。完成后卡片内 toast「已导出 n 个文件」+「在 Finder 中显示」。任务进行中两枚 chip 禁用，换模式不丢已排队任务。 |
+
+## 10. R11 新增 AX 名（冻结名一个未动）
+
+R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道（B 时刻分无界面、C 播放器/媒体池、E 一键导出）+ 简化专项车道 + 修复车道新增的控件（均为新控件用新名）：
+
+- **监视器（车道 C）**：img「时刻热力」；button「上一条建议」「下一条建议」；`data-testid="monitor-suggestion"`；「播放速度」原为禁用占位按钮，本轮起可点（=按 `L`），AX 名未变。
+- **镜头带（车道 C）**：button「自动挑选精选段」（`aria-expanded`）；group「自动挑选精选段」内 group「挑选范围」（chips「只看收藏」「收藏 + 3 星以上」「全部素材」）、label「总时长约 … 秒（按发布平台预填）」、button「开始挑选」。
+- **设置 → 外观（车道 C）**：switch「选中素材从最精彩处开播」「播完自动播下一条」。
+- **媒体池（车道 C）**：`.pool-card-bolt`（aria-hidden，title「有建议段」，即闪电角标）、`.pool-card-scrub`（`data-testid="pool-card-scrub"`，悬停刮擦条）。
+- **交付抽屉 / 检查器 / 媒体池（车道 E）**：chip「快速导出」「完整交付包」（`aria-pressed`，group「导出方式」）；button「导出到上次文件夹」（可见「导出」/「导出…」）、「更改文件夹」（可见「更改文件夹…」）、「导出所选」（检查器精选段区按钮 + 媒体池右键 menuitem，可见「导出所选…」/「导出所选（n 条）…」）、「在 Finder 中显示」；list「将导出的文件」；section「快速导出」；menu「素材操作」（`ui/Menu` 右键菜单）。
+- **首启引导（简化专项）**：group「三步上手」；button「选择素材文件夹」「自动挑选」「导出片段」「关闭引导」。
+- **设置页三分区（简化专项）**：tab「常用」「工具与模型」「关于」（九个旧分区 id 原样保留，见车道报告搬迁表）；button「云端补镜」「隐私与诊断」（左轨「直达」按钮，取代原 tab）；button「更改…」/「选择…」（导出文件夹，常用段新增一行）；button「更多信息」（检查器折叠段，`aria-expanded`）；button「打开导入」「回到按章节」（镜头带空态）、「去添加文件夹」（导入任务空态）；switch「启用增强分析」（原「启用 L3 增强」）、「自动生成轻量预览文件」（原「自动生成 540p 代理」）；combobox「后台并行任务数」（原「worker 并发」）；text「安装检查」「全部就绪」。
+- **修复车道**：button「回到当前集」（媒体池只读查看横幅内，`role=status` 的 `.workspace-pool-scope` 里，N-2 修复新增）；帮助页「媒体池」组空格条目的 keys 改为 `Space, K`（旧 id `immersive-player` 不变，V-05 修复把 `K` 接入 `toggle-playback`）。
+
+**术语清扫（简化专项，改名而非新增，记在这里免得被当成漏改）**：可见文案里 remux/L1/L3/Stack/VFR/PTS/tick/worker 等内部术语已替换为白话（完整清单见 `.superpowers/sdd/r11/lane-simplify-report.md` §3），新增门禁 `src/workspace/terminology.test.ts` 扫描回归；AX 名同步迁移的包括「启用 L3 增强」→「启用增强分析」、「Take n」可见文字→「第 n 条」（`aria-label="Take n · 文件名"` 本身按 R10 冻结未动，留给 R12）、「只看 Stack 首选」→「只看每组首选」。

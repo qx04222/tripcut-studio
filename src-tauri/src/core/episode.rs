@@ -232,6 +232,40 @@ pub fn archive_current_with_platform(
     Ok(ArchiveOutcome { archived, next })
 }
 
+/// R10 U-16:「新建集」。名称必填(1-120 字)。
+///
+/// 集模型是「任意时刻恰好一个 active」,所以新建 = 把当前集封存、开一个新的
+/// active 集并切换过去——与 `archive_current_with_platform` 同一条事务路径,
+/// 平台/朝向继承当前集。唯一的差别:当前集**还没有任何素材**时,不留一个
+/// 空档案(封存守卫本来就拒绝空集),而是直接把这个空集改成要的名字继续用
+/// ——用户看到的结果一样是「一个叫这个名字的空集,处于进行中」。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CreateEpisodeOutcome {
+    pub episode: EpisodeSummary,
+    /// 当前集是空的、被就地改名复用(没有封存任何东西)。
+    pub reused_empty: bool,
+    /// 被封存的前一集(`reused_empty` 时为 `None`)。
+    pub archived: Option<EpisodeSummary>,
+}
+
+pub fn create_episode(connection: &mut Connection, title: &str) -> Result<CreateEpisodeOutcome> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 120 {
+        return Err(CoreError::Story("集标题必须为 1-120 字".to_owned()));
+    }
+    let current = current_episode(connection)?;
+    if current.clip_count == 0 {
+        let episode = rename_current(connection, title, &current.theme)?;
+        return Ok(CreateEpisodeOutcome { episode, reused_empty: true, archived: None });
+    }
+    let outcome = archive_current_with_platform(connection, Some(title), None, None)?;
+    Ok(CreateEpisodeOutcome {
+        episode: outcome.next,
+        reused_empty: false,
+        archived: Some(outcome.archived),
+    })
+}
+
 /// 写操作守卫:素材必须属于当前进行中的集。
 /// 历史集是只读档案——UI 会禁用写控件,但**后端必须独立校验**,
 /// 不能把界面禁用当权限边界(回归测试覆盖该缺口)。
@@ -388,6 +422,63 @@ mod tests {
             .query_row("SELECT episode_id FROM clips WHERE id=?1", [new_clip], |r| r.get(0))
             .unwrap();
         assert_eq!(owner, outcome.next.id);
+    }
+
+    // ---- R10 U-16:新建集 ----
+
+    #[test]
+    fn create_episode_archives_a_non_empty_current_and_switches_to_the_new_one() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        insert_clip(&connection, "a.mp4");
+        let outcome = create_episode(&mut connection, "  多伦多两日  ").unwrap();
+        assert!(!outcome.reused_empty);
+        assert_eq!(outcome.episode.title, "多伦多两日");
+        assert_eq!(outcome.episode.status, "active");
+        assert_eq!(outcome.episode.clip_count, 0);
+        assert_ne!(outcome.episode.id, first.id);
+        assert_eq!(outcome.archived.as_ref().map(|e| e.id), Some(first.id));
+        assert_eq!(current_episode(&connection).unwrap().id, outcome.episode.id);
+        let active: i64 = connection
+            .query_row("SELECT COUNT(*) FROM episodes WHERE status='active'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn create_episode_reuses_an_empty_current_episode_in_place() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        let outcome = create_episode(&mut connection, "新集").unwrap();
+        assert!(outcome.reused_empty);
+        assert!(outcome.archived.is_none());
+        assert_eq!(outcome.episode.id, first.id);
+        assert_eq!(outcome.episode.title, "新集");
+        let archives: i64 = connection
+            .query_row("SELECT COUNT(*) FROM episode_archives", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(archives, 0, "空集不留空档案");
+    }
+
+    #[test]
+    fn create_episode_requires_a_title() {
+        let (_dir, mut connection) = test_connection();
+        insert_clip(&connection, "a.mp4");
+        let error = create_episode(&mut connection, "   ").unwrap_err();
+        assert!(error.to_string().contains("集标题"));
+        assert_eq!(current_episode(&connection).unwrap().clip_count, 1, "失败不改当前集");
+    }
+
+    /// 走查 U-16「0 素材」:后端计数是 COUNT(*) 现算,导入后立刻就是 21——
+    /// 「0」来自前端只在挂载时刷新一次的缓存,不是后端。
+    #[test]
+    fn episode_clip_count_is_live() {
+        let (_dir, connection) = test_connection();
+        assert_eq!(current_episode(&connection).unwrap().clip_count, 0);
+        insert_clip(&connection, "a.mp4");
+        insert_clip(&connection, "b.mp4");
+        assert_eq!(current_episode(&connection).unwrap().clip_count, 2);
+        assert_eq!(list_episodes(&connection).unwrap()[0].clip_count, 2);
     }
 
     #[test]

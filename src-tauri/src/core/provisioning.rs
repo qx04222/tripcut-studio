@@ -95,6 +95,113 @@ pub struct ComponentStatus {
     /// 本次进程启动时,`sweep_rolling_orphans` 是否从一个孤儿 `.rolling`
     /// 文件恢复过这个组件(即上次进程在三步交换的换步 2 之前崩溃)。
     pub recovered_from_rolling: bool,
+    /// R10 U-24:只有 `whisper-model` 填——官方下载地址、期望 SHA-256、目标路径,
+    /// 让「模型缺失」变成一条可执行的路径(其它组件为 `None`)。
+    pub download_url: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub target_path: Option<String>,
+}
+
+/// R10 U-24:`import_whisper_model` 的结果。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WhisperModelImportOutcome {
+    /// 按文件 SHA-256 识别出的模型档(`large-v3-turbo` / `small`)。
+    pub tier: String,
+    pub file_name: String,
+    pub target_path: String,
+    pub sha256: String,
+    /// 导入的档是否就是设置里当前选的档;不是时前端可提示切换 `tools.whisper_model_tier`。
+    pub matches_active_tier: bool,
+}
+
+/// 流式算 SHA-256(模型 0.5–1.6 GB,不能整段读进内存)。
+pub fn sha256_of_file(path: &Path) -> Result<String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// R10 U-24:把用户自己下载的模型文件校验后放进 models 目录。
+/// 1. 算 SHA-256,必须命中 `transcribe::WHISPER_MODEL_SPECS` 里某一档的期望值——
+///    档由摘要决定,不由文件名决定(用户改过名也认);不匹配则拒绝并把两档期望值
+///    都列出来。
+/// 2. 先复制到 `models/<file>.staging`,再走 `install_with_rollback` 原子落位
+///    (已有同名旧文件备份成 `.prev`,自检失败自动换回)。
+///
+/// 源文件不动。
+pub fn import_whisper_model(connection: &Connection, source: &Path) -> Result<WhisperModelImportOutcome> {
+    let active_tier = super::settings::string_value(
+        connection,
+        super::settings::WHISPER_MODEL_TIER_KEY,
+        super::transcribe::DEFAULT_MODEL_TIER,
+    )?;
+    import_whisper_model_into(
+        source,
+        &models_dir()?,
+        &active_tier,
+        &super::transcribe::WHISPER_MODEL_SPECS,
+    )
+}
+
+/// `import_whisper_model` 的可注入内核:models 目录、当前档、期望摘要表都由调用方给,
+/// 测试不用动 `TRIPCUT_APP_SUPPORT_DIR`(进程级环境变量,并行测试会互相踩)。
+pub(crate) fn import_whisper_model_into(
+    source: &Path,
+    models: &Path,
+    active_tier: &str,
+    specs: &[super::transcribe::WhisperModelSpec],
+) -> Result<WhisperModelImportOutcome> {
+    if !source.is_file() {
+        return Err(CoreError::Io(std::io::Error::other(format!(
+            "模型文件不存在:{}",
+            source.display()
+        ))));
+    }
+    let sha256 = sha256_of_file(source)?;
+    let Some(spec) = specs.iter().find(|spec| spec.expected_sha256 == sha256) else {
+        let expected = specs
+            .iter()
+            .map(|spec| format!("{}({})= {}", spec.file_name, spec.tier, spec.expected_sha256))
+            .collect::<Vec<_>>()
+            .join(";");
+        return Err(CoreError::Io(std::io::Error::other(format!(
+            "SHA-256 不匹配任何受支持的 Whisper 模型,已拒绝导入。文件摘要 {sha256};期望 {expected}"
+        ))));
+    };
+    std::fs::create_dir_all(models)?;
+    let destination = models.join(spec.file_name);
+    let staged = models.join(format!("{}.staging", spec.file_name));
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(source, &staged)?;
+    let expected_size = std::fs::metadata(source)?.len();
+    let install = install_with_rollback(&destination, &staged, |installed| {
+        verify_file_nonempty(installed)?;
+        let size = std::fs::metadata(installed)?.len();
+        if size != expected_size {
+            return Err(CoreError::Io(std::io::Error::other(
+                "模型复制后大小不一致,已回滚",
+            )));
+        }
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&staged);
+    install?;
+    Ok(WhisperModelImportOutcome {
+        tier: spec.tier.to_owned(),
+        file_name: spec.file_name.to_owned(),
+        target_path: destination.to_string_lossy().into_owned(),
+        sha256,
+        matches_active_tier: active_tier == spec.tier,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -359,6 +466,9 @@ fn component_status_single(component: &str, model_tier: &str) -> Result<Componen
         has_previous,
         previous_version,
         recovered_from_rolling: recovered_flag_for(component, model_tier),
+        download_url: None,
+        expected_sha256: None,
+        target_path: None,
     })
 }
 
@@ -435,6 +545,9 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         has_previous: ffmpeg_prev,
         previous_version: ffmpeg_prev_version,
         recovered_from_rolling: recovered_flag_for("ffmpeg", &model_tier),
+        download_url: None,
+        expected_sha256: None,
+        target_path: None,
     });
     let (ffprobe_prev, ffprobe_prev_version) = previous_of("ffprobe");
     list.push(ComponentStatus {
@@ -451,6 +564,9 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         has_previous: ffprobe_prev,
         previous_version: ffprobe_prev_version,
         recovered_from_rolling: recovered_flag_for("ffprobe", &model_tier),
+        download_url: None,
+        expected_sha256: None,
+        target_path: None,
     });
     let (whisper_cli_prev, whisper_cli_prev_version) = previous_of("whisper-cli");
     list.push(ComponentStatus {
@@ -467,8 +583,13 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         has_previous: whisper_cli_prev,
         previous_version: whisper_cli_prev_version,
         recovered_from_rolling: recovered_flag_for("whisper-cli", &model_tier),
+        download_url: None,
+        expected_sha256: None,
+        target_path: None,
     });
     let (model_prev, model_prev_version) = previous_of("whisper-model");
+    let model_spec = super::transcribe::model_spec_for_tier(&model_tier);
+    let model_target = models_dir()?.join(model_file);
     list.push(ComponentStatus {
         id: "whisper-model".into(),
         title: format!("转写模型({model_tier})"),
@@ -476,13 +597,20 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         detail: if model_ok {
             "已就绪".into()
         } else {
-            "受验证的模型下载尚未启用；可在设置页指定已校验模型".into()
+            format!(
+                "缺少 {}:从官方地址下载后用「导入模型文件…」导入(会校验 SHA-256),或自行放到 {}",
+                model_spec.file_name,
+                model_target.display()
+            )
         },
         installable: false,
-        approx_size_mb: 0,
+        approx_size_mb: model_spec.size_bytes / (1024 * 1024),
         has_previous: model_prev,
         previous_version: model_prev_version,
         recovered_from_rolling: recovered_flag_for("whisper-model", &model_tier),
+        download_url: Some(model_spec.download_url.to_owned()),
+        expected_sha256: Some(model_spec.expected_sha256.to_owned()),
+        target_path: Some(model_target.to_string_lossy().into_owned()),
     });
     list.push(ComponentStatus {
         id: "clip-sidecar".into(),
@@ -498,6 +626,9 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
         has_previous: false,
         previous_version: None,
         recovered_from_rolling: false,
+        download_url: None,
+        expected_sha256: None,
+        target_path: None,
     });
     Ok(list)
 }
@@ -545,6 +676,101 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    // ---- R10 U-24:导入 Whisper 模型文件 ----
+
+    fn fake_spec(file_name: &'static str, tier: &'static str, sha: &str) -> crate::core::transcribe::WhisperModelSpec {
+        crate::core::transcribe::WhisperModelSpec {
+            tier,
+            file_name,
+            download_url: "https://example.invalid/model.bin",
+            expected_sha256: Box::leak(sha.to_owned().into_boxed_str()),
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn sha256_of_file_matches_a_known_digest() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("abc.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_of_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn importing_a_model_with_the_wrong_digest_is_refused_and_leaves_models_dir_untouched() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("ggml-small.bin");
+        std::fs::write(&source, b"not the real model").unwrap();
+        let models = directory.path().join("models");
+        let error = import_whisper_model_into(
+            &source,
+            &models,
+            "small",
+            &crate::core::transcribe::WHISPER_MODEL_SPECS,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("SHA-256 不匹配"), "{message}");
+        assert!(message.contains("1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"));
+        assert!(!models.join("ggml-small.bin").exists());
+        assert!(!models.join("ggml-small.bin.staging").exists());
+        assert!(source.is_file(), "源文件不动");
+    }
+
+    #[test]
+    fn importing_a_verified_model_copies_it_into_models_dir_by_digest_not_by_name() {
+        let directory = TestDirectory::new();
+        // 用户改过名的文件也认——档由摘要决定。
+        let source = directory.path().join("下载 (1).bin");
+        std::fs::write(&source, b"pretend model bytes").unwrap();
+        let sha = sha256_of_file(&source).unwrap();
+        let specs = [fake_spec("ggml-small.bin", "small", &sha)];
+        let models = directory.path().join("models");
+        let outcome = import_whisper_model_into(&source, &models, "large-v3-turbo", &specs).unwrap();
+        assert_eq!(outcome.tier, "small");
+        assert_eq!(outcome.file_name, "ggml-small.bin");
+        assert_eq!(outcome.sha256, sha);
+        assert!(!outcome.matches_active_tier);
+        assert_eq!(std::fs::read(models.join("ggml-small.bin")).unwrap(), b"pretend model bytes");
+        assert!(!models.join("ggml-small.bin.staging").exists());
+        assert!(source.is_file(), "源文件不动");
+        // 再导一次:旧文件备份成 .prev,新文件落位。
+        std::fs::write(&source, b"pretend model bytes v2").unwrap();
+        let sha2 = sha256_of_file(&source).unwrap();
+        let specs = [fake_spec("ggml-small.bin", "small", &sha2)];
+        let outcome = import_whisper_model_into(&source, &models, "small", &specs).unwrap();
+        assert!(outcome.matches_active_tier);
+        assert_eq!(std::fs::read(models.join("ggml-small.bin")).unwrap(), b"pretend model bytes v2");
+        assert_eq!(std::fs::read(models.join("ggml-small.bin.prev")).unwrap(), b"pretend model bytes");
+    }
+
+    #[test]
+    fn whisper_model_status_carries_official_url_digest_and_target_path() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let statuses = component_statuses(&connection).unwrap();
+        let model = statuses.iter().find(|status| status.id == "whisper-model").unwrap();
+        assert_eq!(
+            model.download_url.as_deref(),
+            Some("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin")
+        );
+        assert_eq!(
+            model.expected_sha256.as_deref(),
+            Some("1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69")
+        );
+        assert!(model
+            .target_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("models/ggml-large-v3-turbo.bin")));
+        assert!(model.approx_size_mb > 1_000);
+        for other in statuses.iter().filter(|status| status.id != "whisper-model") {
+            assert!(other.download_url.is_none() && other.expected_sha256.is_none() && other.target_path.is_none());
         }
     }
 

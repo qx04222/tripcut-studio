@@ -179,6 +179,20 @@ export function buildShotStackWallItems(
   return items;
 }
 
+/**
+ * U-15:池内搜索的文件名分支 —— 大小写不敏感的子串匹配,返回命中的 clip id。
+ * 与后端语义/对白命中取并集;空查询返回空(调用方对空查询走「复原」而不是「搜」)。
+ */
+export function matchClipsByFileName(clips: readonly ClipListItem[], query: string): number[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const ids: number[] = [];
+  for (const clip of clips) {
+    if (clip.id !== null && clip.file_name.toLowerCase().includes(needle)) ids.push(clip.id);
+  }
+  return ids;
+}
+
 /** 媒体池卡片上的时长 —— 补零到 mm:ss,规格 §7 的 AX 名靠它对齐。 */
 export function poolDurationLabel(clip: ClipListItem): string {
   if (

@@ -133,7 +133,8 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
     expect(within(dialog).getByRole("button", { name: "添加素材文件夹" }).className).toContain("ui-button--primary");
     expect(within(dialog).getByText("只建立索引，不复制或改写原片")).toBeTruthy();
-    expect(await within(dialog).findByText("/Volumes/TRIP_2026")).toBeTruthy();
+    // R10 U-07 起路径拆成头 / 尾两段做中间省略,整条路径在 aria-label 上。
+    expect(await within(dialog).findByLabelText("/Volumes/TRIP_2026")).toBeTruthy();
     expect(within(dialog).getByText("上次同步 2026-09-11 08:00")).toBeTruthy();
     expect(within(dialog).getByRole("switch", { name: "自动同步" }).getAttribute("aria-checked")).toBe("true");
     expect(within(dialog).getByRole("button", { name: "移除" })).toBeTruthy();
@@ -148,7 +149,7 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     render(<WorkspaceShell />);
     await openImportDrawer();
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
-    await within(dialog).findByText("/Volumes/TRIP_2026");
+    await within(dialog).findByLabelText("/Volumes/TRIP_2026");
     await act(async () => {
       within(dialog).getByRole("switch", { name: "自动同步" }).click();
       await Promise.resolve();
@@ -183,7 +184,10 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
       await Promise.resolve();
     });
     expect(window.location.hash).toBe(before);
-    expect(await screen.findByRole("dialog", { name: "设置" })).toBeTruthy();
+    const settings = await screen.findByRole("dialog", { name: "设置" });
+    // R10 U-14 的 openSettings(section):直接落到工具链所在的分区;R11 简化专项 #2 起它住在「工具与模型」。
+    expect(within(settings).getByRole("tab", { name: "工具与模型", selected: true })).toBeTruthy();
+    expect(within(settings).getByRole("heading", { level: 3, name: "工具链" })).toBeTruthy();
   });
 
   it("任务分页:进度卡三行阶段 + 批次卡「停止本批」/「撤销本批…」", async () => {
@@ -196,7 +200,8 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
     expect(await within(dialog).findByText("已处理 59 / 60")).toBeTruthy();
     for (const stage of ["索引", "画质分析", "运镜分析"]) expect(within(dialog).getByText(stage)).toBeTruthy();
-    expect(within(dialog).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("59");
+    // R10 U-08 起三段各有自己的进度条,索引那条按名字找。
+    expect(within(dialog).getByRole("progressbar", { name: "索引进度" }).getAttribute("aria-valuenow")).toBe("59");
     expect(within(dialog).getByText("2026-08-12")).toBeTruthy();
     // Badge 的文字在内层 label span 里,角标 class 挂在外层。
     expect(within(dialog).getByText("正在扫描").closest(".ui-badge")?.className).toContain("ui-badge");

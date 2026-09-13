@@ -112,6 +112,8 @@ export interface SettingsStatus {
     database_bytes: number;
     disk_bytes: number;
   };
+  /** R10 U-22:首启引导已跳过/完成(settings `onboarding.first_run_done`)。FirstRunGuide 只看这一位。 */
+  first_run_done?: boolean;
 }
 
 export interface CacheRebuildResult {
@@ -199,6 +201,8 @@ export interface ClipListItem {
   captured_at: string | null;
   audio_sample_rate?: number | null;
   rotation?: number | null;
+  /** R10 U-13:rotation + 像素宽高综合判定的显示方向(核心 `core::orientation`);检查器「方向」用它,不再只看 rotation。 */
+  orientation?: ClipOrientation;
   color_transfer?: string | null;
   hdr_flag?: boolean;
   iso_value?: number | null;
@@ -224,6 +228,8 @@ export interface ClipListItem {
   binary_rating: -1 | 0 | 1 | null;
   star_rating: 0 | 1 | 2 | 3 | 4 | 5 | null;
   select_count: number;
+  /** R11 §1.2:后端算出过建议段(车道 B 提供;缺省 undefined = 不显示角标)。 */
+  has_suggestions?: boolean;
 }
 
 export interface DeviceClockSetting {
@@ -648,6 +654,10 @@ export interface ExportStatus {
   rough_cut_actual_ticks: number | null;
   rough_cut_actual_tb_num: number | null;
   rough_cut_actual_tb_den: number | null;
+  /** R10 U-05:本次交付(idle 时 = 将要)用的画布;idle 且解析失败时 `null`。 */
+  canvas?: ExportCanvas | null;
+  /** R11 车道 E:任务模式(`quick` = 快速导出,`full` = 完整交付包);idle 或旧后端为 null / 缺省。 */
+  mode?: "quick" | "full" | null;
 }
 
 export interface JianyingAvailability {
@@ -1134,6 +1144,8 @@ export interface PlatformPreset {
   tb_num: number;
   tb_den: number;
   subtitle_style: Record<string, unknown>;
+  /** R10 U-05(迁移 0042):平台习惯的画布方向;`auto` = 跟随本集素材多数方向。 */
+  default_orientation?: PresetDefaultOrientation;
 }
 
 export interface EpisodeSummary {
@@ -1229,7 +1241,10 @@ export interface GenerationRequestSummary {
 
 export interface StoryGap {
   id: number;
+  /** `narrative_chapters.id`(叙事章)——不是镜头带的 D2 `chapters.id`,两者相等只是巧合。 */
   chapter_id: number;
+  /** R10:这个缺口应挂在镜头带的哪一章(D2 `chapters.id`,按 beats 素材的 chapter_id 多数决);没 beat / 素材未分章时 null。带上匹配用它。 */
+  band_chapter_id?: number | null;
   chapter_title: string;
   beat_id: number | null;
   slot: string;
@@ -1375,6 +1390,12 @@ export interface ComponentStatus {
   has_previous: boolean;
   previous_version: string | null;
   recovered_from_rolling: boolean;
+  /** R10 U-24:只有 `whisper-model` 填——官方下载地址(Hugging Face ggerganov/whisper.cpp)。 */
+  download_url?: string | null;
+  /** 期望 SHA-256(小写十六进制),供用户核验或界面展示。 */
+  expected_sha256?: string | null;
+  /** 模型应放到的完整目标路径。 */
+  target_path?: string | null;
 }
 
 export interface InstallProgress {
@@ -1507,3 +1528,278 @@ export const getMusicAnalysis = (trackId: number) =>
   invoke<MusicAnalysis>("get_music_analysis", { trackId });
 export const deleteMusicTrack = (trackId: number) =>
   invoke<void>("delete_music_track", { trackId });
+
+// ---------------------------------------------------------------------------
+// R10 车道 B(Rust 核心)追加的类型与命令。上面的接口只插了可选字段,这里放新命令。
+// ---------------------------------------------------------------------------
+
+/** R10 U-13:素材显示方向。`square` 显示宽高相等;`unknown` 没有尺寸。 */
+export type ClipOrientation = "landscape" | "portrait" | "square" | "unknown";
+
+/** R10 U-05:平台预设的默认画布方向。 */
+export type PresetDefaultOrientation = "landscape" | "portrait" | "auto";
+
+/** 交付画布方向来源:抽屉手动切(override)> 集明确选过(episode)> 平台习惯(preset)> 素材多数(clips)> 横版兜底(fallback)。 */
+export type CanvasOrientationSource = "override" | "episode" | "preset" | "clips" | "fallback";
+
+export interface ExportCanvas {
+  platform: TargetPlatform;
+  display_name: string;
+  orientation: "portrait" | "landscape";
+  orientation_source: CanvasOrientationSource;
+  width: number;
+  height: number;
+}
+
+/** R10 U-05:交付抽屉预览「画布 W×H」——按将要传给 startExport 的平台/方向解析,不建任务。 */
+export function previewExportCanvas(
+  overridePlatform: TargetPlatform | null,
+  overrideOrientation: "portrait" | "landscape" | null = null,
+): Promise<ExportCanvas> {
+  return invoke<ExportCanvas>("preview_export_canvas", { overridePlatform, overrideOrientation });
+}
+
+/**
+ * R10 U-05:`startExport` + 本次交付手动指定的画布方向(`null` = 按预设/集/素材自动)。
+ * 与 `startExport` 是同一条后端命令(`start_export` 多了可选的 overrideOrientation)。
+ */
+export function startExportWithCanvas(
+  dest: string,
+  overridePlatform: TargetPlatform | null,
+  overrideOrientation: "portrait" | "landscape" | null,
+  includeContactSheet: boolean,
+  targetSeconds: RoughCutTargetSeconds | null,
+): Promise<ExportStatus> {
+  return invoke<ExportStatus>("start_export", {
+    dest,
+    overridePlatform,
+    overrideOrientation,
+    includeContactSheet,
+    targetSeconds,
+  });
+}
+
+/** R10 U-16:新建集的结果。 */
+export interface CreateEpisodeOutcome {
+  /** 新的进行中集(reused_empty 时是被改名的原空集)。 */
+  episode: EpisodeSummary;
+  /** 当前集本来就是空的,被就地改名复用(没有封存任何东西,id 不变)。 */
+  reused_empty: boolean;
+  /** 被封存的前一集;reused_empty 时为 null。 */
+  archived: EpisodeSummary | null;
+}
+
+/**
+ * R10 U-16:新建集(名称必填,1–120 字)。集模型「任意时刻恰好一个进行中」,所以当前集有素材时
+ * = 封存当前集 + 开新集并切换过去(平台/朝向继承);当前集为空时就地改名复用。
+ * 调用方拿到结果后请派发 `tripcut:episode-changed`,与封存后的做法一致。
+ */
+export async function createEpisode(title: string): Promise<CreateEpisodeOutcome> {
+  return invoke<CreateEpisodeOutcome>("create_episode", { title });
+}
+
+/** R10 U-19:音乐分析落到终态(done/failed)时后端发出的事件负载;`bpm` 只在 done 时非空。 */
+export interface MusicAnalyzedEvent {
+  track_id: number;
+  episode_id: number;
+  analysis_status: "done" | "failed";
+  bpm: number | null;
+}
+
+/** R10 U-19:后端 Tauri 事件名;前端 DOM 侧同名 CustomEvent 由 `bridgeMusicAnalyzedEvents` 转发。 */
+export const MUSIC_ANALYZED_EVENT = "tripcut:music-analyzed";
+
+/** R10 U-19:状态条「音乐分析」计数——当前集音乐轨按 analysis_status 分桶。 */
+export interface MusicAnalysisProgress {
+  total: number;
+  done: number;
+  failed: number;
+  running: number;
+  pending: number;
+}
+
+export function getMusicAnalysisProgress(): Promise<MusicAnalysisProgress> {
+  return invoke<MusicAnalysisProgress>("get_music_analysis_progress");
+}
+
+/**
+ * R10 U-19:把后端的 `tripcut:music-analyzed` Tauri 事件转发成同名 `window` CustomEvent
+ * (`detail` = MusicAnalyzedEvent),沿用工作区现有的 `tripcut:*` DOM 事件约定——
+ * 音乐面板 / 状态条只需 `window.addEventListener(MUSIC_ANALYZED_EVENT, …)`。
+ * 在壳层挂一次即可;返回解除函数。非 Tauri 环境(vitest / `vite --mode mock`)里
+ * `listen` 会失败,此时静默退化为 no-op(不抛)。
+ */
+export async function bridgeMusicAnalyzedEvents(): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<MusicAnalyzedEvent>(MUSIC_ANALYZED_EVENT, (event) => {
+      window.dispatchEvent(new CustomEvent<MusicAnalyzedEvent>(MUSIC_ANALYZED_EVENT, { detail: event.payload }));
+    });
+    return unlisten;
+  } catch {
+    return () => undefined;
+  }
+}
+
+/** R10 U-22:首启引导「已跳过 / 已完成」持久化(settings `onboarding.first_run_done`,默认 false)。 */
+export function getFirstRunDone(): Promise<boolean> {
+  return invoke<boolean>("get_first_run_done");
+}
+
+/** 用户点「暂时进入」或走完向导时调一次;之后 FirstRunGuide 不再弹,切换新旧界面 / 恢复页也不重放。 */
+export function setFirstRunDone(done = true): Promise<void> {
+  return invoke<void>("set_first_run_done", { done });
+}
+
+/** R10 U-24:`importWhisperModel` 的结果。 */
+export interface WhisperModelImportOutcome {
+  /** 按文件 SHA-256 识别出的模型档(档由摘要决定,不由文件名决定)。 */
+  tier: "large-v3-turbo" | "small";
+  file_name: string;
+  target_path: string;
+  sha256: string;
+  /** 导入的档是否就是设置里当前选的档;false 时可提示用 setSetting("tools.whisper_model_tier", tier) 切换。 */
+  matches_active_tier: boolean;
+}
+
+/**
+ * R10 U-24:「导入模型文件…」——校验 SHA-256(必须命中官方摘要之一)后复制进 models 目录,
+ * 源文件不动;摘要不匹配则拒绝并在错误信息里列出期望值。大文件算摘要要几秒,await 期间请给忙态。
+ */
+export async function importWhisperModel(path: string): Promise<WhisperModelImportOutcome> {
+  return invoke<WhisperModelImportOutcome>("import_whisper_model", { path });
+}
+
+/**
+ * R10 U-28:「添加 LUT…」——把用户选中的 `.cube` 复制进 `<应用支持目录>/luts/`,返回复制后的
+ * 完整列表(与 `listDisplayLuts` 同形)。后端校验扩展名 / 非空 ≤ 64 MB / 文件头 LUT_3D_SIZE|LUT_1D_SIZE;
+ * 同名不同内容会拒绝(错误信息含「同名」),同名同内容视为已导入。文件选择用 rfd(`pick_*`)
+ * 或 `@tauri-apps/plugin-dialog`,本命令只收路径。
+ */
+export function importLut(path: string): Promise<string[]> {
+  return invoke<string[]>("import_lut", { path });
+}
+
+/** R10 U-24:「导入模型文件…」的系统文件选择(rfd);取消返回 null。 */
+export const pickWhisperModelFile = () => invoke<string | null>("pick_whisper_model_file");
+
+/** R10 U-28:「添加 LUT…」的系统文件选择(rfd,.cube);取消返回 null。 */
+export const pickLutFile = () => invoke<string | null>("pick_lut_file");
+
+// ---------------------------------------------------------------------------
+// R11 车道 B:时刻分与自动挑选(Rust `core::moments` / `core::smart_select`)
+// ---------------------------------------------------------------------------
+
+/** 一个 0.5 s 窗口的时刻分;热力条用 `get_clip_moments`(已降采样到 ≤200 点)。 */
+export interface Moment {
+  clip_id: number;
+  win_index: number;
+  t_start_ticks: number;
+  t_end_ticks: number;
+  /** 0–1,越大越清晰。 */
+  sharp: number;
+  /** 0–1,画面运动量;「运动适中」由打分判。 */
+  motion: number;
+  exposure_ok: boolean;
+  loud: boolean;
+  speech: boolean;
+  scene_cut: boolean;
+  /** 0–1 综合分。 */
+  score: number;
+  /** 给人看的中文原因:「清晰」「运动适中」「曝光正常」「有人声」「有声音」。 */
+  reasons: string[];
+}
+
+/** 建议段(源 time_base 的 tick;换算用素材的 tb_num/tb_den)。 */
+export interface SegmentSuggestion {
+  in_ticks: number;
+  out_ticks: number;
+  score: number;
+  reasons: string[];
+}
+
+/**
+ * 自动挑选范围;不传 = `favorites_or_rated3` = 收藏 ∪ ≥3 星(新手缺省)。
+ * `rated3` 在 Rust 里是**纯** ≥3 星 —— 标签写「收藏 + 3 星以上」的 chip 必须发并集(V-02)。
+ */
+export type AutoSelectScope = "favorites_or_rated3" | "favorites" | "rated3" | "all";
+
+export interface AutoSelectOutcome {
+  /** 新建的精选段 id(`segments.source = 'auto'`)。 */
+  created: number[];
+  total_secs: number;
+  chapters_covered: number;
+  /** 传给 `undoAutoSelect` 一键撤销整批。 */
+  batch_id: string;
+}
+
+/** 状态条「补齐时刻分 n/m」:当前集已分析素材里有/没有时刻分的数量与任务状态。 */
+export interface MomentsProgress {
+  total: number;
+  done: number;
+  failed: number;
+  running: number;
+  pending: number;
+}
+
+export function getClipMoments(clipId: number): Promise<Moment[]> {
+  return invoke<Moment[]>("get_clip_moments", { clipId });
+}
+
+/** 建议段,≤3 条,按分数降序;`targetSecs` 不传按本集平台预算取 4–8 s。 */
+export function suggestSegments(clipId: number, targetSecs?: number): Promise<SegmentSuggestion[]> {
+  return invoke<SegmentSuggestion[]>("suggest_segments", { clipId, targetSecs: targetSecs ?? null });
+}
+
+/** 自动挑选整集精选段;`budgetSecs` 不传按平台预算(不限时长的平台按 60 s)。 */
+export function autoSelectEpisode(options: { budgetSecs?: number; scope?: AutoSelectScope } = {}): Promise<AutoSelectOutcome> {
+  return invoke<AutoSelectOutcome>("auto_select_episode", {
+    budgetSecs: options.budgetSecs ?? null,
+    scope: options.scope ?? null,
+  });
+}
+
+/** 撤销一批自动挑选(只删该批 `source='auto'` 的段),返回删掉的条数。 */
+export function undoAutoSelect(batchId: string): Promise<number> {
+  return invoke<number>("undo_auto_select", { batchId });
+}
+
+export function getMomentsProgress(): Promise<MomentsProgress> {
+  return invoke<MomentsProgress>("get_moments_progress");
+}
+
+/** 手动重跑「补齐时刻分」(失败后重试),返回新排队的条数。 */
+export function enqueueMomentsBackfill(): Promise<number> {
+  return invoke<number>("enqueue_moments_backfill");
+}
+
+/** 车道 C 先行用的别名;真身是车道 B 的 `Moment`(多出的字段无害)。 */
+export type ClipMoment = Moment;
+// ---------- R11 车道 E:快速导出 ----------
+
+/** 只导这些段 / 素材;两项都不给 = 本集全部精选段 + 收藏。`clip_ids` 命中该素材名下的全部精选段(没有精选段时是它的整条收藏)。 */
+export interface QuickExportSelection {
+  segment_ids?: number[];
+  clip_ids?: number[];
+}
+
+/** `quickExport` / `planQuickExport` 的结果:`job_id` 只在真的排了任务时有值;`dir` 是将写的文件夹(给了目标目录是全路径,否则只有文件夹名)。 */
+export interface QuickExportOutcome {
+  job_id: number | null;
+  dir: string;
+  files: string[];
+  skipped: { reason: string }[];
+}
+
+/** `quickExport` 的错误文本含这个词 = 目标目录不存在 / 不可写,前端回落到保存面板;别的失败不带它。 */
+export const QUICK_EXPORT_DEST_UNAVAILABLE = "dest_unavailable";
+
+/** 快速导出:只 remux 精选段与整条收藏到 `destDir/<集名>_导出_<日期>`(同名 `-2`),不出粗剪 / 镜头表 / 联系表。进度走 `getExportStatus`(`mode = "quick"`)。 */
+export function quickExport(destDir: string, selection?: QuickExportSelection | null): Promise<QuickExportOutcome> {
+  return invoke<QuickExportOutcome>("quick_export", { destDir, selection: selection ?? null });
+}
+
+/** 只算不排:快速导出将写的文件夹与文件清单(交付抽屉快速模式的清单读它)。 */
+export function planQuickExport(destDir: string | null, selection?: QuickExportSelection | null): Promise<QuickExportOutcome> {
+  return invoke<QuickExportOutcome>("plan_quick_export", { destDir, selection: selection ?? null });
+}

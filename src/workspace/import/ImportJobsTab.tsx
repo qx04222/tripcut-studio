@@ -4,42 +4,43 @@ import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
-import { batchStatusLabel, lastPathSegment, type AnalysisProgress } from "./importModel";
+import { batchStatusLabel, decodeQueueHint, lastPathSegment, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
 import { useImportJobs } from "./useImportJobs";
+import { dispatchWorkspace } from "../WorkspaceStore";
 
-/** 解码许可吃满时的提示——文案逐字沿用 ImportPage.PermitWaitingHint。 */
-function permitHint(waiting: number, pausedForMemory: boolean): string | null {
-  // 内存暂停时「等待解码许可」会误导——排队的不是许可,是内存;说清楚真正的原因。
-  if (pausedForMemory) return "「内存不足，已暂停解码与模型任务」";
-  if (!waiting || waiting <= 0) return null;
-  return `「${waiting} 等待解码许可」`;
-}
-
-function StageRow({ label, done, total, running, waiting, failed }: {
-  label: string; done: number; total: number; running: number; waiting: number; failed: number;
-}): JSX.Element {
+/** 三段式的一段(R10 U-08):标签 + 「已处理 n / N」+ 百分比 + 自己的进度条 + 处理中 / 等待 / 失败。 */
+function PipelineTile({ segment }: { segment: PipelineSegment }): JSX.Element {
+  const { label, done, total, percent, running, waiting, failed } = segment;
   return (
-    <li className="import-stage">
-      <span className="import-stage-label">{label}</span>
-      <span className="import-stage-done">{done} / {total} 完成</span>
-      <span className="import-stage-rest">{running} 处理中 · {waiting} 等待</span>
-      {failed > 0 ? <span className="import-stage-failed">{failed} 失败</span> : <span className="import-stage-failed" aria-hidden="true" />}
+    <li className="import-pipeline-tile" data-segment={segment.id}>
+      <span className="import-pipeline-label">{label}</span>
+      <span className="import-pipeline-count">{`已处理 ${done} / ${total}`}</span>
+      <span className="import-pipeline-percent">{`${percent}%`}</span>
+      <div
+        className="import-index-track"
+        role="progressbar"
+        aria-label={`${label}进度`}
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={done}
+      >
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <span className="import-pipeline-rest">
+        {running > 0 ? `${running} 处理中 · ` : ""}
+        {`${waiting} 等待`}
+        {failed > 0 ? <span className="import-stage-failed">{` · ${failed} 失败`}</span> : null}
+      </span>
     </li>
   );
 }
 
-function analysisRow(label: string, progress: AnalysisProgress, total: number): JSX.Element {
-  return <StageRow label={label} done={progress.done} total={total} running={progress.running} waiting={progress.waiting} failed={progress.failed} />;
-}
-
-/** 任务分页(规格 §4.1):进度卡(大数字 + 进度条 + 三阶段)、批次卡、批量操作行、确认框。 */
+/** 任务分页(规格 §4.1):进度卡(三段式:索引 / 画质 / 运镜)、批次卡、批量操作行、确认框。 */
 export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Element {
   const jobs = useImportJobs({ onChanged });
   const { progress, readyClips, quality, motion, batches, busy, notice, confirmation, refreshError } = jobs;
-  const completed = progress.done + progress.failed;
-  const percent = progress.total === 0 ? 0 : Math.round((completed / progress.total) * 100);
-  const pending = Math.max(0, progress.total - completed - progress.running);
-  const hint = permitHint(progress.waiting_for_permit, progress.paused_for_memory);
+  const segments = pipelineSegments(progress, readyClips.length, quality, motion);
+  const hint = decodeQueueHint(progress, segments);
   // 确认框接在批次列表之后,列表一长就在视口外;弹出时滚到它并把焦点交给它(alertdialog)。
   const confirmRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -52,31 +53,15 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
   return (
     <div className="import-tab import-jobs">
       <section className="import-section" aria-label="索引进度">
-        <SectionHeader title="索引进度" meta={`${percent}%`} />
-        <Card className="import-index" aria-live="polite">
-          <div className="import-index-head">
-            <span className="import-index-big">{`已处理 ${completed} / ${progress.total}`}</span>
-            <span className="import-index-sub">
-              {progress.running > 0 ? `${progress.running} 正在探测` : `${pending} 等待中`} · {readyClips.length} 条可用素材
-            </span>
-          </div>
-          <div
-            className="import-index-track"
-            role="progressbar"
-            aria-label="索引进度"
-            aria-valuemin={0}
-            aria-valuemax={progress.total}
-            aria-valuenow={completed}
-          >
-            <span style={{ width: `${percent}%` }} />
-          </div>
-          {hint ? <p className="import-index-hint">{hint}</p> : null}
-          <ul className="import-stages">
-            <StageRow label="索引" done={progress.done} total={progress.total} running={progress.running} waiting={pending} failed={progress.failed} />
-            {analysisRow("画质分析", quality, readyClips.length)}
-            {analysisRow("运镜分析", motion, readyClips.length)}
+        <SectionHeader title="索引进度" meta={pipelineHeadline(segments)} />
+        <Card className="import-index import-index--pipeline" aria-live="polite">
+          <ul className="import-pipeline" aria-label="流水线三阶段">
+            {segments.map((segment) => (
+              <PipelineTile key={segment.id} segment={segment} />
+            ))}
           </ul>
-          <p className="import-index-note">封面出现后即可筛片。分析在后台继续；失败原因可在检查器里查看。</p>
+          {hint ? <p className="import-index-hint">{hint}</p> : null}
+          <p className="import-index-note">{`${readyClips.length} 条可用素材。封面出现后即可筛片；分析在后台继续，失败原因可在检查器里查看。`}</p>
         </Card>
         {refreshError ? (
           <p className="import-note import-note--error" role="status">
@@ -102,7 +87,17 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
         />
         {batches.length === 0 ? (
           <Card className="import-jobs-empty">
-            <EmptyState size="inline" icon="import" title="还没有导入批次" body="从「来源」分页添加文件夹或拖入文件夹后，每次导入会在这里各成一批。" />
+            <EmptyState
+              size="inline"
+              icon="import"
+              title="还没有导入批次"
+              body="添加一个素材文件夹后,每次导入会在这里各成一批。"
+              action={
+                <Button variant="ghost" size="sm" onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" })}>
+                  去添加文件夹
+                </Button>
+              }
+            />
           </Card>
         ) : (
           <ul className="import-jobs-list">

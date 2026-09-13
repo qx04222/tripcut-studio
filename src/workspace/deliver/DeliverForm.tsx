@@ -1,6 +1,6 @@
 import { useId, type JSX } from "react";
 import type { TargetPlatform } from "../../api";
-import { Badge, Card, Field, SectionHeader, Select, Toggle, type BadgeTone } from "../ui";
+import { Badge, Card, Chip, Field, SectionHeader, Select, Toggle, type BadgeTone } from "../ui";
 import {
   PLATFORM_LABELS,
   PLATFORM_OPTIONS,
@@ -10,6 +10,12 @@ import {
   roughCutTargetKey,
 } from "./deliverModel";
 import type { DeliverForm as DeliverFormState } from "./useDeliverForm";
+import type { ExportOrientation } from "./useExportCanvas";
+
+const ORIENTATION_OPTIONS: ReadonlyArray<{ value: ExportOrientation; label: string }> = [
+  { value: "landscape", label: "横版" },
+  { value: "portrait", label: "竖版" },
+];
 
 export interface DeliverFormProps {
   form: DeliverFormState;
@@ -61,6 +67,20 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
                 </option>
               ))}
             </Select>
+          </Field>
+          {/* R10 U-05:横/竖切换只覆盖本次交付(不写集记录);当前高亮 = 后端现算的画布方向。 */}
+          <Field label="画布方向" help={form.canvas ? `${form.canvas.width}×${form.canvas.height}` : "按集设置 / 平台习惯 / 素材多数自动"}>
+            <div className="deliver-orientation" role="group" aria-label="本次交付画布方向">
+              {ORIENTATION_OPTIONS.map((option) => (
+                <Chip
+                  key={option.value}
+                  selected={(form.overrideOrientation ?? form.canvas?.orientation) === option.value}
+                  onClick={() => form.setOverrideOrientation(option.value)}
+                >
+                  {option.label}
+                </Chip>
+              ))}
+            </div>
           </Field>
           <Field label="参考粗剪时长" htmlFor={targetId} help="按平台时长预算预选">
             <Select

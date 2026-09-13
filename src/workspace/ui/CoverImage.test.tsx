@@ -53,4 +53,9 @@ describe("CoverImage", () => {
     expect(rule).toMatch(/background:\s*var\(--well-bg\)/);
     expect(rule).toMatch(/justify-content:\s*center/);
   });
+
+  it("R-04:默认带 crossorigin=anonymous —— 媒体服务器没有 Origin 头就回 403,裸 <img> 永远只能拿到占位", () => {
+    const { container } = render(<CoverImage src="http://127.0.0.1:9/cache/1/cover.jpg?expires=1&signature=x" />);
+    expect(container.querySelector("img")?.getAttribute("crossorigin")).toBe("anonymous");
+  });
 });

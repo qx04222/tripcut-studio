@@ -27,7 +27,6 @@ export function AboutSection(): JSX.Element {
           title="中文工作指南"
           help={`${KEYBOARD_SHORTCUT_COUNT} 项快捷键 · ${String(WORKFLOW_STEPS.length).padStart(2, "0")} 步工作流 · ${String(HELP_FAQS.length).padStart(2, "0")} 类常见问题`}
         >
-          <Button onClick={() => window.dispatchEvent(new CustomEvent("tripcut:open-wizard"))}>打开安装向导</Button>
           <Button onClick={() => setHelpOpen(true)}>打开中文帮助</Button>
         </SettingsRow>
         <SettingsRow
@@ -65,6 +64,14 @@ export function AboutSection(): JSX.Element {
         </SettingsRow>
       </div>
 
+      <div className="settings-sheet-group">
+        {/* R11 简化专项 #2:「打开日志目录」从隐私与诊断搬到关于 —— 出了问题要日志时不用翻高级。 */}
+        <SettingsRow title="诊断日志" help="出问题时把这个目录发给我们;日志只保留 7 天,素材路径只记文件名。">
+          <Button disabled={form.busy} onClick={() => void form.openLogs()}>
+            打开日志目录
+          </Button>
+        </SettingsRow>
+      </div>
       <SectionHeader title="应用信息" description="本地优先的旅途素材筛选与交付工作台。" className="settings-sheet-section-gap" />
       <dl className="settings-sheet-facts">
         <div><dt>应用版本</dt><dd>{appInfo?.version ?? "—"}</dd></div>

@@ -1,0 +1,342 @@
+/*
+ * R11 简化专项(车道 simplify):首启三步引导卡、设置页三分区 + 「高级…」折叠、
+ * 检查器「更多信息」折叠。只用 tokens.css 的令牌;选择器都带自己的根类。
+ */
+
+/* ---- 首启三步引导(预览区,替代空态占位) ---- */
+
+.monitor .onboarding-stage {
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+
+.monitor .onboarding-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: min(100%, 720px);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.monitor .onboarding-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.monitor .onboarding-kicker {
+  color: var(--accent-text);
+  font-size: var(--text-12);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: var(--lh-12);
+}
+
+.monitor .onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.monitor .onboarding-step {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-10);
+  background: var(--surface-panel);
+}
+
+.monitor .onboarding-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-md);
+  height: var(--control-md);
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-13);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.monitor .onboarding-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.monitor .onboarding-title {
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.monitor .onboarding-body {
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.monitor .onboarding-arrow {
+  position: absolute;
+  top: var(--space-4);
+  right: calc(-1 * var(--space-4));
+  color: var(--text-muted);
+  transform: translateX(-50%);
+}
+
+.monitor .onboarding-foot {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.monitor .onboarding-foot kbd {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-panel);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+}
+
+@media (width < 1040px) {
+  .monitor .onboarding-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .monitor .onboarding-arrow {
+    display: none;
+  }
+}
+
+/* ---- 设置 → 工具链:安装检查卡(原首启弹窗的内容) ---- */
+
+.settings-sheet .settings-toolchain-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.settings-sheet .settings-toolchain-guide-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.settings-sheet .settings-toolchain-guide[data-state="ok"] .settings-toolchain-guide-head [data-icon] {
+  color: var(--ok);
+}
+
+.settings-sheet .settings-toolchain-guide[data-state="todo"] .settings-toolchain-guide-head [data-icon] {
+  color: var(--warn);
+}
+
+.settings-sheet .settings-toolchain-guide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+.settings-sheet .settings-toolchain-guide-steps li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.settings-sheet .settings-toolchain-guide-steps li.is-required strong {
+  color: var(--danger);
+}
+
+.settings-sheet .settings-toolchain-guide-steps li span,
+.settings-sheet .settings-toolchain-guide-note {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* ---- 设置页:三分区左轨 + 快捷入口 + 「高级…」折叠 ---- */
+
+.settings-sheet .settings-sheet-rail-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-sheet .settings-sheet-rail-links {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-hair);
+}
+
+.settings-sheet .settings-sheet-rail-links-title {
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.settings-sheet .settings-sheet-rail-link {
+  justify-content: flex-start;
+  width: 100%;
+  color: var(--text-secondary);
+}
+
+.settings-sheet .settings-sheet-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-sheet .settings-sheet-block + .settings-sheet-block {
+  margin-top: var(--space-2);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-hair);
+}
+
+.settings-sheet .settings-sheet-advanced {
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border-hair);
+}
+
+.settings-sheet .settings-sheet-advanced-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  font-weight: 500;
+  line-height: var(--lh-13);
+  list-style: none;
+  cursor: pointer;
+}
+
+.settings-sheet .settings-sheet-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-sheet .settings-sheet-advanced-summary:hover {
+  color: var(--text-primary);
+}
+
+.settings-sheet .settings-sheet-advanced-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-6);
+}
+
+.settings-sheet .settings-sheet-advanced-summary small {
+  color: var(--text-muted);
+  font-size: var(--text-11);
+  font-weight: 400;
+  line-height: var(--lh-11);
+}
+
+.settings-sheet .settings-sheet-advanced-chevron {
+  transition: transform var(--motion-fast);
+}
+
+.settings-sheet .settings-sheet-advanced-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.settings-sheet .settings-sheet-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-2);
+}
+
+/* ---- 检查器:「更多信息」(收进没东西可看的折叠段;DOM 顺序不动,靠 order 排到行后) ---- */
+
+.workspace-shell .inspector .inspector-collapsible-slot {
+  display: contents;
+}
+
+.workspace-shell .inspector .inspector-collapsible-slot[hidden] {
+  display: none;
+}
+
+.workspace-shell .inspector .inspector-collapsible-slot.is-quiet > .inspector-collapsible {
+  order: 2;
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.workspace-shell .inspector .inspector-more {
+  order: 1;
+  flex: none;
+  border: 1px dashed var(--border-hair);
+  border-radius: var(--radius-6);
+  background: transparent;
+}
+
+.workspace-shell .inspector .inspector-more-toggle {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-13);
+  font-weight: 500;
+  line-height: var(--lh-13);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-shell .inspector .inspector-more-toggle:hover {
+  color: var(--accent-text);
+}
+
+.workspace-shell .inspector .inspector-more-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ---- 镜头带空态(grid 外的一句话 + 一个按钮) ---- */
+
+.workspace-shell .shot-band .band-empty-state {
+  padding: var(--space-3) var(--space-4);
+}
+
+/* 空态出现时把空 grid 视口收成 0 高(它得留在树里做 landmark),免得空态下面还悬着一块白。 */
+.workspace-shell .shot-band .band-viewport:has(+ .band-empty-state) {
+  height: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}

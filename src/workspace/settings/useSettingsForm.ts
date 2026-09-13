@@ -31,6 +31,7 @@ import type { SettingsForm } from "./settingsFormTypes";
 import { useUpdaterFlow } from "./useUpdaterFlow";
 import { bytesLabel } from "./settingsModel";
 import { useGenerationSettings } from "./useGenerationSettings";
+import { describeError, failureText } from "../errorText";
 
 export type { SettingsForm } from "./settingsFormTypes";
 
@@ -89,7 +90,7 @@ export function useSettingsForm(): SettingsForm {
       await refreshStatus().catch(() => undefined);
       setRollbackNotice(`${updated.title} 已回滚到上一版`);
     } catch (error) {
-      setRollbackNotice(`回滚失败：${String(error)}`);
+      setRollbackNotice(failureText("回滚", error));
     } finally {
       setBusy(false);
     }
@@ -211,7 +212,7 @@ export function useSettingsForm(): SettingsForm {
         ...confirmedSettingsRef.current,
         [key]: value,
       };
-      setNotice(key === "performance.worker_count" ? "已保存，worker 并发将在重启后生效" : "已保存");
+      setNotice(key === "performance.worker_count" ? "已保存,后台并行任务数将在重启后生效" : "已保存");
       return true;
     } catch (error) {
       if (saveVersionRef.current.get(key) === version) {
@@ -223,7 +224,7 @@ export function useSettingsForm(): SettingsForm {
           return next;
         });
       }
-      setNotice(`保存失败：${String(error)}`);
+      setNotice(`保存失败:${describeError(error)}。再试一次`);
       return false;
     }
   }, [settingsLoaded]);
@@ -238,7 +239,7 @@ export function useSettingsForm(): SettingsForm {
 
   const savePath = useCallback(async (key: string, value: string) => {
     await save(key, value.trim());
-    await refreshStatus().catch((error) => setNotice(`工具检测失败：${String(error)}`));
+    await refreshStatus().catch((error) => setNotice(failureText("检测工具", error)));
     await refreshComponentStatuses().catch(() => undefined);
   }, [save, refreshStatus, refreshComponentStatuses]);
 
@@ -250,7 +251,7 @@ export function useSettingsForm(): SettingsForm {
   const setLlmEnabled = useCallback(async (enabled: boolean) => {
     const current = settingsRef.current;
     if (enabled && (current.llm_provider === "none" || current.llm_provider === "auto")) {
-      setNotice("请先明确锁定一个 LLM provider，再启用 L3 增强");
+      setNotice("请先明确锁定一个 LLM provider,再启用增强分析");
       return;
     }
     await save("llm_enabled", String(enabled));
@@ -295,7 +296,7 @@ export function useSettingsForm(): SettingsForm {
       await openLogsDirectory();
       setNotice("已在访达中打开日志目录；panic 日志自动保留 7 天");
     } catch (error) {
-      setNotice(`日志目录打开失败：${String(error)}`);
+      setNotice(failureText("打开日志目录", error, "可以在访达里手动找 ~/Library/Logs/TripCutStudio"));
     } finally {
       setBusy(false);
     }
@@ -316,7 +317,7 @@ export function useSettingsForm(): SettingsForm {
       );
       await refreshStatus();
     } catch (error) {
-      setNotice(`缓存重建失败：${String(error)}`);
+      setNotice(failureText("重建缓存", error));
     } finally {
       setBusy(false);
     }
@@ -339,7 +340,7 @@ export function useSettingsForm(): SettingsForm {
       await refreshDeviceClocks();
       setNotice(`${deviceModel} 已按 Canonical Journey Time 重新排序`);
     } catch (error) {
-      setNotice(`设备时钟校正失败：${String(error)}`);
+      setNotice(failureText("校正设备时钟", error));
     } finally {
       setBusy(false);
     }

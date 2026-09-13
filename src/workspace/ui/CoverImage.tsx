@@ -8,7 +8,13 @@ export interface CoverImageProps {
   /** 没有封面或封面加载失败时显示什么;默认是中性的胶片图标(不是浏览器的坏图问号)。 */
   fallback?: ReactNode;
   lazy?: boolean;
-  crossOrigin?: "anonymous";
+  /**
+   * 默认 `anonymous`(R10 R-04):本机媒体服务器(`core/media_server.rs`)没有
+   * `Origin` 头就回 403,而裸 `<img>` 的 no-cors 请求不带 Origin —— 只有
+   * `crossorigin` 的图片会带。媒体池卡片一直显式传了,镜头带瓦片 / Take 条 /
+   * 检查器头 / 监视器井底没传,所以永远是占位。传 `null` 才关掉。
+   */
+  crossOrigin?: "anonymous" | null;
   className?: string;
 }
 
@@ -17,7 +23,7 @@ export interface CoverImageProps {
  * 文件不存在)时,渲染 `--well-bg` 上的中性占位,绝不让浏览器画出坏图「?」。
  * 容器由调用方提供(各处井的尺寸不同),这里只负责「图还是占位」。
  */
-export function CoverImage({ src, fallback, lazy = false, crossOrigin, className }: CoverImageProps): JSX.Element {
+export function CoverImage({ src, fallback, lazy = false, crossOrigin = "anonymous", className }: CoverImageProps): JSX.Element {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   // 换了一条素材就重新给它一次机会——失败记忆只跟着那一条 URL。
   useEffect(() => setFailedSrc(null), [src]);
@@ -34,7 +40,7 @@ export function CoverImage({ src, fallback, lazy = false, crossOrigin, className
       src={src}
       alt=""
       className={className}
-      crossOrigin={crossOrigin}
+      crossOrigin={crossOrigin ?? undefined}
       loading={lazy ? "lazy" : undefined}
       decoding={lazy ? "async" : undefined}
       draggable={false}

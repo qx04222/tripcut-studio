@@ -12,20 +12,33 @@ import {
 } from "@dnd-kit/core";
 import { SortableContext, horizontalListSortingStrategy } from "@dnd-kit/sortable";
 
-import { generationAvailability, type GenerationAvailability, type StoryGap, type Storyboard } from "../api";
+import {
+  dismissStoryGap,
+  generationAvailability,
+  reopenStoryGap,
+  undoAutoSelect,
+  type GenerationAvailability,
+  type StoryGap,
+  type Storyboard,
+} from "../api";
 import { GenerationDialog } from "../GenerationDialog";
 import { BandAccessory, BandTabs, BandViewToggle, MusicRuler } from "./BandAccessory";
+import { BandAutoSelect, autoSelectToast } from "./BandAutoSelect";
 import { PaneHead } from "./PaneHead";
 import { BandChapterSection, BandToast } from "./BandChapters";
 import { DragGhost, generationDisabledHint } from "./BandSegment";
+import { ShotBandPicker } from "./ShotBandPicker";
+import { bandPickerCandidates } from "./bandTemplateModel";
 import { TakeStrip } from "./BandTakeStrip";
 import { chapterOffsets } from "./bandGeometry";
 import {
   BAND_SEGMENT_PITCH,
   BAND_VIEWPORT_HEIGHT,
   applyBandView,
+  bandCountLabel,
   buildBandChapters,
   renderableChapterRange,
+  type BandChapter,
   type BandSegment,
   type BandView,
 } from "./shotBandModel";
@@ -34,6 +47,8 @@ import { planBandReorder, planBandStep, useBandDrag } from "./useBandDrag";
 import { useBandTakes, type BandTakesState } from "./useBandTakes";
 import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
+import { BandEmpty } from "./emptyStates";
+import { failureText } from "./errorText";
 
 export { BAND_CHAPTER_HEADER_WIDTH, chapterOffsets } from "./bandGeometry";
 export { ratingPatch } from "./useBandTakes";
@@ -42,6 +57,8 @@ export { ratingPatch } from "./useBandTakes";
 export const BAND_SEGMENT_WIDTH = BAND_SEGMENT_PITCH;
 /** 提示自动消失的时长。 */
 export const BAND_TOAST_MS = 4_000;
+/** 「已忽略缺口 · 撤销」的窗口(R10 U-17)。 */
+export const GAP_UNDO_MS = 5_000;
 
 export function ShotBand(): JSX.Element {
   const feed = useClipsFeed();
@@ -58,6 +75,20 @@ export function ShotBand(): JSX.Element {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [availability, setAvailability] = useState<GenerationAvailability | null>(null);
   const [generationGap, setGenerationGap] = useState<StoryGap | null>(null);
+  // 「从媒体池选择…」打开在哪一章上(R10 U-17 / U-18);null = 没开。
+  const [picker, setPicker] = useState<BandChapter | null>(null);
+  // 「忽略」缺口后的可撤销提示(R10 U-17):5 秒内点「撤销」调 reopen_story_gap。
+  const [gapToast, setGapToast] = useState<{ gapId: number; text: string } | null>(null);
+  // R11 §1.2:自动挑选的结果 toast(batchId ≥ 0 可「撤销这批」;-1 = 出错,只能关)。
+  const [autoToast, setAutoToast] = useState<{ batchId: string | null; text: string } | null>(null);
+  const onUndoAutoSelect = useCallback(() => {
+    if (autoToast === null || autoToast.batchId === null) return;
+    const { batchId } = autoToast;
+    setAutoToast(null);
+    undoAutoSelect(batchId)
+      .then(() => refreshClipsFeed(true))
+      .catch((error) => setAutoToast({ batchId: null, text: failureText("撤销", error) }));
+  }, [autoToast]);
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -201,14 +232,59 @@ export function ShotBand(): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [notice, dismissNotice]);
 
+  useEffect(() => {
+    if (gapToast === null) return;
+    const timer = window.setTimeout(() => setGapToast(null), GAP_UNDO_MS);
+    return () => window.clearTimeout(timer);
+  }, [gapToast]);
+
+  const onDismissGap = useCallback((gap: StoryGap) => {
+    void dismissStoryGap(gap.id)
+      .then(() => {
+        setGapToast({ gapId: gap.id, text: `已忽略缺口「${gap.slot_label_zh}」` });
+        return refreshClipsFeed(true);
+      })
+      .catch((error) => setGapToast({ gapId: -1, text: failureText("忽略缺口", error) }));
+  }, []);
+
+  const onUndoDismiss = useCallback(() => {
+    if (gapToast === null || gapToast.gapId < 0) return;
+    const { gapId } = gapToast;
+    setGapToast(null);
+    void reopenStoryGap(gapId)
+      .then(() => refreshClipsFeed(true))
+      .catch((error) => setGapToast({ gapId: -1, text: failureText("撤销", error) }));
+  }, [gapToast]);
+
+  const closePicker = useCallback(() => setPicker(null), []);
+  const pickerCandidates = useMemo(
+    () => (picker === null ? [] : bandPickerCandidates(feed.clips, board)),
+    [picker, feed.clips, board],
+  );
+  const { insert } = drag;
+  const onPick = useCallback(
+    (clipId: number) => {
+      setPicker(null);
+      insert(clipId);
+    },
+    [insert],
+  );
+
   const draggingSegment = draggingKey === null ? null : segments.find((segment) => segment.key === draggingKey) ?? null;
   const activeSegment = selectedIndex >= 0 ? segments[selectedIndex] : undefined;
+  const clipTotal = chapters.reduce((sum, chapter) => sum + chapter.clipCount, 0);
+  const gapTotal = chapters.reduce((sum, chapter) => sum + chapter.gapCount, 0);
 
   return (
     // 栏 landmark(规格 §7):`镜头带` 这个 AX 名是冒烟脚本的锚点,壳里不再包一层。
     <div className="shot-band workspace-pane" aria-label="镜头带" role="region" data-pane="band" tabIndex={-1}>
-      <PaneHead title="镜头带" meta={chapters.length > 0 ? `${chapters.length} 章 · ${segments.length} 镜` : "空"}>
+      <PaneHead title="镜头带" meta={chapters.length > 0 ? `${chapters.length} 章 · ${bandCountLabel(clipTotal, gapTotal)}` : "空"}>
         <BandViewToggle value={view} onChange={setView} />
+        <BandAutoSelect
+          disabled={readOnly}
+          onOutcome={(outcome) => setAutoToast({ batchId: outcome.batch_id, text: autoSelectToast(outcome) })}
+          onError={(text) => setAutoToast({ batchId: null, text })}
+        />
         <BandTabs />
       </PaneHead>
       {/* 音乐模式的刻度轨在带**上方**,与镜头带共用同一条时间轴(规格 §3.4)。 */}
@@ -259,17 +335,25 @@ export function ShotBand(): JSX.Element {
                   if (effectiveBoard) drag.apply(planBandStep(effectiveBoard, segment.key, direction));
                 }}
                 onGenerate={setGenerationGap}
+                onDismiss={onDismissGap}
+                onPickFromPool={setPicker}
               />
             ))}
           </SortableContext>
           <DragOverlay>{draggingSegment ? <DragGhost segment={draggingSegment} /> : null}</DragOverlay>
         </DndContext>
-        {chapters.length === 0 ? (
-          <p className="band-empty">
-            {feed.loading ? "正在整理镜头" : view === "gaps" ? "所有章节都没有缺口。" : "导入完成后会按拍摄时间自动生成章节。"}
-          </p>
-        ) : null}
       </div>
+      {/* 空态放在 grid 外面(WebKit 会把 role=grid 的非 row 子节点从 AX 树剔掉,按钮在里面按名字找不到);
+          R11 简化专项 #5:一句话 + 一个按钮。 */}
+      {chapters.length === 0 ? (
+        feed.loading ? (
+          <p className="band-empty">正在整理镜头</p>
+        ) : view === "gaps" ? (
+          <BandEmpty variant="no-gaps" onAction={() => setView("chapter")} />
+        ) : (
+          <BandEmpty variant="no-chapters" />
+        )
+      ) : null}
       {takes.takesOpen && selectedStack ? (
         <TakeStrip
           stack={selectedStack}
@@ -280,6 +364,15 @@ export function ShotBand(): JSX.Element {
       ) : null}
       {drag.notice ? (
         <BandToast notice={drag.notice} undoable={drag.undoable} onDismiss={drag.dismissNotice} onUndo={drag.undo} />
+      ) : null}
+      {gapToast ? (
+        <BandToast notice={gapToast.text} undoable={gapToast.gapId >= 0} onDismiss={() => setGapToast(null)} onUndo={onUndoDismiss} />
+      ) : null}
+      {autoToast ? (
+        <BandToast notice={autoToast.text} undoable={autoToast.batchId !== null} onDismiss={() => setAutoToast(null)} onUndo={onUndoAutoSelect} />
+      ) : null}
+      {picker ? (
+        <ShotBandPicker chapterTitle={picker.chapterId === null ? null : picker.title} candidates={pickerCandidates} busy={drag.busy} onPick={onPick} onClose={closePicker} />
       ) : null}
       <BandAccessory />
       {generationGap ? (

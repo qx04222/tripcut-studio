@@ -341,6 +341,83 @@ struct MusicAnalyzePayload {
     track_id: i64,
 }
 
+/// R10 U-19:`music_analyze` 任务落到终态(done/failed)后发给前端的事件负载
+/// (Tauri 事件名 `tripcut:music-analyzed`)。`bpm` 只在 done 时非空。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MusicAnalyzedEvent {
+    pub track_id: i64,
+    pub episode_id: i64,
+    pub analysis_status: String,
+    pub bpm: Option<f64>,
+}
+
+pub const MUSIC_ANALYZED_EVENT: &str = "tripcut:music-analyzed";
+
+/// `execute()` 之后由 worker 调用:这条 job 是 `music_analyze` 且音乐轨已到终态
+/// 才返回 `Some`。job 还在重试(轨仍是 pending/running)或轨已被删除 → `None`。
+pub fn analyzed_event(connection: &Connection, job: &Job) -> Result<Option<MusicAnalyzedEvent>> {
+    if job.kind != "music_analyze" {
+        return Ok(None);
+    }
+    let payload: MusicAnalyzePayload = serde_json::from_str(&job.payload)
+        .map_err(|error| CoreError::Music(format!("音乐分析任务数据无效：{error}")))?;
+    let row = connection
+        .query_row(
+            "SELECT episode_id, analysis_status, bpm FROM music_tracks WHERE id = ?1",
+            [payload.track_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row
+        .filter(|(_, status, _)| matches!(status.as_str(), "done" | "failed"))
+        .map(|(episode_id, analysis_status, bpm)| MusicAnalyzedEvent {
+            track_id: payload.track_id,
+            episode_id,
+            analysis_status,
+            bpm,
+        }))
+}
+
+/// R10 U-19:状态条「音乐分析」计数——当前集的音乐轨按 analysis_status 分桶。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MusicAnalysisProgress {
+    pub total: u64,
+    pub done: u64,
+    pub failed: u64,
+    pub running: u64,
+    pub pending: u64,
+}
+
+pub fn analysis_progress(connection: &Connection) -> Result<MusicAnalysisProgress> {
+    connection
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(analysis_status = 'done'), 0),
+                    COALESCE(SUM(analysis_status = 'failed'), 0),
+                    COALESCE(SUM(analysis_status = 'running'), 0),
+                    COALESCE(SUM(analysis_status = 'pending'), 0)
+               FROM music_tracks
+              WHERE episode_id = (SELECT id FROM episodes WHERE status = 'active')",
+            [],
+            |row| {
+                Ok(MusicAnalysisProgress {
+                    total: row.get::<_, i64>(0)?.max(0) as u64,
+                    done: row.get::<_, i64>(1)?.max(0) as u64,
+                    failed: row.get::<_, i64>(2)?.max(0) as u64,
+                    running: row.get::<_, i64>(3)?.max(0) as u64,
+                    pending: row.get::<_, i64>(4)?.max(0) as u64,
+                })
+            },
+        )
+        .map_err(CoreError::from)
+}
+
 fn read_track_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<MusicTrackSummary> {
     Ok(MusicTrackSummary {
         id: row.get(0)?,
@@ -1570,6 +1647,10 @@ mod tests {
         let summary = import_track(&mut connection, episode_id, &wav).unwrap();
         drop(connection);
 
+        // 这条会真的 decode_pcm,给 DECODE_PCM_CALLS 计数;不拿锁会和
+        // `import_track_reads_duration_via_ffprobe_without_decoding` 的「必须为 0」并发撞车
+        // (全量 cargo test 偶发红,单跑绿)。
+        let _guard = DECODE_PCM_CALLS_LOCK.lock().unwrap();
         assert!(
             jobs::JobRunner::run_one(&directory.db_path()).unwrap(),
             "应当认领并运行一个任务"
@@ -1717,6 +1798,60 @@ mod tests {
             .query_row("SELECT analysis_status FROM music_tracks WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(track_status, "failed");
+        // R10 U-19:终态(failed)也发事件,前端才能把「分析排队中…」换掉。
+        let job = Job {
+            id: job_id,
+            kind: "music_analyze".to_owned(),
+            payload: payload.clone(),
+            status: jobs::JobStatus::Blocked,
+            attempt: 1,
+            blocked_summary: None,
+            result_path: None,
+        };
+        let event = analyzed_event(&connection, &job).unwrap().expect("终态必须有事件");
+        assert_eq!(event.track_id, 1);
+        assert_eq!(event.episode_id, episode_id);
+        assert_eq!(event.analysis_status, "failed");
+        assert_eq!(event.bpm, None);
+        let progress = analysis_progress(&connection).unwrap();
+        assert_eq!((progress.total, progress.failed, progress.done), (1, 1, 0));
+    }
+
+    /// R10 U-19:轨还在 pending/running(任务在重试)或不是音乐任务 → 不发事件;
+    /// 分析落库(done + bpm)→ 发带 bpm 的事件。
+    #[test]
+    fn analyzed_event_only_fires_on_terminal_track_status() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let episode_id = first_episode_id(&connection);
+        connection
+            .execute(
+                "INSERT INTO music_tracks(id, episode_id, file_name, rel_path, quick_hash, analysis_status, created_at)
+                 VALUES (7, ?1, 'bgm.wav', '/x/bgm.wav', 'h', 'pending', 'now')",
+                [episode_id],
+            )
+            .unwrap();
+        let payload = serde_json::to_string(&MusicAnalyzePayload { track_id: 7 }).unwrap();
+        let job = Job {
+            id: 1,
+            kind: "music_analyze".to_owned(),
+            payload: payload.clone(),
+            status: jobs::JobStatus::Running,
+            attempt: 1,
+            blocked_summary: None,
+            result_path: None,
+        };
+        assert_eq!(analyzed_event(&connection, &job).unwrap(), None);
+        assert_eq!(analysis_progress(&connection).unwrap().pending, 1);
+        let other = Job { kind: "thumbnail".to_owned(), ..job.clone() };
+        assert_eq!(analyzed_event(&connection, &other).unwrap(), None);
+        connection
+            .execute("UPDATE music_tracks SET analysis_status = 'done', bpm = 220.0 WHERE id = 7", [])
+            .unwrap();
+        let event = analyzed_event(&connection, &job).unwrap().unwrap();
+        assert_eq!(event.analysis_status, "done");
+        assert_eq!(event.bpm, Some(220.0));
+        assert_eq!(analysis_progress(&connection).unwrap().done, 1);
     }
 
     #[test]

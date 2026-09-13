@@ -25,6 +25,9 @@ export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace"
   const [clips, setClips] = useState<ClipListItem[]>([]);
   const [query, setQuery] = useState("");
   const [deepHits, setDeepHits] = useState<GlobalSearchHit[]>([]);
+  // 高亮项受控(R10 U-31):列表换代(全量命中到达 / 清空)时 cmdk 可能落成「没有任何一项
+  // 被选中」,这时 Enter 什么都不做,要鼠标点。下面的 effect 保证总有首项被高亮。
+  const [value, setValue] = useState("");
   const debounceRef = useRef<number | undefined>(undefined);
   const queryRef = useRef("");
   queryRef.current = query;
@@ -96,6 +99,31 @@ export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace"
     return () => window.clearTimeout(debounceRef.current);
   }, [query]);
 
+  // 每次列表内容变化后,若没有任何一项处于选中态,就把第一项设为选中(Enter 默认执行首项)。
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      const root = paletteRef.current;
+      if (!root) return;
+      if (root.querySelector('[cmdk-item][aria-selected="true"]')) return;
+      const first = root.querySelector<HTMLElement>('[cmdk-item]:not([aria-disabled="true"])');
+      const next = first?.getAttribute("data-value");
+      if (next) setValue(next);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, query, deepHits, clips]);
+
+  // Enter 的兜底:cmdk 自己找不到选中项时,执行 DOM 里的第一项。
+  const onEnterFallback = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    const root = paletteRef.current;
+    if (!root || root.querySelector('[cmdk-item][aria-selected="true"]')) return;
+    const first = root.querySelector<HTMLElement>('[cmdk-item]:not([aria-disabled="true"])');
+    if (!first) return;
+    event.preventDefault();
+    first.click();
+  }, []);
+
   const go = useCallback(
     (path: string) => {
       onNavigate(path);
@@ -133,6 +161,9 @@ export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace"
         label="全局命令"
         className="command-palette"
         shouldFilter={deepHits.length === 0}
+        value={value}
+        onValueChange={setValue}
+        onKeyDownCapture={onEnterFallback}
         onClick={(event) => event.stopPropagation()}
         ref={paletteRef}
         role="dialog"
@@ -185,7 +216,8 @@ export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace"
                 <Command.Item onSelect={() => go("band-story")}>切到故事附属带</Command.Item>
                 <Command.Item onSelect={() => go("band-music")}>切到音乐附属带</Command.Item>
                 <Command.Item onSelect={() => go("band-journey")}>切到旅程附属带</Command.Item>
-                <Command.Item onSelect={() => go("band-destination")}>切到目的地附属带</Command.Item>
+                {/* 与附属 tab 的标签「地点卡」同名(R10 U-31)。 */}
+                <Command.Item onSelect={() => go("band-destination")}>切到地点卡附属带</Command.Item>
                 <Command.Item onSelect={() => go("band-template")}>切到模板附属带</Command.Item>
               </Command.Group>
             </>

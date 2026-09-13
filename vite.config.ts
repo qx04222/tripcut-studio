@@ -98,7 +98,7 @@ export default defineConfig(({ mode }) => {
               // 于是 index 又静态 import 了 `settings-*.js`,设置 sheet 的 lazy() 白写。
               {
                 name: "app-core",
-                test: /[\\/]src[\\/](api|appearance|useFocusTrap|kindLabels|historyView)\.tsx?$|[\\/]src[\\/]workspace[\\/](uiSettings|WorkspaceStore|modalStack)\.tsx?$/,
+                test: /[\\/]src[\\/](api|appearance|useFocusTrap|kindLabels|historyView|toolchainSteps)\.tsx?$|[\\/]src[\\/]workspace[\\/](uiSettings|WorkspaceStore|modalStack)\.tsx?$/,
               },
               { name: "vendor-dnd", test: /node_modules[\\/]@dnd-kit/ },
               // 三栏布局库是新壳首屏就要用的;不点名它就被吸进 `select-legacy` 块,

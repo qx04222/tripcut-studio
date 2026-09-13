@@ -120,7 +120,15 @@ export function PoolFilters({
             autoComplete="off"
             spellCheck={false}
             enterKeyHint="search"
-            onChange={(event) => setDraft(event.currentTarget.value)}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              setDraft(next);
+              // U-15:删光即复原,不用再按「搜索」;Esc 走的是 store 的 set-query,同一条路。
+              if (next === "" && !composing) {
+                dispatchWorkspace({ type: "set-query", query: "" });
+                onSearch("");
+              }
+            }}
             onCompositionStart={() => setComposing(true)}
             onCompositionEnd={() => setComposing(false)}
             onKeyDown={(event) => {
@@ -221,7 +229,7 @@ export function PoolFilters({
                     onExtrasChange({ ...extras, hideDuplicates: event.currentTarget.checked })
                   }
                 />
-                只看 Stack 首选
+                只看每组首选
               </label>
               <label className="pool-more-check" title="只看竖屏素材(按 rotation 与画面比例判定)">
                 <input

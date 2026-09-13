@@ -17,7 +17,7 @@ vi.mock("../api", () => apiMocks);
 
 import type { ClipListItem } from "../api";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
-import { echoElementId, extendMultiSelection, useSelection, type SelectionView } from "./useSelection";
+import { echoElementId, extendMultiSelection, selectionBelongsToEpisode, useSelection, type SelectionView } from "./useSelection";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 function clip(id: number): ClipListItem {
@@ -198,5 +198,22 @@ describe("useSelection —— 三栏共享的选择视图", () => {
     } finally {
       echo.remove();
     }
+  });
+});
+
+describe("R-06:selectionBelongsToEpisode", () => {
+  const clips = new Map([
+    [1, { episode_id: 1 }],
+    [2, { episode_id: 2 }],
+    [3, { episode_id: null }],
+  ]);
+  it("素材属于新集才留;旧数据(episode_id 空)归当前集;查不到与空槽位都清;集 id 未知不动", () => {
+    expect(selectionBelongsToEpisode({ kind: "clip", clipId: 1 }, 1, clips)).toBe(true);
+    expect(selectionBelongsToEpisode({ kind: "clip", clipId: 1 }, 2, clips)).toBe(false);
+    expect(selectionBelongsToEpisode({ kind: "clip", clipId: 3 }, 2, clips)).toBe(true);
+    expect(selectionBelongsToEpisode({ kind: "clip", clipId: 9 }, 2, clips)).toBe(false);
+    expect(selectionBelongsToEpisode({ kind: "slot", chapterId: 4, slot: "REAL/ESTABLISHING" }, 2, clips)).toBe(false);
+    expect(selectionBelongsToEpisode({ kind: "clip", clipId: 1 }, null, clips)).toBe(true);
+    expect(selectionBelongsToEpisode(null, 2, clips)).toBe(true);
   });
 });

@@ -344,8 +344,13 @@ shot(5, "band-music");
 {
   const opened = clickByLabel("生成交付包");
   sleep(1200);
-  const tree = entireContents();
+  // R11 车道 E:抽屉默认「快速导出」——先断言快速模式的两颗按钮在,再切到「完整交付包」看旧表单。
+  const quickTree = entireContents();
   check("drawer.deliver.open", opened, `点中=${opened}`);
+  check("drawer.deliver.quick", quickTree.includes("导出到上次文件夹") && quickTree.includes("更改文件夹"), "快速导出:导出到上次文件夹 / 更改文件夹");
+  clickByLabel("完整交付包");
+  sleep(600);
+  const tree = entireContents();
   check("drawer.deliver.platform", tree.includes("本次交付平台"), "本次交付平台");
   check("drawer.deliver.contact", tree.includes("联系表"), "联系表(R4 Task 3 前端接线未上时预期 FAIL)");
   shot(3, "drawer-deliver");

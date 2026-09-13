@@ -12,6 +12,7 @@ const apiMock = vi.hoisted(() => ({
   listMusicTracks: vi.fn(),
   getMusicAnalysis: vi.fn(),
   deleteMusicTrack: vi.fn(),
+  MUSIC_ANALYZED_EVENT: "tripcut:music-analyzed",
 }));
 vi.mock("./api", () => apiMock);
 
@@ -158,6 +159,38 @@ describe("MusicPanel", () => {
       marker.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(container.textContent).toContain("已复制切点");
+  });
+
+  it("R10 U-19: 收到 tripcut:music-analyzed 后重取列表,标签从「分析排队中…」翻成 BPM;选中的曲目也重取分析", async () => {
+    const pendingTrack = track({ bpm: null, analysis_status: "pending" });
+    apiMock.listMusicTracks.mockResolvedValueOnce([pendingTrack]).mockResolvedValue([track()]);
+    apiMock.getMusicAnalysis.mockResolvedValue(analysisOf(pendingTrack));
+    await act(async () => {
+      root.render(<MusicPanel readOnly={false} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("分析排队中…");
+    const selectButton = container.querySelector(".music-track-select") as HTMLButtonElement;
+    await act(async () => {
+      selectButton.click();
+      await Promise.resolve();
+    });
+    expect(apiMock.getMusicAnalysis).toHaveBeenCalledTimes(1);
+    apiMock.getMusicAnalysis.mockResolvedValue(analysisOf(track()));
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("tripcut:music-analyzed", {
+          detail: { track_id: 1, episode_id: 7, analysis_status: "done", bpm: 120 },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiMock.listMusicTracks).toHaveBeenCalledTimes(2);
+    expect(apiMock.getMusicAnalysis).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("120 BPM");
+    expect(container.textContent).not.toContain("分析排队中…");
   });
 
   it("disables import and delete for a read-only episode", async () => {

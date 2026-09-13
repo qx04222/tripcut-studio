@@ -15,7 +15,10 @@ export const EMPTY_COPY = {
   inspector: { icon: "info", title: "选一条素材查看详情", body: "评级、标签与技术检查都在这里。" },
 } as const satisfies Record<string, { icon: IconName; title: string; body: string }>;
 
-/** 媒体池无素材:带「导入素材」(与顶栏同名 —— 只在空池时渲染,非空池主屏仍只有一个同名按钮)。 */
+/**
+ * 媒体池无素材(U-06):大号 primary「导入素材」入口。AX 名是**新名**「导入第一批素材」——
+ * 「导入素材」是顶栏按钮的冻结名,壳测试与真机冒烟按名字找它,空池时两颗同名会撞。
+ */
 export function PoolEmpty(): JSX.Element {
   const copy = EMPTY_COPY.pool;
   return (
@@ -23,10 +26,12 @@ export function PoolEmpty(): JSX.Element {
       icon={copy.icon}
       title={copy.title}
       body={copy.body}
+      className="pool-empty-state"
       action={
         <Button
-          variant="secondary"
+          variant="primary"
           icon="import"
+          aria-label="导入第一批素材"
           aria-haspopup="dialog"
           onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" })}
         >
@@ -37,8 +42,11 @@ export function PoolEmpty(): JSX.Element {
   );
 }
 
-/** 媒体池筛选无命中:「清空筛选」把 filter 拨回 all。 */
-export function PoolFilteredEmpty(): JSX.Element {
+/**
+ * 媒体池筛选无命中:「清空筛选」把 filter 拨回 all;`onReset` 让媒体池顺带清掉
+ * 搜索词、八维与「更多筛选」(U-06)—— 只拨 filter 时搜索词还挂着,池仍是空的。
+ */
+export function PoolFilteredEmpty({ onReset }: { onReset?: () => void } = {}): JSX.Element {
   const copy = EMPTY_COPY.poolFiltered;
   return (
     <EmptyState
@@ -46,7 +54,13 @@ export function PoolFilteredEmpty(): JSX.Element {
       title={copy.title}
       body={copy.body}
       action={
-        <Button variant="ghost" onClick={() => dispatchWorkspace({ type: "set-filter", filter: "all" })}>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            dispatchWorkspace({ type: "set-filter", filter: "all" });
+            onReset?.();
+          }}
+        >
           清空筛选
         </Button>
       }
@@ -60,10 +74,48 @@ export function MonitorEmpty(): JSX.Element {
   return <EmptyState icon={copy.icon} title={copy.title} body={copy.body} tone="dark" />;
 }
 
-/** 镜头带无章节。 */
-export function BandEmpty(): JSX.Element {
+/**
+ * 镜头带空态(R11 简化专项 #5:一句话 + 一个按钮)。
+ * `no-chapters`:还没有章节 → 「打开导入」;`no-gaps`:仅缺口视图下没有缺口 → 「回到按章节」。
+ */
+export function BandEmpty({ variant = "no-chapters", onAction }: { variant?: "no-chapters" | "no-gaps"; onAction?: () => void } = {}): JSX.Element {
+  if (variant === "no-gaps") {
+    return (
+      <EmptyState
+        icon="check"
+        size="inline"
+        title="所有章节都没有缺口"
+        body="每一章都有素材可用。"
+        className="band-empty-state"
+        action={
+          <Button variant="ghost" size="sm" onClick={onAction}>
+            回到按章节
+          </Button>
+        }
+      />
+    );
+  }
   const copy = EMPTY_COPY.band;
-  return <EmptyState icon={copy.icon} title={copy.title} body={copy.body} />;
+  return (
+    <EmptyState
+      icon={copy.icon}
+      size="inline"
+      title={copy.title}
+      body={copy.body}
+      className="band-empty-state"
+      action={
+        <Button
+          variant="ghost"
+          size="sm"
+          icon="import"
+          aria-haspopup="dialog"
+          onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" })}
+        >
+          打开导入
+        </Button>
+      }
+    />
+  );
 }
 
 /** 检查器未选中。 */

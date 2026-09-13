@@ -45,6 +45,10 @@ const SHELL_DEFAULTS: Record<string, () => unknown> = {
   getAppInfo: () => ({ version: "0.0.0", db_schema_version: 41, worker_count: 4, read_only: false }),
   hasMinimaxKey: () => false,
   // 状态条常驻轮询这三条(StatusStrip)。
+  // R10 U-19:状态条把音乐分析进度并进轮询;回 [] 会让 `running + pending` 变 NaN。
+  getMusicAnalysisProgress: () => ({ total: 0, done: 0, failed: 0, running: 0, pending: 0 }),
+  // R10 U-19:壳挂载时桥接 Tauri 事件,卸载时调返回的解除函数——替身也得回一个函数。
+  bridgeMusicAnalyzedEvents: () => () => undefined,
   getImportProgress: () => ({
     total: 0,
     done: 0,

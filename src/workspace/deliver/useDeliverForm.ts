@@ -4,15 +4,27 @@ import {
   generateJianyingDraft,
   getCurrentEpisode,
   getJianyingAvailability,
+  getSettings,
   listPlatformPresets,
   pickExportFolder,
   revealExport,
+  setSetting,
   startExport,
+  startExportWithCanvas,
+  type ExportCanvas,
   type JianyingAvailability,
   type JianyingDraftResult,
+  type PlatformPreset,
   type TargetPlatform,
 } from "../../api";
-import { closestTargetWithinBudget, presetBudgetSeconds, type TargetSecondsOption } from "./deliverModel";
+import {
+  closestTargetWithinBudget,
+  presetBudgetSeconds,
+  rememberedDeliverChoices,
+  roughCutTargetKey,
+  type TargetSecondsOption,
+} from "./deliverModel";
+import { useExportCanvas, type ExportOrientation } from "./useExportCanvas";
 import type { ExportProgress } from "./useExportProgress";
 
 export interface DeliverForm {
@@ -25,6 +37,16 @@ export interface DeliverForm {
   setTargetSeconds(t: TargetSecondsOption): void;
   includeContactSheet: boolean;
   setIncludeContactSheet(v: boolean): void;
+  /** 剪映草稿开关(打开时主按钮走 generateNative);R10 U-20 起也记住。 */
+  useJianyingDraft: boolean;
+  setUseJianyingDraft(v: boolean): void;
+  /** 本集平台的预设(画布尺寸等);读不到为 null。 */
+  preset: PlatformPreset | null;
+  /** R10 U-05:后端按 平台 / 手动方向 现算的「将要用的画布」;读不到为 null。 */
+  canvas: ExportCanvas | null;
+  /** 本次交付手动指定的画布方向(一次性,不落盘;换集清空);null = 自动。 */
+  overrideOrientation: ExportOrientation | null;
+  setOverrideOrientation(next: ExportOrientation | null): void;
   jianying: JianyingAvailability;
   nativeBusy: boolean;
   nativeResult: JianyingDraftResult | null;
@@ -64,21 +86,56 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
   const [nativeNotice, setNativeNotice] = useState<string | null>(null);
   const [episodeTitle, setEpisodeTitle] = useState("");
   const [episodePlatform, setEpisodePlatform] = useState<TargetPlatform>("general");
-  const [overridePlatform, setOverridePlatform] = useState<TargetPlatform>("general");
-  const [includeContactSheet, setIncludeContactSheet] = useState(true);
-  const [targetSeconds, setTargetSeconds] = useState<TargetSecondsOption>(null);
+  const [overridePlatform, setOverridePlatformState] = useState<TargetPlatform>("general");
+  const [includeContactSheet, setIncludeContactSheetState] = useState(true);
+  const [useJianyingDraft, setUseJianyingDraftState] = useState(false);
+  const [targetSeconds, setTargetSecondsState] = useState<TargetSecondsOption>(null);
+  const [preset, setPreset] = useState<PlatformPreset | null>(null);
+  const [overrideOrientation, setOverrideOrientation] = useState<ExportOrientation | null>(null);
+  const canvas = useExportCanvas(overridePlatform === episodePlatform ? null : overridePlatform, overrideOrientation);
+
+  // 抽屉记住上次选择(R10 U-20):四个 `ui.deliver.*` 键,改一次写一次;打开时读回来,
+  // 记过的平台 / 时长压过本集默认,没记过才按本集平台与预算预选。
+  const remember = useCallback((key: string, value: string) => {
+    void setSetting(key, value).catch(() => undefined);
+  }, []);
+  const setOverridePlatform = useCallback((next: TargetPlatform) => {
+    setOverridePlatformState(next);
+    remember("ui.deliver.platform", next);
+  }, [remember]);
+  const setTargetSeconds = useCallback((next: TargetSecondsOption) => {
+    setTargetSecondsState(next);
+    remember("ui.deliver.target_seconds", roughCutTargetKey(next));
+  }, [remember]);
+  const setIncludeContactSheet = useCallback((next: boolean) => {
+    setIncludeContactSheetState(next);
+    remember("ui.deliver.contact_sheet", String(next));
+  }, [remember]);
+  const setUseJianyingDraft = useCallback((next: boolean) => {
+    setUseJianyingDraftState(next);
+    remember("ui.deliver.jianying_draft", String(next));
+  }, [remember]);
 
   useEffect(() => {
     let alive = true;
     const loadEpisodePlatform = () => {
-      void Promise.all([getCurrentEpisode(), listPlatformPresets().catch(() => [])])
-        .then(([episode, presets]) => {
+      void Promise.all([getCurrentEpisode(), listPlatformPresets().catch(() => []), getSettings().catch(() => ({}))])
+        .then(([episode, presets, settings]) => {
           if (!alive) return;
+          const remembered = rememberedDeliverChoices(settings ?? {});
           setEpisodeTitle(episode.title);
           setEpisodePlatform(episode.target_platform);
-          setOverridePlatform(episode.target_platform);
-          const preset = presets.find((candidate) => candidate.platform === episode.target_platform);
-          setTargetSeconds(closestTargetWithinBudget(presetBudgetSeconds(preset)));
+          const platform = remembered.platform ?? episode.target_platform;
+          setOverridePlatformState(platform);
+          const episodePreset = presets.find((candidate) => candidate.platform === episode.target_platform);
+          setPreset(presets.find((candidate) => candidate.platform === platform) ?? episodePreset ?? null);
+          setTargetSecondsState(
+            remembered.targetSeconds === undefined
+              ? closestTargetWithinBudget(presetBudgetSeconds(episodePreset))
+              : remembered.targetSeconds,
+          );
+          setIncludeContactSheetState(remembered.includeContactSheet);
+          setUseJianyingDraftState(remembered.useJianyingDraft);
         })
         .catch(() => undefined);
     };
@@ -86,6 +143,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
       // 换集:上一集的草稿结果与错误不再成立(轮询状态由 useExportProgress 自己重置)。
       setNativeResult(null);
       setFormError(null);
+      setOverrideOrientation(null);
       loadEpisodePlatform();
     };
     loadEpisodePlatform();
@@ -122,16 +180,15 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
   const startStablePackage = useCallback(
     async (selected: string) => {
       setDestination(selected);
-      const started = await startExport(
-        selected,
-        overridePlatform === episodePlatform ? undefined : overridePlatform,
-        includeContactSheet,
-        targetSeconds ?? undefined,
-      );
+      const platform = overridePlatform === episodePlatform ? null : overridePlatform;
+      // 手动切过画布方向才走带 overrideOrientation 的那条;没切走旧命令(行为不变)。
+      const started = overrideOrientation
+        ? await startExportWithCanvas(selected, platform, overrideOrientation, includeContactSheet, targetSeconds)
+        : await startExport(selected, platform ?? undefined, includeContactSheet, targetSeconds ?? undefined);
       setStatus(started);
       setJobId(started.job_id);
     },
-    [episodePlatform, includeContactSheet, overridePlatform, setJobId, setStatus, targetSeconds],
+    [episodePlatform, includeContactSheet, overrideOrientation, overridePlatform, setJobId, setStatus, targetSeconds],
   );
 
   const generate = useCallback(async () => {
@@ -223,6 +280,12 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     setTargetSeconds,
     includeContactSheet,
     setIncludeContactSheet,
+    useJianyingDraft,
+    setUseJianyingDraft,
+    preset,
+    canvas,
+    overrideOrientation,
+    setOverrideOrientation,
     jianying,
     nativeBusy,
     nativeResult,

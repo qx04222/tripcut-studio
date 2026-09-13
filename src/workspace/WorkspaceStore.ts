@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ClipDimensionKey, SettingsMap } from "../api";
+import type { SettingsSectionId } from "../settingsSections";
 import type { SelectionFilter } from "./poolModel";
 import {
   UI_SETTING_DEFAULTS,
@@ -28,11 +29,27 @@ export interface WorkspaceState {
   poolWidth: number;
   inspectorWidth: number;
   monitorRatio: number;
+  /** 用户手动折叠(⌘1/⌘2 或竖条按钮),落 `ui.pane.*_collapsed`。 */
   poolCollapsed: boolean;
   inspectorCollapsed: boolean;
+  /**
+   * 窄窗自动折叠(R10 U-04)。与手动折叠**分开记**且永不落盘:此前自动折叠直接翻
+   * `inspectorCollapsed`,被 persistedPairs 写进设置表——窗口放大后没人把它翻回来,
+   * 真机上 1280 → 1704 检查器一直是竖条。实际显示按 `isPaneCollapsed()`(二者取或)。
+   */
+  poolAutoCollapsed: boolean;
+  inspectorAutoCollapsed: boolean;
   bandMode: BandMode;
   openDrawer: DrawerKind;
   importTab: "source" | "jobs" | "missing";
+  /** 打开设置 sheet 时要落到的分区(`openSettings(section)`);null = sheet 自己的默认分区。 */
+  settingsSection: SettingsSectionId | null;
+  /**
+   * 启动时待恢复的选中(R10 U-23,`ui.selection.last_clip`)。素材表还没拉回来之前
+   * 不能直接写进 `selection`(检查器会对着一个可能已删除的 id 转圈),壳在 clips feed
+   * 首次落地后核对存在再选中,随后清掉。
+   */
+  restoreClipId: number | null;
   inspectorSections: readonly string[];
   filter: SelectionFilter;
   dimension: ClipDimensionKey | "";
@@ -64,8 +81,16 @@ export type WorkspaceAction =
   | { type: "clear-selection" }
   | { type: "set-pane-size"; pane: "pool" | "inspector" | "monitor"; value: number }
   | { type: "toggle-pane"; pane: "pool" | "inspector" }
+  /** 窄窗阈值跨越时由壳派发;只改 auto 位,不碰用户手动位。 */
+  | { type: "set-auto-collapse"; pool?: boolean; inspector?: boolean }
   | { type: "set-band-mode"; mode: BandMode }
-  | { type: "open-drawer"; drawer: Exclude<DrawerKind, null>; tab?: WorkspaceState["importTab"] }
+  | {
+      type: "open-drawer";
+      drawer: Exclude<DrawerKind, null>;
+      tab?: WorkspaceState["importTab"];
+      section?: SettingsSectionId;
+    }
+  | { type: "consume-restore-clip" }
   | { type: "close-drawer" }
   | { type: "toggle-inspector-section"; id: string }
   | { type: "set-filter"; filter: SelectionFilter }
@@ -102,9 +127,13 @@ export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
   monitorRatio: Number(UI_SETTING_DEFAULTS["ui.pane.monitor_height"]),
   poolCollapsed: false,
   inspectorCollapsed: false,
+  poolAutoCollapsed: false,
+  inspectorAutoCollapsed: false,
   bandMode: "story",
   openDrawer: null,
   importTab: "source",
+  settingsSection: null,
+  restoreClipId: null,
   inspectorSections: [],
   filter: "all",
   dimension: "",
@@ -121,6 +150,21 @@ export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
  * 变成一条永远会被忘掉的纪律。
  */
 const HYDRATED_STATES = new WeakSet<WorkspaceState>();
+
+/** 实际显示用的折叠判定:手动折叠或窄窗自动折叠,任一为真就是竖条。 */
+export function isPaneCollapsed(state: WorkspaceState, pane: "pool" | "inspector"): boolean {
+  return pane === "pool"
+    ? state.poolCollapsed || state.poolAutoCollapsed
+    : state.inspectorCollapsed || state.inspectorAutoCollapsed;
+}
+
+/** `ui.selection.last_clip`:没写过 / 坏值 / 非正整数一律当没有。 */
+function readRestoreClipId(settings: SettingsMap): number | null {
+  const raw = readUiSetting(settings, "ui.selection.last_clip");
+  if (raw === "") return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 function isBandMode(value: string): value is BandMode {
   return ["story", "music", "journey", "destination", "template"].includes(value);
@@ -175,10 +219,23 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         return { ...state, inspectorWidth: clamp(action.value, INSPECTOR_WIDTH_MIN, INSPECTOR_WIDTH_MAX) };
       }
       return { ...state, monitorRatio: clamp(action.value, MONITOR_RATIO_MIN, MONITOR_RATIO_MAX) };
-    case "toggle-pane":
-      return action.pane === "pool"
-        ? { ...state, poolCollapsed: !state.poolCollapsed }
-        : { ...state, inspectorCollapsed: !state.inspectorCollapsed };
+    case "toggle-pane": {
+      // 「切换」按**实际显示**判:竖条状态下(不管是手动还是窄窗自动折的)一律展开,
+      // 且把两个位都清掉——用户明确要看,窄窗的自动折叠让位;展开状态下折叠记为手动。
+      // ⌘2 因此在任何状态下都能把检查器找回来(U-04)。
+      if (action.pane === "pool") {
+        const collapsed = isPaneCollapsed(state, "pool");
+        return { ...state, poolCollapsed: !collapsed, poolAutoCollapsed: false };
+      }
+      const collapsed = isPaneCollapsed(state, "inspector");
+      return { ...state, inspectorCollapsed: !collapsed, inspectorAutoCollapsed: false };
+    }
+    case "set-auto-collapse":
+      return {
+        ...state,
+        poolAutoCollapsed: action.pool ?? state.poolAutoCollapsed,
+        inspectorAutoCollapsed: action.inspector ?? state.inspectorAutoCollapsed,
+      };
     case "set-band-mode":
       return { ...state, bandMode: action.mode };
     case "open-drawer":
@@ -186,7 +243,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         ...state,
         openDrawer: action.drawer,
         importTab: action.tab ?? state.importTab,
+        settingsSection: action.drawer === "settings" ? (action.section ?? null) : state.settingsSection,
       };
+    case "consume-restore-clip":
+      return state.restoreClipId === null ? state : { ...state, restoreClipId: null };
     case "close-drawer":
       return { ...state, openDrawer: null };
     case "toggle-inspector-section":
@@ -211,8 +271,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       for (let step = 1; step <= size; step += 1) {
         // +size 再取模:⇧F6 往回走时下标会变负,JS 的 % 保留负号。
         const candidate = PANE_ORDER[(start + direction * step + size * size) % size]!;
-        if (candidate === "pool" && state.poolCollapsed) continue;
-        if (candidate === "inspector" && state.inspectorCollapsed) continue;
+        if (candidate === "pool" && isPaneCollapsed(state, "pool")) continue;
+        if (candidate === "inspector" && isPaneCollapsed(state, "inspector")) continue;
         return { ...state, focusedPane: candidate };
       }
       return state;
@@ -250,6 +310,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         inspectorSections: readUiList(s, "ui.inspector.sections_open"),
         filter: readUiSetting(s, "ui.pool.filter") as SelectionFilter,
         dimension,
+        restoreClipId: readRestoreClipId(s),
       };
       HYDRATED_STATES.add(next);
       return next;
@@ -288,6 +349,13 @@ export function persistedPairs(
   }
   if (previous.filter !== next.filter) pairs.push(["ui.pool.filter", next.filter]);
   if (previous.dimension !== next.dimension) pairs.push(["ui.pool.dimension", next.dimension]);
+  // 选中本身是会话态,只有「最近选中的素材」落盘(U-23):重启后壳按它恢复选中。
+  // 清除选中 / 选到槽位不改这个键——用户下次启动仍回到最后看过的那条。
+  const nextClip = next.selection?.kind === "clip" ? next.selection.clipId : null;
+  const previousClip = previous.selection?.kind === "clip" ? previous.selection.clipId : null;
+  if (nextClip !== null && nextClip !== previousClip) {
+    pairs.push(["ui.selection.last_clip", String(nextClip)]);
+  }
   return pairs;
 }
 

@@ -42,6 +42,19 @@ struct MockServer {
 
 impl MockServer {
     fn spawn(node: &PathBuf, outcome: &str, delay_ms: u64) -> Self {
+        // 并行测试各自 pick_free_port 会撞车(探测到的空闲端口在 node 绑定前被
+        // 另一个测试抢走 → EADDRINUSE → 子进程退出 → 「did not report listening」)。
+        // 门禁下已三次假红,换端口重试三次。
+        for attempt in 0..3 {
+            if let Some(server) = Self::try_spawn(node, outcome, delay_ms) {
+                return server;
+            }
+            eprintln!("mock server attempt {attempt} did not come up; retrying on a new port");
+        }
+        panic!("mock server did not report listening in time (3 attempts)");
+    }
+
+    fn try_spawn(node: &PathBuf, outcome: &str, delay_ms: u64) -> Option<Self> {
         let port = pick_free_port();
         let mut child = Command::new(node)
             .arg(mock_script_path())
@@ -72,7 +85,11 @@ impl MockServer {
                 break;
             }
         }
-        assert!(ready, "mock server did not report listening in time");
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
 
         // Keep draining stdout (and stderr) for the server's whole life.
         // If we just drop the reader here, our end of the pipe closes; the
@@ -103,7 +120,7 @@ impl MockServer {
             });
         }
 
-        Self { child, base_url: format!("http://127.0.0.1:{port}") }
+        Some(Self { child, base_url: format!("http://127.0.0.1:{port}") })
     }
 }
 

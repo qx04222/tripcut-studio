@@ -6900,6 +6900,30 @@ button:hover:not(:disabled) {
   line-height: 1.55;
 }
 
+/* R10 U-14:按钮挪进 .inspector-ai-actions(旁边多了「去设置」),两代选择器都保留。 */
+.inspector-ai-description > .inspector-ai-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.inspector-ai-description > .inspector-ai-actions > button:first-child {
+  flex: 1 1 auto;
+  min-height: 32px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: var(--accent-tint);
+  font: inherit;
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.inspector-ai-description > .inspector-ai-actions > button:first-child:disabled {
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
 .inspector-ai-description > button {
   width: 100%;
   min-height: 32px;

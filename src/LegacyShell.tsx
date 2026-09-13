@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
+import { setFirstRunDone } from "./api";
 import { CommandPalette } from "./CommandPalette";
 import { DeliverPage } from "./DeliverPage";
 import { EpisodePanel } from "./EpisodePanel";
@@ -98,6 +99,8 @@ export function AppShell({ route }: { route: RoutePath }) {
   });
   const closeWizard = () => {
     try { localStorage.setItem("tripcut.wizard.done", "1"); } catch { /* per-viewer convenience */ }
+    // R10 U-22:向导走完 = 首启引导完成,写进 settings,下次启动 FirstRunGuide 不再弹。
+    void setFirstRunDone().catch(() => undefined);
     setWizardOpen(false);
   };
   useEffect(() => {

@@ -56,6 +56,8 @@ import type {
   StoryTemplateInfo,
   Storyboard,
   WatchedFolder,
+  QuickExportOutcome,
+  QuickExportSelection,
 } from "../api";
 
 // ---------------------------------------------------------------------------
@@ -530,6 +532,7 @@ function buildGaps(): StoryGap[] {
     {
       id: 401,
       chapter_id: 102,
+      band_chapter_id: 102,
       chapter_title: "大理古城与洱海",
       beat_id: null,
       slot: "REAL/ESTABLISHING",
@@ -541,6 +544,7 @@ function buildGaps(): StoryGap[] {
     {
       id: 402,
       chapter_id: 103,
+      band_chapter_id: 103,
       chapter_title: "沙溪古镇的一天",
       beat_id: null,
       slot: "TRANSITION",
@@ -1491,7 +1495,117 @@ const HANDLERS: Record<string, Handler> = {
   list_music_tracks: () => [MUSIC_TRACK],
   get_music_analysis: () => musicAnalysis,
   delete_music_track: noop,
+
+  // --- R10 车道 B(Rust 核心)追加的命令 ---
+  // U-05:画布预览——抖音/小红书/朋友圈竖版,B站/家庭横版,通用跟随素材多数(mock 里按横)。
+  preview_export_canvas: ({ overridePlatform, overrideOrientation }) => {
+    const platform = (typeof overridePlatform === "string" ? overridePlatform : "general") as PlatformPreset["platform"];
+    const preset = PLATFORM_PRESETS.find((item) => item.platform === platform) ?? PLATFORM_PRESETS[0];
+    const forced = overrideOrientation === "portrait" || overrideOrientation === "landscape" ? overrideOrientation : null;
+    const presetOrientation =
+      platform === "douyin" || platform === "xiaohongshu" || platform === "moments" ? "portrait" : "landscape";
+    const orientation = forced ?? presetOrientation;
+    const [width, height] = orientation === "portrait" ? preset.portrait : preset.landscape;
+    return {
+      platform,
+      display_name: preset.display_name,
+      orientation,
+      orientation_source: forced ? "override" : platform === "general" ? "fallback" : "preset",
+      width,
+      height,
+    };
+  },
+  // U-16:新建集——有素材则封存当前集并切换,空集就地改名。
+  create_episode: ({ title }) => {
+    const name = str(title, "title").trim();
+    if (!name) throw new Error("集标题必须为 1-120 字");
+    const current = state.episodes.find((item) => item.status === "active");
+    if (!current) throw new Error("没有处于进行中的集");
+    if (current.clip_count === 0) {
+      current.title = name;
+      return { episode: current, reused_empty: true, archived: null };
+    }
+    current.status = "archived";
+    current.archived_at = new Date().toISOString();
+    const next: EpisodeSummary = {
+      ...current,
+      id: Math.max(...state.episodes.map((item) => item.id)) + 1,
+      title: name,
+      theme: "",
+      status: "active",
+      archived_at: null,
+      clip_count: 0,
+      favorite_count: 0,
+      export_count: 0,
+      episode_number: (current.episode_number ?? state.episodes.length) + 1,
+    };
+    state.episodes.unshift(next);
+    return { episode: next, reused_empty: false, archived: current };
+  },
+  // U-19:状态条音乐分析计数(mock 里唯一一条音乐轨已分析完)。
+  get_music_analysis_progress: () => ({ total: 1, done: 1, failed: 0, running: 0, pending: 0 }),
+  // U-22:首启引导标记(mock 里当作已完成,截图装置不弹 FIRST RUN)。
+  get_first_run_done: () => true,
+  set_first_run_done: noop,
+  // U-24:导入模型文件(mock 里一律当作校验通过的 large-v3-turbo)。
+  import_whisper_model: ({ path }) => ({
+    tier: "large-v3-turbo",
+    file_name: "ggml-large-v3-turbo.bin",
+    target_path: "/Users/mock/Library/Application Support/TripCutStudio/models/ggml-large-v3-turbo.bin",
+    sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    matches_active_tier: str(path, "path").length > 0,
+  }),
+  // U-28:添加 LUT——mock 里把路径的文件名当作新 LUT 追加到列表。
+  import_lut: ({ path }) => {
+    const source = str(path, "path");
+    const fileName = source.split("/").pop() ?? source;
+    return [...(handleMockCommand("list_display_luts", {}) as string[]), `/Users/mock/Library/Application Support/TripCutStudio/luts/${fileName}`];
+  },
+  // R10 接线:两个 rfd 文件选择在 mock 里直接给一条假路径(截图装置不弹系统面板)。
+  pick_whisper_model_file: () => "/Users/mock/Downloads/ggml-large-v3-turbo.bin",
+  pick_lut_file: () => "/Users/mock/Downloads/Teal-Orange.cube",
+  // R11 车道 B:时刻分 / 建议段 / 自动挑选,实现在文件末尾(函数声明提升,故可在此展开)。
+  ...momentHandlers(),
+  // R11 车道 E:快速导出。plan 按 selection 裁剪出文件清单;quick_export 在 mock 里直接
+  // 报"完成"(mode=quick、n 个文件、假路径),抽屉的完成 toast 看的就是它。
+  plan_quick_export: ({ destDir, selection }) => quickExportPlan(destDir, selection),
+  quick_export: ({ destDir, selection }) => {
+    const plan = quickExportPlan(destDir, selection);
+    state.exportStatus = {
+      ...IDLE_EXPORT,
+      job_id: 2,
+      status: "done",
+      stage: "complete",
+      mode: "quick",
+      selected_count: plan.files.length,
+      selected_segment_count: plan.files.filter((name) => name.includes("_段")).length,
+      selected_whole_count: plan.files.filter((name) => !name.includes("_段")).length,
+      completed_items: plan.files.length,
+      output_path: plan.dir,
+      items: plan.files.map((name, index) => ({ clip_id: index, file_name: name, output_name: name, status: "done", note: null, warning: false })),
+    };
+    return { ...plan, job_id: 2 };
+  },
 };
+
+function quickExportPlan(destDir: unknown, selection: unknown): QuickExportOutcome {
+  const picked = (selection ?? null) as QuickExportSelection | null;
+  const segmentIds = picked?.segment_ids ?? null;
+  const clipIds = picked?.clip_ids ?? null;
+  const unfiltered = segmentIds === null && clipIds === null;
+  const favorites = state.clips.filter((clip) => clip.binary_rating === 1 && !clip.generated_source && clip.id !== null);
+  const segmentRows = state.segments
+    .filter((segment) => unfiltered || (segmentIds ?? []).includes(segment.id) || (clipIds ?? []).includes(segment.clip_id))
+    .map((segment) => `${(state.clips.find((clip) => clip.id === segment.clip_id)?.file_name ?? "片段").replace(/\.[^.]+$/, "")}_段${segment.id}.mp4`);
+  const wholeRows = favorites
+    .filter((clip) => !state.segments.some((segment) => segment.clip_id === clip.id))
+    .filter((clip) => unfiltered || (clipIds ?? []).includes(clip.id as number))
+    .map((clip) => clip.file_name);
+  const files = [...segmentRows, ...wholeRows].map((name, index) => `${String(index + 1).padStart(3, "0")}_${name}`);
+  if (files.length === 0) throw new Error("当前没有精选段或收藏素材；请先打点保存片段，或用 F 收藏整条素材");
+  const folder = "EP03_导出_2026-09-13";
+  return { job_id: null, dir: destDir ? `${str(destDir, "destDir")}/${folder}` : folder, files, skipped: [] };
+}
 
 let dimensionsCache: ClipDimension[] | null = null;
 function buildDimensionsCached(): ClipDimension[] {
@@ -1517,6 +1631,13 @@ function audioTracksFor(clipId: number): ClipAudioTrack[] {
   return tracks;
 }
 
+// R11 车道 C:半数素材带「有建议段」角标(Rust 尚未给 has_suggestions;车道 B 的时刻分 / 建议段 / 自动挑选在 momentHandlers)。
+{
+  const baseListClips = HANDLERS.list_clips!;
+  HANDLERS.list_clips = (args) =>
+    (baseListClips(args) as ClipListItem[]).map((clip) => ({ ...clip, has_suggestions: clip.id !== null && clip.id % 2 === 0 }));
+}
+
 /** 已登记的命令名 —— 测试拿它跟 `src/api.ts` 里的 invoke 列表对账。 */
 export const MOCK_COMMANDS: readonly string[] = Object.keys(HANDLERS);
 
@@ -1524,4 +1645,184 @@ export function handleMockCommand(command: string, args: Args): unknown {
   const handler = HANDLERS[command];
   if (!handler) throw new MockCommandMissing(command);
   return handler(args);
+}
+
+/**
+ * R10 车道 E(U-36)截图开关:`?recovery=1` 让假后端报「异常退出」,应用先走恢复页。
+ * 只追加不改上面的表——正常预览路径一个字节都不变。
+ */
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("recovery")) {
+  HANDLERS.get_doctor_report = () => ({ ...DOCTOR, status: "WARN", abnormal_exit: true, recovered_jobs: 2, cache_missing: 1 });
+}
+
+// ---------------------------------------------------------------------------
+// R11 车道 B:时刻分与自动挑选(只追加;确定性:按 clipId 种子)
+// ---------------------------------------------------------------------------
+
+import type { AutoSelectOutcome, Moment, MomentsProgress, SegmentSuggestion } from "../api";
+
+const MOMENT_WINDOW_TICKS = 500;
+const autoBatches = new Map<string, number[]>();
+
+/** 每条素材一条确定性的「山形」曲线:中段高、两头低,第 7 窗一个场景切换。 */
+function momentsFor(clipId: number): Moment[] {
+  const clip = clipById(clipId);
+  const duration = clip.duration_ticks ?? 6000;
+  const count = Math.max(1, Math.ceil(duration / MOMENT_WINDOW_TICKS));
+  const r = mulberry32(clipId * 7919);
+  return Array.from({ length: count }, (_, index) => {
+    const phase = index / Math.max(1, count - 1);
+    const hill = 1 - Math.abs(phase - 0.55) * 1.6;
+    const score = Math.min(1, Math.max(0.05, hill + (r() - 0.5) * 0.15));
+    const sharp = Math.min(1, Math.max(0, score + 0.1));
+    const motion = 0.1 + r() * 0.3;
+    const exposureOk = score > 0.25;
+    const loud = clip.analysis?.has_audio !== false && r() > 0.3;
+    const speech = loud && r() > 0.5;
+    const reasons: string[] = [];
+    if (sharp >= 0.6) reasons.push("清晰");
+    if (motion >= 0.08 && motion <= 0.6) reasons.push("运动适中");
+    if (exposureOk) reasons.push("曝光正常");
+    if (speech) reasons.push("有人声");
+    else if (loud) reasons.push("有声音");
+    return {
+      clip_id: clipId,
+      win_index: index,
+      t_start_ticks: index * MOMENT_WINDOW_TICKS,
+      t_end_ticks: Math.min(duration, (index + 1) * MOMENT_WINDOW_TICKS),
+      sharp,
+      motion,
+      exposure_ok: exposureOk,
+      loud,
+      speech,
+      scene_cut: index === 7,
+      score,
+      reasons,
+    };
+  });
+}
+
+function suggestionsFor(clipId: number, targetSecs: number): SegmentSuggestion[] {
+  const moments = momentsFor(clipId);
+  const span = Math.max(1, Math.round(targetSecs * 2));
+  if (moments.length <= span) {
+    const score = moments.reduce((sum, m) => sum + m.score, 0) / moments.length;
+    return [{ in_ticks: moments[0]!.t_start_ticks, out_ticks: moments[moments.length - 1]!.t_end_ticks, score, reasons: moments[0]!.reasons }];
+  }
+  const candidates: Array<{ start: number; score: number }> = [];
+  for (let start = 0; start + span <= moments.length; start += 1) {
+    if (moments.slice(start + 1, start + span).some((m) => m.scene_cut)) continue;
+    const score = moments.slice(start, start + span).reduce((sum, m) => sum + m.score, 0) / span;
+    candidates.push({ start, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || a.start - b.start);
+  const picked: number[] = [];
+  const out: SegmentSuggestion[] = [];
+  for (const candidate of candidates) {
+    if (picked.some((p) => Math.abs(p - candidate.start) < span)) continue;
+    picked.push(candidate.start);
+    const slice = moments.slice(candidate.start, candidate.start + span);
+    out.push({
+      in_ticks: slice[0]!.t_start_ticks,
+      out_ticks: slice[slice.length - 1]!.t_end_ticks,
+      score: candidate.score,
+      reasons: ["清晰", "运动适中", "曝光正常", "有人声", "有声音"].filter(
+        (label) => slice.filter((m) => m.reasons.includes(label)).length * 2 >= slice.length,
+      ),
+    });
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+function momentHandlers(): Record<string, Handler> {
+  return {
+  get_clip_moments: ({ clipId }) => momentsFor(num(clipId, "clipId")),
+  suggest_segments: ({ clipId, targetSecs }) =>
+    suggestionsFor(num(clipId, "clipId"), typeof targetSecs === "number" && targetSecs > 0 ? targetSecs : 5),
+  auto_select_episode: ({ budgetSecs, scope }) => {
+    const budget = typeof budgetSecs === "number" && budgetSecs > 0 ? budgetSecs : 60;
+    const range = typeof scope === "string" ? scope : "favorites_or_rated3";
+    const eligible = state.clips.filter((clip) => {
+      if (clip.id === null || clip.generated_source) return false;
+      if (state.segments.some((segment) => segment.clip_id === clip.id)) return false;
+      if (range === "all") return true;
+      if (range === "favorites") return clip.binary_rating === 1;
+      if (range === "rated3") return (clip.star_rating ?? 0) >= 3;
+      return clip.binary_rating === 1 || (clip.star_rating ?? 0) >= 3;
+    });
+    if (eligible.length === 0) {
+      throw new Error("这个范围里没有可挑的素材:先收藏几条或给素材打星,等分析跑完再试;或把范围改成「全部」");
+    }
+    const byChapter = new Map<number | null, ClipListItem[]>();
+    for (const clip of eligible) {
+      const key = chapterOfClip(clip);
+      byChapter.set(key, [...(byChapter.get(key) ?? []), clip]);
+    }
+    const batchId = `auto-mock-${autoBatches.size + 1}`;
+    const created: number[] = [];
+    const chapters = new Set<number | null>();
+    let total = 0;
+    let progressed = true;
+    const cursors = new Map<number | null, number>();
+    while (progressed) {
+      progressed = false;
+      for (const [key, clips] of byChapter) {
+        const cursor = cursors.get(key) ?? 0;
+        if (cursor >= clips.length) continue;
+        cursors.set(key, cursor + 1);
+        const clip = clips[cursor]!;
+        const best = suggestionsFor(clip.id as number, 5)[0];
+        if (!best) continue;
+        const secs = (best.out_ticks - best.in_ticks) / 1000;
+        if (total + secs > budget) continue;
+        const seg: SelectSegment = {
+          id: 900 + state.segments.length + 1,
+          clip_id: clip.id as number,
+          in_ticks: best.in_ticks,
+          out_ticks: best.out_ticks,
+          tb_num: TB_NUM,
+          tb_den: TB_DEN,
+        };
+        state.segments.push(seg);
+        clip.select_count += 1;
+        created.push(seg.id);
+        chapters.add(key);
+        total += secs;
+        progressed = true;
+      }
+    }
+    autoBatches.set(batchId, created);
+    bump(state);
+    const outcome: AutoSelectOutcome = { created, total_secs: total, chapters_covered: chapters.size, batch_id: batchId };
+    return outcome;
+  },
+  undo_auto_select: ({ batchId }) => {
+    const ids = autoBatches.get(str(batchId, "batchId")) ?? [];
+    const before = state.segments.length;
+    for (const segment of state.segments.filter((segment) => ids.includes(segment.id))) {
+      clipById(segment.clip_id).select_count = Math.max(0, clipById(segment.clip_id).select_count - 1);
+    }
+    state.segments = state.segments.filter((segment) => !ids.includes(segment.id));
+    autoBatches.delete(str(batchId, "batchId"));
+    bump(state);
+    return before - state.segments.length;
+  },
+  get_moments_progress: (): MomentsProgress => ({ total: CLIP_COUNT, done: CLIP_COUNT - 3, failed: 0, running: 1, pending: 2 }),
+  enqueue_moments_backfill: () => 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// R11 简化专项(车道 simplify)截图开关:`?empty=1` 让素材库为空 —— 预览区显示首启三步引导卡。
+// 只追加不改上面的表;正常预览路径一个字节都不变。
+// ---------------------------------------------------------------------------
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("empty")) {
+  HANDLERS.list_clips = () => [];
+  HANDLERS.list_shot_stacks = () => [];
+  HANDLERS.get_storyboard = () => ({
+    chapters: [], candidates: [], items: [], can_undo: false, mode: "legacy", mode_notice: "", narrative: null, narration_job_status: null, current_template: null,
+  });
+  HANDLERS.list_story_gaps = () => [];
+  HANDLERS.list_clip_dimensions = () => [];
 }

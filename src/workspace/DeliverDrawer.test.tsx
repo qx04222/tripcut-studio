@@ -11,7 +11,7 @@ const apiMock = await vi.hoisted(async () => {
 });
 vi.mock("../api", () => apiMock);
 
-import type { EpisodeSummary, ExportStatus, PlatformPreset } from "../api";
+import type { EpisodeSummary, ExportCanvas, ExportStatus, PlatformPreset } from "../api";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 
@@ -86,6 +86,13 @@ async function openDeliverDrawer(): Promise<void> {
     const button = screen.getByRole("button", { name: "生成交付包" });
     button.focus();
     button.click();
+    await Promise.resolve();
+  });
+  // R11 车道 E:抽屉默认是「快速导出」;本文件测的是完整交付包那套表单,先切过去
+  // (快速模式的用例在 DeliverDrawerQuick.test.tsx)。
+  const fullChip = await screen.findByRole("button", { name: "完整交付包" });
+  await act(async () => {
+    fullChip.click();
     await Promise.resolve();
   });
 }
@@ -188,10 +195,11 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
     expect(await within(dialog).findByText("4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05")).toBeTruthy();
   });
 
-  it("主按钮「生成交付包」primary;点它选目录并 startExport", async () => {
+  it("主按钮「开始生成」primary(R10 U-20 起与顶栏「生成交付包」不同名);点它选目录并 startExport", async () => {
     apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
     const dialog = await openDialog();
-    const button = within(dialog).getByRole("button", { name: "生成交付包" });
+    expect(within(dialog).queryByRole("button", { name: "生成交付包" })).toBeNull();
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
     expect(button.className).toContain("ui-button--primary");
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     await act(async () => {
@@ -225,7 +233,7 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
       await Promise.resolve();
     });
     expect(jianying.getAttribute("aria-checked")).toBe("true");
-    const button = within(dialog).getByRole("button", { name: "生成交付包" });
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     await act(async () => {
       button.click();
@@ -309,7 +317,7 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
     apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 0, selected_segment_count: 0, selected_whole_count: 0 });
     const dialog = await openDialog();
     expect(await within(dialog).findByText(/还没有交付项/)).toBeTruthy();
-    expect((within(dialog).getByRole("button", { name: "生成交付包" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole("button", { name: "开始生成" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("「交付包里有什么」是折叠段,默认收起,没有 01/02/03 水印", async () => {
@@ -319,5 +327,140 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
     expect(details.querySelector("summary")!.textContent).toBe("交付包里有什么");
     expect(dialog.querySelector(".deliver-part-index")).toBeNull();
     expect(dialog.querySelector(".deliver-content-card span")).toBeNull();
+  });
+});
+
+describe("R10 U-20:抽屉记住上次选择,画布尺寸", () => {
+  async function openDialog(): Promise<HTMLElement> {
+    render(<WorkspaceShell />);
+    await openDeliverDrawer();
+    return screen.findByRole("dialog", { name: "生成交付包" });
+  }
+
+  it("平台 / 时长 / 联系表 / 剪映草稿改一次写一次 ui.deliver.*;重开抽屉按记住的值预选", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    const dialog = await openDialog();
+    const platform = within(dialog).getByRole("combobox", { name: "本次交付平台" }) as HTMLSelectElement;
+    await waitFor(() => expect(platform.value).toBe("xiaohongshu"));
+    await act(async () => {
+      fireEvent.change(platform, { target: { value: "douyin" } });
+      fireEvent.change(within(dialog).getByRole("combobox", { name: "参考粗剪时长" }), { target: { value: "30" } });
+      within(dialog).getByRole("switch", { name: "联系表.pdf" }).click();
+      await Promise.resolve();
+    });
+    expect(apiMock.setSetting).toHaveBeenCalledWith("ui.deliver.platform", "douyin");
+    expect(apiMock.setSetting).toHaveBeenCalledWith("ui.deliver.target_seconds", "30");
+    expect(apiMock.setSetting).toHaveBeenCalledWith("ui.deliver.contact_sheet", "false");
+
+    cleanup();
+    __resetWorkspaceForTests();
+    apiMock.getSettings.mockResolvedValue({
+      "ui.deliver.platform": "douyin",
+      "ui.deliver.target_seconds": "30",
+      "ui.deliver.contact_sheet": "false",
+    });
+    const again = await openDialog();
+    const platformAgain = within(again).getByRole("combobox", { name: "本次交付平台" }) as HTMLSelectElement;
+    await waitFor(() => expect(platformAgain.value).toBe("douyin"));
+    expect((within(again).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).value).toBe("30");
+    expect(within(again).getByRole("switch", { name: "联系表.pdf" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("没记过就按本集平台与预算预选(小红书 90s → 60 秒);坏值当没记", async () => {
+    apiMock.getSettings.mockResolvedValue({ "ui.deliver.platform": "myspace", "ui.deliver.target_seconds": "99" });
+    const dialog = await openDialog();
+    const platform = within(dialog).getByRole("combobox", { name: "本次交付平台" }) as HTMLSelectElement;
+    await waitFor(() => expect(platform.value).toBe("xiaohongshu"));
+    expect((within(dialog).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).value).toBe("60");
+  });
+
+  it("导出状态带 canvas 时副标题显示「画布 W×H」;不带就不显示", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, canvas: { width: 1080, height: 1920 } } as never);
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText(/画布 1080×1920/)).toBeTruthy();
+    cleanup();
+    __resetWorkspaceForTests();
+    apiMock.getExportStatus.mockResolvedValue(idleStatus);
+    const plain = await openDialog();
+    await within(plain).findByText("本次交付平台");
+    expect(plain.querySelector(".deliver-subtitle")?.textContent).not.toContain("画布");
+  });
+});
+
+describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是一次性覆盖", () => {
+  const portraitPreset: ExportCanvas = {
+    platform: "xiaohongshu", display_name: "小红书", orientation: "portrait", orientation_source: "preset", width: 1080, height: 1920,
+  };
+  const landscapeOverride: ExportCanvas = {
+    ...portraitPreset, orientation: "landscape", orientation_source: "override", width: 1920, height: 1080,
+  };
+
+  async function openDialog(): Promise<HTMLElement> {
+    render(<WorkspaceShell />);
+    await openDeliverDrawer();
+    return screen.findByRole("dialog", { name: "生成交付包" });
+  }
+
+  it("副标题显示「画布 W×H · 来源」;点「横版」后按 override 重算并显示「本次手动」", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    apiMock.previewExportCanvas.mockImplementation(async (_platform: unknown, orientation: unknown) =>
+      orientation === "landscape" ? landscapeOverride : portraitPreset,
+    );
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText(/画布 1080×1920 · 平台习惯/)).toBeTruthy();
+    const group = within(dialog).getByRole("group", { name: "本次交付画布方向" });
+    expect(within(group).getByRole("button", { name: "竖版" }).getAttribute("aria-pressed")).toBe("true");
+    await act(async () => {
+      within(group).getByRole("button", { name: "横版" }).click();
+      await Promise.resolve();
+    });
+    expect(await within(dialog).findByText(/画布 1920×1080 · 本次手动/)).toBeTruthy();
+    expect(apiMock.previewExportCanvas).toHaveBeenLastCalledWith(null, "landscape");
+    expect(within(group).getByRole("button", { name: "横版" }).getAttribute("aria-pressed")).toBe("true");
+    // 一次性覆盖不落盘
+    expect(apiMock.setSetting).not.toHaveBeenCalledWith(expect.stringContaining("orientation"), expect.anything());
+  });
+
+  it("R-03:「参考粗剪」内容行与包说明按解析画布写 W×H,不再写死 1080p", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    apiMock.previewExportCanvas.mockResolvedValue(portraitPreset);
+    const dialog = await openDialog();
+    await within(dialog).findByText(/画布 1080×1920/);
+    const row = within(dialog).getByText("参考粗剪", { selector: ".deliver-content-name" }).parentElement!;
+    // R11 术语清扫:H.264 → 「通用 MP4」。
+    expect(row.textContent).toContain("1080×1920 通用 MP4");
+    expect(dialog.textContent).not.toContain("1080p");
+    expect(within(dialog).getByText(/统一生成一条 1080×1920 通用 MP4 文件/)).toBeTruthy();
+  });
+
+  it("设了覆盖再点「开始生成」走 startExportWithCanvas(带 overrideOrientation);没设走旧 startExport", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    apiMock.previewExportCanvas.mockResolvedValue(portraitPreset);
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    apiMock.startExportWithCanvas.mockResolvedValue(idleStatus);
+    apiMock.startExport.mockResolvedValue(idleStatus);
+    const dialog = await openDialog();
+    await within(dialog).findByText(/画布 1080×1920/);
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(apiMock.startExport).toHaveBeenCalled());
+    expect(apiMock.startExportWithCanvas).not.toHaveBeenCalled();
+
+    await act(async () => {
+      within(within(dialog).getByRole("group", { name: "本次交付画布方向" })).getByRole("button", { name: "横版" }).click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(apiMock.startExportWithCanvas).toHaveBeenCalledWith("/Volumes/DELIVERY", null, "landscape", true, 60),
+    );
   });
 });

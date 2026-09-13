@@ -19,6 +19,15 @@ pub const MAX_ATTEMPTS: i64 = 3;
 /// worker 线程上被触发的,不能同步等一个可能很慢的系统通知服务占住 worker
 /// 槽位。
 type NotificationFn = dyn Fn(&str, &str) -> bool + Send + Sync;
+/// R10 U-25:「第一个后台任务开始了」的一次性钩子。Tauri 层用它在固定时机把 macOS
+/// 通知权限弹框引出来(发一条「已开始后台处理」的系统通知——桌面端插件的
+/// `request_permission` 是空实现,只有第一次 `show()` 才真弹框),而不是等到
+/// 几分钟后某条分析完成时突然弹。进程生命周期内只调一次。
+type FirstJobFn = dyn Fn() + Send + Sync;
+/// R10 U-19:任务落地后发给前端的应用内事件出口 (事件名, JSON 负载)。Tauri 层接
+/// `app.emit`;测试接一个收集器;没接时静默跳过。与系统通知(`NotificationFn`)
+/// 分开:前端刷新用的事件不该依赖用户有没有开通知权限。
+type EventSinkFn = dyn Fn(&str, serde_json::Value) + Send + Sync;
 
 // M5 benchmark reconciliation showed that four concurrent workers move the
 // 500-item workload from roughly 100 minutes into the 10-minute range.
@@ -191,9 +200,8 @@ pub(crate) enum ResourceClass {
 
 pub(crate) fn resource_class(kind: &str) -> ResourceClass {
     match kind {
-        "thumbnail" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze" => {
-            ResourceClass::Decode
-        }
+        "thumbnail" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze"
+        | "moments" => ResourceClass::Decode,
         "clip_embed" | "classify_dims" | "transcribe" => ResourceClass::HeavyModel,
         _ => ResourceClass::Light,
     }
@@ -201,7 +209,7 @@ pub(crate) fn resource_class(kind: &str) -> ResourceClass {
 
 /// SQL 字面量:与 `resource_class` 的 Decode 分支必须逐字一致。
 pub(crate) const DECODE_KINDS_SQL: &str =
-    "('thumbnail','strip','analyze_l1','analyze_motion','proxy','music_analyze')";
+    "('thumbnail','strip','analyze_l1','analyze_motion','proxy','music_analyze','moments')";
 /// SQL 字面量:与 `resource_class` 的 HeavyModel 分支必须逐字一致。
 pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcribe')";
 
@@ -298,6 +306,7 @@ pub fn claim_next_for_owner_excluding(
                         WHEN 'strip' THEN 39
                         WHEN 'analyze_l1' THEN 30
                         WHEN 'analyze_motion' THEN 28
+                        WHEN 'moments' THEN 27
                         WHEN 'clip_embed' THEN 25
                         WHEN 'classify_dims' THEN 22
                         WHEN 'waveform' THEN 20
@@ -838,6 +847,12 @@ struct WorkerPoolCoordinator {
     /// (`JobRunner::with_notifier`)。测试环境不设置时保持 `None`,
     /// `run_one_with_executor` 里的完成检测直接跳过,不产生任何副作用。
     notifier: OnceLock<Arc<NotificationFn>>,
+    /// R10 U-19:应用内事件出口(`JobRunner::with_event_sink`),见 `EventSinkFn`。
+    event_sink: OnceLock<Arc<EventSinkFn>>,
+    /// R10 U-25:首个后台任务开始时的一次性钩子(`JobRunner::with_first_job_hook`)。
+    first_job_hook: OnceLock<Arc<FirstJobFn>>,
+    /// `first_job_hook` 只放行一次的闸(`Once` 没有 `Default`,用 `OnceLock<()>` 代替)。
+    first_job_once: OnceLock<()>,
 }
 
 impl WorkerPoolCoordinator {
@@ -1190,6 +1205,19 @@ impl JobRunner {
         self
     }
 
+    /// R10 U-19:接应用内事件出口(音乐分析完成等),只能接一次,规则同 `with_notifier`。
+    pub fn with_event_sink(self, sink: Arc<EventSinkFn>) -> Self {
+        let _ = self.coordinator.event_sink.set(sink);
+        self
+    }
+
+    /// R10 U-25:接「首个后台任务开始」钩子,只能接一次;worker 认领到第一条任务时
+    /// 在独立线程调它恰好一次(见 `FirstJobFn`)。
+    pub fn with_first_job_hook(self, hook: Arc<FirstJobFn>) -> Self {
+        let _ = self.coordinator.first_job_hook.set(hook);
+        self
+    }
+
     pub fn run_one(db_path: &Path) -> Result<bool> {
         let coordinator = Arc::new(WorkerPoolCoordinator::default());
         Self::run_one_with_coordinator(db_path, &coordinator)
@@ -1262,9 +1290,46 @@ impl JobRunner {
         let _cancellation = CancellationRegistration::register(&connection, claimed.job.id)?;
         let _lease = LeaseHeartbeat::start(db_path, &claimed.job, owner_id);
         let kind = claimed.job.kind.clone();
+        Self::fire_first_job_hook(coordinator);
         execute(db_path, &mut connection, &claimed.job)?;
         Self::notify_on_completion(coordinator, &connection, &claimed.job);
+        Self::emit_on_completion(coordinator, &connection, &claimed.job);
         Ok(Some(kind))
+    }
+
+    /// R10 U-25:进程内第一条任务被认领时调一次钩子(fire-and-forget,不占 worker 线程);
+    /// 没接钩子(测试 / `run_one`)什么都不做,之后的任务也不再进来。
+    fn fire_first_job_hook(coordinator: &Arc<WorkerPoolCoordinator>) {
+        coordinator.first_job_once.get_or_init(|| {
+            if let Some(hook) = coordinator.first_job_hook.get() {
+                let hook = hook.clone();
+                std::thread::spawn(move || hook());
+            }
+        });
+    }
+
+    /// R10 U-19:`execute()` 落地之后,把需要前端立刻刷新的终态以应用内事件发出去。
+    /// 目前只有音乐分析(`tripcut:music-analyzed`);检测失败只记日志,不影响任务结果。
+    /// 投递同样 fire-and-forget(`app.emit` 走 IPC,不占 worker 线程)。
+    fn emit_on_completion(coordinator: &Arc<WorkerPoolCoordinator>, connection: &Connection, job: &Job) {
+        let Some(sink) = coordinator.event_sink.get() else {
+            return;
+        };
+        match super::music::analyzed_event(connection, job) {
+            Ok(Some(event)) => {
+                let payload = match serde_json::to_value(&event) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        tracing::warn!(%error, job_id = job.id, "音乐分析事件序列化失败");
+                        return;
+                    }
+                };
+                let sink = sink.clone();
+                std::thread::spawn(move || sink(super::music::MUSIC_ANALYZED_EVENT, payload));
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, job_id = job.id, "音乐分析完成事件检测失败"),
+        }
     }
 
     /// R6 Task 4:`execute()` 落地之后重新读一次这条 job——交付包成功、或
@@ -1410,10 +1475,26 @@ impl JobRunner {
                     fail_or_retry(connection, job, &error.to_string())?;
                 }
             },
+            // R11:老库「补齐时刻分」。失败走常规退避重试;不碰 clip_analysis。
+            "moments" => match super::moments::run_moments_job(connection, job) {
+                Ok(()) => mark_done(connection, job.id, job.attempt)?,
+                Err(error) => {
+                    fail_or_retry(connection, job, &error.to_string())?;
+                }
+            },
             "transcribe" => match super::transcribe::run_transcribe(connection, job, &cache_root) {
                 Ok(()) => {
                     super::asset_safety::refresh_all(connection)?;
                     enqueue_dimensions_after(connection, job, &cache_root);
+                    // R11:有了转写就用它覆盖时刻分的「有人声」判定。
+                    if let Some(clip_id) = serde_json::from_str::<serde_json::Value>(&job.payload)
+                        .ok()
+                        .and_then(|payload| payload.get("clip_id").and_then(serde_json::Value::as_i64))
+                    {
+                        if let Err(error) = super::moments::refresh_speech_from_transcript(connection, clip_id) {
+                            tracing::warn!(%error, clip_id, "转写后重打「有人声」失败,时刻分保持原样");
+                        }
+                    }
                 }
                 Err(error) => {
                     fail_or_retry(connection, job, &error.to_string())?;
@@ -1734,6 +1815,7 @@ mod tests {
         "similar_cluster",
         "ocr_scan",
         "music_analyze",
+        "moments",
     ];
 
     fn run_pool_until_empty(db_path: PathBuf, coordinator: Arc<WorkerPoolCoordinator>) {
@@ -3415,6 +3497,107 @@ mod tests {
             receiver.recv_timeout(Duration::from_millis(200)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout),
             "不多不少,恰好一条"
+        );
+    }
+
+    /// R10 U-25:首个后台任务开始时钩子恰好调一次——跑两条任务只收到一次;
+    /// 通知出口(`notifier`)不因此多收任何一条。
+    #[test]
+    fn first_job_hook_fires_exactly_once_across_many_jobs() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            enqueue(&mut connection, "noop", "{}", "first-hook-1").unwrap();
+            enqueue(&mut connection, "noop", "{}", "first-hook-2").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<()>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .first_job_hook
+            .set(Arc::new(move || {
+                let _ = sender.lock().unwrap_or_else(|error| error.into_inner()).send(());
+            }))
+            .ok();
+        let (notify_sender, notify_receiver) = std::sync::mpsc::channel::<(String, String)>();
+        let notify_sender = Mutex::new(notify_sender);
+        coordinator
+            .notifier
+            .set(Arc::new(move |title: &str, body: &str| {
+                notify_sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((title.to_owned(), body.to_owned()))
+                    .is_ok()
+            }))
+            .ok();
+
+        assert!(JobRunner::run_one_with_executor(&db_path, &coordinator, "hook-owner", JobRunner::execute_claimed).unwrap());
+        assert!(JobRunner::run_one_with_executor(&db_path, &coordinator, "hook-owner", JobRunner::execute_claimed).unwrap());
+
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("第一条任务开始就该调钩子");
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "第二条任务不再调"
+        );
+        assert_eq!(
+            notify_receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "noop 任务不产生系统通知,钩子也不借通知出口"
+        );
+    }
+
+    /// R10 U-19:music_analyze 落到终态(这里是缺文件 → 轨 failed)后事件出口收到
+    /// 恰好一条 `tripcut:music-analyzed`;别的 kind 不发。
+    #[test]
+    fn event_sink_receives_music_analyzed_once_per_terminal_music_job() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            let episode_id: i64 = connection
+                .query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO music_tracks(id, episode_id, file_name, rel_path, quick_hash, analysis_status, created_at)
+                     VALUES (3, ?1, 'gone.wav', ?2, 'h', 'pending', 'now')",
+                    params![episode_id, directory.path().join("gone.wav").to_string_lossy()],
+                )
+                .unwrap();
+            enqueue(&mut connection, "music_analyze", r#"{"track_id":3}"#, "music-event").unwrap();
+            enqueue(&mut connection, "noop", "{}", "noop-event").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, serde_json::Value)>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .event_sink
+            .set(Arc::new(move |name: &str, payload: serde_json::Value| {
+                let _ = sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((name.to_owned(), payload));
+            }))
+            .ok();
+
+        assert!(JobRunner::run_one_with_executor(&db_path, &coordinator, "music-owner", JobRunner::execute_claimed).unwrap());
+        assert!(JobRunner::run_one_with_executor(&db_path, &coordinator, "music-owner", JobRunner::execute_claimed).unwrap());
+
+        let (name, payload) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("音乐分析终态必须发事件");
+        assert_eq!(name, "tripcut:music-analyzed");
+        assert_eq!(payload["track_id"], 3);
+        assert_eq!(payload["analysis_status"], "failed");
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "noop 不发事件,音乐只发一条"
         );
     }
 

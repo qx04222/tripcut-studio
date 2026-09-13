@@ -50,7 +50,7 @@ export function TakeStrip({
               ) : null}
             </span>
             <span className="band-take-caption">
-              <span className="band-take-order">{`Take ${index + 1}`}</span>
+              <span className="band-take-order">{`第 ${index + 1} 条`}</span>
               <span className="band-take-name" title={clip?.file_name}>
                 {clip?.file_name ?? `素材 #${member.clip_id}`}
               </span>

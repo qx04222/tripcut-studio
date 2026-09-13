@@ -25,6 +25,8 @@ const apiMocks = vi.hoisted(() => ({
   rollbackComponent: vi.fn(),
   getSettings: vi.fn(),
   getSettingsStatus: vi.fn(),
+  // R10 U-22:FirstRunGuide 「暂时进入」会写 first_run_done。
+  setFirstRunDone: vi.fn(async () => undefined),
   getStoryboard: vi.fn(),
   listLlmLedger: vi.fn(),
   listSelectSegments: vi.fn(),

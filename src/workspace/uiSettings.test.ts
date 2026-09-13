@@ -26,14 +26,17 @@ describe("readUiSetting", () => {
     expect(readUiNumber({ "ui.pane.pool_width": "abc" }, "ui.pane.pool_width")).toBe(320);
     expect(readUiList({ "ui.inspector.sections_open": "{" }, "ui.inspector.sections_open")).toEqual([]);
   });
-  it("每个偏好键都有默认值,空串只允许出现在 ui.pool.dimension", () => {
+  it("每个偏好键都有默认值,空串只允许出现在「空 = 没有 / 跟随」语义的那几个键", () => {
     // 规格 §5 的表里 ui.pool.dimension 的默认值就是 "",所以这里断言「等于声明的默认值」
-    // 而不是「非空」——非空版本会把规格自己的默认值判成缺陷。
+    // 而不是「非空」——非空版本会把规格自己的默认值判成缺陷。R10 又加了三个同语义的键:
+    // 最近选中(空 = 没有)、交付平台(空 = 跟随本集)、交付时长(空 = 跟随平台预算)。
+    // R11 车道 E 再加一个:快速导出上次文件夹(空 = 还没选过,首次弹一次面板)。
+    const EMPTY_MEANS_NONE = ["ui.pool.dimension", "ui.selection.last_clip", "ui.deliver.platform", "ui.deliver.target_seconds", "ui.export.last_dir"];
     for (const [key, value] of Object.entries(UI_SETTING_DEFAULTS)) {
       expect(readUiSetting({}, key)).toBe(value);
     }
     for (const key of Object.keys(UI_SETTING_DEFAULTS)) {
-      if (key !== "ui.pool.dimension") expect(readUiSetting({}, key)).not.toBe("");
+      if (!EMPTY_MEANS_NONE.includes(key)) expect(readUiSetting({}, key)).not.toBe("");
     }
   });
 });

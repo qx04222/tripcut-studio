@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.3.0"
+version = "0.5.0"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -24,6 +24,9 @@ tauri-plugin-process = "=2.3.1"
 tauri-plugin-updater = "=2.11.0"
 axum = { version = "=0.8.9", features = ["http1", "tokio"] }
 blake3 = "=1.8.7"
+# R10 U-24:导入 Whisper 模型文件前校验 SHA-256(官方 Hugging Face LFS 的 oid 就是
+# SHA-256)。=0.10.9 已经是 Cargo.lock 里锁定的传递版本,这里只是提升为直接依赖。
+sha2 = "=0.10.9"
 libc = "=0.2.189"
 libmpv2 = "=6.0.0"
 lopdf = "=0.44.0"

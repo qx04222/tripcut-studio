@@ -1,4 +1,5 @@
-import type { ExportStatus, PlatformPreset, RoughCutTargetSeconds, TargetPlatform } from "../../api";
+import type { ExportStatus, PlatformPreset, RoughCutTargetSeconds, SettingsMap, TargetPlatform } from "../../api";
+import { readUiBool, readUiSetting } from "../uiSettings";
 
 /** 交付表单的纯常量与纯函数(R9 Task 6a):从 `DeliverPage` 移入,那里 re-export。 */
 
@@ -111,7 +112,61 @@ export function itemStatusLabel(status: string): string {
   }
 }
 
+/**
+ * 「整条收藏 0 条」但精选段 > 0 时补一句(R10 U-33):有精选段的收藏按片段导出,不再整条
+ * remux——池里明明收藏了 1 条,摘要却写 0,用户以为收藏丢了。
+ */
+export function wholeFavoritesNote(status: ExportStatus): string | null {
+  return status.selected_whole_count === 0 && status.selected_segment_count > 0 ? "有精选段的收藏已按片段导出" : null;
+}
+
 /** 交付项汇总一行(规格 §4.2 第 2 条):「4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05」。 */
 export function summaryLine(status: ExportStatus): string {
-  return `${status.selected_count} 项 · ${status.selected_segment_count} 段精选片段 · ${status.selected_whole_count} 条整条收藏 · 预计 ${formatDuration(status.total_duration_seconds)}`;
+  const note = wholeFavoritesNote(status);
+  const whole = `${status.selected_whole_count} 条整条收藏${note ? `（${note}）` : ""}`;
+  return `${status.selected_count} 项 · ${status.selected_segment_count} 段精选片段 · ${whole} · 预计 ${formatDuration(status.total_duration_seconds)}`;
+}
+
+/** 抽屉记住的上次选择(R10 U-20,`ui.deliver.*`)。平台 / 时长为 null = 没记过,走本集默认。 */
+export interface RememberedDeliverChoices {
+  platform: TargetPlatform | null;
+  /** `undefined` = 没记过(按平台预算预选);`null` = 记的是「完整」。 */
+  targetSeconds: TargetSecondsOption | undefined;
+  includeContactSheet: boolean;
+  useJianyingDraft: boolean;
+}
+
+export function rememberedDeliverChoices(settings: SettingsMap): RememberedDeliverChoices {
+  const platform = readUiSetting(settings, "ui.deliver.platform");
+  const target = readUiSetting(settings, "ui.deliver.target_seconds");
+  const validTarget = target === "full" ? null : (ROUGH_CUT_TARGET_OPTIONS.find((option) => option !== null && String(option) === target) ?? undefined);
+  return {
+    platform: (PLATFORM_OPTIONS as readonly string[]).includes(platform) ? (platform as TargetPlatform) : null,
+    targetSeconds: target === "" ? undefined : validTarget,
+    includeContactSheet: readUiBool(settings, "ui.deliver.contact_sheet"),
+    useJianyingDraft: readUiBool(settings, "ui.deliver.jianying_draft"),
+  };
+}
+
+/** 画布尺寸(U-20):车道 B 在 api 里追加的可选字段 `canvas?: {width,height}`,谁先带上就读谁;都没有就不显示。 */
+export interface CanvasSize {
+  width: number;
+  height: number;
+}
+
+export function readCanvas(...sources: ReadonlyArray<unknown>): CanvasSize | null {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const canvas = (source as { canvas?: unknown }).canvas;
+    if (!canvas || typeof canvas !== "object") continue;
+    const { width, height } = canvas as { width?: unknown; height?: unknown };
+    if (typeof width === "number" && typeof height === "number" && width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+  return null;
+}
+
+export function canvasLabel(canvas: CanvasSize | null): string | null {
+  return canvas ? `画布 ${canvas.width}×${canvas.height}` : null;
 }

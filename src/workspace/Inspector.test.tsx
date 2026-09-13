@@ -65,6 +65,10 @@ const apiMocks = vi.hoisted(() => ({
   applyNarrativeOp: vi.fn().mockResolvedValue(null),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
+  // R10 U-11 精选段区 / U-18 加入当前章节
+  listSelectSegments: vi.fn().mockResolvedValue([]),
+  deleteSelectSegment: vi.fn().mockResolvedValue(undefined),
+  playerCommand: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../api", () => apiMocks);
 
@@ -318,22 +322,26 @@ function findSummary(title: string): HTMLElement {
 }
 
 describe("检查器 · 默认层", () => {
-  it("有内容时默认层四段顺序固定且永远展开;空段不渲染,没有占位句", async () => {
+  it("有内容时默认层五段顺序固定且永远展开;没有占位句", async () => {
     selectClipInStack();
     render(<Inspector />);
-    await screen.findByText("同镜头 Take 切换");
-    await waitFor(() => expect(defaultSectionTitles()).toEqual(["评级与收藏", "标签", "所属章节 / 槽位", "同镜头 Take 切换"]));
+    // R11 术语清扫:「同镜头 Take 切换」→「同一镜头的多条」。
+    await screen.findByText("同一镜头的多条");
+    // R10 U-11 起多一段「精选段」,排在章节之后、Take 之前。
+    await waitFor(() => expect(defaultSectionTitles()).toEqual(["评级与收藏", "标签", "所属章节 / 槽位", "精选段", "同一镜头的多条"]));
     expect(screen.queryByText(/暂无标签/)).toBeNull();
     expect(screen.queryByText(/不属于任何 Take Stack/)).toBeNull();
     expect(document.querySelectorAll(".inspector-default-section details").length).toBe(0);
   });
 
-  it("没标签、没 Take、没故事板的素材只有评级段", async () => {
+  it("没标签、没 Take、没故事板的素材:可编辑段常驻(R10 U-12),只少 Take 段;空态给出入口", async () => {
     selectLoneClip();
     await renderReady();
-    expect(defaultSectionTitles()).toEqual(["评级与收藏"]);
-    expect(screen.queryByText("同镜头 Take 切换")).toBeNull();
-    expect(screen.queryByText("所属章节 / 槽位")).toBeNull();
+    expect(defaultSectionTitles()).toEqual(["评级与收藏", "标签", "所属章节 / 槽位", "精选段"]);
+    expect(screen.queryByText("同一镜头的多条")).toBeNull();
+    expect(screen.getByRole("button", { name: "添加标签" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "加入当前章节" })).toBeTruthy();
+    expect(screen.getByText(/还没有精选段/)).toBeTruthy();
   });
 
   it("检查器头部:缩略图 + 文件名 + 上一条 / 下一条,在两端各禁一个", async () => {
@@ -383,7 +391,7 @@ describe("检查器 · 默认层", () => {
     const strip = await screen.findByRole("group", { name: /的候选$/ });
     expect(strip.querySelectorAll("img").length).toBe(2);
     const current = strip.querySelector(".ui-card--selected")!;
-    expect(current.textContent).toContain("Take 1");
+    expect(current.textContent).toContain("第 1 条");
     expect(current.textContent).toContain("08-12");
     expect(current.textContent).toContain("clip-1.mov");
   });
@@ -493,7 +501,7 @@ describe("检查器 · 默认层", () => {
     await screen.findByText("标签");
     // 「AI 描述」折叠段里也列同一批标签(常驻在树里),只看标签卡这一份。
     expect(document.querySelector(".inspector-tag-list")!.textContent).toContain("机场");
-    const addButton = screen.getByRole("button", { name: "添加" }) as HTMLButtonElement;
+    const addButton = screen.getByRole("button", { name: "添加标签" }) as HTMLButtonElement;
     expect(addButton.disabled).toBe(true);
     expect(addButton.title).toBe("暂不支持手动标签");
   });

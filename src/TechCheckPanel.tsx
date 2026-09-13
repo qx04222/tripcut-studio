@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   clearDisplayLut,
+  importLut,
   listAudioTracks,
   listDisplayLuts,
+  pickLutFile,
   probeAudioTracks,
   setDisplayLut,
   setPlaybackTrack,
@@ -29,10 +31,16 @@ function sampleRateLabel(track: ClipAudioTrack): string {
   return track.sample_rate ? `${track.sample_rate} Hz` : "—";
 }
 
-function orientationLabel(rotation: number | null | undefined): string {
-  const angle = ((rotation ?? 0) % 360 + 360) % 360;
-  const isPortrait = angle === 90 || angle === 270;
-  return `${isPortrait ? "竖屏" : "横屏"} · ${angle}°`;
+/**
+ * R10 U-13:方向读后端 `clip.orientation`(rotation + 像素宽高综合判定,竖拍手机片 rotation=0 也能判成竖屏);
+ * 旧库 / 桩没带这个字段时才回落到只看 rotation。角度照旧显示。
+ */
+function orientationLabel(clip: Pick<ClipListItem, "rotation" | "orientation">): string {
+  const angle = ((clip.rotation ?? 0) % 360 + 360) % 360;
+  const fallback = angle === 90 || angle === 270 ? "portrait" : "landscape";
+  const orientation = clip.orientation && clip.orientation !== "unknown" ? clip.orientation : fallback;
+  const word = orientation === "portrait" ? "竖屏" : orientation === "square" ? "方屏" : "横屏";
+  return `${word} · ${angle}°`;
 }
 
 function colorBadges(clip: ClipListItem): Array<"D-Log" | "HDR"> {
@@ -47,8 +55,14 @@ function actualFrameRateLabel(clip: ClipListItem): string {
   if (!clip.fps_num || !clip.fps_den) return "—";
   const fps = clip.fps_num / clip.fps_den;
   const formatted = Number.isInteger(fps) ? fps.toFixed(0) : fps.toFixed(2);
-  return `${formatted} fps${clip.is_vfr ? "（VFR）" : ""}`;
+  return `${formatted} fps${clip.is_vfr ? "(帧率不稳)" : ""}`;
 }
+
+/** 「添加 LUT…」下拉项的哨兵值(R10 U-28)。 */
+export const ADD_LUT_OPTION = "__add_lut__";
+/** LUT 放置目录说明:与后端 `list_display_luts` 读的目录一致(应用支持目录下的 luts/)。 */
+export const LUT_DIRECTORY_HINT =
+  "把 .cube 文件放进 ~/Library/Application Support/TripCutStudio/luts/（读取列表时会自动创建这个目录），放好后点「刷新列表」。";
 
 export function TechCheckPanel({
   clip,
@@ -70,6 +84,7 @@ export function TechCheckPanel({
   const [busyTrack, setBusyTrack] = useState<{ streamIndex: number; action: "monitor" | "transcribe" } | null>(null);
   const [probing, setProbing] = useState(false);
   const [lutBusy, setLutBusy] = useState(false);
+  const [lutHelpOpen, setLutHelpOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latest = useRef(0);
   const mounted = useRef(true);
@@ -84,6 +99,9 @@ export function TechCheckPanel({
   const refreshTracks = useCallback(() => {
     if (clipId === null) return;
     const seq = ++latest.current;
+    // 换素材先回到「未载入」:否则上一条的 tracksLoaded=true + 同样的 tracks.length 让下面的
+    // 上报 effect 不再触发,检查器那行状态字就永远停在「加载中」(09-13 走查 U-27:切到 Take 2)。
+    setTracksLoaded(false);
     listAudioTracks(clipId)
       .then((result) => {
         if (seq !== latest.current || !mounted.current) return;
@@ -94,6 +112,9 @@ export function TechCheckPanel({
       .catch((loadError) => {
         if (seq !== latest.current || !mounted.current) return;
         setError(`音轨未载入：${String(loadError)}`);
+        // 读失败也是一个终态:上报 0 让状态字落到「未探测」,不能一直「加载中」。
+        setTracks([]);
+        setTracksLoaded(true);
       });
   }, [clipId]);
 
@@ -102,9 +123,10 @@ export function TechCheckPanel({
   useEffect(() => {
     if (!tracksLoaded) return;
     onCountChange?.(tracks.length);
-  }, [tracksLoaded, tracks.length, onCountChange]);
+    // clipId 进依赖:同一份计数换一条素材也要重报一次(检查器换素材时把计数清回 null)。
+  }, [tracksLoaded, tracks.length, onCountChange, clipId]);
 
-  useEffect(() => {
+  const refreshLuts = useCallback(() => {
     listDisplayLuts()
       .then((result) => {
         if (!mounted.current) return;
@@ -116,6 +138,8 @@ export function TechCheckPanel({
         setError(`LUT 列表未载入：${String(loadError)}`);
       });
   }, []);
+
+  useEffect(() => refreshLuts(), [refreshLuts]);
 
   const onProbe = () => {
     if (readOnly || clipId === null) return;
@@ -161,8 +185,38 @@ export function TechCheckPanel({
       });
   };
 
+  // 「添加 LUT…」(R10 U-28):系统面板选 .cube → 后端校验并复制进 luts/ → 列表按返回值刷新。
+  // 取消选择或导入被拒时,把放置目录说明摆出来作为手动路线的兜底。
+  const onAddLut = () => {
+    setLutBusy(true);
+    pickLutFile()
+      .then(async (path) => {
+        if (!path) {
+          if (mounted.current) setLutHelpOpen(true);
+          return;
+        }
+        const next = await importLut(path);
+        if (!mounted.current) return;
+        setError(null);
+        setLuts(next);
+        setLutHelpOpen(false);
+      })
+      .catch((lutError) => {
+        if (!mounted.current) return;
+        setError(`添加 LUT 失败：${String(lutError)}`);
+        setLutHelpOpen(true);
+      })
+      .finally(() => {
+        if (mounted.current) setLutBusy(false);
+      });
+  };
+
   const onLutChange = (path: string) => {
     if (readOnly || clipId === null) return;
+    if (path === ADD_LUT_OPTION) {
+      onAddLut();
+      return;
+    }
     setLutBusy(true);
     const action = path === "" ? clearDisplayLut("clip", clipId) : setDisplayLut("clip", clipId, path);
     action
@@ -197,7 +251,7 @@ export function TechCheckPanel({
         </div>
         <div>
           <dt>方向</dt>
-          <dd>{orientationLabel(clip.rotation)}</dd>
+          <dd>{orientationLabel(clip)}</dd>
         </div>
         <div>
           <dt>色彩</dt>
@@ -286,8 +340,23 @@ export function TechCheckPanel({
               {path.split("/").pop()}
             </option>
           ))}
+          <option value={ADD_LUT_OPTION}>添加 LUT…</option>
         </select>
         <small>仅用于预览，不影响导出</small>
+        {lutHelpOpen ? (
+          <div className="tech-check-lut-help" role="status">
+            <p>{LUT_DIRECTORY_HINT}</p>
+            <button
+              type="button"
+              onClick={() => {
+                refreshLuts();
+                setLutHelpOpen(false);
+              }}
+            >
+              已放好，刷新列表
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

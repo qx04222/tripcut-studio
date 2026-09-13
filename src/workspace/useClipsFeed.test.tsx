@@ -18,6 +18,7 @@ vi.mock("../api", () => apiMocks);
 import type { ClipListItem } from "../api";
 import {
   __resetClipsFeedForTests,
+  COVER_URL_REFRESH_MS,
   getClipsFeedSnapshot,
   patchClipInFeed,
   refreshClipsFeed,
@@ -85,6 +86,27 @@ describe("useClipsFeed —— 全应用唯一的 clips 修订轮询", () => {
     await refreshClipsFeed();
     expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
     expect(apiMocks.listShotStacks).toHaveBeenCalledTimes(2);
+  });
+
+  it("R-05:封面签名 URL 5 分钟过期 —— 修订号不变,距上次整表拉取满 4 分钟也要重拉一次,拿到新签名", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-13T10:00:00Z"));
+      apiMocks.listClips.mockResolvedValue([clip(7, { cover_url: "http://127.0.0.1:9/cache/7/cover.jpg?expires=1" })]);
+      await refreshClipsFeed();
+      expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(new Date("2026-09-13T10:03:59Z"));
+      await refreshClipsFeed();
+      expect(apiMocks.listClips).toHaveBeenCalledTimes(1);
+      apiMocks.listClips.mockResolvedValue([clip(7, { cover_url: "http://127.0.0.1:9/cache/7/cover.jpg?expires=2" })]);
+      vi.setSystemTime(new Date("2026-09-13T10:04:00Z"));
+      await refreshClipsFeed();
+      expect(apiMocks.listClips).toHaveBeenCalledTimes(2);
+      expect(getClipsFeedSnapshot().clipsById.get(7)?.cover_url).toContain("expires=2");
+      expect(COVER_URL_REFRESH_MS).toBeLessThan(5 * 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("revision 变了就整表重拉", async () => {

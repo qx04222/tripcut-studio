@@ -30,20 +30,53 @@ export interface RatingHotkeyHandlers {
   onTogglePlayback(): void;
 }
 
+const EDITABLE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
+
+/** 能打字/能选值的控件:input、textarea、select、contenteditable、textbox 类角色。 */
+function isEditableTarget(target: HTMLElement): boolean {
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  const editable = target.getAttribute("contenteditable");
+  if (target.isContentEditable === true || editable === "" || editable === "true") return true;
+  const role = target.getAttribute("role");
+  return role !== null && EDITABLE_ROLES.has(role);
+}
+
+/** 自己有激活键(Enter/Space)的普通控件:按钮、链接、菜单项。gridcell/row 不算。 */
+export function isActivatableControl(target: HTMLElement): boolean {
+  const role = target.getAttribute("role");
+  if (role === "gridcell" || role === "row") return false;
+  if (role === "button" || role === "link" || role === "menuitem" || role === "tab") return true;
+  return target.tagName === "BUTTON" || target.tagName === "A";
+}
+
 /**
- * 沿用 `SelectPage.tsx:80` 的语义:只认「事件目标就是容器本身」。容器里的搜索框、
- * 按钮、输入框拿到的键一律不接管 —— 这条判定就是「不要在输入框里评级」的全部实现,
- * 不要改成 `closest("input")` 之类的黑名单,那样会漏掉 contenteditable 与自定义控件。
+ * 目标判定(U-01,R10)。R8 沿用 `SelectPage.tsx:80` 的「事件目标就是容器本身」,
+ * R9 把卡片改成可聚焦的 `<button role=gridcell>` 之后焦点永远落在卡片上、不再等于
+ * 容器 —— 真机上 F/X/1–5/Space 全哑就是这一条造成的。现在认「容器本身,或容器内
+ * 任何**非编辑**控件」;输入框、textarea、select、contenteditable、textbox/searchbox/
+ * combobox 角色一律不接管 —— 「不要在输入框里评级」仍然成立。
  */
-function isPaneShortcutTarget(target: EventTarget | null, pane: EventTarget | null): boolean {
-  return target === pane;
+export function isPaneShortcutTarget(target: EventTarget | null, pane: EventTarget | null): boolean {
+  if (target === pane) return true;
+  if (!(target instanceof HTMLElement) || !(pane instanceof Node) || !pane.contains(target)) return false;
+  return !isEditableTarget(target);
+}
+
+/**
+ * 栏内的普通按钮(不是 gridcell)自己要用 Enter/Space 激活 —— 这两个键留给按钮,
+ * 其余单键(F/X/1–5/Tab/方向键)照常接管。
+ */
+function reservedForControl(target: EventTarget | null, intent: HotkeyIntent): boolean {
+  if (!(target instanceof HTMLElement) || !isActivatableControl(target)) return false;
+  return intent.kind === "promote-hero" || intent.kind === "toggle-playback";
 }
 
 /**
  * 中文输入法会把字母/数字键吃成候选(`event.key` 变成 `Process`),但物理键 `code`
  * 不受影响 —— 评级键位因此不需要用户切回英文输入法。
  */
-function physicalKey(event: Pick<KeyboardEvent, "key" | "code">): string {
+export function physicalKey(event: Pick<KeyboardEvent, "key" | "code">): string {
   const code = event.code;
   if (code.startsWith("Key") && code.length === 4) return code.slice(3).toLowerCase();
   if (code.startsWith("Digit") && code.length === 6) return code.slice(5);
@@ -70,6 +103,8 @@ export function ratingHotkeyIntent(
   }
   if (lower === "l") return { kind: "stack-state", state: "locked" };
   if (lower === "r") return { kind: "stack-state", state: "rejected" };
+  // V-05:焦点在卡片 / 瓦片上时 K 也能停 / 播(与监视器同键),不必先 F6 到监视器。
+  if (lower === "k") return { kind: "toggle-playback" };
 
   switch (event.key) {
     case "Enter":
@@ -155,6 +190,7 @@ export function useRatingHotkeys(
         isComposing,
       );
       if (!intent) return;
+      if (reservedForControl(event.target, intent)) return;
       event.preventDefault();
       const current = handlersRef.current;
       switch (intent.kind) {

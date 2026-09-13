@@ -25,6 +25,7 @@ const cargoLicenses = {
   httpdate: "MIT OR Apache-2.0",
   reqwest: "MIT OR Apache-2.0",
   base64: "MIT OR Apache-2.0",
+  sha2: "MIT OR Apache-2.0",
   rusqlite: "MIT",
   rustfft: "MIT OR Apache-2.0",
   "ttf-parser": "MIT OR Apache-2.0",

@@ -11,6 +11,7 @@ const apiMocks = await vi.hoisted(async () => {
 });
 vi.mock("../api", () => apiMocks);
 
+import { openSettings } from "./openSettings";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 
@@ -55,7 +56,37 @@ async function goTab(dialog: HTMLElement, name: string): Promise<HTMLElement> {
   return within(dialog).getByRole("tabpanel");
 }
 
-const SHEET_TABS = ["外观", "性能", "旅行时间", "工具链", "分析与 AI", "云端补镜", "隐私与诊断", "帮助与关于", "缓存与重建"];
+/**
+ * R11 简化专项 #2:设置页收成 3 个分区 + 每区一个「高级…」折叠。九个旧分区(下面 SECTION_HOME 的搬迁表)
+ * 一段不少;测试按「分区 → (高级) → 段」走到旧分区所在的 `[data-section]` 块,断言原样迁过来。
+ */
+const SHEET_TABS = ["常用", "工具与模型", "关于"];
+const SECTION_HOME = {
+  appearance: { tab: "常用", advanced: false },
+  performance: { tab: "常用", advanced: true },
+  timeline: { tab: "常用", advanced: true },
+  tools: { tab: "工具与模型", advanced: false },
+  generation: { tab: "工具与模型", advanced: false },
+  analysis: { tab: "工具与模型", advanced: true },
+  about: { tab: "关于", advanced: false },
+  cache: { tab: "关于", advanced: false },
+  privacy: { tab: "关于", advanced: true },
+} as const;
+
+async function goSection(dialog: HTMLElement, id: keyof typeof SECTION_HOME): Promise<HTMLElement> {
+  const home = SECTION_HOME[id];
+  const panel = await goTab(dialog, home.tab);
+  if (home.advanced) {
+    const details = panel.querySelector<HTMLDetailsElement>("details.settings-sheet-advanced")!;
+    expect(details.open).toBe(false);
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+      await Promise.resolve();
+    });
+  }
+  return panel.querySelector<HTMLElement>(`[data-section="${id}"]`)!;
+}
 
 describe("设置 sheet", () => {
   it("点「设置」打开 sheet,role=dialog aria-modal,标题「设置」,宽 880 且 Esc 关闭", async () => {
@@ -71,14 +102,18 @@ describe("设置 sheet", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog")).toBeNull();
-  });
+  // 文件里的第一条要冷启动整棵壳 + 懒加载设置 sheet,全量并行跑时曾超过默认 1 s;只给它 5 s,不改全局。
+  }, 5_000);
 
-  it("⌘, 打开设置 sheet,九个分区 tab 都在,「隐私与诊断」「云端补镜」在树里", async () => {
+  it("⌘, 打开设置 sheet,三个分区 tab 都在,「隐私与诊断」「云端补镜」在树里(左轨快捷入口)", async () => {
     render(<WorkspaceShell />);
     await pressCommandComma();
     const dialog = await screen.findByRole("dialog", { name: "设置" });
     expect((await screen.findAllByText("隐私与诊断")).length).toBeGreaterThan(0);
     expect(screen.getByText("云端补镜")).toBeTruthy();
+    // 冻结的两个冒烟锚点不再是 tab —— 是左轨底部的两颗按钮,点一下直落对应分区。
+    expect(within(dialog).getByRole("button", { name: "隐私与诊断" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "云端补镜" })).toBeTruthy();
     const tablist = within(dialog).getByRole("tablist", { name: "设置分区" });
     expect(within(tablist).getAllByRole("tab").map((tab) => tab.querySelector(".settings-sheet-tab-label")!.textContent)).toEqual(SHEET_TABS);
     for (const label of SHEET_TABS) {
@@ -86,13 +121,11 @@ describe("设置 sheet", () => {
     }
   });
 
-  it("页脚有状态行(role=status),左轨九项中文无 eyebrow,「缓存与重建」在最后且 is-danger;↑↓ 在 tab 间移动", async () => {
+  it("页脚有状态行(role=status),左轨三项中文无 eyebrow;↑↓ 在 tab 间移动;「缓存与重建」在关于分区里仍是 danger 卡", async () => {
     const dialog = await openLoaded();
     expect(within(dialog).getByRole("status").textContent).toMatch(/设置已从本地项目载入|正在读取本地设置/);
     const tablist = within(dialog).getByRole("tablist", { name: "设置分区" });
     const tabs = within(tablist).getAllByRole("tab");
-    expect(tabs.at(-1)!.textContent).toContain("缓存与重建");
-    expect(tabs.at(-1)!.className).toContain("is-danger");
     expect(tablist.textContent).not.toMatch(/APPEARANCE|PERFORMANCE|SETTINGS/);
     expect(dialog.textContent).not.toMatch(/\d\d \/ [A-Z]/);
     expect(tabs[0]!.getAttribute("aria-selected")).toBe("true");
@@ -101,25 +134,43 @@ describe("设置 sheet", () => {
       fireEvent.keyDown(tabs[0]!, { key: "ArrowDown" });
       await Promise.resolve();
     });
-    expect(within(tablist).getByRole("tab", { name: "性能" }).getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).getByRole("heading", { level: 3, name: "性能" })).toBeTruthy();
+    expect(within(tablist).getByRole("tab", { name: "工具与模型" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(dialog).getByRole("heading", { level: 3, name: "工具链" })).toBeTruthy();
     await act(async () => {
-      fireEvent.keyDown(within(tablist).getByRole("tab", { name: "性能" }), { key: "End" });
+      fireEvent.keyDown(within(tablist).getByRole("tab", { name: "工具与模型" }), { key: "End" });
       await Promise.resolve();
     });
-    expect(within(tablist).getByRole("tab", { name: "缓存与重建" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(tablist).getByRole("tab", { name: "关于" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(dialog).getByRole("button", { name: "清空缓存并重建" }).closest(".settings-sheet-danger")).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "关闭设置" })).toBeTruthy();
   });
 
-  it("外观分区:主题三段、缩放四段、界面开关(切回旧界面)", async () => {
-    apiMocks.getSettings.mockResolvedValueOnce({ "ui.workspace_v2": "true" });
+  it("常用分区:每个分区的「高级…」默认折叠;打开后旧分区一段不少", async () => {
     const dialog = await openLoaded();
-    expect(within(dialog).getByRole("heading", { level: 3, name: "外观" })).toBeTruthy();
+    for (const [tab, sections] of [["常用", ["性能", "设备时钟校正"]], ["工具与模型", ["分析与 AI"]], ["关于", ["隐私与诊断"]]] as const) {
+      const panel = await goTab(dialog, tab);
+      const details = panel.querySelector<HTMLDetailsElement>("details.settings-sheet-advanced")!;
+      expect(details.open).toBe(false);
+      expect(details.querySelector("summary")!.textContent).toContain("高级…");
+      for (const heading of sections) expect(within(details).getByRole("heading", { level: 3, name: heading })).toBeTruthy();
+    }
+  });
+
+  it("外观分区(常用):主题三段、缩放四段、导出文件夹;界面开关(切回旧界面)搬到高级 → 性能", async () => {
+    // 壳里不止 sheet 一处读 getSettings(监视器的三步引导也读一次),Once 会被抢走 —— 用常驻值,末尾还原。
+    apiMocks.getSettings.mockResolvedValue({ "ui.workspace_v2": "true", "ui.export.last_dir": "/Volumes/T7/导出" });
+    const dialog = await openLoaded();
+    expect(within(dialog).getByRole("heading", { level: 3, name: "外观与播放" })).toBeTruthy();
     for (const label of ["跟随系统", "浅色", "深色", "90%", "100%", "115%", "130%"]) {
       expect(within(dialog).getByRole("button", { name: label })).toBeTruthy();
     }
     expect(within(dialog).getByRole("button", { name: "跟随系统" }).getAttribute("aria-pressed")).toBe("true");
-    expect(within(dialog).getByRole("button", { name: "切回旧界面" })).toBeTruthy();
+    expect(within(dialog).getByText("导出文件夹")).toBeTruthy();
+    expect(within(dialog).getByText(/\/Volumes\/T7\/导出/)).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "更改…" })).toBeTruthy();
+    const performance = await goSection(dialog, "performance");
+    expect(within(performance).getByRole("button", { name: "切回旧界面" })).toBeTruthy();
+    apiMocks.getSettings.mockResolvedValue({});
     await act(async () => {
       within(dialog).getByRole("button", { name: "深色" }).click();
       await Promise.resolve();
@@ -129,12 +180,12 @@ describe("设置 sheet", () => {
     delete document.documentElement.dataset.theme;
   });
 
-  it("性能分区:worker 并发 Select、自动代理 Toggle、内存档位", async () => {
+  it("性能分区:后台并行任务数 Select、轻量预览文件 Toggle、内存档位(R11 术语清扫:worker 并发 / 540p 代理 → 白话)", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "性能");
-    expect(within(panel).getByRole("combobox", { name: "worker 并发" })).toBeTruthy();
+    const panel = await goSection(dialog, "performance");
+    expect(within(panel).getByRole("combobox", { name: "后台并行任务数" })).toBeTruthy();
     expect(within(panel).getByRole("combobox", { name: "内存档位" })).toBeTruthy();
-    const proxy = within(panel).getByRole("switch", { name: "自动生成 540p 代理" });
+    const proxy = within(panel).getByRole("switch", { name: "自动生成轻量预览文件" });
     expect(proxy.getAttribute("aria-checked")).toBe("true");
     await act(async () => {
       proxy.click();
@@ -156,7 +207,7 @@ describe("设置 sheet", () => {
       },
     ]);
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "旅行时间");
+    const panel = await goSection(dialog, "timeline");
     expect(within(panel).getByText("DJI Pocket 4")).toBeTruthy();
     expect(within(panel).getByText(/12 条素材 · 人工校正 · 置信度 90%/)).toBeTruthy();
     const input = within(panel).getByLabelText("DJI Pocket 4 偏移（秒）") as HTMLInputElement;
@@ -171,7 +222,7 @@ describe("设置 sheet", () => {
 
   it("工具链分区:ffmpeg/ffprobe 读数、路径框失焦即保存、「运行自检」", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "工具链");
+    const panel = await goSection(dialog, "tools");
     expect(await within(panel).findByText(/ffmpeg/)).toBeTruthy();
     expect(within(panel).getByText(/ffprobe/)).toBeTruthy();
     expect(within(panel).getByRole("button", { name: /自检/ })).toBeTruthy();
@@ -180,38 +231,56 @@ describe("设置 sheet", () => {
     fireEvent.blur(input);
     await waitFor(() => expect(apiMocks.setSetting).toHaveBeenCalledWith("tools.ffmpeg_path", "/opt/ffmpeg"));
     expect(within(panel).getByRole("combobox", { name: "Whisper 模型档位" })).toBeTruthy();
+    // R11 简化专项 #1:原首启弹窗的工具链引导住在这里 —— 齐全时一行「全部就绪」。
+    expect(within(panel).getByText("安装检查")).toBeTruthy();
+    expect(within(panel).getByText("全部就绪")).toBeTruthy();
   });
 
   it("分析与 AI:三条阈值 + 六轴权重 range,provider 未锁定时不许启用 L3", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "分析与 AI");
+    const panel = await goSection(dialog, "analysis");
     for (const label of ["场景切分 T", "语义相似度", "抖动阈值", "Technical", "Narrative"]) {
       expect(within(panel).getByRole("slider", { name: label })).toBeTruthy();
     }
     await act(async () => {
-      within(panel).getByRole("switch", { name: "启用 L3 增强" }).click();
+      within(panel).getByRole("switch", { name: "启用增强分析" }).click();
       await Promise.resolve();
     });
     expect(apiMocks.setSetting).not.toHaveBeenCalledWith("llm_enabled", "true");
-    expect(within(dialog).getByRole("status").textContent).toBe("请先明确锁定一个 LLM provider，再启用 L3 增强");
+    expect(within(dialog).getByRole("status").textContent).toBe("请先明确锁定一个 LLM provider,再启用增强分析");
     expect(within(panel).getByRole("combobox", { name: "Provider" })).toBeTruthy();
     expect(within(panel).getByText("尚无调用记录。provider 缺失或开关关闭不会消耗预算。")).toBeTruthy();
   });
 
   it("隐私与诊断 / 云端补镜 两个冒烟锚点在 sheet 里", async () => {
     const dialog = await openLoaded();
-    const privacy = await goTab(dialog, "隐私与诊断");
+    // 左轨快捷入口「隐私与诊断」直落 关于 → 高级 → 隐私与诊断(高级自动展开)。
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "隐私与诊断" }).click();
+      await Promise.resolve();
+    });
+    expect(within(dialog).getByRole("tab", { name: "关于", selected: true })).toBeTruthy();
+    const details = dialog.querySelector<HTMLDetailsElement>("details.settings-sheet-advanced")!;
+    expect(details.open).toBe(true);
+    const privacy = dialog.querySelector<HTMLElement>('[data-section="privacy"]')!;
     expect(within(privacy).getByRole("heading", { level: 3, name: "隐私与诊断" })).toBeTruthy();
-    expect(within(privacy).getByRole("button", { name: "打开日志目录" })).toBeTruthy();
     expect(within(privacy).getByText("始终留在本机，绝不上传")).toBeTruthy();
-    const generation = await goTab(dialog, "云端补镜");
+    // 「打开日志目录」搬到关于的常用段(不在高级里)。
+    const about = dialog.querySelector<HTMLElement>('[data-section="about"]')!;
+    expect(within(about).getByRole("button", { name: "打开日志目录" })).toBeTruthy();
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "云端补镜" }).click();
+      await Promise.resolve();
+    });
+    expect(within(dialog).getByRole("tab", { name: "工具与模型", selected: true })).toBeTruthy();
+    const generation = dialog.querySelector<HTMLElement>('[data-section="generation"]')!;
     expect(within(generation).getByRole("heading", { level: 3, name: "云端补镜（MiniMax）" })).toBeTruthy();
   });
 
   it("云端补镜:默认关闭、generated/ 持久提示、从不回显 key,保存后只显示「已配置」(迁自 SettingsPage.test R7 Task 7)", async () => {
     apiMocks.hasMinimaxKey.mockResolvedValueOnce(false).mockResolvedValue(true);
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "云端补镜");
+    const panel = await goSection(dialog, "generation");
     expect(within(panel).getByRole("switch", { name: "启用云端补镜" }).getAttribute("aria-checked")).toBe("false");
     expect(within(panel).getByText("未配置")).toBeTruthy();
     expect(within(panel).getByText(/生成的片段会存到素材库的 generated\/ 目录，原素材目录不会被写入/)).toBeTruthy();
@@ -233,7 +302,7 @@ describe("设置 sheet", () => {
 
   it("月度预算输入 900 被夹到 500 并报告", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "云端补镜");
+    const panel = await goSection(dialog, "generation");
     const budget = within(panel).getByLabelText("月度预算（USD）");
     fireEvent.change(budget, { target: { value: "900" } });
     fireEvent.blur(budget);
@@ -243,7 +312,7 @@ describe("设置 sheet", () => {
 
   it("帮助与关于:「检查更新」按钮 + 常驻状态行;检查前没有安装/重启按钮;版本与许可清单在", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "帮助与关于");
+    const panel = await goSection(dialog, "about");
     expect(within(panel).getByRole("button", { name: "检查更新" })).toBeTruthy();
     const status = within(panel).getByTestId("updater-status");
     expect(status.getAttribute("data-updater-status")).toBe("idle");
@@ -253,14 +322,16 @@ describe("设置 sheet", () => {
     expect(panel.querySelector('[data-updater-action="restart"]')).toBeNull();
     expect(within(panel).queryByRole("button", { name: /下载并安装|立即重启/ })).toBeNull();
     expect(within(panel).getByRole("button", { name: "打开中文帮助" })).toBeTruthy();
-    expect(within(panel).getByRole("button", { name: "打开安装向导" })).toBeTruthy();
+    // R11 简化专项 #1:「打开安装向导」在新壳里没有监听者(向导只在旧壳挂载),按钮撤掉;
+    // 工具链引导改为常驻 设置 → 工具链 的「安装检查」卡(见下面的工具链用例)。
+    expect(within(panel).queryByRole("button", { name: "打开安装向导" })).toBeNull();
     expect(within(panel).getByText("应用版本")).toBeTruthy();
     expect(within(panel).getByText("开源许可清单")).toBeTruthy();
   });
 
   it("缓存与重建:两次点击才执行,第一次提示确认;危险动作在独立卡里", async () => {
     const dialog = await openLoaded();
-    const panel = await goTab(dialog, "缓存与重建");
+    const panel = await goSection(dialog, "cache");
     const button = within(panel).getByRole("button", { name: "清空缓存并重建" });
     expect(button.closest(".settings-sheet-danger")).toBeTruthy();
     await act(async () => {
@@ -277,13 +348,35 @@ describe("设置 sheet", () => {
     expect(panel.textContent).toContain("评级、片段和原始素材不会被删除");
   });
 
-  it("sheet 里没有任何英文 kicker / 序号水印(九个分区逐个看)", async () => {
+  it("sheet 里没有任何英文 kicker / 序号水印(九个旧分区逐个看,含高级里的)", async () => {
     const dialog = await openLoaded();
-    for (const name of SHEET_TABS) {
-      await goTab(dialog, name);
+    for (const id of Object.keys(SECTION_HOME) as (keyof typeof SECTION_HOME)[]) {
+      await goSection(dialog, id);
       expect(dialog.textContent).not.toMatch(
         /\b(SETTINGS|APPEARANCE|PERFORMANCE|TOOLCHAIN|ANALYSIS|MINIMAX|PRIVACY|DIAGNOSTICS|HELP|ABOUT|CACHE|REBUILD|JOURNEY TIME|OPTIONAL LLM|OPTIONAL CLOUD GENERATION)\b/,
       );
     }
+  });
+});
+
+describe("R10 U-14:openSettings(section) 直接落到分区", () => {
+  it("openSettings(\"analysis\") 打开 sheet 且落到「工具与模型 → 高级 → 分析与 AI」;顶栏按钮仍落到常用", async () => {
+    render(<WorkspaceShell />);
+    await act(async () => {
+      openSettings("analysis");
+      await Promise.resolve();
+    });
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    // R11 简化专项 #2:分析与 AI 住在 工具与模型 → 高级;直落时分区选中且高级自动展开。
+    expect(within(dialog).getByRole("tab", { name: "工具与模型", selected: true })).toBeTruthy();
+    expect(dialog.querySelector<HTMLDetailsElement>("details.settings-sheet-advanced")!.open).toBe(true);
+    expect(within(dialog).getByRole("heading", { level: 3, name: "分析与 AI" })).toBeTruthy();
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "关闭设置" }).click();
+      await Promise.resolve();
+    });
+    await openSettingsSheet();
+    const again = await screen.findByRole("dialog", { name: "设置" });
+    expect(within(again).getByRole("tab", { name: "常用", selected: true })).toBeTruthy();
   });
 });

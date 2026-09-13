@@ -9,9 +9,18 @@ import {
   type PlayerStatus,
   type StoryGap,
 } from "../api";
+
+export { monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
 import { MonitorControls } from "./MonitorControls";
-import { PaneHead } from "./PaneHead";
-import { Chip, CoverImage, EmptyState, Icon } from "./ui";
+import { MonitorIdle } from "./OnboardingCard";
+import { IoRail, MonitorFrame, Placeholder, monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
+import { isAtEnd } from "./MonitorSeekBar";
+import { loadPlayerPrefs } from "./playerPrefs";
+import { Chip, CoverImage, Icon } from "./ui";
+import { useClipsFeed } from "./useClipsFeed";
+import { useClipSuggestions } from "./useClipSuggestions";
+import { useMonitorHotkeys } from "./useMonitorHotkeys";
+import { useMonitorTransport } from "./useMonitorTransport";
 import { usePlayerOcclusion } from "./usePlayerOcclusion";
 import { useStageFit } from "./useStageFit";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
@@ -29,83 +38,10 @@ export function __setEmbeddedPlaybackForTests(value: boolean): void {
   MONITOR_EMBEDDED_PLAYBACK = value;
 }
 
-/** 空槽位时监视器显示什么:章节标题 + 缺口 reason。 */
-export function slotPlaceholderCopy(gap: StoryGap): { title: string; reason: string } {
-  return { title: `${gap.chapter_title} · ${gap.slot_label_zh}`, reason: gap.reason };
-}
-
-/** 井右上角的规格 chip(A 稿「4K · 25p · 12.5 MB」):分辨率档 · 帧率 · 文件大小。 */
-export function monitorSpecLabel(clip: ClipListItem): string {
-  const height = Math.min(clip.width ?? 0, clip.height ?? 0) || (clip.height ?? 0);
-  const long = Math.max(clip.width ?? 0, clip.height ?? 0);
-  const resolution =
-    long >= 3840 ? "4K" : long >= 2560 ? "2.7K" : height > 0 ? `${height}p` : "—";
-  const fps =
-    clip.fps_num !== null && clip.fps_den !== null && clip.fps_den > 0
-      ? `${Math.round(clip.fps_num / clip.fps_den)}p`
-      : "—";
-  const bytes = clip.byte_size ?? 0;
-  const size =
-    bytes >= 1024 ** 3
-      ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
-      : bytes >= 1024 ** 2
-        ? `${(bytes / 1024 ** 2).toFixed(1)} MB`
-        : `${(bytes / 1024).toFixed(1)} KB`;
-  return `${resolution} · ${fps} · ${size}`;
-}
-
-/** 井底的 I/O 轨:入出点区间用强调色、播放头一根白线;纯装饰,数据都在控件条里。 */
-function IoRail({
-  status,
-  inPoint,
-  outPoint,
-}: {
-  status: PlayerStatus | null;
-  inPoint: number | null;
-  outPoint: number | null;
-}): JSX.Element | null {
-  if (!status || status.phase !== "ready" || status.duration <= 0) return null;
-  const pct = (seconds: number) => `${Math.min(100, Math.max(0, (seconds / status.duration) * 100))}%`;
-  return (
-    <div className="monitor-io" aria-hidden="true">
-      <div className="monitor-io-rail">
-        {inPoint !== null ? (
-          <span
-            className="monitor-io-range"
-            style={{ left: pct(inPoint), right: outPoint === null ? "auto" : `calc(100% - ${pct(outPoint)})`, width: outPoint === null ? "2px" : undefined }}
-          />
-        ) : null}
-        {inPoint !== null ? <span className="monitor-io-mark monitor-io-mark--in" style={{ left: pct(inPoint) }} /> : null}
-        {outPoint !== null ? <span className="monitor-io-mark monitor-io-mark--out" style={{ left: pct(outPoint) }} /> : null}
-        <span className="monitor-io-head" style={{ left: pct(status.pos) }} />
-      </div>
-    </div>
-  );
-}
-
-function Placeholder({ title, reason }: { title: string; reason?: string }): JSX.Element {
-  return (
-    <div className="monitor-stage">
-      <div className="monitor-well monitor-well--empty">
-        <EmptyState icon="play" size="inline" tone="dark" title={title} body={reason} />
-      </div>
-    </div>
-  );
-}
-
-/** 栏标题条 + 画面区的公共外壳:标题右侧的状态字说的是「现在看的是哪一条」。 */
-function MonitorFrame({ meta, children }: { meta: string; children: JSX.Element | JSX.Element[] }): JSX.Element {
-  return (
-    <div className="monitor">
-      <PaneHead title="预览监视器" meta={meta} />
-      {children}
-    </div>
-  );
-}
-
 export function Monitor(): JSX.Element {
   const selection = useWorkspace((state) => state.selection);
   const immersive = useWorkspace((state) => state.immersive);
+  const feed = useClipsFeed();
 
   const [clips, setClips] = useState<readonly ClipListItem[]>([]);
   const [gaps, setGaps] = useState<readonly StoryGap[]>([]);
@@ -114,11 +50,13 @@ export function Monitor(): JSX.Element {
   const [outPoint, setOutPoint] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [muted, setMuted] = useState(false);
   const controlsRef = useRef<EmbeddedPlayerControls | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   // 覆盖层打开时藏起原生视频视图(R9 D1);挂在这里是因为监视器在壳里常驻。
   usePlayerOcclusion();
+  // 播放器偏好(R11 §3)只在首次挂载读一次表。
+  useEffect(() => void loadPlayerPrefs(), []);
 
   const selectedClipId = selection?.kind === "clip" ? selection.clipId : null;
   const selectedSlot = selection?.kind === "slot" ? selection : null;
@@ -181,28 +119,75 @@ export function Monitor(): JSX.Element {
   }, []);
 
   const onPlayPause = useCallback(() => {
-    void send([{ type: status?.paused === false ? "pause" : "play" }]);
-  }, [send, status?.paused]);
+    if (status?.paused === false) {
+      void send([{ type: "pause" }]);
+      return;
+    }
+    // U-09:mpv keep-open 停在尾帧时单发 play 什么都不会发生(图标翻成暂停、时间不动)。
+    // 播完再按播放 = 从头放。
+    void send(isAtEnd(status) ? [{ type: "seek_abs", seconds: 0 }, { type: "play" }] : [{ type: "play" }]);
+  }, [send, status]);
 
-  const onToggleMute = useCallback(() => {
-    const next = !muted;
-    setMuted(next);
-    void send([{ type: "set_mute", muted: next }]);
-  }, [send, muted]);
+  // R11 §1.2:时刻分 + 建议段;§3:变速 / 逐帧 / 循环 / 自动下一条 / 静音记忆 / 从最高分开播。
+  const suggestions = useClipSuggestions(clip, status?.phase === "ready" ? status.duration : 0);
+  // 所有 seek 走走带的 seekTo:它记着「最后要去的位置」,暂停态下 seek 未落地时打点 / 逐帧
+  // 才不会拿旧读数算(V-04)。
+  const transport = useMonitorTransport({
+    clip,
+    status,
+    send,
+    inPoint,
+    outPoint,
+    bestStart: suggestions.bestStart,
+    momentsLoaded: suggestions.momentsLoaded,
+  });
+  const onNudge = transport.nudge;
+  const onSeek = transport.seekTo;
 
-  const onNudge = useCallback(
-    (seconds: -1 | 1) => {
-      if (!status || status.phase !== "ready") return;
-      const target = Math.min(status.duration, Math.max(0, status.pos + seconds));
-      void send([{ type: "seek_abs", seconds: target }]);
+  // 当前建议一变(载入 / N / ⇧N)就把入出点填成它 —— I / O 微调、S 或 Enter 保存,都是同一条路。
+  const { current: currentSuggestion, index: suggestionIndex } = suggestions;
+  useEffect(() => {
+    if (!currentSuggestion) return;
+    setInPoint(currentSuggestion.inSeconds);
+    setOutPoint(currentSuggestion.outSeconds);
+  }, [currentSuggestion]);
+  const onStepSuggestion = useCallback(
+    (direction: 1 | -1) => {
+      const next = suggestions.step(direction);
+      if (next) onSeek(next.inSeconds);
     },
-    [send, status],
+    [suggestions, onSeek],
   );
+
+  // 媒体池 / 镜头带的空格键与音乐刻度轨的「建议切点」都不认识播放器,只往 window 上
+  // 广播:`tripcut:toggle-playback`(播放/暂停,播完则从头)与 `tripcut:seek-ratio`
+  // ({ratio} 0..1)。监视器是唯一握着嵌入通道的人,在这里收。用 ref 拿最新的处理函数,
+  // 监听器只挂一次,不跟着 80ms 的状态轮询反复拆装。
+  const latest = useRef({ onPlayPause, onSeek, status });
+  useEffect(() => {
+    latest.current = { onPlayPause, onSeek, status };
+  }, [onPlayPause, onSeek, status]);
+  useEffect(() => {
+    const toggle = () => latest.current.onPlayPause();
+    const seekRatio = (event: Event) => {
+      const ratio = (event as CustomEvent<{ ratio?: unknown }>).detail?.ratio;
+      const current = latest.current.status;
+      if (typeof ratio !== "number" || !Number.isFinite(ratio) || !current || current.phase !== "ready") return;
+      latest.current.onSeek(Math.min(1, Math.max(0, ratio)) * current.duration);
+    };
+    window.addEventListener("tripcut:toggle-playback", toggle);
+    window.addEventListener("tripcut:seek-ratio", seekRatio);
+    return () => {
+      window.removeEventListener("tripcut:toggle-playback", toggle);
+      window.removeEventListener("tripcut:seek-ratio", seekRatio);
+    };
+  }, []);
 
   const markAt = useCallback(
     (edge: "in" | "out") => {
-      if (!status || status.phase !== "ready") return;
-      const at = Math.min(status.duration, Math.max(0, status.pos));
+      // 位置取走带的 position():暂停态 seek 还没落地时,状态里的 pos 是旧的(V-04)。
+      const at = transport.position();
+      if (!status || status.phase !== "ready" || at === null) return;
       if (edge === "in") {
         setInPoint(at);
         // 入点越过旧出点后那段就没意义了,别留一个反向区间等着保存时才报错。
@@ -213,7 +198,7 @@ export function Monitor(): JSX.Element {
       setOutPoint(at);
       setNotice("已设置出点");
     },
-    [status],
+    [status, transport],
   );
 
   const onSaveSegment = useCallback(async () => {
@@ -230,15 +215,29 @@ export function Monitor(): JSX.Element {
     setNotice(null);
     try {
       await createSelectSegment(clip.id as number, inPoint, outPoint);
-      setNotice("精选段已保存");
+      setNotice(suggestionIndex >= 0 ? `已采用建议 ${suggestionIndex + 1} · 精选段已保存` : "精选段已保存");
       setInPoint(null);
       setOutPoint(null);
+      transport.stopLoop();
     } catch (reason) {
       setNotice(`精选段未保存：${String(reason).replace(/^Error:\s*/, "")}`);
     } finally {
       setSaving(false);
     }
-  }, [clip, inPoint, outPoint]);
+  }, [clip, inPoint, outPoint, suggestionIndex, transport]);
+
+  // 单键全走 useMonitorHotkeys(R10 建):J/K/L 变速在 transport 里,Enter 采纳 = 保存当前入出点。
+  useMonitorHotkeys(rootRef, {
+    onMark: markAt,
+    onNudge,
+    onShuttle: transport.shuttle,
+    onTogglePlayback: onPlayPause,
+    onAdoptSuggestion: suggestionIndex >= 0 ? () => void onSaveSegment() : undefined,
+    onStepSuggestion,
+    onFrame: transport.frame,
+    onToggleLoop: transport.toggleLoop,
+    onSave: () => void onSaveSegment(),
+  });
 
   if (immersive && clip) {
     // 沉浸态是同一条素材的另一种呈现;退出后 selection 不变,嵌入态接着播它。
@@ -260,9 +259,10 @@ export function Monitor(): JSX.Element {
   }
 
   if (selectedClipId === null) {
+    // R11 简化专项 #1:整个素材库(不按集裁)为空且没看过引导时,这里是三步上手卡;否则是原来的占位句。
     return (
       <MonitorFrame meta="未选择">
-        <Placeholder title="从左侧媒体池选一条素材" reason="选中后在这里预览,I / O 打点。" />
+        <MonitorIdle clipCount={feed.allClips.length} loading={feed.loading} />
       </MonitorFrame>
     );
   }
@@ -293,9 +293,12 @@ export function Monitor(): JSX.Element {
   }
 
   return (
-    <MonitorFrame meta={clip.file_name}>
+    <MonitorFrame meta={clip.file_name} rootRef={rootRef}>
       <div className="monitor-stage" ref={stageRef}>
         <div className="monitor-well monitor-well--video">
+          {/* 井底铺封面(U-09):原生 mpv 视图压在 WKWebView 之上,画面在时它盖住这层;
+              被覆盖层遮挡(player_set_occluded)或链路还没建好时,露出来的是封面而不是整块黑。 */}
+          <CoverImage src={clip.cover_url} className="monitor-well-backdrop" />
           <PlayerOverlay
             clip={clip}
             variant="embedded"
@@ -319,14 +322,20 @@ export function Monitor(): JSX.Element {
         outPoint={outPoint}
         notice={notice}
         saving={saving}
-        muted={muted}
+        muted={transport.muted}
+        speedLabel={transport.speedLabel}
+        looping={transport.looping}
+        suggestions={suggestions}
         onPlayPause={onPlayPause}
         onNudge={onNudge}
-        onToggleMute={onToggleMute}
+        onToggleMute={transport.toggleMute}
+        onCycleSpeed={() => transport.shuttle("l")}
         onMarkIn={() => markAt("in")}
         onMarkOut={() => markAt("out")}
         onSaveSegment={() => void onSaveSegment()}
+        onStepSuggestion={onStepSuggestion}
         onRequestImmersive={enterImmersive}
+        onSeek={onSeek}
       />
     </MonitorFrame>
   );

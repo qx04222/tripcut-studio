@@ -1,4 +1,4 @@
-import type { ClipListItem, MissingClip } from "../../api";
+import type { ClipListItem, ImportProgress, MissingClip } from "../../api";
 import type { BadgeTone } from "../ui/Badge";
 
 /** 与 `ImportPage.analysisProgress` 同一份算法(旧文件保留自己的导出给旧壳)。 */
@@ -76,4 +76,76 @@ export function lastPathSegment(path: string): string {
 /** 关注文件夹「上次同步」文案逐字沿用 `ImportPage`。 */
 export function formatSyncTime(lastScanAt: string | null): string {
   return lastScanAt ? `上次同步 ${lastScanAt.slice(0, 16).replace("T", " ")}` : "尚未自动同步";
+}
+
+/**
+ * 长路径「中间省略」的两半(R10 U-07):头 = 末段之前的全部(交给 CSS 尾部省略),
+ * 尾 = 末段(永远整段可见)。CSS 的 text-overflow 只会省略尾巴,把末段拆成单独一段
+ * 不收缩,视觉上就是「/Users/xin/Movies/…/walk-media」。单段路径尾为空,整条当头。
+ */
+export function splitPathForEllipsis(path: string): { head: string; tail: string } {
+  const trimmed = path.replace(/\/+$/, "");
+  const cut = trimmed.lastIndexOf("/");
+  if (cut <= 0) return { head: trimmed, tail: "" };
+  return { head: trimmed.slice(0, cut + 1), tail: trimmed.slice(cut + 1) };
+}
+
+/** 任务分页顶部三段式的一段(R10 U-08):索引 / 画质 / 运镜各自的计数与百分比。 */
+export interface PipelineSegment {
+  id: "index" | "quality" | "motion";
+  label: string;
+  done: number;
+  total: number;
+  percent: number;
+  running: number;
+  waiting: number;
+  failed: number;
+}
+
+function percentOf(done: number, total: number): number {
+  return total <= 0 ? 0 : Math.min(100, Math.round((done / total) * 100));
+}
+
+/**
+ * 三段式:索引按 ImportProgress(失败也算处理过),画质 / 运镜按可用素材数。
+ * 此前顶部只有一个「索引进度 100%」,下面却写着画质 10/21、运镜 0/21——用户以为全完了。
+ */
+export function pipelineSegments(
+  progress: ImportProgress,
+  readyCount: number,
+  quality: AnalysisProgress,
+  motion: AnalysisProgress,
+): PipelineSegment[] {
+  const indexed = progress.done + progress.failed;
+  const pending = Math.max(0, progress.total - indexed - progress.running);
+  return [
+    { id: "index", label: "索引", done: indexed, total: progress.total, percent: percentOf(indexed, progress.total), running: progress.running, waiting: pending, failed: progress.failed },
+    { id: "quality", label: "画质分析", done: quality.done, total: readyCount, percent: percentOf(quality.done, readyCount), running: quality.running, waiting: quality.waiting, failed: quality.failed },
+    { id: "motion", label: "运镜分析", done: motion.done, total: readyCount, percent: percentOf(motion.done, readyCount), running: motion.running, waiting: motion.waiting, failed: motion.failed },
+  ];
+}
+
+/** 三段合起来一句话:整条流水线到哪了(节标题右侧的 meta)。 */
+export function pipelineHeadline(segments: readonly PipelineSegment[]): string {
+  const [index, ...analysis] = segments;
+  if (!index || index.total === 0) return "还没有素材";
+  const indexDone = index.done >= index.total && index.running === 0;
+  const analysisDone = analysis.every((segment) => segment.done + segment.failed >= segment.total);
+  if (!indexDone) return `正在索引 ${index.percent}%`;
+  if (analysisDone) return "索引与分析全部完成";
+  return "索引完成，分析进行中";
+}
+
+/**
+ * 解码许可 / 内存暂停的人话(R10 U-08)。此前直出「「38 等待解码许可」」这种内部计数。
+ * 内存暂停优先;许可排队只在还有任务真的在跑 / 在等时才显示——索引和分析都收尾了
+ * 还留着一个陈旧计数只会让人以为卡住了。
+ */
+export function decodeQueueHint(progress: ImportProgress, segments: readonly PipelineSegment[]): string | null {
+  if (progress.paused_for_memory) return "内存不足，已暂停解码与模型任务；释放内存后会自动继续。";
+  const waiting = progress.waiting_for_permit;
+  if (!waiting || waiting <= 0) return null;
+  const busy = segments.some((segment) => segment.running > 0 || segment.waiting > 0);
+  if (!busy) return null;
+  return `解码通道已占满，还有 ${waiting} 个任务在排队，会依次处理。`;
 }

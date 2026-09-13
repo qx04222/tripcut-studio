@@ -9,6 +9,8 @@ vi.mock("../api", () => ({
   })),
   listMissingClips: vi.fn(async () => []),
   listGenerationRequests: vi.fn(async () => []),
+  // R10 U-19:状态条把音乐分析进度并进了轮询。
+  getMusicAnalysisProgress: vi.fn(async () => ({ total: 0, done: 0, failed: 0, running: 0, pending: 0 })),
   setSetting: vi.fn(async () => undefined),
 }));
 
@@ -86,6 +88,9 @@ describe("ratingHotkeyIntent", () => {
       .toEqual({ kind: "move-selection", direction: 1 });
     expect(ratingHotkeyIntent(k({ key: " ", code: "Space" }), false))
       .toEqual({ kind: "toggle-playback" });
+    // V-05:焦点在卡片上时 K 也要能停/播(与监视器同键),新手不必先 F6 到监视器。
+    expect(ratingHotkeyIntent(k({ key: "k", code: "KeyK" }), false)).toEqual({ kind: "toggle-playback" });
+    expect(ratingHotkeyIntent(k({ key: "Process", code: "KeyK" }), false)).toEqual({ kind: "toggle-playback" });
   });
 
   it("没映射的键返回 null(不吃掉 ⌘F 之外的正常输入)", () => {
@@ -124,6 +129,15 @@ function PoolWithHotkeys({ handlers }: { handlers: RatingHotkeyHandlers }): JSX.
         onCompositionEnd={hotkeys.onCompositionEnd}
       >
         <input type="search" aria-label="搜索素材" />
+        <div role="row">
+          <button type="button" role="gridcell" aria-label="卡片">
+            卡片
+          </button>
+        </div>
+        <button type="button" aria-label="加入当前章节">
+          加入
+        </button>
+        <div role="combobox" aria-label="标签" aria-controls="tags" aria-expanded="false" tabIndex={0} />
       </div>
       <StatusStrip />
     </div>
@@ -143,6 +157,43 @@ describe("useRatingHotkeys", () => {
       "stack:locked",
       "playback",
     ]);
+  });
+
+  // U-01(R10):R9 把卡片改成可聚焦 <button role=gridcell> 之后,焦点永远落在卡片上、
+  // 不等于容器 —— 只认 target === 容器 就是「F/X/1–5/Space 全部无效」的根因。
+  it("U-01:焦点在卡片(gridcell)上按 3 / F / Space,评级、收藏、播放都触发", () => {
+    const handlers = makeHandlers();
+    render(<PoolWithHotkeys handlers={handlers} />);
+    const card = screen.getByRole("gridcell", { name: "卡片" });
+    card.focus();
+    fireEvent.keyDown(card, { key: "3", code: "Digit3" });
+    fireEvent.keyDown(card, { key: "f", code: "KeyF" });
+    fireEvent.keyDown(card, { key: " ", code: "Space" });
+    fireEvent.keyDown(card, { key: "Tab", code: "Tab" });
+    expect(handlers.calls).toEqual([
+      'rating:{"kind":"star","value":3}',
+      'rating:{"kind":"binary","value":1}',
+      "playback",
+      "takes",
+    ]);
+  });
+
+  it("U-01:焦点在搜索框 / combobox 上按 3 不触发", () => {
+    const handlers = makeHandlers();
+    render(<PoolWithHotkeys handlers={handlers} />);
+    fireEvent.keyDown(screen.getByRole("searchbox"), { key: "3", code: "Digit3" });
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "3", code: "Digit3" });
+    expect(handlers.calls).toEqual([]);
+  });
+
+  it("U-01:栏内普通按钮上 F/3 仍评级,但 Enter/Space 留给按钮自己激活", () => {
+    const handlers = makeHandlers();
+    render(<PoolWithHotkeys handlers={handlers} />);
+    const button = screen.getByRole("button", { name: "加入当前章节" });
+    fireEvent.keyDown(button, { key: "3", code: "Digit3" });
+    expect(fireEvent.keyDown(button, { key: "Enter", code: "Enter" })).toBe(true);
+    expect(fireEvent.keyDown(button, { key: " ", code: "Space" })).toBe(true);
+    expect(handlers.calls).toEqual(['rating:{"kind":"star","value":3}']);
   });
 
   it("事件目标是输入框时 hook 不接管(目标判定沿用 isFilmGridShortcutTarget 语义)", () => {

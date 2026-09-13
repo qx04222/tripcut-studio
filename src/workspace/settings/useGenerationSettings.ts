@@ -11,6 +11,7 @@ import {
   type SettingsMap,
 } from "../../api";
 import { MINIMAX_MODEL_RESOLUTIONS, MINIMAX_MONTHLY_BUDGET_MAX, clampMinimaxBudgetInput } from "./settingsModel";
+import { failureText } from "../errorText";
 
 type Settled<T> = PromiseSettledResult<T>;
 type Save = (key: string, value: string) => Promise<boolean>;
@@ -67,6 +68,11 @@ export function useGenerationSettings(
     setGenerationLedger(nextLedger);
   }, []);
   const saveMinimaxKey = useCallback(async () => {
+    // R10 U-34:空 Key 点「保存」要有话说,此前按钮禁用、什么都不发生。
+    if (minimaxKeyDraft.trim().length === 0) {
+      setMinimaxKeyNotice("请先粘贴 MiniMax API Key，再保存。");
+      return;
+    }
     setMinimaxKeyBusy(true);
     setMinimaxKeyNotice(null);
     try {
@@ -75,7 +81,7 @@ export function useGenerationSettings(
       await refreshGeneration();
       setMinimaxKeyNotice("已保存");
     } catch (error) {
-      setMinimaxKeyNotice(`保存失败：${String(error)}`);
+      setMinimaxKeyNotice(failureText("保存 Key", error));
     } finally {
       setMinimaxKeyBusy(false);
     }
@@ -90,7 +96,7 @@ export function useGenerationSettings(
       await refreshGeneration();
       setMinimaxKeyNotice("已清除");
     } catch (error) {
-      setMinimaxKeyNotice(`清除失败：${String(error)}`);
+      setMinimaxKeyNotice(failureText("清除 Key", error));
     } finally {
       setMinimaxKeyBusy(false);
     }
@@ -109,7 +115,9 @@ export function useGenerationSettings(
   const saveMinimaxEnabled = useCallback(async (enabled: boolean) => {
     await saveRef.current("minimax_enabled", String(enabled));
     await refreshGeneration();
-  }, [saveRef, refreshGeneration]);
+    // R10 U-34:没有 Key 也允许打开(先开开关再配 Key 是常见顺序),但要说清现在还不能用。
+    setMinimaxKeyNotice(enabled && !minimaxHasKey ? "已启用，但还没有 API Key——生成请求会被拒绝；请在下方保存 Key。" : null);
+  }, [saveRef, refreshGeneration, minimaxHasKey]);
 
   const saveMinimaxModel = useCallback(async (model: string) => {
     const resolutions = MINIMAX_MODEL_RESOLUTIONS[model] ?? [];

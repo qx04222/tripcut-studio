@@ -28,10 +28,14 @@ function statusLine(form: DeliverForm, status: ExportStatus, useJianyingDraft: b
   }
   if (status.status === "done") return { text: "已生成。可换平台或时长再出一份。", tone: "neutral", alert: false };
   if (useJianyingDraft) return { text: "写入剪映草稿目录;自检不过会先让你选保存位置再降级为稳定包。", tone: "neutral", alert: false };
-  return { text: form.destination ? `保存到 ${form.destination}` : "点「生成交付包」后选择保存位置。", tone: "neutral", alert: false };
+  return { text: form.destination ? `保存到 ${form.destination}` : "点「开始生成」后选择保存位置。", tone: "neutral", alert: false };
 }
 
-/** 页脚:状态行 + 取消 / 生成交付包(规格 §4.2 第 3 条)。进行中「取消」停任务,否则关抽屉。 */
+/**
+ * 页脚:状态行 + 取消 / 开始生成(规格 §4.2 第 3 条)。进行中「取消」停任务,否则关抽屉。
+ * 主按钮 AX 名「开始生成」(R10 U-20):顶栏那颗仍叫「生成交付包」,两颗不再同名,
+ * 键盘 / 辅助功能用户分得清哪颗是开抽屉、哪颗是真的动手。
+ */
 export function DeliverFooter({ form, status, useJianyingDraft, onClose }: DeliverFooterProps): JSX.Element {
   const active = isExportActive(status);
   const line = statusLine(form, status, useJianyingDraft);
@@ -57,7 +61,7 @@ export function DeliverFooter({ form, status, useJianyingDraft, onClose }: Deliv
           title={useJianyingDraft ? "生成剪映草稿;自检不过自动降级为稳定包" : undefined}
           onClick={() => void (useJianyingDraft ? form.generateNative() : form.generate())}
         >
-          生成交付包
+          开始生成
         </Button>
       </div>
     </footer>

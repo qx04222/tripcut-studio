@@ -1,0 +1,365 @@
+/*
+ * R10 车道 E(壳、抽屉、设置、恢复页)的样式。只能从 workspace.css 头部 @import
+ * (放尾部会被 postcss-import 静默丢掉),因此每条规则都以自己面板的根类起头抬特异性。
+ * 颜色一律用既有 token,不写字面量。
+ *
+ * 分节:
+ *   1. 界面缩放(U-21):--ui-scale 乘到 R9 的 px 令牌
+ *   2. 导入抽屉(U-07 路径中间省略;U-08 三段式进度)
+ *   3. 交付抽屉(U-20 画布尺寸)
+ *   4. 恢复页(U-36)
+ */
+
+/* ---------- 1. 界面缩放(U-21) ---------- */
+
+/*
+ * 设置 → 外观 → 界面缩放 只把 html 的 font-size 调成 90/115/130%,rem 令牌(--font-*)跟着走,
+ * 但 R9 设计令牌(--text-11…20、--lh-*、--control-*)与壳的 chrome 高度全是 px,
+ * 于是 130% 只放大了套件按钮与芯片,卡片文字、监视器工具条、检查器段标题原地不动
+ * (走查 68 那张图)。这里把同一档缩放落成 --ui-scale,乘到那些 px 令牌上:
+ * 字号、行高、控件高、顶栏 / 状态条 / 栏标题条高整套一起缩。间距六档不缩——密度是
+ * 设计决定,放大的是可读性不是留白。tokens.css 先于本文件进 bundle,同为 :root,后声明者胜。
+ */
+html {
+  --ui-scale: 1;
+}
+
+html[data-ui-scale="90"] {
+  --ui-scale: 0.9;
+}
+
+html[data-ui-scale="115"] {
+  --ui-scale: 1.15;
+}
+
+html[data-ui-scale="130"] {
+  --ui-scale: 1.3;
+}
+
+:root {
+  --text-11: calc(11px * var(--ui-scale));
+  --text-12: calc(12px * var(--ui-scale));
+  --text-13: calc(13px * var(--ui-scale));
+  --text-15: calc(15px * var(--ui-scale));
+  --text-20: calc(20px * var(--ui-scale));
+  --lh-11: calc(14px * var(--ui-scale));
+  --lh-12: calc(16px * var(--ui-scale));
+  --lh-13: calc(18px * var(--ui-scale));
+  --lh-15: calc(20px * var(--ui-scale));
+  --lh-20: calc(26px * var(--ui-scale));
+  --control-sm: calc(24px * var(--ui-scale));
+  --control-md: calc(28px * var(--ui-scale));
+  --control-lg: calc(30px * var(--ui-scale));
+}
+
+/* 壳的 chrome 高度令牌(workspace.css / chrome.css 里是 px);多带一个 html 抬一级特异性。 */
+html .workspace-shell {
+  --workspace-topbar-height: calc(44px * var(--ui-scale));
+  --workspace-status-height: calc(28px * var(--ui-scale));
+  --workspace-control-height: calc(28px * var(--ui-scale));
+  --workspace-pane-head-height: calc(32px * var(--ui-scale));
+  --workspace-pane-chrome-height: calc(32px * var(--ui-scale));
+}
+
+/* workspace.css 里剩下的几处写死 10/11/14px 的角标字号,同样乘上缩放。 */
+.workspace-shell .workspace-episode-caret,
+.workspace-shell .pool-card-generated,
+.workspace-shell .pool-card-stack,
+.workspace-shell .pool-card-match,
+.workspace-shell .pool-card-date,
+.workspace-shell .pool-card-rating,
+.workspace-shell .pool-card-badges .analysis-pending,
+.workspace-shell .monitor-mark-value,
+.workspace-shell .band-chapter-head small,
+.workspace-shell .band-chapter-folded,
+.workspace-shell .band-slot small,
+.workspace-shell .band-ruler-legend,
+.workspace-shell .inspector-take small {
+  font-size: calc(10px * var(--ui-scale));
+}
+
+.workspace-shell .band-slot-actions button,
+.workspace-shell .band-ruler-suggestion,
+.workspace-shell .inspector-dimensions-grid dt {
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.workspace-shell .workspace-rail-icon {
+  font-size: calc(14px * var(--ui-scale));
+}
+
+/* ---------- 2. 导入抽屉 ---------- */
+
+/* 路径中间省略:头段吃掉多余宽度并尾部省略,末段(文件夹名)永不收缩。
+   本文件先于 import-drawer.css 进 bundle,那边 `.import-drawer .import-path` 与
+   `.import-drawer .import-sources-hint .import-path` 会压过同特异性的规则,所以这里
+   多带一个类抬一级。 */
+.import-drawer .import-path.import-path--middle,
+.import-drawer .import-sources-hint .import-path.import-path--middle {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.import-drawer .import-path--middle .import-path-head {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-drawer .import-path--middle .import-path-tail {
+  flex: 0 0 auto;
+}
+
+.import-drawer .import-watched-path {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+/* 任务分页三段式(U-08):索引 / 画质 / 运镜三块并排,各自计数 + 百分比 + 进度条。 */
+.import-drawer .import-pipeline {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-drawer .import-pipeline-tile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label percent"
+    "count count"
+    "track track"
+    "rest rest";
+  gap: var(--space-1) var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-chrome);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-drawer .import-pipeline-label {
+  grid-area: label;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+.import-drawer .import-pipeline-percent {
+  grid-area: percent;
+  color: var(--accent-text);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+.import-drawer .import-pipeline-count {
+  grid-area: count;
+  color: var(--text-primary);
+  font-size: var(--text-20);
+  font-weight: 600;
+  line-height: var(--lh-20);
+  letter-spacing: -0.02em;
+}
+
+.import-drawer .import-pipeline-tile .import-index-track {
+  grid-area: track;
+}
+
+.import-drawer .import-pipeline-rest {
+  grid-area: rest;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+@media (width < 640px) {
+  .import-drawer .import-pipeline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 4. 恢复页(U-36) ---------- */
+
+/*
+ * body 全局禁滚,恢复页自带滚动区;操作条(恢复摘要 + 「进入工作台」)在滚动区之外吸底,
+ * 首屏就看得见。标题按视口自适应并 balance 折行——1512 宽下不再折成「…结\n束」一个孤字。
+ */
+.recovery-r10 {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  color: var(--text-primary);
+  background: var(--surface-ground);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.recovery-r10 .recovery-r10-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: clamp(24px, 4vw, 48px) clamp(20px, 5vw, 64px) var(--space-6);
+}
+
+.recovery-r10 .recovery-r10-hero,
+.recovery-r10 .recovery-r10-section,
+.recovery-r10 .recovery-r10-bar-inner {
+  width: min(960px, 100%);
+  margin: 0 auto;
+}
+
+.recovery-r10 .recovery-r10-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding-bottom: var(--space-5);
+}
+
+.recovery-r10 .recovery-r10-title {
+  max-width: 24ch;
+  margin: 0;
+  font-size: clamp(1.5rem, 1rem + 1.6vw, 2.25rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.recovery-r10 .recovery-r10-lead {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.recovery-r10 .recovery-r10-notice {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.recovery-r10 .recovery-r10-section {
+  padding-top: var(--space-5);
+}
+
+.recovery-r10 .recovery-r10-heading {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+
+.recovery-r10 .recovery-r10-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recovery-r10 .recovery-r10-check {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.recovery-r10 .recovery-r10-check-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.recovery-r10 .recovery-r10-check-copy strong {
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+
+.recovery-r10 .recovery-r10-check-copy span {
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  overflow-wrap: anywhere;
+}
+
+.recovery-r10 .recovery-r10-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.recovery-r10 .recovery-r10-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.recovery-r10 .recovery-r10-action > span {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.recovery-r10 .recovery-r10-bar {
+  flex: 0 0 auto;
+  padding: var(--space-3) clamp(20px, 5vw, 64px);
+  border-top: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-card);
+}
+
+.recovery-r10 .recovery-r10-bar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.recovery-r10 .recovery-r10-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.recovery-r10 .recovery-r10-summary strong {
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+}

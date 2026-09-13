@@ -21,6 +21,34 @@ pub struct Chapter {
     pub clip_count: i64,
 }
 
+/// R10 U-03:整条素材进入镜头带 / 模板 / 叙事候选池的谓词——**收藏 ∪ ≥3 星**
+/// (精选段另走 `live_selects`,三者合起来就是走查要求的「收藏 ∪ ≥3 星 ∪ 有精选段」)。
+/// 两个评级都取整条(非 select 段)上最近一次的值。`alias` 是 clips 表在外层查询里的
+/// 别名。story.rs 两处、narrative.rs 两处共用这一段,别再各抄一份只认收藏的版本。
+pub(crate) fn whole_clip_candidate_predicate(alias: &str) -> String {
+    format!(
+        "(1 = (
+             SELECT binary.value
+             FROM ratings binary
+             JOIN segments rated_segment ON rated_segment.id = binary.segment_id
+             WHERE rated_segment.clip_id = {alias}.id
+               AND COALESCE(rated_segment.kind, 'whole') != 'select'
+               AND rated_segment.tombstone = 0
+               AND binary.rating_type = 'binary'
+             ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
+         ) OR 3 <= COALESCE((
+             SELECT star.value
+             FROM ratings star
+             JOIN segments rated_segment ON rated_segment.id = star.segment_id
+             WHERE rated_segment.clip_id = {alias}.id
+               AND COALESCE(rated_segment.kind, 'whole') != 'select'
+               AND rated_segment.tombstone = 0
+               AND star.rating_type = 'star'
+             ORDER BY star.rated_at DESC, star.id DESC LIMIT 1
+         ), 0))"
+    )
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StoryItem {
     pub key: String,
@@ -436,7 +464,7 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(CoreError::from)?;
 
-    let mut item_statement = connection.prepare(
+    let item_sql = format!(
         "WITH live_selects AS (
              SELECT id, clip_id, in_ticks, out_ticks
              FROM segments
@@ -466,16 +494,7 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
                AND NOT EXISTS (
                    SELECT 1 FROM live_selects selected WHERE selected.clip_id = c.id
                )
-               AND 1 = (
-                   SELECT binary.value
-                   FROM ratings binary
-                   JOIN segments rated_segment ON rated_segment.id = binary.segment_id
-                   WHERE rated_segment.clip_id = c.id
-                     AND COALESCE(rated_segment.kind, 'whole') != 'select'
-                     AND rated_segment.tombstone = 0
-                     AND binary.rating_type = 'binary'
-                   ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
-               )
+               AND {candidate}
          )
          SELECT selected.item_kind, selected.clip_id, selected.segment_id,
                 selected.chapter_id, selected.rel_path,
@@ -492,7 +511,9 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
          ORDER BY story.position IS NULL, story.position,
                   selected.canonical_epoch IS NULL, selected.canonical_epoch,
                   selected.clip_id, selected.in_ticks, selected.segment_id",
-    )?;
+        candidate = whole_clip_candidate_predicate("c")
+    );
+    let mut item_statement = connection.prepare(&item_sql)?;
     let item_rows = item_statement.query_map([episode_id], |row| {
         let item_kind: String = row.get(0)?;
         let clip_id: i64 = row.get(1)?;
@@ -745,26 +766,20 @@ fn ensure_selected(
         )? == 1
     } else {
         connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM clips c
-                WHERE c.id = ?1 AND c.missing_since IS NULL
-                  AND (c.episode_id = ?2 OR c.episode_id IS NULL)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM segments selected
-                      WHERE selected.clip_id = c.id
-                        AND selected.kind = 'select' AND selected.tombstone = 0
-                  )
-                  AND 1 = (
-                      SELECT binary.value
-                      FROM ratings binary
-                      JOIN segments rated_segment ON rated_segment.id = binary.segment_id
-                      WHERE rated_segment.clip_id = c.id
-                        AND COALESCE(rated_segment.kind, 'whole') != 'select'
-                        AND rated_segment.tombstone = 0
-                        AND binary.rating_type = 'binary'
-                      ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
-                  )
-             )",
+            &format!(
+                "SELECT EXISTS(
+                    SELECT 1 FROM clips c
+                    WHERE c.id = ?1 AND c.missing_since IS NULL
+                      AND (c.episode_id = ?2 OR c.episode_id IS NULL)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM segments selected
+                          WHERE selected.clip_id = c.id
+                            AND selected.kind = 'select' AND selected.tombstone = 0
+                      )
+                      AND {candidate}
+                 )",
+                candidate = whole_clip_candidate_predicate("c")
+            ),
             params![item.clip_id, episode_id],
             |row| row.get::<_, i64>(0),
         )? == 1
@@ -1129,6 +1144,51 @@ mod tests {
         let storyboard = get_storyboard(&connection).unwrap();
         assert_eq!(storyboard.items[0].clip_id, second);
         assert_eq!(storyboard.candidates[0].clip_id, first);
+    }
+
+    fn star_rate(connection: &Connection, clip_id: i64, stars: i64, at: &str) {
+        connection
+            .execute(
+                "INSERT INTO ratings(segment_id, rating_type, value, rated_at)
+                 SELECT id, 'star', ?2, ?3 FROM segments
+                  WHERE clip_id = ?1 AND kind = 'whole' AND tombstone = 0",
+                params![clip_id, stars, at],
+            )
+            .unwrap();
+    }
+
+    /// R10 U-03:候选池 = 收藏 ∪ ≥3 星 ∪ 有精选段。三星未收藏的片进候选并可排进
+    /// 镜头带;两星不进,`set_story_order` 也拒绝;后来降到两星即退出候选。
+    #[test]
+    fn three_star_clips_are_story_candidates_even_when_not_favorited() {
+        let (_directory, mut connection) = setup();
+        let three_star = insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, false);
+        let two_star = insert_clip(&connection, "b.mov", "2026-08-31T10:01:00Z", None, false);
+        let favorite = insert_clip(&connection, "c.mov", "2026-08-31T10:02:00Z", None, true);
+        star_rate(&connection, three_star, 3, "2026-08-31T11:00:00Z");
+        star_rate(&connection, two_star, 2, "2026-08-31T11:00:00Z");
+
+        let storyboard = get_storyboard(&connection).unwrap();
+        let candidate_ids = storyboard.candidates.iter().map(|item| item.clip_id).collect::<Vec<_>>();
+        assert_eq!(candidate_ids, vec![three_star, favorite]);
+
+        set_story_order(
+            &mut connection,
+            &[StoryOrderRef { item_kind: "whole".to_owned(), clip_id: three_star, segment_id: None }],
+        )
+        .unwrap();
+        assert_eq!(get_storyboard(&connection).unwrap().items[0].clip_id, three_star);
+        let refused = set_story_order(
+            &mut connection,
+            &[StoryOrderRef { item_kind: "whole".to_owned(), clip_id: two_star, segment_id: None }],
+        );
+        assert!(refused.is_err(), "两星未收藏的片不能进镜头带");
+
+        // 最近一次评级说了算:降到两星即退出候选。
+        star_rate(&connection, three_star, 2, "2026-08-31T12:00:00Z");
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert!(storyboard.candidates.iter().all(|item| item.clip_id != three_star));
+        assert!(storyboard.items.iter().all(|item| item.clip_id != three_star));
     }
 
     #[test]

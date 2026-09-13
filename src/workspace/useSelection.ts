@@ -53,6 +53,23 @@ export function extendMultiSelection(
   return { ids: [next], anchor: next };
 }
 
+/**
+ * 换当前集之后旧选中还成不成立(R10 R-06):素材要属于新集(`episode_id` 为空的
+ * 旧数据归当前集,与 useClipsFeed 的 scopeClips 同规则);feed 里查不到的素材
+ * 和空槽位(章属于旧集)一律算不成立。集 id 未知时不动选中。
+ */
+export function selectionBelongsToEpisode(
+  selection: Selection,
+  episodeId: number | null,
+  clipsById: ReadonlyMap<number, Pick<ClipListItem, "episode_id">>,
+): boolean {
+  if (selection === null || episodeId === null) return true;
+  if (selection.kind !== "clip") return false;
+  const clip = clipsById.get(selection.clipId);
+  if (!clip) return false;
+  return (clip.episode_id ?? episodeId) === episodeId;
+}
+
 /** 回显目标的 DOM id;两栏用同一套 id 规则,scrollIntoView 才能互相找到。 */
 export function echoElementId(selection: Selection, pane: "pool" | "band"): string | null {
   if (selection === null) return null;

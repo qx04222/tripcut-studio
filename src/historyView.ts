@@ -11,3 +11,11 @@ export function openHistoricalEpisode(episodeId: number, title: string): void {
     );
   }, 120);
 }
+
+/**
+ * 从只读查看回到当前集(N-2):派发一条 detail 为 null 的 `tripcut:view-episode`,
+ * 媒体池视角、壳的横幅、搜索增强都听这一个事件收口;不属于当前集的选中由壳清掉。
+ */
+export function returnToActiveEpisode(): void {
+  window.dispatchEvent(new CustomEvent("tripcut:view-episode", { detail: null }));
+}

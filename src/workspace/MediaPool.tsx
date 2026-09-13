@@ -10,8 +10,13 @@ import {
 } from "react";
 
 import { searchClips, searchTranscripts } from "../api";
+import { PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
+import { useMediaPoolHotkeys } from "./MediaPoolHotkeys";
+import { PoolStackStrip } from "./MediaPoolStackStrip";
+import { PoolExportContextMenu } from "./deliver/QuickExportEntry";
 import { PaneHead } from "./PaneHead";
 import { PoolCard } from "./PoolCard";
+import { setPoolOrder } from "./poolOrder";
 import { INITIAL_POOL_EXTRA_FILTERS, PoolFilters, type PoolExtraFilters } from "./PoolFilters";
 import {
   GRID_OVERSCAN_ROWS,
@@ -20,6 +25,7 @@ import {
   filterClipsByDimension,
   filterClipsByOrientation,
   filterSelectionClips,
+  matchClipsByFileName,
   poolColumnCount,
   poolRowAtOffset,
   poolRowTop,
@@ -28,6 +34,7 @@ import {
 import { useClipsFeed } from "./useClipsFeed";
 import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
+import { failureText } from "./errorText";
 
 const FILTER_ORDER: readonly SelectionFilter[] = ["all", "favorite", "unrated", "rejected"];
 
@@ -35,7 +42,10 @@ export function MediaPool(): JSX.Element {
   const feed = useClipsFeed();
   const filter = useWorkspace((state) => state.filter);
   const dimension = useWorkspace((state) => state.dimension);
+  const query = useWorkspace((state) => state.query);
   const paneWidth = useWorkspace((state) => state.poolWidth);
+  // 池内展开的 Stack(U-02):点角标「n 条候选」或在卡片上按 Tab。
+  const [expandedStackId, setExpandedStackId] = useState<number | null>(null);
 
   const [extras, setExtras] = useState<PoolExtraFilters>(INITIAL_POOL_EXTRA_FILTERS);
   const [searching, setSearching] = useState(false);
@@ -70,6 +80,10 @@ export function MediaPool(): JSX.Element {
   }, [paneWidth]);
 
   const clips = useMemo(() => [...feed.clips], [feed.clips]);
+  // 搜索回调要读「此刻」的素材表做文件名匹配,不能把 clips 放进它的依赖里
+  // (那会让每次轮询都换一个 runSearch 身份)。
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
   const dimensions = useMemo(() => [...feed.dimensions], [feed.dimensions]);
   const shotStacks = useMemo(() => [...feed.shotStacks], [feed.shotStacks]);
 
@@ -130,6 +144,8 @@ export function MediaPool(): JSX.Element {
     [items],
   );
   const { selection, multiSelection, selectClip } = useSelection(visibleIds);
+  // R11 §3:监视器「播完自动下一条」按这份可见顺序走。
+  useEffect(() => setPoolOrder(visibleIds), [visibleIds]);
   const selectedId = selection?.kind === "clip" ? selection.clipId : null;
   const storeAnchorId = useWorkspace((state) => state.anchorClipId);
   // 锚点 = 最后一次点击的素材。选中的是镜头带的空槽位时,网格的漫游落点仍留在
@@ -154,18 +170,42 @@ export function MediaPool(): JSX.Element {
       if (request !== searchRequest.current) return;
       const scores = new Map<number, number>();
       for (const hit of hits) scores.set(hit.clip_id, hit.score);
+      // U-15:文件名子串也算命中(⌘K 早就这么搜,池内搜索却只走语义/对白索引,
+      // 「登机」搜不到 IMG_0813_登机口.mov 就是这条缺口)。前端并集,不改 Rust。
       const allowed = new Set<number>([
         ...hits.map((hit) => hit.clip_id),
         ...transcripts.map((match) => match.clip_id),
+        ...matchClipsByFileName(clipsRef.current, query),
       ]);
       setSemanticScores(scores);
       setSearchRestriction(allowed);
     } catch (error) {
-      if (request === searchRequest.current) setSearchError(String(error));
+      if (request === searchRequest.current) setSearchError(failureText("搜索", error, "换个词再试"));
     } finally {
       if (request === searchRequest.current) setSearching(false);
     }
   }, []);
+
+  // U-15:搜索词被清空(输入框删光、Esc、⌘K)即自动复原,不必再按一次「搜索」。
+  useEffect(() => {
+    if (query === "") void runSearch("");
+  }, [query, runSearch]);
+
+  const anchorStack = anchorId === null ? null : feed.shotStackByClipId.get(anchorId) ?? null;
+  // 展开的 Stack 被筛选/搜索从网格里裁掉之后,候选条也跟着收起 —— 不留一条无主的展开。
+  const expandedStack = useMemo(
+    () => (expandedStackId === null ? null : items.find((item) => item.stack?.id === expandedStackId)?.stack ?? null),
+    [expandedStackId, items],
+  );
+  const toggleStack = (stackId: number) => setExpandedStackId(expandedStackId === stackId ? null : stackId);
+  const hotkeys = useMediaPoolHotkeys({
+    anchorId,
+    anchorStack,
+    clipsById: feed.clipsById,
+    expandedStackId,
+    setExpandedStackId,
+    selectClip,
+  });
 
   const rowCount = Math.ceil(items.length / columns);
   const startRow = Math.min(
@@ -203,16 +243,28 @@ export function MediaPool(): JSX.Element {
   }, [anchorId, startRow, endRow, visible.length]);
 
   const onGridKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (anchorId === null || visibleIds.length === 0) return;
+    // Stack 展开时 ↑↓ 在候选里移动(useMediaPoolHotkeys),不做网格漫游。
+    const inTakes = expandedStack !== null && anchorStack?.id === expandedStack.id;
+    const takesKey = event.key === "ArrowUp" || event.key === "ArrowDown";
+    if (anchorId === null || visibleIds.length === 0 || (inTakes && takesKey)) {
+      hotkeys.onKeyDown(event);
+      return;
+    }
     const index = visibleIds.indexOf(anchorId);
-    if (index < 0) return;
+    if (index < 0) {
+      hotkeys.onKeyDown(event);
+      return;
+    }
     const step =
       event.key === "ArrowRight" ? 1
       : event.key === "ArrowLeft" ? -1
       : event.key === "ArrowDown" ? columns
       : event.key === "ArrowUp" ? -columns
       : 0;
-    if (step === 0) return;
+    if (step === 0) {
+      hotkeys.onKeyDown(event);
+      return;
+    }
     event.preventDefault();
     const nextIndex = Math.min(visibleIds.length - 1, Math.max(0, index + step));
     const next = visibleIds[nextIndex];
@@ -256,7 +308,7 @@ export function MediaPool(): JSX.Element {
         </p>
       ) : null}
       <div
-        className="pool-grid-viewport"
+        className={items.length === 0 ? "pool-grid-viewport is-empty" : "pool-grid-viewport"}
         ref={viewportRef}
         role="grid"
         aria-label="媒体池"
@@ -275,6 +327,8 @@ export function MediaPool(): JSX.Element {
         }}
         onScroll={(event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop)}
         onKeyDown={onGridKeyDown}
+        onCompositionStart={hotkeys.onCompositionStart}
+        onCompositionEnd={hotkeys.onCompositionEnd}
       >
         <div className="pool-grid-canvas" style={{ height: poolRowTop(rowCount) }}>
           <div
@@ -299,7 +353,15 @@ export function MediaPool(): JSX.Element {
                     columnIndex={columnOffset + 1}
                     semanticScore={item.semanticScore}
                     stackCount={item.stack ? item.stack.members.length : undefined}
-                    selected={item.clip.id === selectedId}
+                    stackExpanded={item.stack ? item.stack.id === expandedStackId : undefined}
+                    onToggleStack={item.stack ? () => toggleStack(item.stack!.id) : undefined}
+                    // 选中的是 Stack 里某条候选时,代表卡也算选中 —— 网格里没有那条的卡。
+                    selected={
+                      item.clip.id === selectedId ||
+                      (item.stack !== undefined &&
+                        selectedId !== null &&
+                        item.stack.members.some((member) => member.clip_id === selectedId))
+                    }
                     isAnchor={item.clip.id === anchorId}
                     inMultiSelection={item.clip.id !== null && multiSelection.includes(item.clip.id)}
                     onSelect={(modifiers) => {
@@ -311,11 +373,34 @@ export function MediaPool(): JSX.Element {
             ))}
           </div>
         </div>
-        {!feed.loading && items.length === 0 ? (
-          <p className="pool-empty">没有符合当前筛选的素材</p>
-        ) : null}
-        {feed.loading ? <p className="pool-empty">正在整理素材</p> : null}
       </div>
+      {/* U-06:空库给大号「导入素材」入口,筛选无命中才给「清空筛选」。R-07:放在 grid **外面**——
+          WebKit 把 role=grid 的非 row 子节点从 AX 树剔掉,按钮在里面按名字找不到;空态时 grid 靠 is-empty 缩成 0 高。 */}
+      {!feed.loading && items.length === 0 ? (
+        clips.length === 0 ? (
+          <PoolEmpty />
+        ) : (
+          <PoolFilteredEmpty
+            onReset={() => {
+              setExtras(INITIAL_POOL_EXTRA_FILTERS);
+              dispatchWorkspace({ type: "set-dimension", dimension: "" });
+              dispatchWorkspace({ type: "set-query", query: "" });
+            }}
+          />
+        )
+      ) : null}
+      {feed.loading ? <p className="pool-empty">正在整理素材</p> : null}
+      {expandedStack ? (
+        <PoolStackStrip
+          stack={expandedStack}
+          clipsById={feed.clipsById}
+          activeClipId={selectedId}
+          onPick={(member) => selectClip(member.clip_id)}
+          onClose={() => setExpandedStackId(null)}
+        />
+      ) : null}
+      {/* R11 车道 E:多选右键「导出所选…」(自己去同级 grid 上挂 contextmenu,这里只追加一行)。 */}
+      <PoolExportContextMenu multiSelection={multiSelection} />
     </div>
   );
 }

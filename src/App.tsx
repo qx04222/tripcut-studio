@@ -26,6 +26,9 @@ const LazyLegacyShell = lazy(() =>
 
 const BAND_MODES: readonly BandMode[] = ["story", "music", "journey", "destination", "template"];
 
+/** 车道 B(U-22)落盘的「首启引导已完成 / 已跳过」键;未合入前按普通设置键读,缺省 false。 */
+export const FIRST_RUN_DONE_KEY = "onboarding.first_run_done";
+
 function isBandMode(value: string): value is BandMode {
   return (BAND_MODES as readonly string[]).includes(value);
 }
@@ -83,6 +86,11 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [doctorError, setDoctorError] = useState<string | undefined>();
   const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
+  // R10 U-23:恢复页之后不再叠首启弹窗——kill -9 后要连过「恢复页 → FIRST RUN」两道门。
+  // 恢复页真的出现过(自检报告到了但工作台还不能进)就记一笔;首启引导本次启动让位。
+  // `onboarding.first_run_done`(车道 B 的键,缺省当 false)为 true 时也不再弹。
+  const [recoveryShown, setRecoveryShown] = useState(false);
+  const [firstRunDone, setFirstRunDone] = useState(false);
   const [workspaceV2, setWorkspaceV2] = useState(true);
   // 旗的取值在 getSettings() 落地前一律不算数(R8 终审 L4):此前默认 true 会先渲染
   // 一帧新壳,旗其实是 false 的用户于是每次启动都看见新壳闪一下再被换掉。落地前
@@ -121,6 +129,10 @@ export default function App() {
       && (!doctorReport.abnormal_exit || recoveryAcknowledged),
   );
 
+  useEffect(() => {
+    if (doctorReport && !workbenchReady) setRecoveryShown(true);
+  }, [doctorReport, workbenchReady]);
+
   // 同一份 getSettings 结果既喂外观又判旗,不为了读一个键多发一次请求。
   useEffect(() => {
     if (!workbenchReady) return;
@@ -129,6 +141,7 @@ export default function App() {
       applyAppearanceSettings(settings);
       if (!active) return;
       setWorkspaceV2(readUiBool(settings, WORKSPACE_FLAG_KEY));
+      setFirstRunDone(readUiBool(settings, FIRST_RUN_DONE_KEY));
       dispatchWorkspace({ type: "hydrate", settings });
       // 读失败也算"落地"——回落到前端默认值,总比一直卡在骨架上强。
       setSettingsLoaded(true);
@@ -163,19 +176,21 @@ export default function App() {
 
   // 旗默认开(ui.workspace_v2 不在 Rust defaults() 里,没写过就是前端默认值 "true",
   // 见 UI_SETTING_DEFAULTS)。设置 sheet 的界面开关写回显式 "false" 才落到旧四页壳。
+  // R10 U-22:关过一次(暂时进入 / 向导 / 无事可讲)就把 App 级状态翻成 true,切壳不会让它再挂回来。
+  const firstRunGuide = firstRunDone || recoveryShown ? null : <FirstRunGuide onDismiss={() => setFirstRunDone(true)} />;
   if (workspaceV2) {
     return (
       <>
         <WorkspaceShell />
         <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
-        <FirstRunGuide />
+        {firstRunGuide}
       </>
     );
   }
   return (
     <Suspense fallback={<div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台" />}>
       <LazyLegacyShell route={route} />
-      <FirstRunGuide />
+      {firstRunGuide}
     </Suspense>
   );
 }

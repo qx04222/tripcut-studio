@@ -71,12 +71,13 @@ export function narrativeChapterOptions(storyboard: Storyboard | null): readonly
   return storyboard?.narrative?.chapters ?? [];
 }
 
-export type DefaultSectionId = "rating" | "tags" | "chapter" | "takes";
+export type DefaultSectionId = "rating" | "tags" | "chapter" | "segments" | "takes";
 
 /**
- * 默认层只渲染有内容的段(规格 §3.8):评级永远在;标签要有标签;章节段要么已归章、
- * 要么可改章(有事可做);Take 段要在 Stack 里。顺序固定 rating → tags → chapter → takes,
- * **不再有「暂无标签」「不属于任何 Take Stack」这类占位句**。
+ * 默认层的段(规格 §3.8 → R10 U-12 改规则):**可编辑段常驻**,只有「有内容才有意义」的
+ * 折叠段才按内容隐藏。评级、标签、章节/槽位归属、精选段永远在 —— 空态也要给出「添加标签」
+ * 「加入当前章节」这些入口(09-13 走查:帮助页说它们常驻,实际整段不见);Take 段只在
+ * Stack 里才有东西可切,仍按内容显示。顺序固定 rating → tags → chapter → segments → takes。
  */
 export function visibleDefaultSections(input: {
   tagCount: number;
@@ -84,9 +85,7 @@ export function visibleDefaultSections(input: {
   canReassign: boolean;
   hasStack: boolean;
 }): DefaultSectionId[] {
-  const out: DefaultSectionId[] = ["rating"];
-  if (input.tagCount > 0) out.push("tags");
-  if (input.hasPlacement || input.canReassign) out.push("chapter");
+  const out: DefaultSectionId[] = ["rating", "tags", "chapter", "segments"];
   if (input.hasStack) out.push("takes");
   return out;
 }

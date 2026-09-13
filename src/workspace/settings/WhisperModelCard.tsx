@@ -1,0 +1,104 @@
+import { useState, type JSX } from "react";
+
+import { importWhisperModel, pickWhisperModelFile, type ComponentStatus } from "../../api";
+import { Button } from "../ui";
+
+export interface WhisperModelCardProps {
+  /** `whisper-model` 组件状态(带官方地址 / 期望摘要 / 目标路径);没读到也能渲染按钮。 */
+  component: ComponentStatus | undefined;
+  busy: boolean;
+  /** 导入成功后重新检测(model_available 翻绿由 SettingsStatus 决定)。 */
+  onImported(): Promise<void>;
+}
+
+async function copyText(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  throw new Error("当前 WebView 不允许写入剪贴板");
+}
+
+/**
+ * R10 U-24:Whisper 模型缺失态——应用不联网下载模型,这里把「去哪下 / 核对什么 / 放哪」三件事
+ * 摆出来,并给一条不用手动拷文件的路:「导入模型文件…」(系统面板选文件 → 后端校验 SHA-256 后原子落位)。
+ */
+export function WhisperModelCard({ component, busy, onImported }: WhisperModelCardProps): JSX.Element {
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const onImport = async () => {
+    if (importing) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const path = await pickWhisperModelFile();
+      if (!path) return;
+      setImporting(true);
+      const outcome = await importWhisperModel(path);
+      await onImported().catch(() => undefined);
+      setNotice(
+        outcome.matches_active_tier
+          ? `已导入 ${outcome.file_name}（${outcome.tier}）`
+          : `已导入 ${outcome.file_name}（${outcome.tier}），与当前档位不同——把上方档位切到 ${outcome.tier} 即可启用`,
+      );
+    } catch (importError) {
+      setError(String(importError));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const onCopy = async () => {
+    if (!component?.download_url) return;
+    try {
+      await copyText(component.download_url);
+      setNotice("下载地址已复制");
+    } catch (copyError) {
+      setError(`复制失败：${String(copyError)}`);
+    }
+  };
+
+  return (
+    <div className="settings-sheet-readout settings-whisper-model" role="group" aria-label="Whisper 模型文件">
+      <dl className="settings-whisper-model-facts">
+        <div>
+          <dt>官方下载地址</dt>
+          <dd>
+            <code>{component?.download_url ?? "等待检测"}</code>
+            <Button size="sm" variant="ghost" disabled={!component?.download_url} onClick={() => void onCopy()}>
+              复制下载地址
+            </Button>
+          </dd>
+        </div>
+        <div>
+          <dt>期望 SHA-256</dt>
+          <dd>
+            <code>{component?.expected_sha256 ?? "等待检测"}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>目标路径</dt>
+          <dd>
+            <code>{component?.target_path ?? "等待检测"}</code>
+          </dd>
+        </div>
+      </dl>
+      <div className="settings-whisper-model-actions">
+        <Button size="sm" disabled={busy} busy={importing} onClick={() => void onImport()}>
+          {importing ? "正在校验并导入…" : "导入模型文件…"}
+        </Button>
+        <small>浏览器下载后在这里选中文件即可；应用会核对 SHA-256 再复制进 models 目录，源文件不动（大文件算摘要要几秒）。</small>
+      </div>
+      {error ? (
+        <p className="settings-sheet-inline-notice is-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <p className="settings-sheet-inline-notice" role="status" aria-live="polite">
+        {notice ?? ""}
+      </p>
+    </div>
+  );
+}

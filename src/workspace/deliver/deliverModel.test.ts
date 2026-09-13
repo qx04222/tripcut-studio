@@ -8,6 +8,10 @@ import {
   roughCutTargetFromKey,
   roughCutTargetKey,
   summaryLine,
+  canvasLabel,
+  readCanvas,
+  rememberedDeliverChoices,
+  wholeFavoritesNote,
 } from "./deliverModel";
 
 describe("deliverModel", () => {
@@ -76,5 +80,33 @@ describe("deliverModel", () => {
         total_duration_seconds: 185,
       }),
     ).toBe("4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05");
+  });
+});
+
+describe("R10 U-20:记住上次选择与画布尺寸", () => {
+  it("rememberedDeliverChoices:没记过 → platform null / targetSeconds undefined / 联系表 true / 剪映 false", () => {
+    expect(rememberedDeliverChoices({})).toEqual({ platform: null, targetSeconds: undefined, includeContactSheet: true, useJianyingDraft: false });
+  });
+  it("记过的值按类型读回;「full」= 完整(null);坏值当没记", () => {
+    expect(rememberedDeliverChoices({ "ui.deliver.platform": "douyin", "ui.deliver.target_seconds": "full", "ui.deliver.contact_sheet": "false", "ui.deliver.jianying_draft": "true" }))
+      .toEqual({ platform: "douyin", targetSeconds: null, includeContactSheet: false, useJianyingDraft: true });
+    expect(rememberedDeliverChoices({ "ui.deliver.target_seconds": "180" }).targetSeconds).toBe(180);
+    expect(rememberedDeliverChoices({ "ui.deliver.platform": "myspace", "ui.deliver.target_seconds": "99" })).toMatchObject({ platform: null, targetSeconds: undefined });
+  });
+  it("readCanvas 按顺序取第一个带合法 canvas 的来源;canvasLabel 拼「画布 W×H」", () => {
+    expect(readCanvas(undefined, null, { canvas: { width: 0, height: 10 } }, { canvas: { width: 1080, height: 1920 } })).toEqual({ width: 1080, height: 1920 });
+    expect(readCanvas({}, { canvas: "no" })).toBeNull();
+    expect(canvasLabel({ width: 1920, height: 1080 })).toBe("画布 1920×1080");
+    expect(canvasLabel(null)).toBeNull();
+  });
+});
+
+describe("R10 U-33:整条收藏 0 条时说明收藏去了哪", () => {
+  it("有精选段、整条 0 条 → 摘要补「有精选段的收藏已按片段导出」;整条 > 0 或没精选段不补", () => {
+    const base = { ...EMPTY_STATUS, selected_count: 1, selected_segment_count: 2, selected_whole_count: 0, total_duration_seconds: 5 };
+    expect(wholeFavoritesNote(base)).toBe("有精选段的收藏已按片段导出");
+    expect(summaryLine(base)).toBe("1 项 · 2 段精选片段 · 0 条整条收藏（有精选段的收藏已按片段导出） · 预计 0:05");
+    expect(wholeFavoritesNote({ ...base, selected_whole_count: 1 })).toBeNull();
+    expect(wholeFavoritesNote({ ...base, selected_segment_count: 0 })).toBeNull();
   });
 });

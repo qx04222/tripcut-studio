@@ -35,16 +35,19 @@ export function AiDescriptionSection({
   llmBudgetExhausted,
   aiBusy,
   onDescribe,
+  onOpenSettings,
 }: {
   aiDescription: AiDescriptionResult | null;
   llmEnabled: boolean;
   llmBudgetExhausted: boolean;
   aiBusy: boolean;
   onDescribe: () => void;
+  /** R10 U-14:未启用时旁边给「去设置」(新壳传 openSettings("analysis");旧壳不传就不显示)。 */
+  onOpenSettings?: () => void;
 }) {
   return (
     <div className="inspector-section inspector-ai-description">
-      <span>AI 描述 · L3 可选增强</span>
+      <span>AI 描述 · 可选的增强分析</span>
       {aiDescription ? (
         <div className="ai-description-result">
           <p>{aiDescription.description}</p>
@@ -53,7 +56,7 @@ export function AiDescriptionSection({
               <span key={tag}>{tag}</span>
             ))}
           </div>
-          <small>由 {aiDescription.provider} 返回；3 个标签已写入 ai_l3</small>
+          <small>由 {aiDescription.provider} 返回;3 个标签已写入</small>
         </div>
       ) : (
         <p>
@@ -61,34 +64,43 @@ export function AiDescriptionSection({
             ? "设置页开启后才可调用。"
             : llmBudgetExhausted
               ? "本月预算已用尽，后端熔断且不会启动 CLI。"
-              : "只发送文件名和 L1 / 运镜数值，不发送帧或原片。"}
+              : "只发送文件名和基础分析数值,不发送画面或原片。"}
         </p>
       )}
-      <button type="button" disabled={!llmEnabled || llmBudgetExhausted || aiBusy} onClick={onDescribe}>
-        {aiBusy
-          ? "生成中…"
-          : llmBudgetExhausted
-            ? "预算已熔断"
-            : aiDescription
-              ? "重新生成 AI 描述"
-              : "生成 AI 描述"}
-      </button>
+      <div className="inspector-ai-actions">
+        <button type="button" disabled={!llmEnabled || llmBudgetExhausted || aiBusy} onClick={onDescribe}>
+          {aiBusy
+            ? "生成中…"
+            : llmBudgetExhausted
+              ? "预算已熔断"
+              : aiDescription
+                ? "重新生成 AI 描述"
+                : "生成 AI 描述"}
+        </button>
+        {!llmEnabled && onOpenSettings ? (
+          <Button variant="ghost" size="sm" onClick={onOpenSettings}>
+            去设置
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-/** 「标签」段——只在有标签时渲染(规格 §3.8);标签是静态 Chip,「添加」是禁用的 ghost 按钮。 */
+/**
+ * 「标签」段——常驻(R10 U-12):有标签列 Chip,没有就说「还没有标签」;「添加标签」始终在,
+ * 但 `api.ts` 没有手动打标签的写接口,所以是禁用态 —— 入口可见而不假装能用(业主决策,不是漏做)。
+ */
 export function TagsSection({ aiDescription }: { aiDescription: AiDescriptionResult | null }) {
   const tags = aiDescription?.tags ?? [];
   return (
     <div className="inspector-tag-list">
+      {tags.length === 0 ? <span className="inspector-tag-empty">还没有标签；生成 AI 描述会写入 3 个标签</span> : null}
       {tags.map((tag) => (
         <Chip key={tag}>{tag}</Chip>
       ))}
-      {/* `api.ts` 没有手动打标签的写接口——「添加」以禁用态呈现,让入口可见但不假装能用
-       * (业主决策,不是漏做)。 */}
       <Button variant="ghost" size="sm" icon="plus" className="inspector-tag-add" disabled title="暂不支持手动标签">
-        添加
+        添加标签
       </Button>
     </div>
   );
@@ -108,6 +120,8 @@ export function ChapterSlotSection({
   readOnly,
   onMoveChapter,
   onMoveSlot,
+  onAddToBand,
+  addBusy = false,
 }: {
   chapterTitle: string | null;
   canReassign: boolean;
@@ -118,9 +132,24 @@ export function ChapterSlotSection({
   readOnly: boolean;
   onMoveChapter: (chapterId: number) => void;
   onMoveSlot: (targetKey: string) => void;
+  /**
+   * 「加入当前章节」(R10 U-12 / U-18):素材还不在镜头带上时的入口 —— 不靠拖拽的第二条路,
+   * 走 `useBandDrag.insert`(与拖排同一条 set_story_order 路径)。给了才渲染。
+   */
+  onAddToBand?: () => void;
+  addBusy?: boolean;
 }) {
+  const onBand = currentChapterId !== null || currentSlotKey !== null;
   return (
     <div className="inspector-placement">
+      {!onBand && onAddToBand ? (
+        <div className="inspector-placement-add">
+          <span className="inspector-placement-empty">还没有编入镜头带</span>
+          <Button size="sm" icon="plus" disabled={readOnly || addBusy} busy={addBusy} onClick={onAddToBand}>
+            加入当前章节
+          </Button>
+        </div>
+      ) : null}
       <Field label="章节" htmlFor="inspector-chapter-select">
         <Select
           id="inspector-chapter-select"
@@ -205,7 +234,7 @@ export function TakeSwitcher({
               ) : null}
             </span>
             <span className="inspector-take-caption">
-              <span className="inspector-take-order">{`Take ${index + 1}`}</span>
+              <span className="inspector-take-order">{`第 ${index + 1} 条`}</span>
               {date ? <span className="inspector-take-date">{date}</span> : null}
             </span>
             <span className="inspector-take-name" title={memberClip?.file_name}>

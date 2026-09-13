@@ -458,6 +458,26 @@ fn get_component_statuses(
     core::provisioning::component_statuses(&connection).map_err(|error| error.to_string())
 }
 
+/// R10 U-24:把用户自己下载的 Whisper 模型文件校验 SHA-256 后复制进 models 目录。
+/// 算摘要要读 0.5–1.6 GB,放到阻塞线程池,不卡 IPC。
+#[tauri::command]
+async fn import_whisper_model(
+    path: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::provisioning::WhisperModelImportOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能导入模型".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = core::db::open_project(&db_path)?;
+        core::provisioning::import_whisper_model(&connection, &PathBuf::from(path))
+    })
+    .await
+    .map_err(|error| format!("模型导入异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn rollback_component(
     component: String,
@@ -637,6 +657,16 @@ fn archive_current_episode(
     .map_err(|error| error.to_string())
 }
 
+/// R10 U-16:新建集(名称必填)。当前集有素材 → 封存并切到新集;当前集为空 → 就地改名复用。
+#[tauri::command]
+fn create_episode(
+    title: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::episode::CreateEpisodeOutcome, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::episode::create_episode(&mut connection, &title).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn list_platform_presets(
     state: tauri::State<'_, RuntimeState>,
@@ -680,6 +710,24 @@ fn set_setting(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+/// R10 U-22:首启引导是否已跳过/完成(`onboarding.first_run_done`)。
+#[tauri::command]
+fn get_first_run_done(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<bool, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::settings::first_run_done(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_first_run_done(
+    done: bool,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::settings::set_first_run_done(&connection, done).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -864,6 +912,28 @@ async fn pick_relink_folder() -> std::result::Result<Option<String>, String> {
         .pick_folder()
         .await
         .map(|folder| folder.path().to_string_lossy().into_owned()))
+}
+
+/// R10 U-24:「导入模型文件…」的文件选择;命令只选路径,校验与落位在 `import_whisper_model`。
+#[tauri::command]
+async fn pick_whisper_model_file() -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title("选择 Whisper ggml 模型文件")
+        .add_filter("ggml 模型", &["bin"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_string_lossy().into_owned()))
+}
+
+/// R10 U-28:「添加 LUT…」的文件选择;校验与复制在 `import_lut`。
+#[tauri::command]
+async fn pick_lut_file() -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title("选择 .cube LUT 文件")
+        .add_filter("LUT", &["cube", "CUBE"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -1077,6 +1147,15 @@ async fn import_music_track(
     .map_err(|error| error.to_string())
 }
 
+/// R10 U-19:状态条「音乐分析 n/m」——当前集音乐轨按 analysis_status 计数。
+#[tauri::command]
+fn get_music_analysis_progress(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::music::MusicAnalysisProgress, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::music::analysis_progress(&connection).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn list_music_tracks(
     episode_id: i64,
@@ -1235,6 +1314,23 @@ fn set_transcribe_track(
 
 /// Absolute paths of every `.cube` file under `<app support dir>/luts/`,
 /// creating that directory if it doesn't exist yet. An empty list is fine.
+/// R10 U-28:「添加 LUT…」——把选中的 `.cube` 复制进 `<app support dir>/luts/`,
+/// 返回复制后的完整列表(与 `list_display_luts` 同形)。
+#[tauri::command]
+fn import_lut(path: String) -> std::result::Result<Vec<String>, String> {
+    let root = crate::app_paths::app_support_root()
+        .ok_or_else(|| "无法确定应用支持目录".to_owned())?;
+    let luts_dir = root.join("luts");
+    core::player_prefs::import_display_lut(&PathBuf::from(path), &luts_dir)
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn list_display_luts() -> std::result::Result<Vec<String>, String> {
     let root = crate::app_paths::app_support_root()
@@ -1274,6 +1370,71 @@ fn get_clip_analysis(
 ) -> std::result::Result<Option<ClipAnalysis>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::analysis::get_clip_analysis(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// R11 车道 B:时刻分与自动挑选
+// ---------------------------------------------------------------------------
+
+/// 热力条:整条素材的时刻分,按窗口降采样到 ≤ 200 点。
+#[tauri::command]
+fn get_clip_moments(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::moments::Moment>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::moments::get_clip_moments(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+/// 建议段:滑窗取峰,≤ 3 条;`target_secs` 不传按本集平台预算取 4–8 s。
+#[tauri::command]
+fn suggest_segments(
+    clip_id: i64,
+    target_secs: Option<f64>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::smart_select::SegmentSuggestion>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select::suggest_segments(&connection, clip_id, target_secs).map_err(|error| error.to_string())
+}
+
+/// 自动挑选整集精选段。`budget_secs` 不传按平台预算(0 = 60 s);`scope` 不传 = 收藏 ∪ ≥3 星。
+#[tauri::command]
+fn auto_select_episode(
+    budget_secs: Option<f64>,
+    scope: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::smart_select::AutoSelectOutcome, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select::auto_select_episode(&mut connection, budget_secs, scope.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+/// 撤销一批自动挑选:只删该批 `source='auto'` 的段,返回删掉的条数。
+#[tauri::command]
+fn undo_auto_select(
+    batch_id: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<usize, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select::undo_auto_select(&mut connection, &batch_id).map_err(|error| error.to_string())
+}
+
+/// 状态条「补齐时刻分 n/m」。
+#[tauri::command]
+fn get_moments_progress(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::moments::MomentsProgress, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::moments::progress(&connection).map_err(|error| error.to_string())
+}
+
+/// 手动重跑「补齐时刻分」(失败后重试也走这里),返回新排队的条数。
+#[tauri::command]
+fn enqueue_moments_backfill(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<usize, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::moments::enqueue_missing(&mut connection).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1488,10 +1649,13 @@ fn undo_story_change(
     core::story::undo_latest(&mut connection).map_err(|error| error.to_string())
 }
 
+/// `override_orientation`(R10 U-05)是新增的可选参数:前端不传即 `None`,
+/// 旧调用方不受影响。
 #[tauri::command]
 async fn start_export(
     dest: String,
     override_platform: Option<String>,
+    override_orientation: Option<String>,
     include_contact_sheet: bool,
     target_seconds: Option<u32>,
     state: tauri::State<'_, RuntimeState>,
@@ -1499,16 +1663,72 @@ async fn start_export(
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = core::db::open_project(&db_path)?;
-        core::deliver::start_export(
+        core::deliver::start_export_with_canvas(
             &mut connection,
             &PathBuf::from(dest),
             override_platform.as_deref(),
+            override_orientation.as_deref(),
             include_contact_sheet,
             target_seconds,
         )
     })
     .await
     .map_err(|error| format!("交付任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+/// R11 车道 E:快速导出——只 remux 精选段与整条收藏到 `dest_dir/<集名>_导出_<日期>`,
+/// 不出粗剪 / 镜头表 / 联系表 / 说明。`selection` 缺省 = 本集全部精选段 + 收藏。目标目录
+/// 不存在 / 不可写时错误文本含 `dest_unavailable`,前端据此回落到保存面板。进度走
+/// `get_export_status`(`mode = "quick"`)。
+#[tauri::command]
+async fn quick_export(
+    dest_dir: String,
+    selection: Option<core::deliver::QuickExportSelection>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::QuickExportOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能导出".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        core::deliver::start_quick_export(&mut connection, &PathBuf::from(dest_dir), selection.as_ref())
+    })
+    .await
+    .map_err(|error| format!("导出任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+/// R11 车道 E:只算不排——快速导出将写的文件夹与文件清单(抽屉清单读它)。
+#[tauri::command]
+fn plan_quick_export(
+    dest_dir: Option<String>,
+    selection: Option<core::deliver::QuickExportSelection>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::QuickExportOutcome, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::deliver::plan_quick_export(
+        &connection,
+        dest_dir.as_deref().map(std::path::Path::new),
+        selection.as_ref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// R10 U-05:交付抽屉预览「画布 W×H」——按将要传给 `start_export` 的平台/方向解析,不建任务。
+#[tauri::command]
+fn preview_export_canvas(
+    override_platform: Option<String>,
+    override_orientation: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::ExportCanvas, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::deliver::preview_export_canvas(
+        &connection,
+        override_platform.as_deref(),
+        override_orientation.as_deref(),
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -2134,6 +2354,11 @@ pub fn run() {
                 if motion_jobs > 0 {
                     tracing::info!(motion_jobs, "enqueued motion v3 endpoint analysis");
                 }
+                // R11:老库已分析、没时刻分的素材增量补齐。
+                let moment_jobs = core::moments::enqueue_missing(&mut connection)?;
+                if moment_jobs > 0 {
+                    tracing::info!(moment_jobs, "enqueued moment-score backfill");
+                }
                 let dimension_jobs =
                     core::clip_dimensions::enqueue_missing(&mut connection, &cache_root)?;
                 if dimension_jobs > 0 {
@@ -2183,10 +2408,29 @@ pub fn run() {
                 // `core::jobs::notify_on_completion` 那一侧,这里只需要把
                 // `notify::post` 的成功/失败原样透传回去。
                 let notifier_app = app.handle().clone();
+                // R10 U-19:应用内事件出口——音乐分析等任务落到终态时 `app.emit`
+                // 给前端(`tripcut:music-analyzed`),前端不用等下次轮询/重启。
+                let event_app = app.handle().clone();
+                let permission_app = app.handle().clone();
                 let runner = core::jobs::JobRunner::new(db_path.clone(), worker_count)
                     .with_decode_limit(decode_permits)
                     .with_notifier(std::sync::Arc::new(move |title: &str, body: &str| {
                         notify::post(&notifier_app, title, body)
+                    }))
+                    .with_event_sink(std::sync::Arc::new(move |name: &str, payload: serde_json::Value| {
+                        if let Err(error) = tauri::Emitter::emit(&event_app, name, payload) {
+                            tracing::warn!(%error, event = name, "应用内事件投递失败");
+                        }
+                    }))
+                    // R10 U-25:通知权限弹框固定在「第一个后台任务开始」——桌面端
+                    // `request_permission` 是空实现,macOS 只在第一次 `show()` 时弹框,
+                    // 所以这里发一条「已开始后台处理」把它引出来;之后完成通知不再突兀。
+                    .with_first_job_hook(std::sync::Arc::new(move || {
+                        notify::post(
+                            &permission_app,
+                            notify::BACKGROUND_STARTED_TITLE,
+                            "完成后会用系统通知提醒你;可在系统设置里关闭",
+                        );
                     }));
                 let control = runner.control();
                 tauri::async_runtime::spawn(runner.run());
@@ -2375,6 +2619,7 @@ pub fn run() {
             remove_watched_folder,
             rescan_watched_folders,
             get_component_statuses,
+            import_whisper_model,
             rollback_component,
             start_component_install,
             get_install_progress,
@@ -2384,10 +2629,13 @@ pub fn run() {
             get_current_episode,
             rename_current_episode,
             archive_current_episode,
+            create_episode,
             list_platform_presets,
             set_episode_platform,
             get_settings,
             set_setting,
+            get_first_run_done,
+            set_first_run_done,
             get_llm_status,
             list_llm_ledger,
             set_minimax_key,
@@ -2405,8 +2653,11 @@ pub fn run() {
             pick_relink_folder,
             pick_export_folder,
             pick_music_file,
+            pick_whisper_model_file,
+            pick_lut_file,
             import_music_track,
             list_music_tracks,
+            get_music_analysis_progress,
             get_music_analysis,
             delete_music_track,
             list_libraries,
@@ -2437,6 +2688,7 @@ pub fn run() {
             set_playback_track,
             set_transcribe_track,
             list_display_luts,
+            import_lut,
             rate_clip,
             clear_clip_rating,
             list_select_segments,
@@ -2444,6 +2696,12 @@ pub fn run() {
             delete_select_segment,
             restore_select_segment,
             get_clip_analysis,
+            get_clip_moments,
+            suggest_segments,
+            auto_select_episode,
+            undo_auto_select,
+            get_moments_progress,
+            enqueue_moments_backfill,
             search_transcripts,
             search_clips,
             list_similar_groups,
@@ -2464,6 +2722,9 @@ pub fn run() {
             undo_story_change,
             get_clip_artifacts,
             start_export,
+            quick_export,
+            plan_quick_export,
+            preview_export_canvas,
             get_export_status,
             cancel_export,
             cancel_job,

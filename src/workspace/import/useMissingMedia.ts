@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listMissingClips, pickRelinkFolder, relinkVolume, type MissingClip, type RelinkOutcome } from "../../api";
 import { groupByVolume, type VolumeGroup } from "./importModel";
+import { failureText } from "../errorText";
 
 export interface MissingMedia {
   clips: readonly MissingClip[];
@@ -21,7 +22,7 @@ export function useMissingMedia(): MissingMedia {
   const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    void listMissingClips().then(setClips).catch((error) => setNotice(String(error)));
+    void listMissingClips().then(setClips).catch((error) => setNotice(failureText("读取缺失素材", error)));
   }, []);
   useEffect(refresh, [refresh]);
 
@@ -35,7 +36,7 @@ export function useMissingMedia(): MissingMedia {
       setResults((previous) => ({ ...previous, [volumeUuid]: outcome }));
       refresh();
     } catch (error) {
-      setNotice(String(error));
+      setNotice(failureText("重新定位", error, "确认新位置里有同名文件后再试"));
     } finally {
       setBusy(null);
     }

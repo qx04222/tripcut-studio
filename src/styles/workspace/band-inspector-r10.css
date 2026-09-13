@@ -1,0 +1,494 @@
+/*
+ * R10 车道 D:检查器与镜头带的增补样式(U-03 / U-11 / U-12 / U-17 / U-18 / U-27–U-32)。
+ * 选择器一律以栏根 class(.shot-band / .inspector / .band-accessory / .workspace-episode-popover)
+ * 起头;颜色只用 styles.css 的 token。分节与 U 编号对应,改动落到对应分节。
+ */
+
+/* ---------- U-29:章节头可读 —— 标题吃掉剩余宽度(tooltip 给全名),计数「n 镜 · m 缺口」分列 ---------- */
+
+/* 带头高度仍钉在 28px(BAND_CHAPTER_HEAD_HEIGHT 参与视口几何,不能随标题长高),宽度仍是
+   max-content(sticky 在视口左侧;铺满整章会把计数推到几十格之外)。标题可收缩但至少留
+   2.5em,计数与时长不收缩;长标题靠 tooltip 给全名。 */
+.workspace-shell .shot-band .band-chapter-title {
+  flex: 0 1 auto;
+  min-width: 2.5em;
+  max-width: 320px;
+}
+
+.workspace-shell .shot-band .band-chapter-meta,
+.workspace-shell .shot-band .band-chapter-gaps,
+.workspace-shell .shot-band .band-chapter-ordinal {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* ---------- U-17:空章占位与空槽位上的可点入口;「去设置」链接 ---------- */
+
+.workspace-shell .shot-band .band-chapter-empty {
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+}
+
+.workspace-shell .shot-band .band-chapter-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  justify-content: center;
+}
+
+.workspace-shell .shot-band .band-chapter-empty-actions .ui-button {
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-11);
+}
+
+.workspace-shell .shot-band .band-chapter-empty-hint {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  text-align: center;
+}
+
+.workspace-shell .shot-band .band-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.workspace-shell .shot-band .band-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* 提示行里的链接不许被 line-clamp 吃掉:hint 单行不换行、超出省略,链接紧跟在短句后。 */
+.workspace-shell .shot-band .band-slot small.band-slot-hint {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 空槽位的「从媒体池选择…」是 24px 图标键,挤在「生成候选 · 忽略」右侧。 */
+.workspace-shell .shot-band .band-slot-buttons .ui-button--icon {
+  width: var(--control-sm);
+  height: var(--control-sm);
+  margin-left: auto;
+}
+
+/* ---------- U-30:缺口说明可展开 —— 默认一行省略,展开后盖住瓦片其余内容整段可读 ---------- */
+
+/* R-08:<button> 在 WebKit 里不认 -webkit-box 的 line-clamp(原文撑成四行,把「生成候选 · 忽略」
+   和「云端补镜未启用 去设置」挤出 130px 卡片底边)。截行打在内层 span 上;按钮本身可收缩
+   (flex 0 1 auto / min-height 0),按钮行与提示行不可收缩,内层 .band-slot 裁掉任何溢出。 */
+.workspace-shell .shot-band .band-slot-reason {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-shell .shot-band .band-slot-reason-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.workspace-shell .shot-band .band-slot-buttons,
+.workspace-shell .shot-band .band-slot small.band-slot-hint {
+  flex: 0 0 auto;
+}
+
+/* 裁在内层 .band-slot 上,不动卡片的 overflow: visible —— 拖放插入线(::before/::after)画在卡片外 6px。 */
+.workspace-shell .shot-band .band-slot {
+  overflow: hidden;
+}
+
+.workspace-shell .shot-band .band-slot-reason.is-open {
+  position: absolute;
+  z-index: 2;
+  inset: var(--space-2);
+  display: block;
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  white-space: normal;
+}
+
+.workspace-shell .shot-band .band-slot-reason.is-open .band-slot-reason-text {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.workspace-shell .shot-band .band-slot-reason:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- U-17 / U-18:「从媒体池选择…」小选择列表 ---------- */
+
+.workspace-shell .shot-band {
+  position: relative;
+}
+
+.workspace-shell .shot-band .band-picker {
+  position: absolute;
+  z-index: 5;
+  top: calc(var(--workspace-pane-head-height) + var(--space-2));
+  left: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: min(360px, calc(100% - var(--space-3) * 2));
+  max-height: min(320px, calc(100% - var(--workspace-pane-head-height) - var(--space-4)));
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--workspace-radius);
+  background: var(--surface-raised);
+  box-shadow: var(--workspace-lift);
+}
+
+.workspace-shell .shot-band .band-picker-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  align-items: center;
+}
+
+.workspace-shell .shot-band .band-picker-head strong {
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .shot-band .band-picker-head .ui-button--icon {
+  margin-left: auto;
+}
+
+.workspace-shell .shot-band .band-picker-rule {
+  color: var(--text-faint);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .shot-band .band-picker-list {
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.workspace-shell .shot-band .band-picker-item {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-6);
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-12);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-shell .shot-band .band-picker-item:hover,
+.workspace-shell .shot-band .band-picker-item:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  outline: none;
+}
+
+.workspace-shell .shot-band .band-picker-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.workspace-shell .shot-band .band-picker-thumb {
+  display: block;
+  overflow: hidden;
+  width: 48px;
+  height: 27px;
+  border-radius: 3px;
+  background: var(--surface-chrome-2);
+}
+
+.workspace-shell .shot-band .band-picker-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workspace-shell .shot-band .band-picker-name {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-shell .shot-band .band-picker-rating {
+  color: var(--text-muted);
+  font-size: var(--text-11);
+}
+
+/* ---------- U-18:拖拽落点插入线更醒目(2px → 3px + 光晕),落点瓦片本身也亮一下 ---------- */
+
+.workspace-shell .shot-band .band-segment--over-before::before,
+.workspace-shell .shot-band .band-segment--over-after::after {
+  width: 3px;
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.workspace-shell .shot-band .band-segment--over-before::before { left: -6px; }
+.workspace-shell .shot-band .band-segment--over-after::after { right: -6px; }
+
+.workspace-shell .shot-band .band-segment--over-before,
+.workspace-shell .shot-band .band-segment--over-after {
+  border-color: var(--accent);
+}
+
+/* ---------- U-03 / U-30:故事模板 —— 池子说明行、「去媒体池」、卡片网格可滚动不被头部裁 ---------- */
+
+.workspace-shell .band-accessory .band-template-pool {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  align-items: center;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .band-accessory .band-template-pool.is-empty {
+  color: var(--danger);
+}
+
+.workspace-shell .band-accessory .band-template-pool-link {
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  color: var(--accent-text);
+  font-size: var(--text-12);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 附属区正文自己滚,滚动起点留出一行,免得第一排卡的标题贴在栏标题条下面被裁(U-30)。 */
+.workspace-shell .band-accessory-body {
+  scroll-padding-top: var(--space-2);
+  overscroll-behavior: contain;
+}
+
+.workspace-shell .band-accessory .band-template-cards {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  padding-bottom: var(--space-2);
+}
+
+/* ---------- U-11:检查器「精选段」区 ---------- */
+
+.workspace-shell .inspector .inspector-segments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-shell .inspector .inspector-segments-empty,
+.workspace-shell .inspector .inspector-segments-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .inspector .inspector-segments-hint {
+  display: flex;
+  gap: var(--space-1);
+  align-items: flex-start;
+  color: var(--text-faint);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+
+.workspace-shell .inspector .inspector-segments-hint .ui-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.workspace-shell .inspector .inspector-segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-shell .inspector .inspector-segment-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: var(--control-md);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .inspector .inspector-segment-index {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.workspace-shell .inspector .inspector-segment-range,
+.workspace-shell .inspector .inspector-segment-duration {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-shell .inspector .inspector-segment-duration {
+  color: var(--text-muted);
+}
+
+.workspace-shell .inspector .inspector-segment-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.workspace-shell .inspector .inspector-segment-actions .ui-button--icon {
+  width: var(--control-sm);
+  height: var(--control-sm);
+}
+
+/* ---------- U-12:标签与章节归属常驻 —— 空态文案 + 「加入当前章节」 ---------- */
+
+.workspace-shell .inspector .inspector-tag-empty {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .inspector .inspector-placement-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.workspace-shell .inspector .inspector-placement-empty {
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+/* ---------- U-28:LUT 放置目录说明 ---------- */
+
+.workspace-shell .inspector .tech-check-lut-help {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-chrome);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .inspector .tech-check-lut-help p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-shell .inspector .tech-check-lut-help button {
+  align-self: flex-start;
+}
+
+/* ---------- U-32:「重命名本集」表单换设计系统组件(Field / Select / Chip / Button) ---------- */
+
+.workspace-shell .workspace-episode-popover .workspace-episode-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.workspace-shell .workspace-episode-popover .workspace-episode-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.workspace-shell .workspace-episode-popover .workspace-episode-input::placeholder {
+  color: var(--text-muted);
+}
+
+.workspace-shell .workspace-episode-popover .workspace-episode-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.workspace-shell .workspace-episode-popover .workspace-episode-orientation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.workspace-shell .workspace-episode-popover .workspace-episode-edit-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  padding-top: var(--space-1);
+}
+
+/* R10 U-16:「新建集」表单里的一句说明。 */
+.workspace-shell .workspace-episode-popover .workspace-episode-edit-help {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-11);
+  line-height: 1.45;
+}

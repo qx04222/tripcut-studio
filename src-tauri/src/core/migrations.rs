@@ -1319,6 +1319,49 @@ ON jobs(kind, payload_hash)
 WHERE kind = 'generation_poll' AND status IN ('pending','running');
 "#;
 
+// R10 U-05:平台预设加默认画布方向。走查里选小红书交付出了 1920×1080 横版——
+// 集的 canvas_orientation 默认 'both' 被交付侧折成 landscape,跟平台习惯无关。
+// 只加列 + 回填(§4.2 数据零破坏),不改既有列;'auto' = 跟随本集素材多数方向。
+// 顺手把小红书竖版从 1080×1440 改成平台当前推荐的 1080×1920(同一条 UPDATE 只碰这一行)。
+pub const MIGRATION_0042: &str = r#"
+ALTER TABLE platform_presets ADD COLUMN default_orientation TEXT NOT NULL DEFAULT 'auto'
+  CHECK(default_orientation IN ('landscape','portrait','auto'));
+UPDATE platform_presets SET default_orientation = 'portrait'
+ WHERE platform IN ('douyin','xiaohongshu','moments');
+UPDATE platform_presets SET default_orientation = 'landscape'
+ WHERE platform IN ('bilibili','family');
+UPDATE platform_presets SET default_orientation = 'auto'
+ WHERE platform = 'general';
+UPDATE platform_presets SET portrait_w = 1080, portrait_h = 1920
+ WHERE platform = 'xiaohongshu';
+"#;
+
+// R11 车道 B:时刻分(每 0.5 s 一个窗口的画面/声音打分)与自动挑选的精选段来源标记。
+// 只加表、加索引、给 segments 加列;不改任何既有列。
+pub const MIGRATION_0043: &str = r#"
+CREATE TABLE clip_moments (
+  clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  win_index INTEGER NOT NULL,
+  t_start_ticks INTEGER NOT NULL CHECK(t_start_ticks >= 0),
+  t_end_ticks INTEGER NOT NULL CHECK(t_end_ticks >= t_start_ticks),
+  sharp REAL NOT NULL,
+  motion REAL NOT NULL,
+  exposure_ok INTEGER NOT NULL CHECK(exposure_ok IN (0, 1)),
+  loud INTEGER NOT NULL CHECK(loud IN (0, 1)),
+  speech INTEGER NOT NULL CHECK(speech IN (0, 1)),
+  scene_cut INTEGER NOT NULL DEFAULT 0 CHECK(scene_cut IN (0, 1)),
+  score REAL NOT NULL,
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  pipeline TEXT NOT NULL,
+  computed_at TEXT NOT NULL,
+  PRIMARY KEY(clip_id, win_index)
+);
+CREATE INDEX clip_moments_score_idx ON clip_moments(clip_id, score DESC);
+ALTER TABLE segments ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE segments ADD COLUMN batch_id TEXT;
+CREATE INDEX segments_auto_batch_idx ON segments(batch_id) WHERE source = 'auto';
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1461,9 +1504,11 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 39, sql: MIGRATION_0039 },
     Migration { version: 40, sql: MIGRATION_0040 },
     Migration { version: 41, sql: MIGRATION_0041 },
+    Migration { version: 42, sql: MIGRATION_0042 },
+    Migration { version: 43, sql: MIGRATION_0043 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 41;
+pub const LATEST_SCHEMA_VERSION: i64 = 43;
 
 #[cfg(test)]
 mod tests {
@@ -1736,9 +1781,82 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_41() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 41);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 41);
+    fn schema_version_is_43() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 43);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 43);
+    }
+
+    #[test]
+    fn migration_0043_adds_clip_moments_and_segment_source_columns() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'clip_moments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1, "0043 必须建 clip_moments 表");
+        let columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('segments') WHERE name IN ('source', 'batch_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 2, "0043 必须给 segments 加 source 与 batch_id 列");
+        let default_source: String = connection
+            .query_row("SELECT dflt_value FROM pragma_table_info('segments') WHERE name = 'source'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(default_source, "'manual'");
+    }
+
+    #[test]
+    fn migration_0042_adds_default_orientation_and_backfills_presets() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('platform_presets') WHERE name = 'default_orientation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "0042 必须给 platform_presets 加 default_orientation 列");
+        let mut statement = connection
+            .prepare("SELECT platform, default_orientation, portrait_w, portrait_h FROM platform_presets ORDER BY platform")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect::<Vec<_>>();
+        let orientation_of = |platform: &str| {
+            rows.iter().find(|row| row.0 == platform).map(|row| row.1.as_str()).unwrap()
+        };
+        assert_eq!(orientation_of("douyin"), "portrait");
+        assert_eq!(orientation_of("xiaohongshu"), "portrait");
+        assert_eq!(orientation_of("moments"), "portrait");
+        assert_eq!(orientation_of("bilibili"), "landscape");
+        assert_eq!(orientation_of("family"), "landscape");
+        assert_eq!(orientation_of("general"), "auto");
+        let xiaohongshu = rows.iter().find(|row| row.0 == "xiaohongshu").unwrap();
+        assert_eq!((xiaohongshu.2, xiaohongshu.3), (1080, 1920), "小红书竖版改为 1080×1920");
+        // 其它行的尺寸不动。
+        let douyin = rows.iter().find(|row| row.0 == "douyin").unwrap();
+        assert_eq!((douyin.2, douyin.3), (1080, 1920));
+        let error = connection
+            .execute("UPDATE platform_presets SET default_orientation = 'both' WHERE platform = 'douyin'", [])
+            .unwrap_err();
+        assert!(error.to_string().contains("CHECK"), "default_orientation 只允许三枚举");
     }
 
     #[test]

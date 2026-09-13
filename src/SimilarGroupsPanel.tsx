@@ -39,6 +39,9 @@ export function SimilarGroupsPanel({
       .catch((loadError) => {
         if (seq !== latest.current || !mounted.current) return;
         setError(`相似组未载入：${String(loadError)}`);
+        // 读失败也是终态:让计数上报 0,状态字落到「无」而不是一直「加载中」(R10 U-27)。
+        setGroups([]);
+        setGroupsLoaded(true);
       });
   }, []);
 
@@ -51,7 +54,9 @@ export function SimilarGroupsPanel({
   useEffect(() => {
     if (!groupsLoaded) return;
     onCountChange?.(groupCount);
-  }, [groupsLoaded, groupCount, onCountChange]);
+    // clipId 进依赖:相似组是整库一份,换素材时 groupCount 常常 0 → 0 不变,不重报就会让
+    // 检查器(换素材把计数清回 null)永远停在「加载中」(09-13 走查 U-27:切到 Take 2)。
+  }, [groupsLoaded, groupCount, onCountChange, clipId]);
 
   const onSetPrimary = (memberClipId: number) => {
     if (readOnly || !group) return;

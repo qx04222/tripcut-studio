@@ -35,12 +35,12 @@ export const SELECTION_SHORTCUTS: readonly KeyboardShortcut[] = [
   { id: "reject", keys: ["X"], action: "拒绝", detail: "把当前素材标为不采用" },
   { id: "stars", keys: ["1–5"], action: "星级", detail: "为当前素材设置一至五星" },
   { id: "clear-rating", keys: ["0"], action: "清除评级", detail: "同时清除收藏、拒绝与星级" },
-  { id: "expand-stack", keys: ["Tab"], action: "展开 Stack", detail: "展开或收起当前普通视觉 Shot Stack；信息与人物 Stack 始终保留候选" },
-  { id: "browse-stack", keys: ["↑", "↓"], action: "切换候选", detail: "在已展开 Stack 中移动当前候选，不立即改写首选" },
-  { id: "replace-stack", keys: ["Enter"], action: "替换首选", detail: "把当前候选锁定为 Stack 首选" },
-  { id: "lock-stack", keys: ["L"], action: "锁定候选", detail: "锁定或恢复当前 Stack 候选" },
+  { id: "expand-stack", keys: ["Tab"], action: "展开同一镜头的多条", detail: "展开或收起当前镜头的多条候选;信息与人物类镜头始终保留候选" },
+  { id: "browse-stack", keys: ["↑", "↓"], action: "切换候选", detail: "在已展开的多条里移动当前候选,不立即改写首选" },
+  { id: "replace-stack", keys: ["Enter"], action: "替换首选", detail: "把当前候选定为这组的首选" },
+  { id: "lock-stack", keys: ["L"], action: "锁定候选", detail: "锁定或恢复当前候选" },
   { id: "reject-stack", keys: ["R"], action: "排除候选", detail: "永久排除候选但不删除素材" },
-  { id: "immersive-player", keys: ["Space"], action: "沉浸播放", detail: "打开当前素材的原片播放器" },
+  { id: "immersive-player", keys: ["Space", "K"], action: "播放 / 暂停", detail: "焦点在卡片上也能停下或继续预览" },
 ] as const;
 
 export const PLAYER_SHORTCUTS: readonly KeyboardShortcut[] = [
@@ -114,7 +114,7 @@ export const WORKFLOW_STEPS = [
     number: "05",
     label: "检查器",
     eyebrow: "改这一条",
-    description: "右栏。评级、标签、章节归属、Take 与 AI 描述常驻;技术检查、八维、音轨、相似镜头是折叠段。",
+    description: "右栏。评级、标签、章节归属、同一镜头的多条与 AI 描述常驻;技术检查、八维、音轨、相似镜头是折叠段。",
   },
 ] as const;
 
@@ -147,10 +147,10 @@ export const SETTINGS_HELP_TOPICS: readonly SettingsHelpTopic[] = [
     ],
     paragraphs: [
       "外观：主题跟随系统或手动锁定明暗，界面尺度覆盖 90%–130% 四档，只影响阅读密度，不改变导出结果。",
-      "性能：并发 worker 数与代理文件开关；机器越弱建议 worker 越少，内存档位（auto / 保守 / 宽松）决定后台任务在低内存时让路的力度。",
+      "性能:后台并行任务数与轻量预览文件开关;机器越弱建议 worker 越少，内存档位（auto / 保守 / 宽松）决定后台任务在低内存时让路的力度。",
       "旅行时间：多设备时钟校正，把不同相机/手机的拍摄时间对齐到统一的 Canonical Journey Time，避免按时间线索排序时素材错位。",
-      "工具链：FFmpeg、FFprobe、whisper-cli 与 Chinese-CLIP sidecar 的本机路径与检测状态；留空自动搜索 PATH，缺失只降级不损坏原片。每个组件存在上一版本时会出现「回滚到上一版」按钮，装了新版本发现有问题可以一键退回。",
-      "分析与 AI：场景/相似度/抖动阈值，AI Best Take 六轴权重，以及可选的 LLM 增强开关、provider 锁定与月度调用预算。",
+      "工具链:FFmpeg、FFprobe、whisper-cli 与 Chinese-CLIP 画面识别组件的本机路径与检测状态;留空自动搜索 PATH，缺失只降级不损坏原片。每个组件存在上一版本时会出现「回滚到上一版」按钮，装了新版本发现有问题可以一键退回。",
+      "分析与 AI:场景/相似度/抖动阈值,自动选优的六项权重,以及可选的增强分析开关、provider 锁定与月度调用预算。",
       "云端补镜（MiniMax）：默认关闭，API Key 只写入 macOS 钥匙串、界面上永不回显；启用后按月度预算生成缺口镜头，生成的片子只落到素材库的 generated/ 目录，原素材目录不会被写入，实际扣费以 MiniMax 平台账单为准。",
       "隐私与诊断：本地优先的确切边界、诊断日志位置与保留期限，以及崩溃报告由谁控制——这里不产生新的上传行为，只是把已经存在的规则说清楚。",
       "帮助与关于：中文工作指南、安装向导入口与应用版本、开源许可清单。",

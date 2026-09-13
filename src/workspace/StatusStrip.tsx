@@ -1,5 +1,11 @@
 import { useEffect, useState, type CSSProperties, type JSX } from "react";
-import { getImportProgress, listGenerationRequests, listLibraries, listMissingClips } from "../api";
+import {
+  getImportProgress,
+  getMusicAnalysisProgress,
+  listGenerationRequests,
+  listLibraries,
+  listMissingClips,
+} from "../api";
 import { useComposingIndicator } from "./useRatingHotkeys";
 import { Button, Icon } from "./ui";
 import { dispatchWorkspace } from "./WorkspaceStore";
@@ -10,6 +16,10 @@ export interface BackgroundSummary {
   transcribing: number;
   generating: number;
   missing: number;
+  /** R10 U-19:当前集音乐轨已分析 / 总数 / 仍在排队或进行中的条数(可选:旧调用方不传)。 */
+  musicDone?: number;
+  musicTotal?: number;
+  musicActive?: number;
 }
 
 const EMPTY_SUMMARY: BackgroundSummary = {
@@ -18,6 +28,9 @@ const EMPTY_SUMMARY: BackgroundSummary = {
   transcribing: 0,
   generating: 0,
   missing: 0,
+  musicDone: 0,
+  musicTotal: 0,
+  musicActive: 0,
 };
 
 const POLL_INTERVAL_MS = 3_000;
@@ -26,6 +39,8 @@ const POLL_INTERVAL_MS = 3_000;
 export function summaryPhrases(summary: BackgroundSummary): string[] {
   const phrases: string[] = [];
   if (summary.analyzeTotal > 0) phrases.push(`分析 ${summary.analyzed}/${summary.analyzeTotal}`);
+  // 音乐分析只在还有轨排队 / 进行中时报数;全部落终态就不占位(失败的在音乐面板里看)。
+  if ((summary.musicActive ?? 0) > 0) phrases.push(`音乐分析 ${summary.musicDone ?? 0}/${summary.musicTotal ?? 0}`);
   if (summary.transcribing > 0) phrases.push(`转写 ${summary.transcribing}`);
   if (summary.generating > 0) phrases.push(`云端生成 ${summary.generating} 排队`);
   if (summary.missing > 0) phrases.push(`缺失素材 ${summary.missing}`);
@@ -40,10 +55,11 @@ function useBackgroundSummary(): BackgroundSummary {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
-      const [progress, missing, generation] = await Promise.allSettled([
+      const [progress, missing, generation, music] = await Promise.allSettled([
         getImportProgress(),
         listMissingClips(),
         listGenerationRequests(),
+        getMusicAnalysisProgress(),
       ]);
       if (!active) return;
       setSummary((previous) => ({
@@ -59,6 +75,11 @@ function useBackgroundSummary(): BackgroundSummary {
                 .length
             : previous.generating,
         missing: missing.status === "fulfilled" ? missing.value.length : previous.missing,
+        // 旧桩 / 旧后端可能 resolve 成 undefined:当作没读到,保留上一次。
+        musicDone: music.status === "fulfilled" && music.value ? music.value.done : previous.musicDone,
+        musicTotal: music.status === "fulfilled" && music.value ? music.value.total : previous.musicTotal,
+        musicActive:
+          music.status === "fulfilled" && music.value ? music.value.running + music.value.pending : previous.musicActive,
       }));
     };
 

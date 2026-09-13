@@ -224,6 +224,46 @@ pub fn sample_vfr_time_map(
     sampled.into_values().collect()
 }
 
+/// 单个区间偏离标称帧周期(±5%,至少 2 tick)或非正就算「不规则」。
+fn interval_is_irregular(delta: i64, expected: f64, tolerance: f64) -> bool {
+    delta <= 0 || (delta as f64 - expected).abs() > tolerance
+}
+
+fn nominal_frame_period_ticks(tb_num: i64, tb_den: i64, fps_num: i64, fps_den: i64) -> Option<f64> {
+    if tb_num <= 0 || tb_den <= 0 || fps_num <= 0 || fps_den <= 0 {
+        return None;
+    }
+    Some(tb_den as f64 * fps_den as f64 / (tb_num as f64 * fps_num as f64))
+}
+
+/// R10 U-13:不规则区间占比超过这个比例才判 VFR。恒定 30 fps 的 iPhone 源片
+/// 常有一两个掉帧(242 帧里 1 个 2× 间隔),那是掉帧不是变帧率;真正的 VFR
+/// (屏幕录制、部分安卓机)不规则区间是成片出现的。
+const VFR_IRREGULAR_RATIO: f64 = 0.05;
+
+/// 有没有任何一个区间偏离标称帧周期——决定要不要把 PTS 采样表落库
+/// (掉帧也需要时间映射才能帧准),但**不**决定 `clips.is_vfr` 标签。
+pub fn frame_timing_has_irregular_interval(
+    frame_ticks: &[i64],
+    tb_num: i64,
+    tb_den: i64,
+    fps_num: i64,
+    fps_den: i64,
+) -> bool {
+    if frame_ticks.len() < 3 {
+        return false;
+    }
+    let Some(expected) = nominal_frame_period_ticks(tb_num, tb_den, fps_num, fps_den) else {
+        return false;
+    };
+    let tolerance = (expected * 0.05).max(2.0);
+    frame_ticks
+        .windows(2)
+        .any(|pair| interval_is_irregular(pair[1].saturating_sub(pair[0]), expected, tolerance))
+}
+
+/// 变帧率判定:不规则区间占比 > `VFR_IRREGULAR_RATIO`。少于 3 个采样点、
+/// 或时基/帧率非法时一律按 CFR。
 pub fn frame_timing_is_vfr(
     frame_ticks: &[i64],
     tb_num: i64,
@@ -231,20 +271,19 @@ pub fn frame_timing_is_vfr(
     fps_num: i64,
     fps_den: i64,
 ) -> bool {
-    if frame_ticks.len() < 3
-        || tb_num <= 0
-        || tb_den <= 0
-        || fps_num <= 0
-        || fps_den <= 0
-    {
+    if frame_ticks.len() < 3 {
         return false;
     }
-    let expected = tb_den as f64 * fps_den as f64 / (tb_num as f64 * fps_num as f64);
+    let Some(expected) = nominal_frame_period_ticks(tb_num, tb_den, fps_num, fps_den) else {
+        return false;
+    };
     let tolerance = (expected * 0.05).max(2.0);
-    frame_ticks.windows(2).any(|pair| {
-        let delta = pair[1].saturating_sub(pair[0]);
-        delta <= 0 || (delta as f64 - expected).abs() > tolerance
-    })
+    let intervals = frame_ticks.len() - 1;
+    let irregular = frame_ticks
+        .windows(2)
+        .filter(|pair| interval_is_irregular(pair[1].saturating_sub(pair[0]), expected, tolerance))
+        .count();
+    irregular as f64 > intervals as f64 * VFR_IRREGULAR_RATIO
 }
 
 pub fn replace_vfr_map(
@@ -754,8 +793,36 @@ mod tests {
     fn irregular_frame_intervals_are_detected_from_pts_not_average_rate_metadata() {
         let ticks = [0, 3_003, 6_006, 12_012, 15_015];
 
+        // 4 个区间里 1 个不规则 = 25%,超过 5% 门槛,仍是 VFR。
         assert!(frame_timing_is_vfr(&ticks, 1, 90_000, 30_000, 1_001));
         assert!(!frame_timing_is_vfr(&[0, 3_003, 6_006, 9_009], 1, 90_000, 30_000, 1_001));
+        assert!(!frame_timing_has_irregular_interval(&[0, 3_003, 6_006, 9_009], 1, 90_000, 30_000, 1_001));
+    }
+
+    /// R10 U-13 走查复现:IMG_0812(恒定 30 fps,tb 1/19200)242 帧里 240 个
+    /// 640-tick 区间 + 1 个 1280——`-c copy` 切出来的 iPhone 源片,不是 VFR。
+    #[test]
+    fn a_single_dropped_frame_in_a_constant_rate_clip_is_not_vfr() {
+        let mut ticks = Vec::with_capacity(242);
+        let mut tick = 0;
+        for index in 0..242 {
+            ticks.push(tick);
+            tick += if index == 120 { 1_280 } else { 640 };
+        }
+        assert!(!frame_timing_is_vfr(&ticks, 1, 19_200, 30, 1));
+        assert!(frame_timing_has_irregular_interval(&ticks, 1, 19_200, 30, 1));
+    }
+
+    /// 真 VFR:每三个区间就有一个偏离——占比 33%,远超 5% 门槛。
+    #[test]
+    fn widespread_irregular_intervals_are_vfr() {
+        let mut ticks = Vec::new();
+        let mut tick = 0;
+        for index in 0..90 {
+            ticks.push(tick);
+            tick += if index % 3 == 0 { 1_000 } else { 640 };
+        }
+        assert!(frame_timing_is_vfr(&ticks, 1, 19_200, 30, 1));
     }
 
     #[test]

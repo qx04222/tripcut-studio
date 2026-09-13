@@ -29,6 +29,29 @@ import "./PlayerOverlay.css";
 export const STATUS_INTERVAL_MS = 80;
 
 /**
+ * V-04:mpv 的 seek 是异步的 —— 命令返回那一刻 `time-pos` 多半还是旧值,暂停时又不轮询,
+ * 读数会停在旧位置直到下一条命令。seek 之后按这个节拍补读,直到位置落到目标附近
+ * (半帧内)或超时;超时也把最后一次读到的状态交出去,别让读数永远停着。
+ */
+export const SEEK_SETTLE_POLL_MS = 40;
+export const SEEK_SETTLE_MAX_POLLS = 15;
+
+/** seek 落地判据:与目标差在半帧内(fps 无效按 30)。 */
+export function seekSettled(pos: number, target: number, fps: number): boolean {
+  const frame = Number.isFinite(fps) && fps > 0 ? 1 / fps : 1 / 30;
+  return Math.abs(pos - target) <= frame / 2 + 1e-6;
+}
+
+/** 一批命令里最后一条 seek 的目标;没有 seek 返回 null。 */
+export function lastSeekTarget(commands: readonly PlayerCommand[]): number | null {
+  for (let index = commands.length - 1; index >= 0; index -= 1) {
+    const command = commands[index];
+    if (command?.type === "seek_abs") return command.seconds;
+  }
+  return null;
+}
+
+/**
  * 规格 §11:拖分隔条时区域矩形每帧都在变,每一帧都去 `set_viewport` 会把
  * mpv 的渲染线程打满。120ms 防抖——静止后才落一次真正的矩形。
  */
@@ -329,6 +352,43 @@ export function PlayerOverlay({
     }
   }, [reportFailure]);
 
+  // seek 之后等它落地(V-04):只把落地(或超时)那次状态交出去,中间的旧位置不上屏。
+  // 代际号:新的一批命令、换素材、卸载都让还在等的旧循环退出,别对着已经不在的实例敲。
+  const settleGeneration = useRef(0);
+  useEffect(() => {
+    return () => {
+      settleGeneration.current += 1;
+    };
+  }, [clip.id]);
+  const settleSeek = useCallback(
+    async (target: number) => {
+      const generation = ++settleGeneration.current;
+      for (let attempt = 0; attempt < SEEK_SETTLE_MAX_POLLS; attempt += 1) {
+        let next: PlayerStatus;
+        try {
+          next = await playerStatus();
+        } catch (reason) {
+          await reportFailure(reason);
+          return;
+        }
+        if (generation !== settleGeneration.current) return;
+        if (next.phase === "error" || next.error) {
+          await reportFailure(next.error ?? "播放器渲染线程已退出");
+          return;
+        }
+        const last = attempt === SEEK_SETTLE_MAX_POLLS - 1;
+        if (next.phase !== "ready" || seekSettled(next.pos, target, fps) || last) {
+          setStatus(next);
+          setOpening(next.phase !== "ready");
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, SEEK_SETTLE_POLL_MS));
+        if (generation !== settleGeneration.current) return;
+      }
+    },
+    [fps, reportFailure],
+  );
+
   const sendCommands = useCallback(
     async (commands: PlayerCommand[]) => {
       try {
@@ -338,10 +398,12 @@ export function PlayerOverlay({
         return;
       }
       // 停表期间(暂停)发出的 play 不会被轮询看见 —— 命令之后立刻补读一次,
-      // 让 paused 翻成 false,80ms 的表才重新走起来。
-      await refreshStatus();
+      // 让 paused 翻成 false,80ms 的表才重新走起来。带 seek 的一批要等 seek 落地。
+      const target = lastSeekTarget(commands);
+      if (target === null) await refreshStatus();
+      else await settleSeek(target);
     },
-    [refreshStatus, reportFailure],
+    [refreshStatus, reportFailure, settleSeek],
   );
 
   useEffect(() => {

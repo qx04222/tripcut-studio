@@ -4,10 +4,21 @@ import {
   flattenStoryByChapter,
   itemChapterKey,
   moveStoryItemWithinChapter,
+  reorderStoryItem,
   storyOrderRefs,
 } from "../Storyboard";
-import { setStoryOrder, undoStoryChange, type StoryItem, type Storyboard } from "../api";
-import { refreshClipsFeed } from "./useClipsFeed";
+import {
+  getStoryboard,
+  rateClip,
+  setStoryOrder,
+  undoStoryChange,
+  type Chapter,
+  type ClipListItem,
+  type StoryItem,
+  type Storyboard,
+} from "../api";
+import { getClipsFeedSnapshot, refreshClipsFeed } from "./useClipsFeed";
+import { failureText } from "./errorText";
 
 /**
  * 镜头带拖排的写入路径(规格 §3.3)。顺序计算是纯函数,组件只负责把两个 key 交进来 ——
@@ -30,6 +41,24 @@ export const SLOT_KEY_PREFIX = "slot:";
 
 export const CROSS_CHAPTER_NOTICE = "镜头仍归属原章节；请先合并章节再跨章排序";
 export const REORDER_TOAST = "已调整顺序";
+export const ALREADY_ON_BAND_NOTICE = "这条素材已经在镜头带上";
+
+/**
+ * 「加入当前章节」(R10 U-18)松手后的提示。章节是按拍摄时间派生的(`clips.chapter_id`),
+ * 所以素材落在**它自己**的那一章 —— 提示里把章名说出来,别让用户以为它去了别处;
+ * 没收藏过的素材会先被收藏(故事板只认收藏/精选),这一步也要说明(与 U-11 同一条纪律)。
+ */
+export function insertNotice(chapters: readonly Chapter[], item: StoryItem, favorited: boolean): string {
+  const index = chapters.findIndex((chapter) => chapter.id === item.chapter_id);
+  const where = index >= 0 ? `第 ${index + 1} 章「${chapters[index]!.title}」` : "镜头带(未分章)";
+  return `已加入${where}${favorited ? "，并已自动收藏整条" : ""}`;
+}
+
+/** 加入镜头带前要不要先收藏:故事板(`get_storyboard`)只认收藏或有精选段的素材。 */
+export function needsFavoriteBeforeInsert(clip: ClipListItem | undefined): boolean {
+  if (!clip) return false;
+  return clip.binary_rating !== 1 && clip.select_count === 0;
+}
 
 /** 把 activeKey 移到 overKey 所在的位次(与 dnd-kit sortable 的落点语义一致)。 */
 export function planBandReorder(
@@ -76,6 +105,11 @@ export interface BandDragState {
   overKey: string | null;
   setOverKey(key: string | null): void;
   apply(plan: BandReorderPlan): void;
+  /**
+   * 不靠拖拽的第二条路(R10 U-18):把媒体池里的一条素材追加到它所属章节的末尾。
+   * 写入路径与拖排同一条(`reorderStoryItem` → `set_story_order`),所以同样可撤销。
+   */
+  insert(clipId: number): void;
   undo(): void;
   dismissNotice(): void;
 }
@@ -112,7 +146,45 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
           // 乐观顺序必须丢掉 —— 留着会让界面显示一个库里并不存在的排列。
           setOptimisticItems(null);
           setUndoable(false);
-          setNotice(`故事顺序未保存：${String(error)}`);
+          setNotice(failureText("调整顺序", error));
+        } finally {
+          busyRef.current = false;
+          setBusy(false);
+        }
+      })();
+    },
+    [board],
+  );
+
+  const insert = useCallback(
+    (clipId: number) => {
+      if (board === null || busyRef.current) return;
+      busyRef.current = true;
+      setBusy(true);
+      void (async () => {
+        try {
+          let favorited = false;
+          if (needsFavoriteBeforeInsert(getClipsFeedSnapshot().clipsById.get(clipId))) {
+            await rateClip(clipId, "binary", 1);
+            favorited = true;
+          }
+          // 收藏之后候选表才有它;直接重取一份故事板,不等轮询(轮询在飞时 refresh 会被合并掉)。
+          const latest = favorited ? await getStoryboard() : board;
+          if (latest.items.some((item) => item.clip_id === clipId)) {
+            setNotice(ALREADY_ON_BAND_NOTICE);
+            setUndoable(false);
+            return;
+          }
+          const candidate = latest.candidates.find((item) => item.clip_id === clipId);
+          if (!candidate) throw new Error("素材还不在候选里；先在媒体池收藏它");
+          const next = reorderStoryItem(latest.chapters, latest.items, candidate, null);
+          await setStoryOrder(storyOrderRefs(next));
+          setNotice(insertNotice(latest.chapters, candidate, favorited));
+          setUndoable(true);
+          await refreshClipsFeed(true);
+        } catch (error) {
+          setUndoable(false);
+          setNotice(failureText("加入镜头带", error));
         } finally {
           busyRef.current = false;
           setBusy(false);
@@ -131,7 +203,7 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
         setNotice("已撤销最近一次顺序调整");
         await refreshClipsFeed(true);
       } catch (error) {
-        setNotice(`撤销失败：${String(error)}`);
+        setNotice(failureText("撤销", error));
       }
     })();
   }, []);
@@ -141,5 +213,5 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
     setUndoable(false);
   }, []);
 
-  return { optimisticItems, notice, undoable, busy, overKey, setOverKey, apply, undo, dismissNotice };
+  return { optimisticItems, notice, undoable, busy, overKey, setOverKey, apply, insert, undo, dismissNotice };
 }

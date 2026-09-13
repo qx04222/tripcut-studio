@@ -19,6 +19,47 @@ pub const LOW_POWER_MODEL_TIER: &str = "small";
 pub const DEFAULT_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
 pub const LOW_POWER_MODEL_FILE: &str = "ggml-small.bin";
 pub const TRANSCRIPT_FILE: &str = "transcript.json";
+
+/// R10 U-24:模型文件的官方来源与期望摘要。URL 与 SHA-256 取自 Hugging Face
+/// `ggerganov/whisper.cpp` 仓库(LFS oid 即 SHA-256,2026-09-13 核对)。设置页据此
+/// 给出「可执行的路径」:官方地址 + 期望值 + 目标路径 + 「导入模型文件…」。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WhisperModelSpec {
+    pub tier: &'static str,
+    pub file_name: &'static str,
+    pub download_url: &'static str,
+    pub expected_sha256: &'static str,
+    pub size_bytes: u64,
+}
+
+pub const WHISPER_MODEL_SPECS: [WhisperModelSpec; 2] = [
+    WhisperModelSpec {
+        tier: DEFAULT_MODEL_TIER,
+        file_name: DEFAULT_MODEL_FILE,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        expected_sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+        size_bytes: 1_624_555_275,
+    },
+    WhisperModelSpec {
+        tier: LOW_POWER_MODEL_TIER,
+        file_name: LOW_POWER_MODEL_FILE,
+        download_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        expected_sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        size_bytes: 487_601_967,
+    },
+];
+
+pub fn model_spec_for_tier(tier: &str) -> &'static WhisperModelSpec {
+    WHISPER_MODEL_SPECS
+        .iter()
+        .find(|spec| spec.tier == tier)
+        .unwrap_or(&WHISPER_MODEL_SPECS[0])
+}
+
+pub fn model_spec_for_sha256(sha256: &str) -> Option<&'static WhisperModelSpec> {
+    let wanted = sha256.trim().to_ascii_lowercase();
+    WHISPER_MODEL_SPECS.iter().find(|spec| spec.expected_sha256 == wanted)
+}
 pub const SRT_FILE: &str = "transcript.srt";
 
 const AUDIO_EXTRACT_TIMEOUT: Duration = Duration::from_secs(60 * 60);

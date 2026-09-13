@@ -41,7 +41,10 @@ export interface BandSegment {
   chapterId: number | null;
   slot: string | null;
   fileName: string | null;
+  /** 分段时长,单位是**本素材自己的 tick**(`tbNum/tbDen`);显示前必须换算(R-02)。 */
   durationTicks: number;
+  tbNum: number;
+  tbDen: number;
   takeCount: number;
   /** 本段在同镜头 Take 里的 1 基位次(「Take 1/3」的 1);不在 Stack 里就是 1。 */
   takeIndex: number;
@@ -145,17 +148,25 @@ export interface BandChapter {
   ordinal: number;
   chapterId: number | null;
   title: string;
-  durationTicks: number;
+  /** 章内各段按各自 time base 换算后的毫秒总和——各段 tb 不同,ticks 不能直接相加(R-02)。 */
+  durationMs: number;
+  /** 活着的空槽位数;**0 镜的章本身也算一处缺口**(R10 U-17,「仅缺口」视图靠它留下空章)。 */
   gapCount: number;
+  /** 真实镜头数(不含空槽位);带头「n 镜 · m 缺口」分列(R10 U-29)。 */
+  clipCount: number;
+  /** 连空槽位都没有。 */
+  isEmpty: boolean;
   segments: BandSegment[];
 }
 
 /** 没有章节归属的素材落在这一桶里,永远排在最后(与 Storyboard.tsx 的 UNCHAPTERED 同语义)。 */
 const UNCHAPTERED_TITLE = "未分章";
 
-function itemDurationTicks(item: StoryItem): number {
-  return Math.max(0, item.out_ticks - item.in_ticks);
-}
+const itemDurationTicks = (item: StoryItem): number => Math.max(0, item.out_ticks - item.in_ticks);
+
+/** 分段时长换算成毫秒;tb 不合法(旧后端 0/负数)按 0 计,不让一条坏数据把章节时长算成 NaN。 */
+export const segmentDurationMs = (segment: Pick<BandSegment, "durationTicks" | "tbNum" | "tbDen">): number =>
+  segment.tbNum > 0 && segment.tbDen > 0 ? (segment.durationTicks * segment.tbNum * 1_000) / segment.tbDen : 0;
 
 function orderItems(items: readonly StoryItem[]): StoryItem[] {
   return [...items].sort(
@@ -165,11 +176,13 @@ function orderItems(items: readonly StoryItem[]): StoryItem[] {
   );
 }
 
+// 缺口挂在镜头带哪一章看后端算好的 D2 章 id(band_chapter_id),null / 缺席(旧后端)才回落叙事章 id——
+// chapter_id 是 narrative_chapters.id,与 D2 chapters.id 相等只是巧合,不能直接比。
 function activeGapsFor(gaps: readonly StoryGap[], chapterId: number | null): StoryGap[] {
   if (chapterId === null) return [];
   return gaps.filter(
     (gap) =>
-      gap.chapter_id === chapterId &&
+      (gap.band_chapter_id ?? gap.chapter_id) === chapterId &&
       ACTIVE_GAP_STATUSES.includes(gap.status) &&
       GENERATABLE_SLOTS.includes(gap.slot),
   );
@@ -235,6 +248,8 @@ export function buildBandChapters(
         slot: null,
         fileName: item.file_name,
         durationTicks: itemDurationTicks(item),
+        tbNum: item.tb_num,
+        tbDen: item.tb_den,
         // Stack 之外的素材就是它自己一条 Take —— 0 会让角标说「0 条候选」。
         takeCount: stack ? stack.members.length : 1,
         takeIndex: stack
@@ -260,6 +275,8 @@ export function buildBandChapters(
         slot: gap.slot,
         fileName: null,
         durationTicks: 0,
+        tbNum: 1,
+        tbDen: 1_000,
         takeCount: 0,
         takeIndex: 0,
         isGenerated: false,
@@ -269,16 +286,23 @@ export function buildBandChapters(
         roleLabel: null,
       });
     }
+    const isEmpty = segments.length === 0;
     return {
       ordinal: bucketIndex + 1,
       chapterId: bucket.chapterId,
       title: bucket.title,
-      durationTicks: segments.reduce((sum, segment) => sum + segment.durationTicks, 0),
-      gapCount: chapterGaps.length,
+      durationMs: segments.reduce((sum, segment) => sum + segmentDurationMs(segment), 0),
+      gapCount: chapterGaps.length + (isEmpty ? 1 : 0),
+      clipCount: segments.length - chapterGaps.length,
+      isEmpty,
       segments,
     };
   });
 }
+
+/** 带头与栏标题条的计数:「n 镜 · m 缺口」,没缺口时只有「n 镜」(R10 U-29)。 */
+export const bandCountLabel = (clipCount: number, gapCount: number): string =>
+  gapCount > 0 ? `${clipCount} 镜 · ${gapCount} 缺口` : `${clipCount} 镜`;
 
 const TIME_VIEW_TITLE = "按时间";
 
@@ -310,8 +334,10 @@ export function applyBandView(
       ordinal: 1,
       chapterId: null,
       title: TIME_VIEW_TITLE,
-      durationTicks: segments.reduce((sum, segment) => sum + segment.durationTicks, 0),
+      durationMs: segments.reduce((sum, segment) => sum + segmentDurationMs(segment), 0),
       gapCount: 0,
+      clipCount: segments.length,
+      isEmpty: segments.length === 0,
       segments,
     },
   ];

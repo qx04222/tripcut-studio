@@ -1,3 +1,4 @@
+import { createTestApiMock } from "./testApiMock";
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
@@ -78,8 +79,13 @@ const apiMocks = vi.hoisted(() => ({
   playerSetViewport: vi.fn(),
   playerSetOccluded: vi.fn(),
   setSetting: vi.fn(),
+  // R11 车道 C:播放器偏好 / 时刻分 / 建议段(这里的用例不关心,给空)。
+  getSettings: vi.fn(async () => ({})),
+  getClipMoments: vi.fn(async () => []),
+  suggestSegments: vi.fn(async () => []),
 }));
-vi.mock("../api", () => apiMocks);
+// 全量桩打底(见 MonitorR11.test):Monitor 会带起 useClipsFeed,部分桩会抛未定义导出。
+vi.mock("../api", async () => ({ ...(await createTestApiMock()), ...apiMocks }));
 
 import { Monitor, __setEmbeddedPlaybackForTests, slotPlaceholderCopy } from "./Monitor";
 
@@ -173,12 +179,106 @@ describe("Monitor", () => {
     }
   });
 
-  it("时间码用 formatTimecode,格式不变", async () => {
+  it("时间码:传输条显示短格式(U-10),精确的 formatTimecode 值留在 title,格式不变", async () => {
     __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
     render(<Monitor />);
     await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
     await flush();
-    expect(screen.getByLabelText("当前时间码").textContent).toBe("00:00:12.500");
+    expect(screen.getByLabelText("当前时间码").textContent).toBe("00:12.5");
+    expect(screen.getByLabelText("当前时间码").getAttribute("title")).toBe("00:00:12.500");
+  });
+
+  it("播到尾后再按播放:先 seek 到 0 再 play(U-09)", async () => {
+    const ended = { ...readyStatus, pos: 60, duration: 60, paused: true };
+    apiMocks.playerOpen.mockResolvedValue(ended);
+    apiMocks.playerStatus.mockResolvedValue(ended);
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
+    await flush();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "播放" }));
+    });
+    expect(apiMocks.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([
+      { type: "seek_abs", seconds: 0 },
+      { type: "play" },
+    ]);
+  });
+
+  it("拖滑杆经宿主通道发 seek_abs,不另开播放器(U-09)", async () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
+    await flush();
+    await act(async () => {
+      fireEvent.change(screen.getByRole("slider", { name: "播放位置" }), { target: { value: "30" } });
+    });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 });
+    expect(apiMocks.playerOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("window 事件 tripcut:toggle-playback 走同一个播放/暂停处理器(播完则从头)", async () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+    });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    // 状态翻成播放中后再来一次 → pause。
+    apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, paused: false });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+    });
+    await flush();
+    apiMocks.playerCommand.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+    });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" });
+    // 播到尾:先 seek 0 再 play。
+    apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, pos: 60, duration: 60, paused: true });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+    });
+    await flush();
+    apiMocks.playerCommand.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+    });
+    expect(apiMocks.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([
+      { type: "seek_abs", seconds: 0 },
+      { type: "play" },
+    ]);
+  });
+
+  it("window 事件 tripcut:seek-ratio({ratio}) 按总时长换算成 seek_abs;坏 detail 忽略", async () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:seek-ratio", { detail: { ratio: 0.5 } }));
+    });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 });
+    apiMocks.playerCommand.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:seek-ratio", { detail: { ratio: "x" } }));
+      window.dispatchEvent(new CustomEvent("tripcut:seek-ratio"));
+    });
+    expect(apiMocks.playerCommand).not.toHaveBeenCalled();
+  });
+
+  it("井底铺一层封面:原生视图被遮挡或还没画时不是整块黑(U-09)", async () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await screen.findByRole("button", { name: "播放" });
+    const backdrop = document.querySelector(".monitor-well--video > img.monitor-well-backdrop") as HTMLImageElement;
+    expect(backdrop).not.toBeNull();
+    expect(backdrop.getAttribute("src")).toBe("/covers/9.jpg");
+    // 封面在画面节点之下:DOM 顺序在前,画面节点仍是 viewport 代码盯的那一个。
+    expect(backdrop.nextElementSibling?.querySelector(".player-native-slot")).not.toBeNull();
   });
 
   it("播放按钮发 play,并走宿主交出的命令通道(不另起一个播放器)", async () => {
@@ -201,7 +301,8 @@ describe("Monitor", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "入点" }));
     });
-    apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, pos: 20 });
+    // 「前进一秒」= seek 到 13.5;假播放器跟着落地(V-04 之后出点按 seek 目标打,不按旧读数)。
+    apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, pos: 13.5 });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "前进一秒" }));
     });
@@ -214,7 +315,7 @@ describe("Monitor", () => {
     });
     await flush();
     expect(apiMocks.createSelectSegment).toHaveBeenCalledTimes(1);
-    expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(9, 12.5, 20);
+    expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(9, 12.5, 13.5);
   });
 
   it("出点不晚于入点时拒绝保存,并给中文说明", async () => {

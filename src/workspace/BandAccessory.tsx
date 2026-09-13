@@ -3,11 +3,13 @@ import { useEffect, useMemo, useState, type JSX } from "react";
 import { JourneyTimeline } from "../JourneyTimeline";
 import { MusicPanel } from "../MusicPanel";
 import { DestinationCardEditor, narrateEpisodeWithConsent } from "../Storyboard";
-import { listStoryTemplates, type StoryTemplate, type StoryTemplateInfo } from "../api";
+import { listStoryTemplates, setStoryOrder, type StoryTemplate, type StoryTemplateInfo } from "../api";
+import { TEMPLATE_POOL_RULE, isTemplateCandidate, narrativeStoryOrder, storyOrderMatches } from "./bandTemplateModel";
 import { BAND_VIEWS, type BandView } from "./shotBandModel";
 import { Button, Card, Chip, EmptyState, SectionHeader } from "./ui";
-import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
+import { getClipsFeedSnapshot, refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace, useWorkspace, type BandMode } from "./WorkspaceStore";
+import { failureText } from "./errorText";
 
 export { MusicRuler, rulerMarks, MUSIC_RULER_HEIGHT, RULER_SEGMENT_WIDTH } from "./MusicRuler";
 
@@ -60,12 +62,45 @@ export function BandViewToggle({ value, onChange }: { value: BandView; onChange:
   );
 }
 
+/** 模板套用后 0 镜时的解释(R10 U-03):不说「已生成」,说清楚为什么是 0、下一步去哪。 */
+export const TEMPLATE_EMPTY_NOTICE = `没有素材满足『${TEMPLATE_POOL_RULE}』，先在媒体池标几条`;
+
+/** 后端 `build_fallback_draft` 空池时的报错原文 —— 前端认出它,换成同一句解释。 */
+const RUST_EMPTY_POOL_ERROR = "没有已收藏或已选片段";
+
+/** 「去媒体池」:把焦点交回媒体池,筛选回到全部(要标星/收藏的都在那里)。 */
+export function goToMediaPool(): void {
+  dispatchWorkspace({ type: "set-filter", filter: "all" });
+  dispatchWorkspace({ type: "focus-pane", pane: "pool" });
+  document.querySelector<HTMLElement>('[data-pane="pool"]')?.focus();
+}
+
+/**
+ * 模板套用的结果落地(R10 U-03)。LLM 关闭时后端同步生成一版 revision(beats),但**不写
+ * story_order**,镜头带画的是 story_order —— 所以此前套完模板带上仍是 0 镜、底部却说
+ * 「已按模板生成」。这里把 beats 顺序按拖排同一条路径写进 story_order(可撤销);beats 为
+ * 空就如实说 0 镜。返回给用户看的话。
+ */
+export async function settleTemplateOutcome(kind: "job" | "revision", notice: string): Promise<{ text: string; empty: boolean }> {
+  if (kind === "job") return { text: notice, empty: false };
+  const board = getClipsFeedSnapshot().storyboard ?? null;
+  const refs = narrativeStoryOrder(board);
+  if (refs.length === 0) return { text: TEMPLATE_EMPTY_NOTICE, empty: true };
+  if (!storyOrderMatches(board?.items ?? [], refs)) {
+    await setStoryOrder(refs);
+    await refreshClipsFeed(true);
+  }
+  return { text: `已按模板生成 ${refs.length} 镜（未启用 AI），可在镜头带上拖排或撤销`, empty: false };
+}
+
 function TemplatePicker(): JSX.Element {
   const feed = useClipsFeed();
   const [templates, setTemplates] = useState<StoryTemplateInfo[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; empty: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const current = feed.storyboard?.current_template ?? null;
+  // 套用前就把「模板会吃哪些素材」说出来(R10 U-03):池子空着时卡片仍可点,但先看见这句。
+  const poolCount = useMemo(() => feed.clips.filter(isTemplateCandidate).length, [feed.clips]);
   // 只读历史集不许重排 —— 与 MusicPanel / DestinationCardEditor 同一条判定。
   // 漏掉它就会在一个归档的集子上真的发一次 LLM 调用(花钱且改不回来)。
   const readOnly = feed.episode.viewing !== null;
@@ -90,10 +125,19 @@ function TemplatePicker(): JSX.Element {
       // 知情同意/预算/provider 三道关卡在 Storyboard 里只有一份,这里复用它。
       const result = await narrateEpisodeWithConsent(template);
       if (result.kind === "cancelled") return;
-      setNotice(result.notice);
-      if (result.kind === "done") await refreshClipsFeed(true);
+      if (result.kind !== "done") {
+        setNotice({ text: result.notice, empty: false });
+        return;
+      }
+      await refreshClipsFeed(true);
+      setNotice(await settleTemplateOutcome(result.outcome, result.notice));
     } catch (error) {
-      setNotice(`未创建叙事编排任务：${String(error)}`);
+      const text = String(error);
+      setNotice(
+        text.includes(RUST_EMPTY_POOL_ERROR)
+          ? { text: TEMPLATE_EMPTY_NOTICE, empty: true }
+          : { text: failureText("按模板编排", error), empty: false },
+      );
     } finally {
       setBusy(false);
     }
@@ -108,6 +152,12 @@ function TemplatePicker(): JSX.Element {
   );
   return (
     <div className="band-templates">
+      <p className={poolCount === 0 ? "band-template-pool is-empty" : "band-template-pool"} role="status">
+        {poolCount === 0
+          ? `${TEMPLATE_EMPTY_NOTICE}（模板只编排${TEMPLATE_POOL_RULE}的素材）`
+          : `模板会编排 ${poolCount} 条素材（${TEMPLATE_POOL_RULE}）`}
+        {poolCount === 0 ? <PoolLink /> : null}
+      </p>
       {templates.length === 0 ? (
         <EmptyState icon="settings-timeline" size="inline" title="没有可用的故事模板" body="模板清单没有载入;仍可按拍摄时间顺序编排。" action={none} />
       ) : (
@@ -132,10 +182,22 @@ function TemplatePicker(): JSX.Element {
       {readOnly ? <p className="read-only-notice">历史集为只读档案</p> : null}
       {notice ? (
         <p className="band-accessory-notice" role="status">
-          {notice}
+          {notice.text}
+          {notice.empty ? <PoolLink /> : null}
         </p>
       ) : null}
     </div>
+  );
+}
+
+function PoolLink(): JSX.Element {
+  return (
+    <>
+      {" "}
+      <Button variant="ghost" size="sm" className="band-template-pool-link" onClick={goToMediaPool}>
+        去媒体池
+      </Button>
+    </>
   );
 }
 

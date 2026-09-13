@@ -16,6 +16,7 @@ import {
   type RemovalRequest,
 } from "../../api";
 import { analysisProgress, type AnalysisProgress } from "./importModel";
+import { failureText } from "../errorText";
 
 export const EMPTY_PROGRESS: ImportProgress = {
   total: 0,
@@ -137,7 +138,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
     try {
       await action();
     } catch (error) {
-      setNotice(String(error));
+      setNotice(failureText("处理导入任务", error));
     } finally {
       setBusy(false);
     }

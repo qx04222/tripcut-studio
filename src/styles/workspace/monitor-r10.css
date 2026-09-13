@@ -1,0 +1,208 @@
+/*
+ * 监视器 R10(车道 C):U-09 seek bar、U-10 传输条最小宽度、U-37 四栏焦点环。
+ * 只覆盖 monitor.css 里需要改的那几条,颜色全用 token;规则都挂在 .monitor /
+ * .workspace-shell 之下。@import 在 workspace.css 头部(尾部会被 postcss 静默丢掉)。
+ */
+
+/* ---------- U-09 · 井底封面 ---------- */
+
+/* 原生 mpv 视图压在 WKWebView 之上,画面在时看不见这层;被遮挡(popover / 抽屉打开时
+   player_set_occluded)或链路还没建好时露出来的是封面而不是一块黑。画面节点
+   (.player-overlay.embedded,position:relative / z-index:auto)在 DOM 里排它后面,
+   同层按文档序盖住它;chip 与 I/O 轨(z-index 1)不受影响。 */
+
+.monitor .monitor-well--video > .monitor-well-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+  background: var(--well-bg);
+  pointer-events: none;
+}
+
+/* ---------- U-09 / U-10 · 传输条改成两行:短时码 + seek bar / 走带与打点 ---------- */
+
+.monitor .monitor-controls {
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: stretch;
+  /* 容器查询的基准:下面按传输条自己的宽度(= 中栏宽)藏东西,不看窗口。 */
+  container-type: inline-size;
+  container-name: monitor-controls;
+  padding: var(--space-1) var(--space-3) var(--space-2);
+}
+
+.monitor .monitor-seek {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  height: var(--control-sm);
+  padding: 0 var(--space-1);
+}
+
+.monitor .monitor-timecode {
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 轨道:3px 发丝底,已播部分强调色,入出点区间是一段更淡的强调 tint;拇指 12px 圆点。
+   原生 range 铺满轨道且透明,拖动/点击/左右键都是浏览器自己的;fill 与 range 是装饰。 */
+
+.monitor .monitor-seek-track {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 80px;
+  height: var(--control-sm);
+}
+
+.monitor .monitor-seek-track::before {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  content: "";
+  transform: translateY(-50%);
+}
+
+.monitor .monitor-seek-range {
+  position: absolute;
+  top: 50%;
+  height: 7px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  transform: translateY(-50%);
+}
+
+.monitor .monitor-seek-fill {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: translateY(-50%);
+}
+
+.monitor .monitor-seek-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+}
+
+.monitor .monitor-seek-input:disabled {
+  cursor: default;
+}
+
+.monitor .monitor-seek-input::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+
+.monitor .monitor-seek-input::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: calc((var(--control-sm) - 12px) / 2);
+  border: 2px solid var(--surface-card);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+  transition: transform var(--motion-fast);
+  appearance: none;
+}
+
+.monitor .monitor-seek-input:disabled::-webkit-slider-thumb {
+  background: var(--border-strong);
+}
+
+.monitor .monitor-seek-track.scrubbing .monitor-seek-input::-webkit-slider-thumb,
+.monitor .monitor-seek-input:hover:not(:disabled)::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+
+/* 焦点环画在轨道行上(range 本体是透明的,环在它自己身上看不出边界)。 */
+
+.monitor .monitor-seek-input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring) !important;
+  outline-offset: calc(-1 * var(--focus-ring-width)) !important;
+  border-radius: var(--radius-6);
+}
+
+/* 走带条本体:不换行、可收缩的只有状态字;全屏按钮固定宽度、永远排最后。 */
+
+.monitor .monitor-transport {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.monitor .monitor-marked {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.monitor .monitor-transport .ui-toolbar-spacer {
+  flex: 0 0 0;
+}
+
+.monitor .monitor-fullscreen {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 中栏最小 520px:走带 5 钮 + 入/出 + 保存 + 全屏 本就 ≈ 460px;再带两枚 7 字时码就
+   溢出。窄于 600px 时藏起变速占位(本来就是禁用的)与入出点数值——精确时码留在按钮
+   title 与井底 I/O 轨里,状态字缩到只剩省略号也不挤掉「全屏 ⌘⏎」。 */
+
+@container monitor-controls (max-width: 600px) {
+  .monitor .monitor-speed {
+    display: none;
+  }
+
+  .monitor .monitor-mark-value {
+    display: none;
+  }
+
+  .monitor .monitor-marked {
+    padding: 0 var(--space-1);
+  }
+}
+
+/* ---------- U-37 · 四栏 focus-visible 焦点环 ---------- */
+
+/* F6 把焦点送进 [data-pane] 的 landmark(tabIndex=-1)。workspace.css 的通用环
+   outline-offset 是 +2px,画在栏盒子外面,被 Panel 的 overflow:hidden 裁光——真机
+   上四栏聚焦全都看不见(76-f6-band-focus.png)。这里把环收到栏内(负偏移),用实色
+   强调色。!important 是为了压过 styles.css 里 `:where(...[tabindex]):focus-visible`
+   那条带 !important 的通用规则(它的偏移 +2px 同样会把环推出去)。 */
+
+.workspace-shell [data-pane]:focus-visible {
+  outline: var(--focus-ring-width) solid var(--accent) !important;
+  outline-offset: calc(-1 * var(--focus-ring-width)) !important;
+  border-radius: 0;
+}

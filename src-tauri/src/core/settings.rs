@@ -33,6 +33,12 @@ pub const MINIMAX_ENABLED_KEY: &str = "minimax_enabled";
 pub const MINIMAX_MODEL_KEY: &str = "minimax_model";
 pub const MINIMAX_RESOLUTION_KEY: &str = "minimax_resolution";
 pub const MINIMAX_MONTHLY_BUDGET_KEY: &str = "minimax_monthly_budget_usd";
+/// R10 U-22:首启引导「已跳过 / 已完成」。真值 = 不再弹「FIRST RUN」全屏引导;
+/// 弹不弹只看这一位,不再靠「工具链是否齐」推断(切换新旧界面、恢复页之后都不重放)。
+pub const FIRST_RUN_DONE_KEY: &str = "onboarding.first_run_done";
+/// R11 车道 B:时刻分五项权重(JSON 对象,键白名单见 `core::moments::WEIGHT_KEYS`)。
+/// 缺省值在 `core::moments::MomentWeights::default` 里,新手不用调。
+pub const MOMENT_WEIGHTS_KEY: &str = "moments.weights";
 
 const WINDOW_WIDTH_KEY: &str = "window.width";
 const WINDOW_HEIGHT_KEY: &str = "window.height";
@@ -106,6 +112,8 @@ pub struct SettingsStatus {
     pub whisper: WhisperStatus,
     pub clip_sidecar: ClipSidecarStatus,
     pub cache: CacheStats,
+    /// R10 U-22:首启引导已跳过/完成。FirstRunGuide 只看这一位决定弹不弹。
+    pub first_run_done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -130,6 +138,7 @@ fn defaults() -> BTreeMap<String, String> {
         (WORKER_COUNT_KEY.to_owned(), DEFAULT_WORKER_COUNT.to_string()),
         (PROXY_ENABLED_KEY.to_owned(), "true".to_owned()),
         (MEMORY_PROFILE_KEY.to_owned(), "auto".to_owned()),
+        (FIRST_RUN_DONE_KEY.to_owned(), "false".to_owned()),
         (FFMPEG_PATH_KEY.to_owned(), String::new()),
         (FFPROBE_PATH_KEY.to_owned(), String::new()),
         (WHISPER_PATH_KEY.to_owned(), String::new()),
@@ -259,6 +268,7 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         WORKER_COUNT_KEY => value.parse::<usize>().is_ok_and(|count| (1..=8).contains(&count)),
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
         MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
+        FIRST_RUN_DONE_KEY => matches!(value, "true" | "false"),
         FFMPEG_PATH_KEY | FFPROBE_PATH_KEY | WHISPER_PATH_KEY => value.len() <= 4_096,
         WHISPER_MODEL_TIER_KEY => matches!(value, "large-v3-turbo" | "small"),
         SCENE_THRESHOLD_KEY | SIMILARITY_THRESHOLD_KEY => value
@@ -275,6 +285,7 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         | BEST_TAKE_NARRATIVE_WEIGHT_KEY => value
             .parse::<f64>()
             .is_ok_and(|number| number.is_finite() && (0.0..=1.0).contains(&number)),
+        MOMENT_WEIGHTS_KEY => super::moments::MomentWeights::parse(value).is_ok(),
         LLM_ENABLED_KEY => matches!(value, "true" | "false"),
         LLM_PROVIDER_KEY => matches!(value, "none" | "auto" | "claude" | "codex" | "kimi"),
         LLM_MONTHLY_BUDGET_KEY => value
@@ -301,6 +312,15 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
     } else {
         Err(CoreError::InvalidSchema(format!("设置项 {key} 的值无效")))
     }
+}
+
+/// R10 U-22:首启引导是否已跳过/完成。没写过 = false(真正的首次启动)。
+pub fn first_run_done(connection: &Connection) -> Result<bool> {
+    Ok(setting_value(connection, FIRST_RUN_DONE_KEY)?.as_deref() == Some("true"))
+}
+
+pub fn set_first_run_done(connection: &Connection, done: bool) -> Result<()> {
+    set_setting(connection, FIRST_RUN_DONE_KEY, if done { "true" } else { "false" })
 }
 
 pub fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>> {
@@ -476,6 +496,7 @@ pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStat
             },
         },
         cache: cache_stats(connection, cache_root)?,
+        first_run_done: first_run_done(connection)?,
     })
 }
 
@@ -1123,6 +1144,26 @@ mod tests {
             "ffmpeg",
         )
         .is_err());
+    }
+
+    /// R10 U-22:首启标记默认 false、只接受 true/false、写过之后 get_settings 也能看到。
+    #[test]
+    fn first_run_done_defaults_false_and_round_trips() {
+        let (_dir, connection) = connection_with_settings();
+        assert!(!first_run_done(&connection).unwrap());
+        assert_eq!(
+            get_settings(&connection).unwrap().get(FIRST_RUN_DONE_KEY).map(String::as_str),
+            Some("false")
+        );
+        set_first_run_done(&connection, true).unwrap();
+        assert!(first_run_done(&connection).unwrap());
+        assert_eq!(
+            get_settings(&connection).unwrap().get(FIRST_RUN_DONE_KEY).map(String::as_str),
+            Some("true")
+        );
+        assert!(set_setting(&connection, FIRST_RUN_DONE_KEY, "yes").is_err());
+        set_first_run_done(&connection, false).unwrap();
+        assert!(!first_run_done(&connection).unwrap());
     }
 
     #[test]

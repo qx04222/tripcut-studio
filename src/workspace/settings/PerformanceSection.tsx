@@ -1,17 +1,17 @@
 import type { JSX } from "react";
 
-import { SectionHeader, Select, Toggle } from "../ui";
+import { Button, SectionHeader, Select, Toggle } from "../ui";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 
 export function PerformanceSection(): JSX.Element {
   const form = useSettingsFormContext();
-  const { settings } = form;
+  const { settings, workspaceV2 } = form;
   return (
     <>
-      <SectionHeader title="性能" description="控制后台吞吐与代理文件占用；原片始终保持只读。" />
+      <SectionHeader title="性能" description="控制后台处理速度与轻量预览文件的占用;原片始终保持只读。" />
       <div className="settings-sheet-group">
-        <SettingsRow title="worker 并发" help="可选 1–8；保存后在下次重启时生效。" htmlFor="settings-worker-count">
+        <SettingsRow title="后台并行任务数" help="可选 1–8;保存后在下次重启时生效。" htmlFor="settings-worker-count">
           <Select
             id="settings-worker-count"
             value={settings["performance.worker_count"]}
@@ -22,9 +22,9 @@ export function PerformanceSection(): JSX.Element {
             ))}
           </Select>
         </SettingsRow>
-        <SettingsRow title="自动生成 540p 代理" help="关闭后播放器优先读取原片，新导入不再排队生成代理。" align="end">
+        <SettingsRow title="自动生成轻量预览文件" help="关闭后播放器直接读原片,新导入不再排队生成 540p 预览文件。" align="end">
           <Toggle
-            label="自动生成 540p 代理"
+            label="自动生成轻量预览文件"
             checked={settings["performance.proxy_enabled"] === "true"}
             onChange={(next) => void form.save("performance.proxy_enabled", String(next))}
           />
@@ -39,6 +39,21 @@ export function PerformanceSection(): JSX.Element {
             <option value="standard">标准</option>
             <option value="low">省内存</option>
           </Select>
+        </SettingsRow>
+        {/* R11 简化专项 #2:「切回旧界面」从外观搬到高级(性能)—— 新手不该在常用里看见它。
+            这一行是个真开关,不是单向门(R8 终审 M2):文案与写入值都由当前 ui.workspace_v2 决定。 */}
+        <SettingsRow
+          title="界面"
+          help={
+            workspaceV2
+              ? "旅剪工作台是当前默认界面;需要时可以随时切回旧版四步页面。"
+              : "当前是旧版四步页面;随时可以切回旅剪工作台。"
+          }
+          align="end"
+        >
+          <Button onClick={() => void form.toggleWorkspaceFlag()}>
+            {workspaceV2 ? "切回旧界面" : "切换到新界面"}
+          </Button>
         </SettingsRow>
       </div>
     </>

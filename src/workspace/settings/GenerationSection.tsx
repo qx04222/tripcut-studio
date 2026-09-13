@@ -34,7 +34,7 @@ export function GenerationSection(): JSX.Element {
               disabled={minimaxKeyBusy}
               onChange={(event) => form.setMinimaxKeyDraft(event.currentTarget.value)}
             />
-            <Button size="sm" disabled={minimaxKeyBusy || minimaxKeyDraft.trim().length === 0} onClick={() => void form.saveMinimaxKey()}>
+            <Button size="sm" disabled={minimaxKeyBusy} onClick={() => void form.saveMinimaxKey()}>
               保存
             </Button>
             <Button size="sm" variant="ghost" disabled={minimaxKeyBusy || !minimaxHasKey} onClick={() => void form.clearMinimaxKey()}>

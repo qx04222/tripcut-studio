@@ -118,3 +118,28 @@ export function noticeTone(notice: string): NoticeTone {
   if (/^已保存|^已释放|已回滚|已重新排序|已在访达/.test(notice)) return "ok";
   return "info";
 }
+
+/** 「旅行时间」分区空态的三种情况(R10 U-35):没数据、还没跑、跑完了但本批素材没有设备信息。 */
+export type DeviceClockLibraryState = "unknown" | "empty" | "indexing" | "indexed";
+
+export function deviceClockLibraryState(progress: { total: number; done: number; failed: number; running: number }): DeviceClockLibraryState {
+  if (progress.total === 0) return "empty";
+  if (progress.running > 0 || progress.done + progress.failed < progress.total) return "indexing";
+  return "indexed";
+}
+
+export function deviceClockEmptyCopy(state: DeviceClockLibraryState): { title: string; body: string } {
+  switch (state) {
+    case "empty":
+      return { title: "还没有导入素材", body: "导入素材后会按设备型号自动分组，这里才有可校正的时钟。" };
+    case "indexing":
+      return { title: "正在索引素材", body: "元数据回填完成后会按设备型号分组，稍后再来看。" };
+    case "indexed":
+      return {
+        title: "本批素材没有设备信息",
+        body: "已索引的素材都没有写入设备型号（截屏、转码或部分手机导出的文件常见），无法按设备分组；带设备信息的新素材导入后会出现在这里。",
+      };
+    default:
+      return { title: "尚无可识别设备", body: "元数据回填完成后会按 device_model 分组。" };
+  }
+}

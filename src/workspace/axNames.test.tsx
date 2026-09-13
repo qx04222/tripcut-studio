@@ -116,8 +116,21 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
       await Promise.resolve();
     });
     const deliver = await screen.findByRole("dialog", { name: "生成交付包" });
+    // R11 车道 E:抽屉默认「快速导出」(新 AX 名:快速导出 / 完整交付包 / 导出到上次文件夹 / 更改文件夹);
+    // 完整交付包那套冻结的名字在切过去之后照旧。
+    expect(within(deliver).getByRole("button", { name: "快速导出" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(deliver).getByRole("button", { name: "导出到上次文件夹" })).toBeTruthy();
+    expect(within(deliver).getByRole("button", { name: "更改文件夹" })).toBeTruthy();
+    await act(async () => {
+      within(deliver).getByRole("button", { name: "完整交付包" }).click();
+      await Promise.resolve();
+    });
     expect(within(deliver).getByText("本次交付平台")).toBeTruthy();
     expect(within(deliver).getByRole("switch", { name: "联系表.pdf" })).toBeTruthy();
+    // R10 U-20:抽屉里的主按钮叫「开始生成」(新 AX 名,冻结);顶栏那颗仍是「生成交付包」,
+    // 两颗不再同名——冒烟脚本按「生成交付包」开抽屉,按「开始生成」动手。
+    expect(within(deliver).getByRole("button", { name: "开始生成" })).toBeTruthy();
+    expect(within(deliver).queryByRole("button", { name: "生成交付包" })).toBeNull();
 
     await act(async () => {
       dispatchWorkspace({ type: "open-drawer", drawer: "settings" });

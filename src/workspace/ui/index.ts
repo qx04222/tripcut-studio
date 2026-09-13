@@ -14,3 +14,4 @@ export { Select } from "./Select";
 export { Sheet, type SheetProps } from "./Sheet";
 export { Tabs, type TabItem, type TabsProps } from "./Tabs";
 export { Toggle, type ToggleProps } from "./Toggle";
+export { Menu, type MenuItem, type MenuProps } from "./Menu";

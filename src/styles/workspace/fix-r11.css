@@ -1,0 +1,11 @@
+/*
+ * R11 真机复核修复车道(fix):N-2 只读查看横幅带「回到当前集」。
+ * 只在 workspace.css 头部 @import。
+ */
+
+.workspace-pool-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

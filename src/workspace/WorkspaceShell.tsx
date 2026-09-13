@@ -1,5 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
+import { bridgeMusicAnalyzedEvents } from "../api";
 import { Inspector } from "./Inspector";
 import { Monitor } from "./Monitor";
 import { MediaPool } from "./MediaPool";
@@ -8,7 +9,12 @@ import { bandMinHeight, bandPanelHeight, bandPanelMinHeight } from "./shotBandMo
 import { StatusStrip } from "./StatusStrip";
 import { TopBar } from "./TopBar";
 import { popModal, pushModal } from "./modalStack";
+import { getClipsFeedSnapshot } from "./useClipsFeed";
 import { useGlobalHotkeys } from "./useGlobalHotkeys";
+import { selectionBelongsToEpisode } from "./useSelection";
+import { autoCollapseTransition, useRestoreSelection } from "./shellLayout";
+import { returnToActiveEpisode } from "../historyView";
+import { Button } from "./ui";
 import {
   INSPECTOR_WIDTH_MAX,
   INSPECTOR_WIDTH_MIN,
@@ -16,6 +22,7 @@ import {
   POOL_WIDTH_MIN,
   dispatchWorkspace,
   getWorkspaceSnapshot,
+  isPaneCollapsed,
   useWorkspace,
   type DrawerKind,
 } from "./WorkspaceStore";
@@ -37,12 +44,7 @@ const LazyHelpOverlay = lazy(() =>
   import("../HelpOverlay").then((module) => ({ default: module.HelpOverlay })),
 );
 
-/** 窄窗收缩顺序的纯函数:先折检查器,再折媒体池,中栏永不折(规格 §2)。 */
-export function autoCollapseFor(windowWidth: number): { pool: boolean; inspector: boolean } {
-  // 1280 是最小窗口宽;到了它就先让检查器让位(折成 44px 竖条),低于 1040 连
-  // 媒体池也收起来,好让中栏永远保住它的 min 520。
-  return { pool: windowWidth < 1040, inspector: windowWidth <= 1280 };
-}
+export { INSPECTOR_AUTO_COLLAPSE_WIDTH, autoCollapseFor, autoCollapseTransition } from "./shellLayout";
 
 /**
  * 镜头带栏的最小高只有 `shotBandModel.bandMinHeight` 一份(故事 184 = 视口内容高,
@@ -95,8 +97,8 @@ export function WorkspaceShell(): JSX.Element {
   const poolWidth = useWorkspace((state) => state.poolWidth);
   const inspectorWidth = useWorkspace((state) => state.inspectorWidth);
   const monitorRatio = useWorkspace((state) => state.monitorRatio);
-  const poolCollapsed = useWorkspace((state) => state.poolCollapsed);
-  const inspectorCollapsed = useWorkspace((state) => state.inspectorCollapsed);
+  const poolCollapsed = useWorkspace((state) => isPaneCollapsed(state, "pool"));
+  const inspectorCollapsed = useWorkspace((state) => isPaneCollapsed(state, "inspector"));
   const bandMode = useWorkspace((state) => state.bandMode);
   const openDrawer = useWorkspace((state) => state.openDrawer);
   const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
@@ -153,19 +155,22 @@ export function WorkspaceShell(): JSX.Element {
   }, [bandMode, fitBand]);
 
   useEffect(() => {
+    // 窄窗自动折叠只碰 store 的 auto 位(set-auto-collapse),不碰用户手动位,也就
+    // 不会被 persistedPairs 落盘——这正是 U-04 的根因:此前它派发 toggle-pane,把
+    // 自动折叠写成了用户偏好。跨阈值才派发,见 autoCollapseTransition。
+    let lastWidth: number | null = null;
     const apply = () => {
-      const { pool, inspector } = autoCollapseFor(window.innerWidth);
-      const snapshotPool = poolCollapsed;
-      const snapshotInspector = inspectorCollapsed;
-      if (inspector && !snapshotInspector) dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
-      if (pool && !snapshotPool) dispatchWorkspace({ type: "toggle-pane", pane: "pool" });
+      const width = window.innerWidth;
+      const patch = autoCollapseTransition(lastWidth, width);
+      lastWidth = width;
+      if (patch !== null) dispatchWorkspace({ type: "set-auto-collapse", ...patch });
     };
-    // 挂载时先按当前窗宽收一次 —— 只听 resize 的话,本来就开在 900px 的窗口
-    // 一次事件都等不到,两侧栏会一直挤着中栏。
     apply();
     window.addEventListener("resize", apply);
     return () => window.removeEventListener("resize", apply);
-  }, [poolCollapsed, inspectorCollapsed]);
+  }, []);
+
+  useRestoreSelection();
 
   useEffect(() => {
     const apply = () => {
@@ -186,11 +191,31 @@ export function WorkspaceShell(): JSX.Element {
     // 旧壳靠 SelectPage 接这个事件;新壳里没有 SelectPage,不接就等于点了没反应
     // (R8 终审 L6)。
     const onViewEpisode = (event: Event) => {
-      const detail = (event as CustomEvent<{ id: number; title: string }>).detail;
-      if (!detail || typeof detail.id !== "number") return;
+      const detail = (event as CustomEvent<{ id: number; title: string } | null>).detail;
+      if (!detail || typeof detail.id !== "number") {
+        // N-2:detail 为空 = 回到当前集(`returnToActiveEpisode`)。只读查看时选中的历史集素材
+        // 不能带回当前集,按当前集校验一次。
+        dispatchWorkspace({ type: "view-episode", episode: null });
+        const { selection } = getWorkspaceSnapshot();
+        const { clipsById, episode } = getClipsFeedSnapshot();
+        if (!selectionBelongsToEpisode(selection, episode.activeId, clipsById)) {
+          dispatchWorkspace({ type: "clear-selection" });
+        }
+        return;
+      }
       dispatchWorkspace({ type: "view-episode", episode: { id: detail.id, title: detail.title } });
     };
-    const onEpisodeChanged = () => dispatchWorkspace({ type: "view-episode", episode: null });
+    const onEpisodeChanged = (event: Event) => {
+      dispatchWorkspace({ type: "view-episode", episode: null });
+      // 新建 / 切换集后监视器与检查器不能还停在旧集的素材上(R-06):选中不在新集里就清掉。
+      // 用未按集裁的 clipsById 判归属 —— feed 自己也在听这个事件,裁过的列表这一刻可能已经空了。
+      const detail = (event as CustomEvent<{ id?: unknown } | null>).detail;
+      const episodeId = typeof detail?.id === "number" ? detail.id : null;
+      const { selection } = getWorkspaceSnapshot();
+      if (!selectionBelongsToEpisode(selection, episodeId, getClipsFeedSnapshot().clipsById)) {
+        dispatchWorkspace({ type: "clear-selection" });
+      }
+    };
     window.addEventListener("tripcut:view-episode", onViewEpisode);
     window.addEventListener("tripcut:episode-changed", onEpisodeChanged);
     return () => {
@@ -202,6 +227,21 @@ export function WorkspaceShell(): JSX.Element {
   // 规格 §3.2 的整张全局键位表(F6 轮栏、⌘1/⌘2 折叠、⌘⏎ 沉浸、⌘, 设置、⌘I 导入、
   // ? 帮助、Esc 四级优先级)都在这个 hook 里,壳本身不再各挂各的 keydown。
   useGlobalHotkeys();
+
+  useEffect(() => {
+    // R10 U-19:后端的 `tripcut:music-analyzed` Tauri 事件在壳层桥接一次成同名 window 事件,
+    // 音乐面板 / 状态条各自 addEventListener。非 Tauri 环境里桥是 no-op。
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void bridgeMusicAnalyzedEvents().then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     // `?` 由 useGlobalHotkeys 广播;命令面板的「打开帮助」走同一个事件。
@@ -222,8 +262,15 @@ export function WorkspaceShell(): JSX.Element {
     <div className="workspace-shell" ref={shellRef}>
       <TopBar />
       <Group orientation="horizontal" className="workspace-columns" onLayoutChanged={commitSizes}>
+        {/*
+          竖条与整栏是两个不同 id / key 的 Panel,而不是同一个 Panel 换 props:
+          react-resizable-panels 按实例记尺寸,同一实例从 44px 竖条切成 minSize 280 的
+          整栏时,44 < 280 且 `collapsible` 会让它直接塌成 0(U-04 真机「检查器整个消失」)。
+          换 key 让它重新挂载,库按 panel id 组合取回上次的宽或 defaultSize。
+          `collapsible` 也一并去掉——折叠是壳自己的竖条,不需要库再折一层。
+        */}
         {poolCollapsed ? (
-          <Panel defaultSize={44} minSize={44} maxSize={44} className="workspace-pool collapsed">
+          <Panel key="pool-rail" id="pool-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-pool collapsed">
             <CollapsedRail
               icon="▤"
               label="媒体池"
@@ -232,10 +279,11 @@ export function WorkspaceShell(): JSX.Element {
           </Panel>
         ) : (
           <Panel
+            key="pool-pane"
+            id="pool-pane"
             defaultSize={poolWidth}
             minSize={POOL_WIDTH_MIN}
             maxSize={POOL_WIDTH_MAX}
-            collapsible
             onResize={(size) => {
               latest.current.pool = size.inPixels;
               paint("--pool-width", `${Math.round(size.inPixels)}px`);
@@ -252,6 +300,9 @@ export function WorkspaceShell(): JSX.Element {
               {viewingEpisode ? (
                 <p className="workspace-pool-scope" role="status">
                   {`只读查看「${viewingEpisode.title}」`}
+                  <Button variant="ghost" size="sm" onClick={returnToActiveEpisode}>
+                    回到当前集
+                  </Button>
                 </p>
               ) : null}
               <MediaPool />
@@ -267,7 +318,7 @@ export function WorkspaceShell(): JSX.Element {
           <span className="workspace-handle-grip" aria-hidden="true" />
         </Separator>
 
-        <Panel minSize={520} className="workspace-center">
+        <Panel id="center" minSize={520} className="workspace-center">
           <Group orientation="vertical" className="workspace-center-stack">
             <Panel
               defaultSize={`${Math.round(monitorRatio * 100)}%`}
@@ -320,7 +371,7 @@ export function WorkspaceShell(): JSX.Element {
         </Separator>
 
         {inspectorCollapsed ? (
-          <Panel defaultSize={44} minSize={44} maxSize={44} className="workspace-inspector collapsed">
+          <Panel key="inspector-rail" id="inspector-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-inspector collapsed">
             <CollapsedRail
               icon="▥"
               label="检查器"
@@ -329,10 +380,11 @@ export function WorkspaceShell(): JSX.Element {
           </Panel>
         ) : (
           <Panel
+            key="inspector-pane"
+            id="inspector-pane"
             defaultSize={inspectorWidth}
             minSize={INSPECTOR_WIDTH_MIN}
             maxSize={INSPECTOR_WIDTH_MAX}
-            collapsible
             onResize={(size) => {
               latest.current.inspector = size.inPixels;
               paint("--inspector-width", `${Math.round(size.inPixels)}px`);

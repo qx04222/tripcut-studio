@@ -3,23 +3,26 @@ import { describe, expect, it } from "vitest";
 import type { ClipListItem } from "../api";
 import { takeDateLabel, visibleDefaultSections } from "./inspectorModel";
 
-describe("visibleDefaultSections(规格 §3.8:空段不渲染)", () => {
-  it("全有时四段顺序固定", () => {
+describe("visibleDefaultSections(R10 U-12:可编辑段常驻,只有 Take 段按内容显示)", () => {
+  it("全有时五段顺序固定", () => {
     expect(visibleDefaultSections({ tagCount: 3, hasPlacement: true, canReassign: true, hasStack: true })).toEqual([
       "rating",
       "tags",
       "chapter",
+      "segments",
       "takes",
     ]);
   });
-  it("没标签、不在任何章、没有 Take 时只剩评级", () => {
-    expect(visibleDefaultSections({ tagCount: 0, hasPlacement: false, canReassign: false, hasStack: false })).toEqual(["rating"]);
-  });
-  it("可改章但尚未归章时章节段仍显示(有事可做)", () => {
-    expect(visibleDefaultSections({ tagCount: 0, hasPlacement: false, canReassign: true, hasStack: false })).toEqual([
+  it("没标签、不在任何章、没有 Take 时:评级 / 标签 / 章节 / 精选段仍常驻(空态给入口),只少 Take 段", () => {
+    expect(visibleDefaultSections({ tagCount: 0, hasPlacement: false, canReassign: false, hasStack: false })).toEqual([
       "rating",
+      "tags",
       "chapter",
+      "segments",
     ]);
+  });
+  it("可改章但尚未归章时章节段照样显示", () => {
+    expect(visibleDefaultSections({ tagCount: 0, hasPlacement: false, canReassign: true, hasStack: false })).toContain("chapter");
   });
 });
 

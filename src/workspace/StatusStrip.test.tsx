@@ -85,3 +85,25 @@ describe("StatusStrip", () => {
     expect(main.querySelector("svg[data-icon=\"info\"]")).not.toBeNull();
   });
 });
+
+describe("R10 U-19 音乐分析计数", () => {
+  it("还有排队/进行中的音乐轨时显示「音乐分析 n/m」;全部落终态后不显示", async () => {
+    apiMocks.getMusicAnalysisProgress.mockResolvedValue({ total: 3, done: 1, failed: 0, running: 1, pending: 1 });
+    const view = render(<StatusStrip />);
+    expect(await screen.findByText("音乐分析 1/3")).toBeTruthy();
+    view.unmount();
+    apiMocks.getMusicAnalysisProgress.mockResolvedValue({ total: 3, done: 2, failed: 1, running: 0, pending: 0 });
+    render(<StatusStrip />);
+    expect(await screen.findByText("分析 12/500")).toBeTruthy();
+    expect(screen.queryByText(/音乐分析/)).toBeNull();
+  });
+
+  it("summaryPhrases:音乐分析短语排在素材分析之后、转写之前", () => {
+    expect(
+      summaryPhrases({ analyzed: 1, analyzeTotal: 2, transcribing: 0, generating: 0, missing: 0, musicDone: 1, musicTotal: 3, musicActive: 2 }),
+    ).toEqual(["分析 1/2", "音乐分析 1/3"]);
+    expect(
+      summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0, musicDone: 3, musicTotal: 3, musicActive: 0 }),
+    ).toEqual(["后台空闲"]);
+  });
+});
