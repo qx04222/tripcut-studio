@@ -29,6 +29,19 @@ type FirstJobFn = dyn Fn() + Send + Sync;
 /// 分开:前端刷新用的事件不该依赖用户有没有开通知权限。
 type EventSinkFn = dyn Fn(&str, serde_json::Value) + Send + Sync;
 
+/// X-04:一条 import_probe 落到终态(done / failed / blocked)时发给前端的应用内事件名。
+pub const IMPORT_PROBE_DONE_EVENT: &str = "tripcut:import-probe-done";
+
+/// 执行落地后重读这条 job:终态才发(还会重试、回到 pending 的不发)。
+fn import_probe_done_event(connection: &Connection, job: &Job) -> Result<Option<serde_json::Value>> {
+    let status: Option<String> = connection
+        .query_row("SELECT status FROM jobs WHERE id = ?1", [job.id], |row| row.get(0))
+        .optional()?;
+    Ok(status
+        .filter(|status| matches!(status.as_str(), "done" | "failed" | "blocked"))
+        .map(|status| serde_json::json!({ "job_id": job.id, "status": status })))
+}
+
 // M5 benchmark reconciliation showed that four concurrent workers move the
 // 500-item workload from roughly 100 minutes into the 10-minute range.
 pub const WORKER_COUNT: usize = super::settings::DEFAULT_WORKER_COUNT;
@@ -1315,6 +1328,17 @@ impl JobRunner {
         let Some(sink) = coordinator.event_sink.get() else {
             return;
         };
+        // X-04:每条 import_probe 落到终态就发一条,状态条按单条完成刷新计数(估算器要连续样本)。
+        if job.kind == "import_probe" {
+            match import_probe_done_event(connection, job) {
+                Ok(Some(payload)) => {
+                    let sink = sink.clone();
+                    std::thread::spawn(move || sink(IMPORT_PROBE_DONE_EVENT, payload));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, job_id = job.id, "导入探测完成事件检测失败"),
+            }
+        }
         match super::music::analyzed_event(connection, job) {
             Ok(Some(event)) => {
                 let payload = match serde_json::to_value(&event) {
@@ -1412,6 +1436,14 @@ impl JobRunner {
                     }
                     Ok(super::import::ImportProbeOutcome::Duplicate(path)) => {
                         mark_done_with_result_path(connection, job.id, job.attempt, &path)?;
+                    }
+                    Ok(super::import::ImportProbeOutcome::OwnedElsewhere { path, note }) => {
+                        // Z-13:算作「重复」(result_path 有值),但把「在哪一集」留在 blocked_summary 给占位卡。
+                        mark_done_with_result_path(connection, job.id, job.attempt, &path)?;
+                        connection.execute(
+                            "UPDATE jobs SET blocked_summary = ?2 WHERE id = ?1 AND status = 'done'",
+                            params![job.id, note],
+                        )?;
                     }
                     Err(error) => {
                         // 确定性媒体错误(损坏/不可读)重试无意义:直接置 blocked 可见,
@@ -3548,6 +3580,48 @@ mod tests {
             notify_receiver.recv_timeout(Duration::from_millis(200)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout),
             "noop 任务不产生系统通知,钩子也不借通知出口"
+        );
+    }
+
+    /// X-04:每条 import_probe 落到终态(done / failed / blocked)都发一条 `tripcut:import-probe-done`,
+    /// 状态条按单条完成即时刷新计数,估算器才拿得到连续样本;还会重试(回到 pending)的不发。
+    #[test]
+    fn event_sink_receives_import_probe_done_per_terminal_probe() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            let retrying = enqueue(&mut connection, "import_probe", "{broken", "probe-retry").unwrap();
+            let terminal = enqueue(&mut connection, "import_probe", "{broken", "probe-terminal").unwrap();
+            connection
+                .execute("UPDATE jobs SET attempt = 2 WHERE id = ?1", [terminal])
+                .unwrap();
+            let _ = retrying;
+            enqueue(&mut connection, "noop", "{}", "noop-probe").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, serde_json::Value)>();
+        let sender = Mutex::new(sender);
+        coordinator
+            .event_sink
+            .set(Arc::new(move |name: &str, payload: serde_json::Value| {
+                let _ = sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .send((name.to_owned(), payload));
+            }))
+            .ok();
+        for _ in 0..3 {
+            assert!(JobRunner::run_one_with_executor(&db_path, &coordinator, "probe-owner", JobRunner::execute_claimed).unwrap());
+        }
+        let (name, payload) = receiver.recv_timeout(Duration::from_secs(2)).expect("终态的 import_probe 必须发事件");
+        assert_eq!(name, "tripcut:import-probe-done");
+        assert_eq!(payload["status"], "blocked", "第三次失败按三次规则落 blocked");
+        assert!(payload["job_id"].is_i64());
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "还会重试的 probe 与 noop 都不发"
         );
     }
 

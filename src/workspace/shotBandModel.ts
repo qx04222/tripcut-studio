@@ -41,6 +41,9 @@ export interface BandSegment {
   chapterId: number | null;
   slot: string | null;
   fileName: string | null;
+  /** R13 §4:本段在素材里的入出点(素材自己的 tick);播放头与拖边裁剪按它换算。整条素材是 0–时长。 */
+  inTicks: number;
+  outTicks: number;
   /** 分段时长,单位是**本素材自己的 tick**(`tbNum/tbDen`);显示前必须换算(R-02)。 */
   durationTicks: number;
   tbNum: number;
@@ -56,6 +59,18 @@ export interface BandSegment {
   slotIndex: number;
   /** 叙事模式下 beat 的角色词(瓦片右下);legacy 模式与空槽位为 null。 */
   roleLabel: string | null;
+  /** R12 §2:精选段镜块的「片段 0.5–4.5 s」小标;整条素材与空槽位为 null。 */
+  rangeLabel: string | null;
+}
+
+/** 秒数一位小数,整数不带 .0(「0.5」「3」);R13 的裁剪时长标签(bandTimeline)用同一个格式。 */
+export const secondsLabel = (seconds: number): string => (Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1).replace(/\.0$/, ""));
+
+/** 「片段 0.5–4.5 s」—— 按素材自己的 time base 换算(R-02);tb 不合法时只剩「片段」。 */
+export function segmentRangeLabel(inTicks: number, outTicks: number, tbNum: number, tbDen: number): string {
+  if (tbNum <= 0 || tbDen <= 0) return "片段";
+  const toSeconds = (ticks: number) => Math.round((ticks * tbNum * 10) / tbDen) / 10;
+  return `片段 ${secondsLabel(toSeconds(inTicks))}–${secondsLabel(toSeconds(outTicks))} s`;
 }
 
 /**
@@ -156,6 +171,8 @@ export interface BandChapter {
   clipCount: number;
   /** 连空槽位都没有。 */
   isEmpty: boolean;
+  /** R12 §2「这章够了」:被标成跳过的章,0 镜也不算缺口。 */
+  skipped: boolean;
   segments: BandSegment[];
 }
 
@@ -220,6 +237,8 @@ export function buildBandChapters(
   gaps: readonly StoryGap[],
   stacks: readonly ShotStack[],
   clipsById: ReadonlyMap<number, ClipListItem>,
+  /** R12:「这章够了」标过的章 id(settings `story.chapter_skipped.<id>` = "true")。 */
+  skippedChapters: ReadonlySet<number> = new Set(),
 ): BandChapter[] {
   const boardChapters = board.chapters ?? [];
   const boardItems = board.items ?? [];
@@ -247,6 +266,8 @@ export function buildBandChapters(
         chapterId: item.chapter_id,
         slot: null,
         fileName: item.file_name,
+        inTicks: item.in_ticks,
+        outTicks: item.out_ticks,
         durationTicks: itemDurationTicks(item),
         tbNum: item.tb_num,
         tbDen: item.tb_den,
@@ -260,6 +281,7 @@ export function buildBandChapters(
         gap: null,
         slotIndex: segments.length + 1,
         roleLabel: roles.get(item.clip_id) ?? null,
+        rangeLabel: item.segment_id === null ? null : segmentRangeLabel(item.in_ticks, item.out_ticks, item.tb_num, item.tb_den),
       });
     }
     const chapterGaps = activeGapsFor(gaps, bucket.chapterId);
@@ -274,6 +296,8 @@ export function buildBandChapters(
         chapterId: gap.chapter_id,
         slot: gap.slot,
         fileName: null,
+        inTicks: 0,
+        outTicks: 0,
         durationTicks: 0,
         tbNum: 1,
         tbDen: 1_000,
@@ -284,17 +308,21 @@ export function buildBandChapters(
         gap,
         slotIndex: segments.length + 1,
         roleLabel: null,
+        rangeLabel: null,
       });
     }
     const isEmpty = segments.length === 0;
+    const skipped = bucket.chapterId !== null && skippedChapters.has(bucket.chapterId);
     return {
       ordinal: bucketIndex + 1,
       chapterId: bucket.chapterId,
       title: bucket.title,
       durationMs: segments.reduce((sum, segment) => sum + segmentDurationMs(segment), 0),
-      gapCount: chapterGaps.length + (isEmpty ? 1 : 0),
+      // 「这章够了」的 0 镜章不算缺口(R12 §2);已有槽位缺口照算。
+      gapCount: chapterGaps.length + (isEmpty && !skipped ? 1 : 0),
       clipCount: segments.length - chapterGaps.length,
       isEmpty,
+      skipped,
       segments,
     };
   });
@@ -338,6 +366,7 @@ export function applyBandView(
       gapCount: 0,
       clipCount: segments.length,
       isEmpty: segments.length === 0,
+      skipped: false,
       segments,
     },
   ];
@@ -367,10 +396,13 @@ function inclusiveRange(from: number, to: number): number[] {
 }
 
 /**
- * 视口外的章节只渲染带头;拖动期间关闭虚拟化(当前章 ±1 全渲染,规格 §11)。
+ * 视口外的章节只渲染带头;拖动期间关闭虚拟化 —— **所有章全渲染**(规格 §11,V14-02 修正)。
  *
  * 拖动时**不看视口** —— dnd-kit 的落点可能在视口边缘之外几十像素,按视口算会把
- * 目标章节卸载掉,拖到一半目标消失。当前章 ±1 是固定窗口,与滚动位置无关。
+ * 目标章节卸载掉,拖到一半目标消失。以前只留「当前章 ±1」:`active` 取的是视口最左那章,
+ * 视口装得下 7 章时,离左缘 ≥2 章的源章一拖起就被折叠成「n 个镜头」,连源都没了、
+ * 更没有落点(真机 V14-02:7 章 · 11 镜,第 7 章内拖排松手无效)。章数是几十这个量级,
+ * 拖动那几秒全画得起;拖完即恢复虚拟化。
  */
 export function renderableChapterRange(
   scrollLeftByChapter: readonly number[],
@@ -389,9 +421,7 @@ export function renderableChapterRange(
   const active = clampIndex(activeChapterIndex, total);
 
   if (dragging) {
-    const from = clampIndex(active - 1, total);
-    const to = clampIndex(active + 1, total);
-    return { from, to, fullyRendered: inclusiveRange(from, to) };
+    return { from: 0, to: total - 1, fullyRendered: inclusiveRange(0, total - 1) };
   }
 
   const start = scrollLeft ?? scrollLeftByChapter[active] ?? 0;

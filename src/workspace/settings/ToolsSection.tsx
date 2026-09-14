@@ -7,21 +7,21 @@ import { ToolchainGuide } from "./ToolchainGuide";
 import { WhisperModelCard } from "./WhisperModelCard";
 
 const TOOL_PATHS = [
-  { key: "tools.ffmpeg_path", componentId: "ffmpeg", title: "FFmpeg 路径", help: "负责预览、音频与导出处理;留空时自动检测。", placeholder: "自动检测 ffmpeg", readout: "FFmpeg" },
-  { key: "tools.ffprobe_path", componentId: "ffprobe", title: "FFprobe 路径", help: "负责读取媒体流与容器信息；留空时自动检测。", placeholder: "自动检测 ffprobe", readout: "FFprobe" },
-  { key: "tools.whisper_path", componentId: "whisper-cli", title: "whisper-cli 路径", help: "负责本地语音转写；留空时自动检测。", placeholder: "自动检测 whisper-cli", readout: "Whisper" },
+  { key: "tools.ffmpeg_path", componentId: "ffmpeg", title: "视频处理组件的位置", help: "负责预览、音频与导出处理;留空时自动检测。", placeholder: "自动检测", readout: "视频处理组件" },
+  { key: "tools.ffprobe_path", componentId: "ffprobe", title: "媒体信息组件的位置", help: "负责读取素材的画面与声音信息；留空时自动检测。", placeholder: "自动检测", readout: "媒体信息组件" },
+  { key: "tools.whisper_path", componentId: "whisper-cli", title: "转写组件的位置", help: "负责本地语音转写；留空时自动检测。", placeholder: "自动检测", readout: "转写组件" },
 ] as const;
 
 export function ToolsSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { settings, status, componentStatuses, busy, rollbackNotice } = form;
   const toolStatus = (readout: string) =>
-    readout === "FFmpeg" ? status?.ffmpeg : readout === "FFprobe" ? status?.ffprobe : status?.whisper.binary;
+    readout === "视频处理组件" ? status?.ffmpeg : readout === "媒体信息组件" ? status?.ffprobe : status?.whisper.binary;
   const component = (id: string) => componentStatuses.find((entry) => entry.id === id);
 
   return (
     <>
-      <SectionHeader title="工具链" description="留空时自动搜索环境变量与 PATH；填写路径后，失焦即保存并重新检测。" />
+      <SectionHeader title="工具链" description="留空时自动在本机搜索；填写位置后，离开输入框即保存并重新检测。" />
       <ToolchainGuide status={status} />
       {rollbackNotice ? (
         <p className="settings-sheet-inline-notice" role="status" aria-live="polite">
@@ -48,8 +48,8 @@ export function ToolsSection(): JSX.Element {
           );
         })}
         <SettingsRow
-          title="Whisper 模型档位"
-          help="可选模型不由应用联网下载；按状态区路径放置已校验的 ggml 文件。"
+          title="转写模型"
+          help="应用不联网下载模型；按下方路径放置已校验的模型文件。"
           htmlFor="settings-whisper-tier"
           className="settings-sheet-row--stack"
         >
@@ -69,7 +69,7 @@ export function ToolsSection(): JSX.Element {
             </div>
             <code>{status?.whisper.model_path ?? "等待检测"}</code>
             <small>
-              当前版本不提供在线下载。需要转写时，请自行核验来源与 SHA-256 后放入
+              当前版本不提供在线下载。需要转写时，请自行核验来源与校验码后放入
               {status?.whisper.models_directory ?? "应用 models 目录"}；缺失不影响核心工作流。
             </small>
           </div>
@@ -79,7 +79,7 @@ export function ToolsSection(): JSX.Element {
           ) : null}
           <RollbackControl componentStatus={component("whisper-model")} busy={busy} onRollback={() => void form.rollbackTool("whisper-model")} />
         </SettingsRow>
-        <SettingsRow title="Chinese-CLIP 画面识别组件" help={status?.clip_sidecar.note ?? "本地画面搜索服务。"} className="settings-sheet-row--stack">
+        <SettingsRow title="画面识别组件" help={status?.clip_sidecar.note ?? "本地画面搜索服务。"} className="settings-sheet-row--stack">
           <div className="settings-sheet-readout">
             <div className="settings-sheet-readout-head">
               <StatusPill available={status?.clip_sidecar.available ?? false}>

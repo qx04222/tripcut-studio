@@ -8,13 +8,17 @@ import { HelpOverlay } from "./HelpOverlay";
 import {
   HELP_FAQS,
   KEYBOARD_SHORTCUT_GROUPS,
+  PIPELINE_MANUAL,
   PLAYER_SHORTCUTS,
   SELECTION_SHORTCUTS,
   SETTINGS_HELP_TOPICS,
   WORKSPACE_SHORTCUTS,
   WORKFLOW_STEPS,
+  shortcutKeys,
+  shortcutsById,
 } from "./helpContent";
 import { GENERATED_LICENSES } from "./licenses.generated";
+import { globalHotkeyIntent } from "./workspace/useGlobalHotkeys";
 
 // P2:帮助层压在命令面板之下打开时,Esc 只应关最上层——需要真的把 CommandPalette
 // 挂上去验证,所以复用它测试文件里的同一套 api/pinyin mock。
@@ -29,10 +33,55 @@ const apiMock = vi.hoisted(() => ({
   listShotStacks: vi.fn().mockResolvedValue([]),
   listStoryGaps: vi.fn().mockResolvedValue([]),
   listAssetSafety: vi.fn().mockResolvedValue([]),
+  // R12:引入 useGlobalHotkeys 会连带 WorkspaceStore(它在模块顶层建 setSetting 写手)。
+  setSetting: vi.fn().mockResolvedValue(undefined),
+  getSettings: vi.fn().mockResolvedValue({}),
+  arrangeSelectedSegments: vi.fn().mockResolvedValue({ placed: 0, chapters: 0 }),
 }));
 vi.mock("./api", () => apiMock);
 vi.mock("./historyView", () => ({ openHistoricalEpisode: vi.fn() }));
 vi.mock("pinyin-pro", () => ({ pinyin: () => [] }));
+
+describe("R12 §1:流水线手册", () => {
+  it("四步各恰好 3 行「怎么做」,快捷键 id 全部能在总表里找到(不手抄键位)", () => {
+    expect(PIPELINE_MANUAL.map((entry) => entry.step)).toEqual([1, 2, 3, 4]);
+    expect(PIPELINE_MANUAL.map((entry) => entry.title)).toEqual(["导入", "挑选", "排列", "导出"]);
+    for (const entry of PIPELINE_MANUAL) {
+      expect(entry.howTo).toHaveLength(3);
+      expect(shortcutsById(entry.shortcutIds).map((shortcut) => shortcut.id)).toEqual([...entry.shortcutIds]);
+    }
+  });
+
+  it("总表里「工作区」那组的每一条都对应 useGlobalHotkeys 里一个真实 intent(表与实现同源)", () => {
+    const idle = { openDrawer: null, immersive: false, query: "" } as const;
+    const press: Record<string, { key: string; code: string; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }> = {
+      "command-palette": { key: "k", code: "KeyK", metaKey: true, ctrlKey: false, shiftKey: false },
+      "cycle-pane": { key: "F6", code: "F6", metaKey: false, ctrlKey: false, shiftKey: false },
+      "toggle-pool": { key: "1", code: "Digit1", metaKey: true, ctrlKey: false, shiftKey: false },
+      "toggle-inspector": { key: "2", code: "Digit2", metaKey: true, ctrlKey: false, shiftKey: false },
+      immersive: { key: "Enter", code: "Enter", metaKey: true, ctrlKey: false, shiftKey: false },
+      "open-import": { key: "i", code: "KeyI", metaKey: true, ctrlKey: false, shiftKey: false },
+      "open-settings": { key: ",", code: "Comma", metaKey: true, ctrlKey: false, shiftKey: false },
+      "open-help": { key: "?", code: "Slash", metaKey: false, ctrlKey: false, shiftKey: true },
+      escape: { key: "Escape", code: "Escape", metaKey: false, ctrlKey: false, shiftKey: false },
+    };
+    for (const shortcut of WORKSPACE_SHORTCUTS) {
+      expect(press[shortcut.id], `帮助表里的 ${shortcut.id} 没有对应的按键样例`).toBeTruthy();
+      expect(globalHotkeyIntent(press[shortcut.id], idle, false), shortcut.id).not.toBeNull();
+    }
+  });
+
+  it("帮助浮层标题「流水线手册」,第一节四步各带 3 行与该步快捷键", () => {
+    const markup = renderToStaticMarkup(<HelpOverlay open onClose={() => undefined} />);
+    expect(markup).toContain("流水线手册");
+    for (const step of [1, 2, 3, 4]) {
+      expect(markup).toContain(`data-pipeline-step="${step}"`);
+      expect(markup).toContain(`第 ${step} 步快捷键`);
+    }
+    expect(markup).toContain("下一步:自动挑选");
+    expect(markup).toContain("只重试失败的");
+  });
+});
 
 describe("P5-F3 Chinese help and polish", () => {
   it("工作流一节讲的是一屏三栏,不是已经下线的四步页面(规格 §1)", () => {
@@ -177,5 +226,21 @@ describe("P2: HelpOverlay 挂上模态栈,Esc 只关最上层", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(onCloseHelp).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("R13 §1:帮助页键帽随预设变化", () => {
+  it("shortcutKeys:有 actions 的行按键位表取键帽;Premiere 下沉浸预览显示 `", async () => {
+    const { resolveKeymap } = await import("./workspace/keymap");
+    const immersive = WORKSPACE_SHORTCUTS.find((shortcut) => shortcut.id === "immersive")!;
+    expect(shortcutKeys(immersive, resolveKeymap("jianying", undefined))).toEqual(["⌘⏎"]);
+    expect(shortcutKeys(immersive, resolveKeymap("premiere", undefined))).toEqual(["`"]);
+    const frame = PLAYER_SHORTCUTS.find((shortcut) => shortcut.id === "step-frame")!;
+    expect(shortcutKeys(frame, resolveKeymap("jianying", undefined))).toEqual(["←", "→"]);
+    // 每一行帮助都绑了动作(不再手抄键位),只有「1–5 星级」保留静态写法。
+    for (const shortcut of KEYBOARD_SHORTCUT_GROUPS.flatMap((group) => group.shortcuts)) {
+      if (shortcut.id === "stars") continue;
+      expect(shortcut.actions, shortcut.id).toBeTruthy();
+    }
   });
 });

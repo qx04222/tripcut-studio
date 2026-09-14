@@ -35,14 +35,15 @@ import { Card, Icon, SectionHeader, type IconName } from "./ui";
 import { planBandReorder, useBandDrag } from "./useBandDrag";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { useSelection } from "./useSelection";
+import { INSPECTOR_TITLES } from "./copy";
 
 export type InspectorSectionId = "techcheck" | "dimensions" | "ai" | "audio" | "similar";
 
 export const INSPECTOR_SECTIONS: readonly { id: InspectorSectionId; title: string; icon: IconName }[] = [
   { id: "techcheck", title: "技术检查", icon: "check" },
-  { id: "dimensions", title: "八维评分", icon: "settings-analysis" },
+  { id: "dimensions", title: INSPECTOR_TITLES.dimensions, icon: "settings-analysis" },
   { id: "ai", title: "AI 描述", icon: "settings-generation" },
-  { id: "audio", title: "音轨与 LUT", icon: "volume" },
+  { id: "audio", title: INSPECTOR_TITLES.audio, icon: "volume" },
   { id: "similar", title: "相似镜头", icon: "search" },
 ];
 

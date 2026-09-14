@@ -9,6 +9,8 @@ import {
 
 import type { RatingAction } from "../SelectPage";
 import type { ShotStackUserState } from "../api";
+import { lookupAction, type KeymapIndex } from "./keymap";
+import { getKeymap } from "./keymapStore";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
 export type HotkeyIntent =
@@ -83,44 +85,48 @@ export function physicalKey(event: Pick<KeyboardEvent, "key" | "code">): string 
   return event.key;
 }
 
-/** 纯函数:一次 keydown 该做什么。composing=true 时单键一律返回 null(IME 组合保护)。 */
+/**
+ * 纯函数:一次 keydown 该做什么。composing=true 时单键一律返回 null(IME 组合保护)。
+ * R13 §1:改为查键位表(`keymap.ts` 的 `pool` 栏;默认剪映预设 F/X/1–5/0/L/R/Tab/↑↓/←→/空格/K)。
+ */
 export function ratingHotkeyIntent(
-  event: Pick<globalThis.KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey">,
+  event: Pick<globalThis.KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey"> & Partial<Pick<globalThis.KeyboardEvent, "altKey">>,
   composing: boolean,
+  index: KeymapIndex = getKeymap().index,
 ): HotkeyIntent | null {
   if (composing) return null;
-  // ⌘/Ctrl 组合是壳的键位(⌘1/⌘2 折叠栏、⌘⏎ 全屏沉浸),一个都不能落进评级。
-  if (event.metaKey || event.ctrlKey) return null;
-
-  const key = physicalKey(event);
-  const lower = key.toLowerCase();
-
-  if (lower === "f") return { kind: "rating", action: { kind: "binary", value: 1 } };
-  if (lower === "x") return { kind: "rating", action: { kind: "binary", value: -1 } };
-  if (lower === "0") return { kind: "rating", action: { kind: "clear" } };
-  if (/^[1-5]$/.test(lower)) {
-    return { kind: "rating", action: { kind: "star", value: Number(lower) as 1 | 2 | 3 | 4 | 5 } };
-  }
-  if (lower === "l") return { kind: "stack-state", state: "locked" };
-  if (lower === "r") return { kind: "stack-state", state: "rejected" };
-  // V-05:焦点在卡片 / 瓦片上时 K 也能停 / 播(与监视器同键),不必先 F6 到监视器。
-  if (lower === "k") return { kind: "toggle-playback" };
-
-  switch (event.key) {
-    case "Enter":
+  const action = lookupAction(index, "pool", event);
+  switch (action) {
+    case "favorite":
+      return { kind: "rating", action: { kind: "binary", value: 1 } };
+    case "reject":
+      return { kind: "rating", action: { kind: "binary", value: -1 } };
+    case "clear-rating":
+      return { kind: "rating", action: { kind: "clear" } };
+    case "star-1":
+    case "star-2":
+    case "star-3":
+    case "star-4":
+    case "star-5":
+      return { kind: "rating", action: { kind: "star", value: Number(action.slice(-1)) as 1 | 2 | 3 | 4 | 5 } };
+    case "lock-stack":
+      return { kind: "stack-state", state: "locked" };
+    case "reject-stack":
+      return { kind: "stack-state", state: "rejected" };
+    case "promote-hero":
       return { kind: "promote-hero" };
-    case "Tab":
+    case "expand-stack":
       return { kind: "toggle-takes" };
-    case "ArrowUp":
+    case "prev-take":
       return { kind: "move-take", direction: -1 };
-    case "ArrowDown":
+    case "next-take":
       return { kind: "move-take", direction: 1 };
-    case "ArrowLeft":
+    case "prev-clip":
       return { kind: "move-selection", direction: -1 };
-    case "ArrowRight":
+    case "next-clip":
       return { kind: "move-selection", direction: 1 };
-    case " ":
-    case "Spacebar":
+    case "play-pause":
+    case "shuttle-pause":
       return { kind: "toggle-playback" };
     default:
       return null;
@@ -186,6 +192,7 @@ export function useRatingHotkeys(
           metaKey: event.metaKey,
           ctrlKey: event.ctrlKey,
           shiftKey: event.shiftKey,
+          altKey: event.altKey,
         },
         isComposing,
       );

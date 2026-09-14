@@ -20,10 +20,10 @@ export function railPanelId(id: SettingsGroupId): string {
 }
 
 /**
- * 左侧竖向分区轨:`role="tablist"` 名「设置分区」(冻结),R11 起只有三个 `tab`
- * (常用 / 工具与模型 / 关于;AX 名只有 label,说明 `aria-hidden`);↑ ↓ Home End roving + 自动激活。
- * 底部常驻两个快捷入口「云端补镜」「隐私与诊断」—— 它们是 design-system §6 冻结的冒烟锚点,
- * 三分区之后不再是 tab,以按钮形式留在左轨。
+ * 左侧竖向分区轨:`role="tablist"` 名「设置分区」(冻结),R13 起六个 `tab`
+ * (项目与缓存 / 快捷键 / 播放与导出 / 性能 / 工具与模型 / 关于;AX 名只有 label,说明 `aria-hidden`);
+ * ↑ ↓ Home End roving + 自动激活。底部常驻两个快捷入口「云端补镜」「隐私与诊断」—— 它们是
+ * design-system §6 冻结的冒烟锚点,不是 tab,以按钮形式留在左轨,点一下直落对应分区的那一段。
  */
 export function SettingsRail({ value, onChange, onJump }: SettingsRailProps): JSX.Element {
   const move = (event: KeyboardEvent<HTMLButtonElement>, from: number) => {

@@ -1,8 +1,10 @@
-import type { JSX } from "react";
-import type { ExportStatus, JianyingDraftResult } from "../../api";
-import { Button, Card, Icon } from "../ui";
-import { STAGE_LABELS } from "./deliverModel";
+import { useState, type JSX } from "react";
+import { JIANYING_BUNDLE_ID, openApp, type ExportStatus, type JianyingDraftResult } from "../../api";
+import { failureText } from "../errorText";
+import { Button, Card, Icon, showToast } from "../ui";
+import { draftContentLine, STAGE_LABELS } from "./deliverModel";
 import { DeliverItemList } from "./DeliverProgressCard";
+import { submitJianyingHumanCheck } from "./jianyingHumanCheck";
 
 export interface DeliverResultCardProps {
   status: ExportStatus;
@@ -55,8 +57,9 @@ export function DeliverResultCard({ status, onReveal }: DeliverResultCardProps):
   return null;
 }
 
-/** 剪映草稿已生成:草稿名 + 回读自检信息 + 路径。不声称已打开剪映。 */
+/** 剪映草稿已生成:草稿名 + 回读自检信息 + 路径。不声称已打开剪映。试验草稿(R14 §9 A)另给三步 + 两个裁定按钮。 */
 export function JianyingResultCard({ result }: { result: JianyingDraftResult }): JSX.Element {
+  if (result.experimental) return <ExperimentalDraftCard result={result} />;
   return (
     <Card className="deliver-result deliver-result--ok" padding={4}>
       <span className="deliver-result-icon">
@@ -65,8 +68,75 @@ export function JianyingResultCard({ result }: { result: JianyingDraftResult }):
       <div className="deliver-result-copy">
         <p className="deliver-result-title">剪映草稿已生成</p>
         <p className="deliver-result-name">{result.draft_name}</p>
+        <p className="deliver-result-meta">{draftContentLine(result)}</p>
         <p className="deliver-result-meta">{result.message}</p>
         <code className="deliver-result-path">{result.output_path}</code>
+      </div>
+    </Card>
+  );
+}
+
+export const OPEN_JIANYING_LABEL = "打开剪映";
+export const HUMAN_CHECK_OK_LABEL = "可以用";
+export const HUMAN_CHECK_FAIL_LABEL = "打不开";
+
+/**
+ * 试验草稿结果卡:「1 打开剪映 → 2 看草稿列表里有没有『<草稿名>』→ 3 能打开就点『可以用』,打不开点『打不开』」。
+ * 裁定写进 settings `jianying.human_check.<version>` 并广播可用性;ok 之后这个版本视为已验证。
+ */
+function ExperimentalDraftCard({ result }: { result: JianyingDraftResult }): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [recorded, setRecorded] = useState<"ok" | "fail" | null>(null);
+  const verdict = async (value: "ok" | "fail") => {
+    setBusy(true);
+    try {
+      if (await submitJianyingHumanCheck(result.jianying_version, value)) setRecorded(value);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card className="deliver-result deliver-result--ok deliver-result--experimental" padding={4}>
+      <span className="deliver-result-icon">
+        <Icon name="check" size={16} />
+      </span>
+      <div className="deliver-result-copy">
+        <p className="deliver-result-title">试验草稿已写出,请到剪映里看一眼</p>
+        <p className="deliver-result-meta">{draftContentLine(result)}</p>
+        <ol className="deliver-experimental-steps">
+          <li>
+            打开剪映
+            <Button
+              variant="secondary"
+              size="sm"
+              aria-label={OPEN_JIANYING_LABEL}
+              onClick={() => void openApp(JIANYING_BUNDLE_ID).catch((error) => showToast(`${failureText("打开剪映", error, "")}草稿在 ${result.draft_path ?? result.output_path}`, { tone: "danger" }))}
+            >
+              {OPEN_JIANYING_LABEL}
+            </Button>
+          </li>
+          <li>
+            看草稿列表里有没有『<span className="deliver-result-name">{result.draft_name}</span>』
+          </li>
+          <li>
+            能打开就点「可以用」,打不开点「打不开」
+            {recorded ? (
+              <span className="deliver-experimental-verdict deliver-experimental-verdict--done" role="status">
+                已记下「{recorded === "ok" ? HUMAN_CHECK_OK_LABEL : HUMAN_CHECK_FAIL_LABEL}」
+              </span>
+            ) : (
+              <span className="deliver-experimental-verdict">
+                <Button variant="primary" size="sm" aria-label={HUMAN_CHECK_OK_LABEL} busy={busy} disabled={busy} onClick={() => void verdict("ok")}>
+                  {HUMAN_CHECK_OK_LABEL}
+                </Button>
+                <Button variant="ghost" size="sm" aria-label={HUMAN_CHECK_FAIL_LABEL} disabled={busy} onClick={() => void verdict("fail")}>
+                  {HUMAN_CHECK_FAIL_LABEL}
+                </Button>
+              </span>
+            )}
+          </li>
+        </ol>
+        <code className="deliver-result-path">{result.draft_path ?? result.output_path}</code>
       </div>
     </Card>
   );

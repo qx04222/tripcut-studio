@@ -79,7 +79,7 @@ describe("deliverModel", () => {
         selected_whole_count: 1,
         total_duration_seconds: 185,
       }),
-    ).toBe("4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05");
+    ).toBe("4 项 · 3 段精选片段 · 1 条收藏的整条视频 · 预计 3:05");
   });
 });
 
@@ -96,16 +96,16 @@ describe("R10 U-20:记住上次选择与画布尺寸", () => {
   it("readCanvas 按顺序取第一个带合法 canvas 的来源;canvasLabel 拼「画布 W×H」", () => {
     expect(readCanvas(undefined, null, { canvas: { width: 0, height: 10 } }, { canvas: { width: 1080, height: 1920 } })).toEqual({ width: 1080, height: 1920 });
     expect(readCanvas({}, { canvas: "no" })).toBeNull();
-    expect(canvasLabel({ width: 1920, height: 1080 })).toBe("画布 1920×1080");
+    expect(canvasLabel({ width: 1920, height: 1080 })).toBe("横版 1920×1080");
     expect(canvasLabel(null)).toBeNull();
   });
 });
 
-describe("R10 U-33:整条收藏 0 条时说明收藏去了哪", () => {
+describe("R10 U-33:收藏的整条视频 0 条时说明收藏去了哪", () => {
   it("有精选段、整条 0 条 → 摘要补「有精选段的收藏已按片段导出」;整条 > 0 或没精选段不补", () => {
     const base = { ...EMPTY_STATUS, selected_count: 1, selected_segment_count: 2, selected_whole_count: 0, total_duration_seconds: 5 };
     expect(wholeFavoritesNote(base)).toBe("有精选段的收藏已按片段导出");
-    expect(summaryLine(base)).toBe("1 项 · 2 段精选片段 · 0 条整条收藏（有精选段的收藏已按片段导出） · 预计 0:05");
+    expect(summaryLine(base)).toBe("1 项 · 2 段精选片段 · 0 条收藏的整条视频（有精选段的收藏已按片段导出） · 预计 0:05");
     expect(wholeFavoritesNote({ ...base, selected_whole_count: 1 })).toBeNull();
     expect(wholeFavoritesNote({ ...base, selected_segment_count: 0 })).toBeNull();
   });

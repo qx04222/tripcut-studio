@@ -51,7 +51,9 @@ export function analysisBadgeKinds(clip: ClipListItem): AnalysisBadgeKind[] {
   if (!clip.analysis) return [];
 
   const badges: AnalysisBadgeKind[] = [];
-  if (clip.analysis.exposure_yavg < DARK_YAVG_THRESHOLD) badges.push("dark");
+  // R14:不再单独发「过暗」角标——平均亮度低的夜景(有路灯/窗户高光)曝光是对的,
+  // 真正曝光不足由后端 underexposed_ratio(暗部贴黑 + 整帧偏暗 + 无高光)判定,
+  // 池子角标、检查面板、导出清单同一口径。`dark` 只保留给旧数据/CSS 兼容。
   if (clip.analysis.overexposed_ratio > OVEREXPOSED_RATIO_THRESHOLD) {
     badges.push("overexposed");
   }

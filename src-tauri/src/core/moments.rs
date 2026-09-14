@@ -16,8 +16,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{
-    LOW_ENTROPY_GUARD, OVEREXPOSED_YAVG_THRESHOLD, OVEREXPOSED_YHIGH_THRESHOLD,
-    UNDEREXPOSED_YAVG_THRESHOLD, UNDEREXPOSED_YLOW_THRESHOLD,
+    frame_underexposed, LOW_ENTROPY_GUARD, OVEREXPOSED_YAVG_THRESHOLD, OVEREXPOSED_YHIGH_THRESHOLD,
 };
 use super::error::{CoreError, Result};
 use super::jobs::Job;
@@ -27,7 +26,8 @@ pub const MOMENT_WINDOW_SECS: f64 = 0.5;
 pub const AUDIO_WINDOW_SAMPLE_RATE: u32 = 8000;
 pub const AUDIO_WINDOW_SAMPLES: u32 = AUDIO_WINDOW_SAMPLE_RATE / 2;
 /// 版本号变化会让 `enqueue_missing` 把旧时刻分重新排队。
-pub const MOMENTS_PIPELINE_VERSION: &str = "moments/v1";
+/// v2(R14):「曝光正常」改用 L1 的 `frame_underexposed`(夜景有高光不算欠曝)。
+pub const MOMENTS_PIPELINE_VERSION: &str = "moments/v2";
 pub const WEIGHT_KEYS: [&str; 5] = ["sharp", "motion", "exposure", "sound", "no_cut"];
 /// 热力条降采样上限。
 pub const HEATMAP_MAX_POINTS: usize = 200;
@@ -111,6 +111,7 @@ pub struct VideoWindow {
     pub yavg: f64,
     pub ylow: f64,
     pub yhigh: f64,
+    pub ymax: f64,
     /// blurdetect 对没有边缘的帧给 NaN,保留原值由打分处理。
     pub blur: f64,
     pub entropy: f64,
@@ -168,6 +169,7 @@ impl WindowSignals {
                         "lavfi.signalstats.YAVG" => window.yavg = value,
                         "lavfi.signalstats.YLOW" => window.ylow = value,
                         "lavfi.signalstats.YHIGH" => window.yhigh = value,
+                        "lavfi.signalstats.YMAX" => window.ymax = value,
                         "lavfi.blur" => window.blur = value,
                         "lavfi.entropy.entropy.normal.Y" => window.entropy = value,
                         "lavfi.vmafmotion.score" => window.motion = value,
@@ -253,7 +255,7 @@ pub fn motion_moderation(motion: f64) -> f64 {
 
 fn exposure_is_ok(window: &VideoWindow) -> bool {
     let over = window.yhigh >= OVEREXPOSED_YHIGH_THRESHOLD && window.yavg >= OVEREXPOSED_YAVG_THRESHOLD;
-    let under = window.ylow <= UNDEREXPOSED_YLOW_THRESHOLD && window.yavg <= UNDEREXPOSED_YAVG_THRESHOLD;
+    let under = frame_underexposed(window.ylow, window.yavg, window.ymax);
     !over && !under
 }
 
@@ -621,12 +623,7 @@ pub fn run_moments_job(connection: &mut Connection, job: &Job) -> Result<()> {
         "ffmpeg",
     )?;
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
-    let scene_threshold = super::settings::number_value(
-        connection,
-        super::settings::SCENE_THRESHOLD_KEY,
-        super::analysis::SCENE_THRESHOLD,
-    )?
-    .clamp(0.0, 1.0);
+    let scene_threshold = super::analysis::effective_scene_threshold(connection)?;
     let (windows, cuts, probed_audio) =
         super::analysis::scan_windows(&path, tb_num, tb_den, &ffmpeg, &ffprobe, scene_threshold)?;
     let cuts = cuts.into_iter().filter(|cut| *cut > 0 && *cut < duration_ticks).collect::<Vec<_>>();
@@ -689,6 +686,7 @@ mod tests {
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YLOW=16
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YAVG=16
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YHIGH=16
+[Parsed_metadata_10 @ 0x1] lavfi.signalstats.YMAX=16
 [Parsed_metadata_10 @ 0x1] lavfi.blur=nan
 [Parsed_metadata_10 @ 0x1] lavfi.entropy.entropy.normal.Y=0.000000
 [Parsed_metadata_10 @ 0x1] lavfi.vmafmotion.score=0.00
@@ -701,6 +699,7 @@ mod tests {
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YLOW=40
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YAVG=110
 [Parsed_metadata_10 @ 0x1] lavfi.signalstats.YHIGH=190
+[Parsed_metadata_10 @ 0x1] lavfi.signalstats.YMAX=255
 [Parsed_metadata_10 @ 0x1] lavfi.blur=4.5
 [Parsed_metadata_10 @ 0x1] lavfi.entropy.entropy.normal.Y=6.8
 [Parsed_metadata_10 @ 0x1] lavfi.vmafmotion.score=32.00
@@ -740,6 +739,16 @@ mod tests {
         assert!(good.score > 0.7, "清晰运动人声 {}", good.score);
         assert_eq!(good.reasons, vec!["清晰", "运动适中", "曝光正常", "有人声"]);
         assert_eq!((good.t_start_ticks, good.t_end_ticks), (500, 1000));
+    }
+
+    #[test]
+    fn night_window_with_highlights_counts_as_exposure_ok() {
+        // R14:夜景窗口(暗部贴黑、整帧偏暗,但有路灯/窗户高光)曝光是对的;
+        // 同样的暗度没有任何高光才是欠曝。
+        let night = VideoWindow { yavg: 41.0, ylow: 16.0, yhigh: 86.0, ymax: 244.0, blur: 5.0, entropy: 5.6, motion: 15.0, ..VideoWindow::default() };
+        assert!(exposure_is_ok(&night));
+        let under = VideoWindow { ymax: 166.0, ..night.clone() };
+        assert!(!exposure_is_ok(&under));
     }
 
     #[test]

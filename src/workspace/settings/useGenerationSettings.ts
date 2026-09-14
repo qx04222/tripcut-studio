@@ -70,7 +70,7 @@ export function useGenerationSettings(
   const saveMinimaxKey = useCallback(async () => {
     // R10 U-34:空 Key 点「保存」要有话说,此前按钮禁用、什么都不发生。
     if (minimaxKeyDraft.trim().length === 0) {
-      setMinimaxKeyNotice("请先粘贴 MiniMax API Key，再保存。");
+      setMinimaxKeyNotice("请先粘贴 MiniMax 密钥，再保存。");
       return;
     }
     setMinimaxKeyBusy(true);
@@ -116,7 +116,7 @@ export function useGenerationSettings(
     await saveRef.current("minimax_enabled", String(enabled));
     await refreshGeneration();
     // R10 U-34:没有 Key 也允许打开(先开开关再配 Key 是常见顺序),但要说清现在还不能用。
-    setMinimaxKeyNotice(enabled && !minimaxHasKey ? "已启用，但还没有 API Key——生成请求会被拒绝；请在下方保存 Key。" : null);
+    setMinimaxKeyNotice(enabled && !minimaxHasKey ? "已启用，但还没有密钥——生成请求会被拒绝；请在下方保存密钥。" : null);
   }, [saveRef, refreshGeneration, minimaxHasKey]);
 
   const saveMinimaxModel = useCallback(async (model: string) => {

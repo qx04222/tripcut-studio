@@ -208,7 +208,7 @@ export function CommandPalette({ onNavigate, onSelectClip, variant = "workspace"
             <>
               <Command.Group heading="工作区">
                 <Command.Item onSelect={() => go("open-import")}>打开导入素材</Command.Item>
-                <Command.Item onSelect={() => go("open-deliver")}>打开生成交付包</Command.Item>
+                <Command.Item onSelect={() => go("open-deliver")}>打开导出</Command.Item>
                 <Command.Item onSelect={() => go("open-settings")}>打开设置</Command.Item>
                 <Command.Item onSelect={() => go("open-help")}>打开帮助</Command.Item>
               </Command.Group>

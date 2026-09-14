@@ -76,6 +76,27 @@ describe("tokens.css", () => {
       }
     }
   });
+  it("R13 §5「剪映风格深色」:自己的一整套深色值(底 / 面板 / 文字 / 强调 / 播放头),挂在 html[data-theme=\"jianying-dark\"] 上", () => {
+    const root = postcss.parse(TOKENS);
+    const blocks: Set<string>[] = [];
+    root.walkRules((rule) => {
+      if (!rule.selector.includes('data-theme="jianying-dark"')) return;
+      const set = new Set<string>();
+      rule.walkDecls((d) => {
+        set.add(d.prop);
+      });
+      blocks.push(set);
+    });
+    expect(blocks.length).toBe(1);
+    const set = blocks[0]!;
+    for (const k of [
+      "--bg", "--bg-elevated", "--bg-solid", "--border", "--border-strong", "--text-primary", "--text-secondary", "--text-muted", "--text-faint",
+      "--accent", "--accent-contrast", "--accent-tint", "--accent-glow", "--focus-ring", "--warning", "--danger", "--media-well", "--media-overlay",
+      "--surface-card", "--surface-raised", "--surface-chrome", "--surface-chrome-2", "--well-bg", "--shadow-card", "--shadow-raised", "--shadow-inset-well", "--playhead",
+    ]) {
+      expect(set.has(k), k).toBe(true);
+    }
+  });
 });
 
 /** 规格 §1 的三条扫描,套件与主屏样式共用。 */
@@ -143,4 +164,5 @@ describe.todo("workspace.css 只从令牌取值(规格 §1)", () => {
     });
     expect(offenders).toEqual([]);
   });
+
 });

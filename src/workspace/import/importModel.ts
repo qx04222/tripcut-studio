@@ -40,7 +40,7 @@ export function batchStatusLabel(status: string): { label: string; tone: BadgeTo
       return { label: "扫描未完成，可重试", tone: "danger" };
     case "completed":
     case "done":
-      return { label: "索引完成", tone: "neutral" };
+      return { label: "登记完成", tone: "neutral" };
     case "removed":
       return { label: "已移除", tone: "neutral" };
     default:
@@ -119,7 +119,7 @@ export function pipelineSegments(
   const indexed = progress.done + progress.failed;
   const pending = Math.max(0, progress.total - indexed - progress.running);
   return [
-    { id: "index", label: "索引", done: indexed, total: progress.total, percent: percentOf(indexed, progress.total), running: progress.running, waiting: pending, failed: progress.failed },
+    { id: "index", label: "登记", done: indexed, total: progress.total, percent: percentOf(indexed, progress.total), running: progress.running, waiting: pending, failed: progress.failed },
     { id: "quality", label: "画质分析", done: quality.done, total: readyCount, percent: percentOf(quality.done, readyCount), running: quality.running, waiting: quality.waiting, failed: quality.failed },
     { id: "motion", label: "运镜分析", done: motion.done, total: readyCount, percent: percentOf(motion.done, readyCount), running: motion.running, waiting: motion.waiting, failed: motion.failed },
   ];
@@ -131,9 +131,9 @@ export function pipelineHeadline(segments: readonly PipelineSegment[]): string {
   if (!index || index.total === 0) return "还没有素材";
   const indexDone = index.done >= index.total && index.running === 0;
   const analysisDone = analysis.every((segment) => segment.done + segment.failed >= segment.total);
-  if (!indexDone) return `正在索引 ${index.percent}%`;
-  if (analysisDone) return "索引与分析全部完成";
-  return "索引完成，分析进行中";
+  if (!indexDone) return `正在登记 ${index.percent}%`;
+  if (analysisDone) return "登记与分析全部完成";
+  return "登记完成，分析进行中";
 }
 
 /**
@@ -148,4 +148,20 @@ export function decodeQueueHint(progress: ImportProgress, segments: readonly Pip
   const busy = segments.some((segment) => segment.running > 0 || segment.waiting > 0);
   if (!busy) return null;
   return `解码通道已占满，还有 ${waiting} 个任务在排队，会依次处理。`;
+}
+
+/**
+ * Z-13:登记判定「已属于另一集」的文件,按集名归堆成一句「这 n 个文件已在「EP01」里,可在那一集里找到」。
+ * 数据来自 listClips 的占位项(id 为空、status duplicate),后端把那一句放在 error 里;
+ * 普通重复(同一集里已有)不在这里说。
+ */
+export function ownedElsewhereLines(clips: readonly ClipListItem[]): string[] {
+  const counts = new Map<string, number>();
+  for (const clip of clips) {
+    if (clip.id !== null || clip.status !== "duplicate" || !clip.error) continue;
+    const title = /已在「(.+?)」里/.exec(clip.error)?.[1];
+    if (!title) continue;
+    counts.set(title, (counts.get(title) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([title, count]) => `这 ${count} 个文件已在「${title}」里,可在那一集里找到`);
 }

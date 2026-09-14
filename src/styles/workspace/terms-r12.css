@@ -1,0 +1,44 @@
+/*
+ * R12 车道 C(术语清扫 v2):设置 → 工具链 的组件读数把路径与版本号收进「详情」折叠。
+ * 只挂在 .settings-sheet 下;颜色只用 token。
+ */
+.settings-sheet .settings-sheet-readout-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.settings-sheet .settings-sheet-readout-details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  list-style: none;
+}
+
+.settings-sheet .settings-sheet-readout-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-sheet .settings-sheet-readout-details > summary::before {
+  content: "▸ ";
+}
+
+.settings-sheet .settings-sheet-readout-details[open] > summary::before {
+  content: "▾ ";
+}
+
+/* 检查器「技术检查」第一行「画面 3840×2160 · 30 帧/秒 · 横屏」比原来三行合一后变长:
+   标签不折行,值允许在「·」处换行、右对齐。 */
+.inspector-techcheck-scope .tech-check-basics dt {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.inspector-techcheck-scope .tech-check-basics dd {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  line-height: 1.5;
+}

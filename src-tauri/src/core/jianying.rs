@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -23,6 +23,8 @@ const SCHEMA_VERSION: i64 = 360_000;
 const TOP_LEVEL_KEY_COUNT: usize = 36;
 const MATERIAL_KEY_COUNT: usize = 55;
 const PROJECT_NAME: &str = "旅剪项目";
+/// R14 C-1:草稿名里集名的最大字符数——剪映草稿列表一行放不下太长的名字,超出即截断。
+const DRAFT_NAME_TITLE_MAX_CHARS: usize = 40;
 
 pub const SUPPORTED_JIANYING_VERSIONS: &[&str] = &["11.3.0"];
 
@@ -32,6 +34,11 @@ pub const SUPPORTED_JIANYING_VERSIONS: &[&str] = &["11.3.0"];
 /// 在此之前:应用侧照旧按"不支持的版本"拒绝生成草稿(不假装可用);真机金丝雀对这些版本打印
 /// WARN 并跳过键集比对,而不是让整个门禁一直红。确认可用后把版本挪进 `SUPPORTED_JIANYING_VERSIONS`。
 pub const JIANYING_VERSIONS_PENDING_HUMAN_CHECK: &[&str] = &["11.4.13169", "11.4.13189"];
+
+/// R14 §9 A:人眼验证结果落在 settings 的键前缀,完整键 `jianying.human_check.<version>`,
+/// 值 "ok" | "fail"。只对 `JIANYING_VERSIONS_PENDING_HUMAN_CHECK` 里的版本有意义 —— 未知版本
+/// 记了 ok 也不放行(`availability_from` 只把 ok 当作「待验证 → 已验证」的升格)。
+pub const HUMAN_CHECK_PREFIX: &str = "jianying.human_check.";
 
 // E0 的 11.3.0 template.tmp 金丝雀确认 new_version/version；其余字段按任务卡
 // 指定的 pyJianYingDraft 经典结构内嵌。这里不读取、include 或复制用户草稿。
@@ -115,11 +122,48 @@ const META_TEMPLATE: &str = r#"
 }
 "#;
 
+/// 业主在剪映里开过一次试验草稿之后的裁定(R14 §9 A)。`None` = 还没人试过。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HumanCheck {
+    None,
+    Ok,
+    Fail,
+}
+
+impl HumanCheck {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ok" => Some(Self::Ok),
+            "fail" => Some(Self::Fail),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ok => "ok",
+            Self::Fail => "fail",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct JianyingAvailability {
     pub installed_version: Option<String>,
+    /// 与 `usable` 同值;老前端只认这个名字,保留。
     pub supported: bool,
     pub reason: String,
+    /// 版本在 `SUPPORTED_JIANYING_VERSIONS` 白名单里。
+    pub whitelisted: bool,
+    /// settings `jianying.human_check.<version>` 的裁定。
+    pub human_check: HumanCheck,
+    /// `whitelisted || human_check == ok`,且草稿根目录存在。普通(非 force)生成只看它。
+    pub usable: bool,
+    /// 版本在「待人眼验证」名单里且草稿根目录存在:允许 `force = true` 试着生成。未知版本永远 false。
+    pub force_allowed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -130,7 +174,15 @@ pub struct JianyingDraftResult {
     pub jianying_version: String,
     pub selected_count: u64,
     pub subtitle_count: u64,
+    /// R14 C-2:写进草稿的章节标记数(每章首镜 material_name 前缀);0 = 镜头带没有章。
+    pub chapter_marks: u64,
+    /// R14 C-3:是否带了配乐轨(`tracks[1]` audio)。
+    pub has_music: bool,
     pub message: String,
+    /// R14 §9 A:这份草稿是对「待验证」版本 force 出来的,剪映能不能开还要人眼确认。
+    pub experimental: bool,
+    /// 与 `output_path` 同值;试验卡按这个名字读。
+    pub draft_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +205,8 @@ struct DraftInput {
     /// side_data 显示矩阵)时非空。写入 segment 的 `clip.rotation`(11.3.0
     /// 金样已有此键，见 `build_draft` 里的 `clip` json blob，不新增键)。
     manual_rotation: Option<i64>,
+    /// R14 C-2:镜头带上这条素材所属章节的标题(叙事章优先,其次手动章);空串 = 不属于任何章。
+    chapter_title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +235,8 @@ struct DraftInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DraftMaterials {
     #[serde(default)]
+    audios: Vec<DraftAudioMaterial>,
+    #[serde(default)]
     speeds: Vec<Value>,
     #[serde(default)]
     videos: Vec<DraftVideoMaterial>,
@@ -208,6 +264,40 @@ struct DraftVideoMaterial {
     #[serde(rename = "type")]
     material_type: String,
     width: i64,
+}
+
+/// R14 C-3:配乐素材。11.3.0 金样里 `materials.audios` 是空数组,元素形状取自
+/// pyJianYingDraft `AudioMaterial.export_json()`(GuanYixuan/pyJianYingDraft,
+/// `local_materials.py`;同文件的 `VideoMaterial` 键集与本模块 `DraftVideoMaterial`
+/// 逐键一致,故信其 audio 形状)。`type` 用 `extract_music`(本地导入音乐在剪映里的类型)。
+/// 只引用原文件绝对路径,不复制——与视频素材同策略。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DraftAudioMaterial {
+    app_id: i64,
+    category_id: String,
+    category_name: String,
+    check_flag: i64,
+    copyright_limit_type: String,
+    duration: i64,
+    effect_id: String,
+    formula_id: String,
+    id: String,
+    local_material_id: String,
+    music_id: String,
+    name: String,
+    path: String,
+    source_platform: i64,
+    #[serde(rename = "type")]
+    material_type: String,
+    wave_points: Vec<Value>,
+}
+
+/// R14 C-3:本集选用的配乐——来自 `music_tracks`,已解析成绝对路径与微秒时长。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DraftMusic {
+    file_name: String,
+    source_path: PathBuf,
+    duration_us: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +337,9 @@ struct DraftSegment {
     visible: bool,
     volume: f64,
     clip: Value,
-    uniform_scale: Value,
+    /// 视频段必有;音频段没有这个键(pyJianYingDraft `AudioSegment` 只写 `clip: null`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uniform_scale: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,15 +397,51 @@ pub fn golden_key_sets() -> (BTreeSet<String>, BTreeSet<String>) {
     (top_level, materials)
 }
 
-pub fn availability() -> JianyingAvailability {
+pub fn availability(connection: &Connection) -> JianyingAvailability {
     let version = read_editor_version(Path::new(JIANYING_APP_PLIST));
     let draft_root_exists = default_draft_root().is_ok_and(|root| root.is_dir());
-    availability_from(version, draft_root_exists)
+    let human_check = match &version {
+        Ok(version) => human_check_from_settings(connection, version).unwrap_or(HumanCheck::None),
+        Err(_) => HumanCheck::None,
+    };
+    availability_from(version, draft_root_exists, human_check)
 }
 
-pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraftResult> {
-    let status = availability();
-    if !status.supported {
+/// 读 settings 里对某版本的人眼裁定;没记过 / 表还没建 = `None`。
+pub fn human_check_from_settings(connection: &Connection, version: &str) -> Result<HumanCheck> {
+    let key = format!("{HUMAN_CHECK_PREFIX}{version}");
+    Ok(super::settings::setting_value(connection, &key)?
+        .and_then(|value| HumanCheck::parse(&value))
+        .unwrap_or(HumanCheck::None))
+}
+
+/// 「可以用」/「打不开」落盘。只接受待验证名单里的版本 —— 未知版本连 fail 也不记,
+/// 免得一条设置行就把白名单绕过去。
+pub fn set_human_check(connection: &Connection, version: &str, verdict: HumanCheck) -> Result<()> {
+    if !JIANYING_VERSIONS_PENDING_HUMAN_CHECK.contains(&version) {
+        return Err(CoreError::Jianying(format!(
+            "剪映 {version} 不在待验证名单里,不能记录人工验证结果"
+        )));
+    }
+    let key = format!("{HUMAN_CHECK_PREFIX}{version}");
+    super::settings::set_setting(connection, &key, verdict.as_str())
+}
+
+/// `force = true` 只对「待验证」版本放行(未知版本仍拒绝);草稿一律新名字,永不覆盖。
+pub fn generate_native_draft(connection: &mut Connection, force: bool) -> Result<JianyingDraftResult> {
+    let status = availability(connection);
+    let root = default_draft_root()?;
+    generate_with_availability(connection, &status, &root, force)
+}
+
+fn generate_with_availability(
+    connection: &mut Connection,
+    status: &JianyingAvailability,
+    root: &Path,
+    force: bool,
+) -> Result<JianyingDraftResult> {
+    let experimental = !status.usable;
+    if experimental && !(force && status.force_allowed) {
         return Err(CoreError::Jianying(format!(
             "{}；已停止原生草稿路径，请改用稳定交付包",
             status.reason
@@ -321,6 +449,7 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
     }
     let version = status
         .installed_version
+        .clone()
         .ok_or_else(|| CoreError::Jianying("无法确认剪映版本".to_owned()))?;
     let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let episode_id: i64 = transaction
@@ -330,11 +459,17 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
             |row| row.get(0),
         )
         .map_err(|_| CoreError::Jianying("没有进行中的 Episode，无法生成草稿".to_owned()))?;
+    // R14 C-1:草稿目录/名字用集名(经 `draft_folder_name` 清洗),不再固定「旅剪项目」。
+    let episode_title: String = transaction
+        .query_row("SELECT title FROM episodes WHERE id = ?1", [episode_id], |row| row.get(0))
+        .unwrap_or_default();
     let mut clips = deliver::selected_clips(&transaction)?;
     // R3 Task 3:草稿画布来自集的目标平台预设,不再取首条素材的原始尺寸——
     // `both` 朝向在这里折成 `landscape`(横竖同时制作,草稿按横版画布)。
     // 原生草稿没有交付层的 override 入口,永远读集自己的 target_platform。
     let (canvas_width, canvas_height) = super::platform::resolve_platform(&transaction, episode_id, None)?.canvas();
+    // R14 C-3:本集配乐(最近导入的一首;没有就只写视频轨)。
+    let music = selected_music(&transaction, episode_id)?;
     transaction.commit()?;
     if clips.is_empty() {
         return Err(CoreError::Jianying(
@@ -344,22 +479,34 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
 
     resolve_draft_sources(connection, &mut clips)?;
     let inputs = draft_inputs(connection, &clips)?;
+    let (_, chapter_marks) = chapter_prefixes(&inputs);
     let now = unix_timestamp()?;
     let draft_id = Uuid::new_v4().to_string().to_uppercase();
     let short_id = draft_id.chars().filter(|ch| *ch != '-').take(8).collect::<String>();
-    let draft_name = format!("{PROJECT_NAME}_剪映草稿_{short_id}");
-    let root = default_draft_root()?;
+    let draft_name = draft_folder_name(&episode_title, experimental, now, &short_id);
     let final_path = root.join(&draft_name);
-    let draft = build_draft(&draft_name, &draft_id, &inputs, now, canvas_width, canvas_height)?;
+    let draft = build_draft_with_music(
+        &draft_name,
+        &draft_id,
+        &inputs,
+        now,
+        canvas_width,
+        canvas_height,
+        music.as_ref(),
+    )?;
     let meta = build_meta(&draft, &final_path, now)?;
-    let subtitle_count = write_draft_atomically(&root, &final_path, &draft, &meta, &inputs)?;
+    let subtitle_count = write_draft_atomically(root, &final_path, &draft, &meta, &inputs)?;
 
     let manifest = json!({
         "schema": {"new_version": draft.new_version.clone(), "version": draft.version},
         "jianying_version": version.clone(),
         "self_check": "passed",
+        "experimental": experimental,
         "selected_count": inputs.len(),
         "subtitle_count": subtitle_count,
+        "chapter_marks": chapter_marks,
+        "has_music": music.is_some(),
+        "music_path": music.as_ref().map(|track| track.source_path.to_string_lossy().into_owned()),
         "output_path": final_path.to_string_lossy().into_owned(),
         "source_paths": inputs.iter().map(|input| input.source_path.to_string_lossy().into_owned()).collect::<Vec<_>>()
     });
@@ -378,47 +525,75 @@ pub fn generate_native_draft(connection: &mut Connection) -> Result<JianyingDraf
         )));
     }
 
+    let output_path = final_path.to_string_lossy().into_owned();
     Ok(JianyingDraftResult {
         status: "created".to_owned(),
-        output_path: final_path.to_string_lossy().into_owned(),
+        draft_path: output_path.clone(),
+        output_path,
         draft_name,
         jianying_version: version,
         selected_count: inputs.len() as u64,
         subtitle_count,
-        message: "草稿已生成；请回到剪映首页，在“本地草稿”中打开并核对素材顺序与入出点".to_owned(),
+        chapter_marks,
+        has_music: music.is_some(),
+        message: if experimental {
+            "试验草稿已写出;打开剪映,在「本地草稿」里找它,能打开就回来点「可以用」".to_owned()
+        } else {
+            "草稿已生成；请回到剪映首页，在“本地草稿”中打开并核对素材顺序与入出点".to_owned()
+        },
+        experimental,
     })
 }
 
 fn availability_from(
     version: std::result::Result<String, String>,
     draft_root_exists: bool,
+    human_check: HumanCheck,
 ) -> JianyingAvailability {
+    let unavailable = |installed_version: Option<String>, reason: String, force_allowed: bool| JianyingAvailability {
+        installed_version,
+        supported: false,
+        reason,
+        whitelisted: false,
+        human_check,
+        usable: false,
+        force_allowed,
+    };
     match version {
-        Ok(version) if !SUPPORTED_JIANYING_VERSIONS.contains(&version.as_str()) => {
-            JianyingAvailability {
-                installed_version: Some(version.clone()),
-                supported: false,
-                reason: format!(
-                    "当前剪映 {version} 不在已验证白名单（仅 {}）；原生草稿已禁用",
+        Ok(version) if !draft_root_exists => unavailable(
+            Some(version),
+            "未找到剪映草稿根目录；请先在剪映中创建一份本地草稿".to_owned(),
+            false,
+        ),
+        Ok(version) => {
+            let whitelisted = SUPPORTED_JIANYING_VERSIONS.contains(&version.as_str());
+            let pending = JIANYING_VERSIONS_PENDING_HUMAN_CHECK.contains(&version.as_str());
+            let usable = whitelisted || (pending && human_check == HumanCheck::Ok);
+            let reason = if whitelisted {
+                format!("剪映 {version} 已通过明文空草稿金丝雀，可生成实验草稿")
+            } else if usable {
+                format!("剪映 {version} 已确认可用(你在剪映里打开过试验草稿)")
+            } else if pending && human_check == HumanCheck::Fail {
+                format!("上次生成的试验草稿在剪映 {version} 里打不开;可以再试一次,或改用「导出片段」")
+            } else if pending {
+                format!("这个剪映版本({version})还没核对过;可以试着生成一份草稿,再到剪映里看能不能打开")
+            } else {
+                format!(
+                    "这个剪映版本({version})还没核对过(已核对:{});本次改为输出稳定包,不写草稿",
                     SUPPORTED_JIANYING_VERSIONS.join("、")
-                ),
+                )
+            };
+            JianyingAvailability {
+                installed_version: Some(version),
+                supported: usable,
+                reason,
+                whitelisted,
+                human_check,
+                usable,
+                force_allowed: pending,
             }
         }
-        Ok(version) if !draft_root_exists => JianyingAvailability {
-            installed_version: Some(version),
-            supported: false,
-            reason: "未找到剪映草稿根目录；请先在剪映中创建一份本地草稿".to_owned(),
-        },
-        Ok(version) => JianyingAvailability {
-            installed_version: Some(version.clone()),
-            supported: true,
-            reason: format!("剪映 {version} 已通过明文空草稿金丝雀，可生成实验草稿"),
-        },
-        Err(reason) => JianyingAvailability {
-            installed_version: None,
-            supported: false,
-            reason: format!("无法读取剪映版本：{reason}；原生草稿已禁用"),
-        },
+        Err(reason) => unavailable(None, format!("无法读取剪映版本：{reason}；原生草稿已禁用"), false),
     }
 }
 
@@ -449,6 +624,30 @@ fn read_editor_version(plist: &Path) -> std::result::Result<String, String> {
         Err("CFBundleShortVersionString 为空".to_owned())
     } else {
         Ok(version)
+    }
+}
+
+/// R14 C-1:集名 → 草稿文件夹名。路径分隔符/冒号/控制字符换成 `_`,首尾空白去掉,
+/// 超过 [`DRAFT_NAME_TITLE_MAX_CHARS`] 截断;清洗后为空(集名全是非法字符)才退回「旅剪项目」。
+/// 末尾仍带 8 位短 id,同名集多次生成也不会撞目录(`write_draft_atomically` 拒绝覆盖)。
+/// R14 A+C 合流:集名打底;试验草稿再带「试验 + 秒级时间戳」,业主在剪映草稿列表里一眼能认出哪份是刚写的。
+fn draft_folder_name(episode_title: &str, experimental: bool, now: i64, short_id: &str) -> String {
+    let cleaned = episode_title
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' => '_',
+            other if other.is_control() => '_',
+            other => other,
+        })
+        .take(DRAFT_NAME_TITLE_MAX_CHARS)
+        .collect::<String>();
+    let cleaned = cleaned.trim_matches(['_', ' ', '.']);
+    let title = if cleaned.is_empty() { PROJECT_NAME } else { cleaned };
+    if experimental {
+        format!("{title}_剪映草稿_试验_{now}_{short_id}")
+    } else {
+        format!("{title}_剪映草稿_{short_id}")
     }
 }
 
@@ -546,9 +745,47 @@ fn draft_inputs(connection: &Connection, clips: &[ExportClip]) -> Result<Vec<Dra
                 selected_transcribe_track: clip.selected_transcribe_track,
                 audio_tracks: clip.audio_tracks.clone(),
                 manual_rotation: clip.manual_rotation,
+                chapter_title: clip.chapter_title.clone(),
             })
         })
         .collect()
+}
+
+/// R14 C-3:本集的配乐。音乐面板的「选中」只是前端状态、没有落库,所以这里取
+/// **最近导入**的一首(`music_tracks` 按 id 最大,即面板列表里最后一条)。没有音乐、
+/// 导入时没探到时长、或原文件已不在 → `None`,草稿只写视频轨(不报错、不猜时长)。
+fn selected_music(connection: &Connection, episode_id: i64) -> Result<Option<DraftMusic>> {
+    let row: Option<(String, String, Option<i64>, i64, i64)> = connection
+        .query_row(
+            "SELECT file_name, rel_path, duration_ticks, tb_num, tb_den
+               FROM music_tracks WHERE episode_id = ?1
+              ORDER BY id DESC LIMIT 1",
+            [episode_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()?;
+    let Some((file_name, rel_path, duration_ticks, tb_num, tb_den)) = row else {
+        return Ok(None);
+    };
+    let Some(duration_ticks) = duration_ticks.filter(|value| *value > 0) else {
+        return Ok(None);
+    };
+    let source = PathBuf::from(&rel_path);
+    if !source.is_absolute() {
+        return Ok(None);
+    }
+    let Ok(source_path) = source.canonicalize() else {
+        return Ok(None);
+    };
+    if !source_path.is_file() {
+        return Ok(None);
+    }
+    let duration_us = ticks_to_microseconds(duration_ticks, tb_num, tb_den)?;
+    Ok(Some(DraftMusic {
+        file_name,
+        source_path,
+        duration_us,
+    }))
 }
 
 fn resolve_draft_sources(connection: &Connection, clips: &mut [ExportClip]) -> Result<()> {
@@ -603,6 +840,62 @@ fn audio_track_material_name(input: &DraftInput) -> String {
     format!("{} [音轨映射 {mapping}]", input.file_name)
 }
 
+/// R14 C-2:章节标记。11.3.0 金样里 `materials.time_marks` 是空数组、顶层 `time_marks`
+/// 是 null,元素结构无从比对(pyJianYingDraft 也不建模它),写一个猜出来的元素会让剪映
+/// 拒开整份草稿——所以退化到与 R3 音轨映射同一落点:每章**第一个**镜的 `material_name`
+/// 前缀「【第 n 章·章名】」,剪映素材面板和人都能读,不新增 JSON 键。
+/// 前缀只落在**镜头带顺序上同一章连续一段的第一个镜**;章的序号按「第几个见到的章」数,
+/// 同一章再出现也沿用同一个号(V14-04:以前按连续段落计数,同一章被拆成两段就冒出两个号)。
+/// 自动章名本身已带「第 n 章 · …」时只包一层 `【章名】`,不再在前面叠一个「第 m 章·」
+/// (真机曾出现「【第 1 章·第 7 章 · 14:40-14:40】」)。空标题不算章。
+/// 返回每条输入的前缀(无前缀为空串)与章数(不同的章名个数)。
+fn chapter_prefixes(inputs: &[DraftInput]) -> (Vec<String>, u64) {
+    let mut prefixes = Vec::with_capacity(inputs.len());
+    let mut seen_titles: Vec<&str> = Vec::new();
+    let mut previous: Option<&str> = None;
+    for input in inputs {
+        let title = input.chapter_title.trim();
+        if title.is_empty() {
+            prefixes.push(String::new());
+            previous = None;
+            continue;
+        }
+        let ordinal = match seen_titles.iter().position(|seen| *seen == title) {
+            Some(index) => index + 1,
+            None => {
+                seen_titles.push(title);
+                seen_titles.len()
+            }
+        };
+        if previous != Some(title) {
+            prefixes.push(chapter_prefix(ordinal, title));
+        } else {
+            prefixes.push(String::new());
+        }
+        previous = Some(title);
+    }
+    (prefixes, seen_titles.len() as u64)
+}
+
+/// 「【第 n 章·章名】」;章名自己已经是「第 n 章 …」开头时只包「【章名】」。
+fn chapter_prefix(ordinal: usize, title: &str) -> String {
+    if title_carries_ordinal(title) {
+        format!("【{title}】")
+    } else {
+        format!("【第 {ordinal} 章·{title}】")
+    }
+}
+
+/// 自动章名的形态「第 7 章 · 14:40-14:40」:「第」+ 数字 +「章」开头。
+fn title_carries_ordinal(title: &str) -> bool {
+    let Some(rest) = title.strip_prefix('第') else { return false };
+    let Some((number, _)) = rest.split_once('章') else { return false };
+    let number = number.trim();
+    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+}
+
+/// 无配乐的草稿(既有测试的入口);生产路径走 [`build_draft_with_music`]。
+#[cfg(test)]
 fn build_draft(
     name: &str,
     draft_id: &str,
@@ -610,6 +903,20 @@ fn build_draft(
     now: i64,
     canvas_width: i64,
     canvas_height: i64,
+) -> Result<DraftInfo> {
+    build_draft_with_music(name, draft_id, inputs, now, canvas_width, canvas_height, None)
+}
+
+/// R14 C-3:`build_draft` + 可选配乐轨。有音乐 → `materials.audios` 一条 + `tracks[1]`
+/// 一条 `audio` 轨,入点 0、时长 = min(音乐时长, 视频轨总时长);无音乐 → 与 `build_draft` 相同。
+fn build_draft_with_music(
+    name: &str,
+    draft_id: &str,
+    inputs: &[DraftInput],
+    now: i64,
+    canvas_width: i64,
+    canvas_height: i64,
+    music: Option<&DraftMusic>,
 ) -> Result<DraftInfo> {
     let mut draft: DraftInfo = serde_json::from_str(DRAFT_TEMPLATE_11_3_0)
         .map_err(|error| CoreError::Jianying(format!("内嵌草稿模板无效：{error}")))?;
@@ -627,9 +934,10 @@ fn build_draft(
     draft.template_fields.insert("create_time".to_owned(), json!(now));
     draft.template_fields.insert("update_time".to_owned(), json!(now));
 
+    let (chapter_prefixes, _) = chapter_prefixes(inputs);
     let mut target_start = 0_i64;
     let mut segments = Vec::with_capacity(inputs.len());
-    for input in inputs {
+    for (input, chapter_prefix) in inputs.iter().zip(chapter_prefixes) {
         let source_start = ticks_to_microseconds(input.in_ticks, input.tb_num, input.tb_den)?;
         let source_end = ticks_to_microseconds(input.out_ticks, input.tb_num, input.tb_den)?;
         let duration = source_end.checked_sub(source_start).filter(|value| *value > 0).ok_or_else(
@@ -651,7 +959,7 @@ fn build_draft(
             id: material_id.clone(),
             local_material_id: String::new(),
             material_id: material_id.clone(),
-            material_name: audio_track_material_name(input),
+            material_name: format!("{chapter_prefix}{}", audio_track_material_name(input)),
             media_path: String::new(),
             path: input.source_path.to_string_lossy().into_owned(),
             material_type: "video".to_owned(),
@@ -694,7 +1002,7 @@ fn build_draft(
             visible: true,
             volume: 1.0,
             clip: json!({"alpha":1.0,"flip":{"horizontal":false,"vertical":false},"rotation":input.manual_rotation.unwrap_or(0) as f64,"scale":{"x":1.0,"y":1.0},"transform":{"x":0.0,"y":0.0}}),
-            uniform_scale: json!({"on":true,"value":1.0}),
+            uniform_scale: Some(json!({"on":true,"value":1.0})),
         });
         target_start = target_start
             .checked_add(duration)
@@ -710,8 +1018,75 @@ fn build_draft(
         segments,
         track_type: "video".to_owned(),
     }];
+    if let Some(music) = music {
+        append_music_track(&mut draft, music)?;
+    }
     validate_draft(&draft, inputs.len())?;
     Ok(draft)
+}
+
+fn append_music_track(draft: &mut DraftInfo, music: &DraftMusic) -> Result<()> {
+    if !music.source_path.is_absolute() {
+        return Err(CoreError::Jianying("配乐路径不是绝对路径,拒绝写入草稿".to_owned()));
+    }
+    let duration = music.duration_us.min(draft.duration);
+    if duration <= 0 {
+        return Err(CoreError::Jianying(format!("配乐 {} 的时长无效", music.file_name)));
+    }
+    let material_id = Uuid::new_v4().simple().to_string();
+    draft.materials.audios.push(DraftAudioMaterial {
+        app_id: 0,
+        category_id: String::new(),
+        category_name: "local".to_owned(),
+        check_flag: 3,
+        copyright_limit_type: "none".to_owned(),
+        duration: music.duration_us,
+        effect_id: String::new(),
+        formula_id: String::new(),
+        id: material_id.clone(),
+        local_material_id: material_id.clone(),
+        music_id: material_id.clone(),
+        name: music.file_name.clone(),
+        path: music.source_path.to_string_lossy().into_owned(),
+        source_platform: 0,
+        material_type: "extract_music".to_owned(),
+        wave_points: Vec::new(),
+    });
+    draft.tracks.push(DraftTrack {
+        attribute: 0,
+        flag: 0,
+        id: Uuid::new_v4().simple().to_string(),
+        is_default_name: true,
+        name: String::new(),
+        segments: vec![DraftSegment {
+            common_keyframes: Vec::new(),
+            enable_adjust: false,
+            enable_color_correct_adjust: false,
+            enable_color_curves: true,
+            enable_color_match_adjust: false,
+            enable_color_wheels: true,
+            enable_lut: false,
+            extra_material_refs: Vec::new(),
+            id: Uuid::new_v4().simple().to_string(),
+            is_tone_modify: false,
+            keyframe_refs: Vec::new(),
+            last_nonzero_volume: 1.0,
+            material_id,
+            render_index: 0,
+            reverse: false,
+            source_timerange: DraftTimerange { duration, start: 0 },
+            speed: 1.0,
+            target_timerange: DraftTimerange { duration, start: 0 },
+            track_attribute: 0,
+            track_render_index: 0,
+            visible: true,
+            volume: 1.0,
+            clip: Value::Null,
+            uniform_scale: None,
+        }],
+        track_type: "audio".to_owned(),
+    });
+    Ok(())
 }
 
 fn build_meta(draft: &DraftInfo, final_path: &Path, now: i64) -> Result<DraftMetaInfo> {
@@ -737,15 +1112,16 @@ fn validate_draft(draft: &DraftInfo, expected_segments: usize) -> Result<()> {
     }
     // Nine typed top-level fields + flattened template fields; two typed material buckets
     // + flattened empty buckets. This pins the exact 11.3.0 template.tmp key shape from E0.
+    // R14 C-3:audios 也成了类型化桶,所以是 +3。
     if draft.template_fields.len() + 9 != TOP_LEVEL_KEY_COUNT
-        || draft.materials.other.len() + 2 != MATERIAL_KEY_COUNT
+        || draft.materials.other.len() + 3 != MATERIAL_KEY_COUNT
     {
         return Err(CoreError::Jianying(
             "草稿 schema 键集合与 11.3.0 金样不一致".to_owned(),
         ));
     }
-    if draft.tracks.len() != 1 || draft.tracks[0].track_type != "video" {
-        return Err(CoreError::Jianying("草稿必须且只能含一条视频轨".to_owned()));
+    if draft.tracks.is_empty() || draft.tracks.len() > 2 || draft.tracks[0].track_type != "video" {
+        return Err(CoreError::Jianying("草稿必须以一条视频轨开头,至多再带一条配乐轨".to_owned()));
     }
     let segments = &draft.tracks[0].segments;
     if segments.len() != expected_segments || draft.materials.videos.len() != expected_segments {
@@ -780,6 +1156,36 @@ fn validate_draft(draft: &DraftInfo, expected_segments: usize) -> Result<()> {
         if !Path::new(&material.path).is_absolute() {
             return Err(CoreError::Jianying("草稿含非绝对原片路径".to_owned()));
         }
+    }
+    validate_music_track(draft)
+}
+
+/// R14 C-3:配乐轨(若有)必须是 `tracks[1]`、`audio` 类型、恰一段,入点 0,时长在
+/// (0, 视频轨总时长] 内,且引用 `materials.audios` 里的一条绝对路径素材;audios 与
+/// 配乐轨一一对应(没有轨就不能有孤儿音频素材)。
+fn validate_music_track(draft: &DraftInfo) -> Result<()> {
+    let audio_tracks = draft.tracks.len() - 1;
+    if draft.materials.audios.len() != audio_tracks {
+        return Err(CoreError::Jianying("草稿音频素材与配乐轨数量不一致".to_owned()));
+    }
+    let Some(track) = draft.tracks.get(1) else {
+        return Ok(());
+    };
+    if track.track_type != "audio" || track.segments.len() != 1 {
+        return Err(CoreError::Jianying("配乐轨必须是 audio 类型且只含一段".to_owned()));
+    }
+    let segment = &track.segments[0];
+    let material = &draft.materials.audios[0];
+    if segment.material_id != material.id
+        || segment.target_timerange.start != 0
+        || segment.source_timerange.start != 0
+        || segment.target_timerange.duration <= 0
+        || segment.target_timerange.duration != segment.source_timerange.duration
+        || segment.target_timerange.duration > draft.duration
+        || segment.target_timerange.duration > material.duration
+        || !Path::new(&material.path).is_absolute()
+    {
+        return Err(CoreError::Jianying("配乐轨时间范围或素材引用无效".to_owned()));
     }
     Ok(())
 }
@@ -926,26 +1332,218 @@ mod tests {
             selected_transcribe_track: None,
             audio_tracks: Vec::new(),
             manual_rotation: None,
+            chapter_title: String::new(),
         }
+    }
+
+    fn music(duration_us: i64) -> DraftMusic {
+        DraftMusic {
+            file_name: "bgm.mp3".to_owned(),
+            source_path: PathBuf::from("/Volumes/CARD/bgm.mp3"),
+            duration_us,
+        }
+    }
+
+    fn build_with_music(inputs: &[DraftInput], music: Option<&DraftMusic>) -> DraftInfo {
+        build_draft_with_music("旅剪", "DRAFT-ID", inputs, 10, 1920, 1080, music).unwrap()
+    }
+
+    /// R14 C-3:有音乐 → 两条轨(video, audio)+ 一条 audios 素材;键集仍是 11.3.0 金样。
+    #[test]
+    fn music_adds_an_audio_track_clamped_to_video_duration() {
+        let inputs = [input("a.mov", 0, 1_000), input("b.mov", 0, 2_000)];
+        let draft = build_with_music(&inputs, Some(&music(10_000_000)));
+        assert_eq!(draft.tracks.len(), 2);
+        assert_eq!(draft.tracks[1].track_type, "audio");
+        assert_eq!(draft.materials.audios.len(), 1);
+        let segment = &draft.tracks[1].segments[0];
+        assert_eq!(segment.target_timerange, DraftTimerange { start: 0, duration: 3_000_000 });
+        assert_eq!(segment.source_timerange, DraftTimerange { start: 0, duration: 3_000_000 });
+        assert_eq!(segment.material_id, draft.materials.audios[0].id);
+        assert_eq!(draft.materials.audios[0].duration, 10_000_000);
+        assert_eq!(draft.materials.audios[0].path, "/Volumes/CARD/bgm.mp3");
+        assert_eq!(draft.duration, 3_000_000);
+
+        let value = serde_json::to_value(&draft).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), TOP_LEVEL_KEY_COUNT);
+        assert_eq!(value["materials"].as_object().unwrap().len(), MATERIAL_KEY_COUNT);
+        let (top, materials) = golden_key_sets();
+        assert!(value.as_object().unwrap().keys().all(|key| top.contains(key)));
+        assert!(value["materials"].as_object().unwrap().keys().all(|key| materials.contains(key)));
+        assert_eq!(value["materials"]["audios"][0]["type"], "extract_music");
+        assert_eq!(value["tracks"][1]["segments"][0]["clip"], Value::Null);
+        assert!(value["tracks"][1]["segments"][0].get("uniform_scale").is_none());
+        assert!(value["tracks"][0]["segments"][0].get("uniform_scale").is_some());
+    }
+
+    #[test]
+    fn short_music_keeps_its_own_duration() {
+        let draft = build_with_music(&[input("a.mov", 0, 5_000)], Some(&music(2_000_000)));
+        assert_eq!(draft.tracks[1].segments[0].target_timerange.duration, 2_000_000);
+    }
+
+    #[test]
+    fn no_music_keeps_a_single_video_track() {
+        let draft = build_with_music(&[input("a.mov", 0, 1_000)], None);
+        assert_eq!(draft.tracks.len(), 1);
+        assert!(draft.materials.audios.is_empty());
+    }
+
+    #[test]
+    fn readback_rejects_music_track_longer_than_video() {
+        let mut draft = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
+        draft.tracks[1].segments[0].target_timerange.duration = 2_000_000;
+        draft.tracks[1].segments[0].source_timerange.duration = 2_000_000;
+        assert!(validate_draft(&draft, 1).is_err());
+        let mut orphan = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
+        orphan.tracks.pop();
+        assert!(validate_draft(&orphan, 1).is_err());
+    }
+
+    #[test]
+    fn music_draft_round_trips_through_the_atomic_writer() {
+        let root = std::env::temp_dir().join(format!("tripcut-jianying-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let final_path = root.join("music-draft");
+        let draft = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
+        let meta = build_meta(&draft, &final_path, 10).unwrap();
+        write_draft_atomically(&root, &final_path, &draft, &meta, &[input("a.mov", 0, 1_000)]).unwrap();
+        let written: DraftInfo =
+            serde_json::from_slice(&std::fs::read(final_path.join(DRAFT_INFO_FILE)).unwrap()).unwrap();
+        assert_eq!(written.tracks.len(), 2);
+        assert_eq!(written.materials.audios[0].name, "bgm.mp3");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// R14 C-3:`selected_music` 取本集最近导入的一首;没探到时长或文件不在 → None。
+    #[test]
+    fn selected_music_picks_latest_track_with_duration_and_existing_file() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let episode_id: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(selected_music(&connection, episode_id).unwrap(), None);
+
+        let older = directory.path().join("older.mp3");
+        let newer = directory.path().join("newer.mp3");
+        std::fs::write(&older, b"older").unwrap();
+        std::fs::write(&newer, b"newer").unwrap();
+        for (path, duration) in [(&older, Some(4_000_000_i64)), (&newer, Some(9_000_000))] {
+            connection
+                .execute(
+                    "INSERT INTO music_tracks(episode_id, file_name, rel_path, duration_ticks, analysis_status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'done', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![
+                        episode_id,
+                        path.file_name().unwrap().to_string_lossy(),
+                        path.to_string_lossy(),
+                        duration
+                    ],
+                )
+                .unwrap();
+        }
+        let picked = selected_music(&connection, episode_id).unwrap().unwrap();
+        assert_eq!(picked.file_name, "newer.mp3");
+        assert_eq!(picked.duration_us, 9_000_000);
+        assert_eq!(picked.source_path, newer.canonicalize().unwrap());
+
+        connection
+            .execute(
+                "INSERT INTO music_tracks(episode_id, file_name, rel_path, duration_ticks, analysis_status, created_at)
+                 VALUES (?1, 'missing.mp3', ?2, 1000, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![episode_id, directory.path().join("missing.mp3").to_string_lossy()],
+            )
+            .unwrap();
+        assert_eq!(selected_music(&connection, episode_id).unwrap(), None);
+    }
+
+    fn chaptered(name: &str, chapter: &str) -> DraftInput {
+        let mut clip = input(name, 0, 1_000);
+        clip.chapter_title = chapter.to_owned();
+        clip
+    }
+
+    /// R14 C-2:两章 → 两个前缀,只落在每章第一个镜上;无章的镜不带前缀。
+    #[test]
+    fn chapter_marks_prefix_first_shot_of_each_chapter() {
+        let inputs = [
+            chaptered("a.mov", "清晨出发"),
+            chaptered("b.mov", "清晨出发"),
+            chaptered("c.mov", "海边日落"),
+            chaptered("d.mov", ""),
+        ];
+        let (prefixes, count) = chapter_prefixes(&inputs);
+        assert_eq!(count, 2);
+        assert_eq!(prefixes, ["【第 1 章·清晨出发】", "", "【第 2 章·海边日落】", ""]);
+        let draft = build_draft("旅剪", "DRAFT-ID", &inputs, 10, 1920, 1080).unwrap();
+        let names = draft.materials.videos.iter().map(|m| m.material_name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["【第 1 章·清晨出发】a.mov", "b.mov", "【第 2 章·海边日落】c.mov", "d.mov"]);
+    }
+
+    /// R14 C-2:章前缀与 R3 音轨映射共用 material_name,顺序是「章前缀 + 文件名 + 映射」。
+    #[test]
+    fn chapter_prefix_composes_with_audio_track_mapping() {
+        let mut clip = chaptered("one.mov", "在途");
+        clip.audio_tracks = vec![
+            deliver::ExportAudioTrack { stream_index: 0, role_guess: Some("onboard_mic".to_owned()) },
+            deliver::ExportAudioTrack { stream_index: 1, role_guess: Some("wireless_mic".to_owned()) },
+        ];
+        let draft = build_draft("旅剪", "DRAFT-ID", &[clip], 10, 1920, 1080).unwrap();
+        assert_eq!(
+            draft.materials.videos[0].material_name,
+            "【第 1 章·在途】one.mov [音轨映射 0=机内麦(转录)/1=无线麦]"
+        );
+    }
+
+    /// V14-04:自动章名「第 7 章 · 14:40-14:40」不叠序号,只包一层;同一章被拆成两段时沿用同一个号、
+    /// 章数按不同章名数;手动章名仍是「【第 n 章·章名】」。
+    #[test]
+    fn chapter_prefix_never_stacks_ordinals_and_reuses_the_same_chapter_number() {
+        let inputs = [
+            chaptered("IMG_0831.mov", "第 7 章 · 14:40-14:40"),
+            chaptered("IMG_0832.mov", "第 7 章 · 14:40-14:40"),
+            chaptered("clip_1.mp4", "第 1 章 · 13:00-13:00"),
+            chaptered("IMG_0830.mov", "第 7 章 · 14:40-14:40"),
+            chaptered("x.mov", "海边"),
+        ];
+        let (prefixes, count) = chapter_prefixes(&inputs);
+        assert_eq!(
+            prefixes,
+            ["【第 7 章 · 14:40-14:40】", "", "【第 1 章 · 13:00-13:00】", "【第 7 章 · 14:40-14:40】", "【第 3 章·海边】"]
+        );
+        assert_eq!(count, 3, "章数 = 不同章名数,不是连续段落数");
+        assert!(!prefixes.iter().any(|prefix| prefix.contains("章·第")), "{prefixes:?}");
+        assert!(title_carries_ordinal("第 12 章"));
+        assert!(!title_carries_ordinal("第一章"));
+        assert!(!title_carries_ordinal("清晨出发"));
+    }
+
+    #[test]
+    fn no_chapters_means_zero_marks_and_plain_names() {
+        let inputs = [input("a.mov", 0, 1_000), input("b.mov", 0, 1_000)];
+        assert_eq!(chapter_prefixes(&inputs).1, 0);
+        let draft = build_draft("旅剪", "DRAFT-ID", &inputs, 10, 1920, 1080).unwrap();
+        assert_eq!(draft.materials.videos[0].material_name, "a.mov");
     }
 
     #[test]
     fn whitelist_accepts_only_measured_version() {
-        let status = availability_from(Ok("11.3.0".to_owned()), true);
+        let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
         assert!(status.supported);
         assert_eq!(status.installed_version.as_deref(), Some("11.3.0"));
     }
 
     #[test]
     fn whitelist_rejects_unmeasured_upgrade() {
-        let status = availability_from(Ok("11.4.0".to_owned()), true);
+        let status = availability_from(Ok("11.4.0".to_owned()), true, HumanCheck::None);
         assert!(!status.supported);
-        assert!(status.reason.contains("不在已验证白名单"));
+        assert!(status.reason.contains("还没核对过"));
     }
 
     #[test]
     fn missing_draft_root_disables_native_button() {
-        let status = availability_from(Ok("11.3.0".to_owned()), false);
+        let status = availability_from(Ok("11.3.0".to_owned()), false, HumanCheck::None);
         assert!(!status.supported);
         assert!(status.reason.contains("草稿根目录"));
     }
@@ -1002,6 +1600,20 @@ mod tests {
             source.canonicalize().unwrap()
         );
         assert_eq!(draft_inputs(&connection, &clips).unwrap().len(), 1);
+    }
+
+    /// R14 C-1:草稿名用集名,不再固定「旅剪项目」。
+    #[test]
+    fn draft_folder_name_uses_sanitized_episode_title() {
+        assert_eq!(draft_folder_name("夏日海边之旅", false, 0, "ABCD1234"), "夏日海边之旅_剪映草稿_ABCD1234");
+        assert_eq!(draft_folder_name("  A/B:C\\D  ", false, 0, "ABCD1234"), "A_B_C_D_剪映草稿_ABCD1234");
+        assert_eq!(draft_folder_name("///", false, 0, "ABCD1234"), "旅剪项目_剪映草稿_ABCD1234");
+        assert_eq!(draft_folder_name("", false, 0, "ABCD1234"), "旅剪项目_剪映草稿_ABCD1234");
+        let long = "长".repeat(60);
+        assert_eq!(
+            draft_folder_name(&long, false, 0, "ABCD1234").chars().count(),
+            DRAFT_NAME_TITLE_MAX_CHARS + "_剪映草稿_ABCD1234".chars().count()
+        );
     }
 
     #[test]
@@ -1215,5 +1827,228 @@ mod tests {
         assert!(write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)]).is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod r14_force_tests {
+    use super::*;
+    use crate::core::{db, import, ratings, settings, test_support::TestDirectory};
+
+    fn seed_selected_clip(directory: &TestDirectory) -> Connection {
+        let source = directory.path().join("selected.mov");
+        std::fs::write(&source, b"verified draft source").unwrap();
+        let (quick_hash, byte_size) = import::quick_fingerprint(&source).unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('draft-volume')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(
+                    volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
+                    duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                    imported_at, episode_id
+                 ) VALUES (
+                    'draft-volume', ?1, ?2, ?3, 1, 1000, 1000, 30, 1, 0,
+                    'h264', 1920, 1080, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    (SELECT id FROM episodes WHERE status='active')
+                 )",
+                params![source.to_string_lossy(), byte_size as i64, quick_hash],
+            )
+            .unwrap();
+        let clip_id = connection.last_insert_rowid();
+        ratings::rate_clip(&mut connection, clip_id, "binary", 1).unwrap();
+        connection
+    }
+
+    #[test]
+    fn pending_version_is_not_usable_but_force_allowed() {
+        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::None);
+        assert!(!status.usable);
+        assert!(!status.supported);
+        assert!(!status.whitelisted);
+        assert!(status.force_allowed);
+        assert_eq!(status.human_check, HumanCheck::None);
+    }
+
+    #[test]
+    fn unknown_version_is_never_force_allowed() {
+        let status = availability_from(Ok("12.0.0".to_owned()), true, HumanCheck::None);
+        assert!(!status.usable);
+        assert!(!status.force_allowed);
+    }
+
+    #[test]
+    fn human_check_ok_makes_pending_version_usable() {
+        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::Ok);
+        assert!(status.usable);
+        assert!(status.supported);
+        assert!(!status.whitelisted);
+        assert!(status.reason.contains("已确认"));
+    }
+
+    #[test]
+    fn human_check_fail_keeps_pending_version_unusable_but_retryable() {
+        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::Fail);
+        assert!(!status.usable);
+        assert!(status.force_allowed);
+        assert_eq!(status.human_check, HumanCheck::Fail);
+    }
+
+    #[test]
+    fn human_check_ok_never_rescues_an_unknown_version() {
+        let status = availability_from(Ok("12.0.0".to_owned()), true, HumanCheck::Ok);
+        assert!(!status.usable);
+    }
+
+    #[test]
+    fn missing_draft_root_blocks_force_too() {
+        let status = availability_from(Ok("11.4.13189".to_owned()), false, HumanCheck::None);
+        assert!(!status.force_allowed);
+    }
+
+    #[test]
+    fn human_check_setting_round_trips_through_settings_whitelist() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::None);
+        set_human_check(&connection, "11.4.13189", HumanCheck::Ok).unwrap();
+        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::Ok);
+        assert_eq!(
+            settings::setting_value(&connection, "jianying.human_check.11.4.13189").unwrap().as_deref(),
+            Some("ok")
+        );
+        set_human_check(&connection, "11.4.13189", HumanCheck::Fail).unwrap();
+        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::Fail);
+        // 未知版本不许记「可以用」:那会绕过白名单。
+        assert!(set_human_check(&connection, "12.0.0", HumanCheck::Ok).is_err());
+        // 值只认 ok / fail。
+        assert!(settings::set_setting(&connection, "jianying.human_check.11.4.13189", "maybe").is_err());
+    }
+
+    #[test]
+    fn force_generates_timestamped_experimental_draft_for_pending_version() {
+        let directory = TestDirectory::new();
+        let mut connection = seed_selected_clip(&directory);
+        let root = directory.path().join("draft-root");
+        std::fs::create_dir(&root).unwrap();
+        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::None);
+
+        assert!(generate_with_availability(&mut connection, &status, &root, false).is_err());
+        let result = generate_with_availability(&mut connection, &status, &root, true).unwrap();
+
+        assert!(result.experimental);
+        assert_eq!(result.draft_path, result.output_path);
+        assert!(Path::new(&result.draft_path).join(DRAFT_INFO_FILE).is_file());
+        assert!(result.draft_name.contains("试验"));
+        assert!(result.draft_name.len() > PROJECT_NAME.len() + 8, "name should carry a timestamp: {}", result.draft_name);
+        let (golden_top, golden_materials) = golden_key_sets();
+        let written: Value = serde_json::from_slice(&std::fs::read(Path::new(&result.draft_path).join(DRAFT_INFO_FILE)).unwrap()).unwrap();
+        let top: BTreeSet<String> = written.as_object().unwrap().keys().cloned().collect();
+        let materials: BTreeSet<String> = written["materials"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(top, golden_top);
+        assert_eq!(materials, golden_materials);
+        // 第二次 force 也是新目录,不覆盖第一次。
+        let second = generate_with_availability(&mut connection, &status, &root, true).unwrap();
+        assert_ne!(second.draft_path, result.draft_path);
+        assert!(Path::new(&result.draft_path).is_dir());
+    }
+
+    /// V14-01:原生草稿的 videos 顺序 = 镜头带「按章节」顺序(早章在前、章内按 position),
+    /// 不是挑选先后。与素材包 / 导出片段共用 `story::ordered_band_items` 这一份真相。
+    #[test]
+    fn native_draft_videos_follow_band_order_not_pick_order() {
+        let directory = TestDirectory::new();
+        let mut connection = seed_selected_clip(&directory);
+        let seed_clip = |connection: &Connection, name: &str| -> i64 {
+            let source = directory.path().join(name);
+            std::fs::write(&source, name.as_bytes()).unwrap();
+            let (quick_hash, byte_size) = import::quick_fingerprint(&source).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO clips(
+                        volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
+                        duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                        imported_at, episode_id
+                     ) VALUES (
+                        'draft-volume', ?1, ?2, ?3, 1, 1000, 1000, 30, 1, 0,
+                        'h264', 1920, 1080, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                        (SELECT id FROM episodes WHERE status='active')
+                     )",
+                    params![source.to_string_lossy(), byte_size as i64, quick_hash],
+                )
+                .unwrap();
+            connection.last_insert_rowid()
+        };
+        let insert_chapter = |connection: &Connection, title: &str, start_at: &str| -> i64 {
+            connection
+                .execute(
+                    "INSERT INTO chapters(title, start_at, end_at, manual, episode_id)
+                     VALUES (?1, ?2, '2026-08-31T23:59:59Z', 1,
+                             (SELECT id FROM episodes WHERE status = 'active'))",
+                    params![title, start_at],
+                )
+                .unwrap();
+            connection.last_insert_rowid()
+        };
+        let selected: i64 = connection
+            .query_row("SELECT id FROM clips WHERE rel_path LIKE '%selected.mov'", [], |row| row.get(0))
+            .unwrap();
+        let early_clip = seed_clip(&connection, "early.mov");
+        ratings::rate_clip(&mut connection, early_clip, "binary", 1).unwrap();
+        let late = insert_chapter(&connection, "傍晚", "2026-08-31T18:00:00Z");
+        let early = insert_chapter(&connection, "清晨", "2026-08-31T06:00:00Z");
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id = ?2", params![late, selected]).unwrap();
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id = ?2", params![early, early_clip]).unwrap();
+        // 挑选先后:傍晚的 selected.mov 先,清晨的 early.mov 后。
+        for (position, clip_id) in [selected, early_clip].into_iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO story_order(item_kind, clip_id, position, tombstone, created_at, updated_at, episode_id)
+                     VALUES ('whole', ?1, ?2, 0, 'now', 'now', (SELECT id FROM episodes WHERE status = 'active'))",
+                    params![clip_id, position as i64],
+                )
+                .unwrap();
+        }
+        let root = directory.path().join("draft-root");
+        std::fs::create_dir(&root).unwrap();
+        let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
+
+        let result = generate_with_availability(&mut connection, &status, &root, false).unwrap();
+
+        let written: Value = serde_json::from_slice(&std::fs::read(Path::new(&result.draft_path).join(DRAFT_INFO_FILE)).unwrap()).unwrap();
+        let names = written["materials"]["videos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|video| video["material_name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        // 去掉章前缀只看顺序(前缀形态归 V14-04 的测试管)。
+        let files = names.iter().map(|name| name.rsplit('】').next().unwrap()).collect::<Vec<_>>();
+        assert_eq!(files, vec!["early.mov", "selected.mov"], "{names:?}");
+        assert_eq!(result.chapter_marks, 2);
+    }
+
+    #[test]
+    fn force_still_rejects_unknown_version() {
+        let directory = TestDirectory::new();
+        let mut connection = seed_selected_clip(&directory);
+        let root = directory.path().join("draft-root");
+        std::fs::create_dir(&root).unwrap();
+        let status = availability_from(Ok("12.0.0".to_owned()), true, HumanCheck::None);
+        let error = generate_with_availability(&mut connection, &status, &root, true).unwrap_err();
+        assert!(error.to_string().contains("12.0.0"));
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn whitelisted_version_without_force_is_not_experimental() {
+        let directory = TestDirectory::new();
+        let mut connection = seed_selected_clip(&directory);
+        let root = directory.path().join("draft-root");
+        std::fs::create_dir(&root).unwrap();
+        let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
+        let result = generate_with_availability(&mut connection, &status, &root, false).unwrap();
+        assert!(!result.experimental);
+        assert!(!result.draft_name.contains("试验"));
     }
 }

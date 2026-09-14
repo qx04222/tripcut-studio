@@ -3,7 +3,8 @@ import { useCallback, useState, type JSX } from "react";
 import { HelpOverlay } from "../../HelpOverlay";
 import { HELP_FAQS, KEYBOARD_SHORTCUT_GROUPS, WORKFLOW_STEPS } from "../../helpContent";
 import { GENERATED_LICENSES } from "../../licenses.generated";
-import { Button, SectionHeader } from "../ui";
+import { resetGuides } from "../guides";
+import { Button, SectionHeader, showToast } from "../ui";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 
@@ -31,7 +32,7 @@ export function AboutSection(): JSX.Element {
         </SettingsRow>
         <SettingsRow
           title="应用更新"
-          help={`当前版本 ${appInfo?.version ?? "—"} · 更新包经 minisign 签名校验后才会安装`}
+          help={`当前版本 ${appInfo?.version ?? "—"} · 更新包已校验签名后才会安装`}
           className="settings-sheet-row--stack"
         >
           <div className="settings-sheet-actions">
@@ -65,6 +66,16 @@ export function AboutSection(): JSX.Element {
       </div>
 
       <div className="settings-sheet-group">
+        {/* R13 §3(车道 B):七个功能气泡各只弹一次;想再看一遍从这里重置(guide.*.viewed 写回 false)。 */}
+        <SettingsRow title="新手引导" help="工作区里那些「知道了」的小气泡各只出现一次;重置后会再出现一遍。">
+          <Button
+            onClick={() => {
+              void resetGuides().then(() => showToast("新手引导已重置,回到工作区就会再出现", { tone: "success" }));
+            }}
+          >
+            重置新手引导
+          </Button>
+        </SettingsRow>
         {/* R11 简化专项 #2:「打开日志目录」从隐私与诊断搬到关于 —— 出了问题要日志时不用翻高级。 */}
         <SettingsRow title="诊断日志" help="出问题时把这个目录发给我们;日志只保留 7 天,素材路径只记文件名。">
           <Button disabled={form.busy} onClick={() => void form.openLogs()}>
@@ -75,18 +86,19 @@ export function AboutSection(): JSX.Element {
       <SectionHeader title="应用信息" description="本地优先的旅途素材筛选与交付工作台。" className="settings-sheet-section-gap" />
       <dl className="settings-sheet-facts">
         <div><dt>应用版本</dt><dd>{appInfo?.version ?? "—"}</dd></div>
-        <div><dt>Schema</dt><dd>V{appInfo?.db_schema_version ?? "—"}</dd></div>
-        <div><dt>当前 worker</dt><dd>{appInfo?.worker_count ?? "—"}</dd></div>
+        {/* Y-11:反馈问题时截图用的事实,也用白话 —— 数据版本 / 后台线程 / 能不能改。 */}
+        <div><dt>数据版本</dt><dd>V{appInfo?.db_schema_version ?? "—"}</dd></div>
+        <div><dt>后台线程</dt><dd>{appInfo?.worker_count ?? "—"}</dd></div>
         <div>
-          <dt>项目模式</dt>
-          <dd>{appInfo ? (appInfo.read_only ? "只读（另一实例持有写锁）" : "独占写入") : "—"}</dd>
+          <dt>这个窗口</dt>
+          <dd>{appInfo ? (appInfo.read_only ? "只能看（另一个窗口正在编辑这个素材库）" : "可以编辑") : "—"}</dd>
         </div>
       </dl>
       <div className="settings-sheet-licenses">
         <div className="settings-sheet-ledger-head">
           <div>
             <strong>开源许可清单</strong>
-            <small>由 Cargo.toml 与 package.json 的直接依赖生成 · {GENERATED_LICENSES.length} 项</small>
+            <small>应用直接用到的开源组件 · {GENERATED_LICENSES.length} 项</small>
           </div>
           <Button variant="ghost" size="sm" aria-expanded={licensesOpen} onClick={() => setLicensesOpen((open) => !open)}>
             {licensesOpen ? "收起清单" : "展开清单"}

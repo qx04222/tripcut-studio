@@ -153,7 +153,7 @@ export function FirstRunGuide({ onDismiss }: { onDismiss?: () => void } = {}) {
         </header>
 
         {checking ? (
-          <div className="first-run-state" role="status">正在检测 FFmpeg、Whisper 与 Chinese-CLIP…</div>
+          <div className="first-run-state" role="status">正在检测视频处理、转写与画面识别组件…</div>
         ) : error ? (
           <div className="first-run-state error" role="alert">
             <strong>工具链检测失败</strong>

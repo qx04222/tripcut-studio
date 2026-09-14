@@ -127,11 +127,13 @@ function press(target: Element, key: string, code: string): void {
 }
 
 describe("monitorHotkeyIntent(纯函数)", () => {
-  it("I/O 打点、←/→ ±1 s、J/K/L 穿梭、空格播放暂停;IME 组合中与 ⌘ 组合一律不接", () => {
+  it("I/O 打点、←/→ 逐帧(R13 剪映键位)、⌥←/→ ±1 s、J/K/L 穿梭、空格播放暂停;IME 组合中与 ⌘ 组合一律不接", () => {
     expect(monitorHotkeyIntent({ key: "i", code: "KeyI", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "mark", edge: "in" });
     expect(monitorHotkeyIntent({ key: "Process", code: "KeyO", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "mark", edge: "out" });
-    expect(monitorHotkeyIntent({ key: "ArrowLeft", code: "ArrowLeft", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "nudge", seconds: -1 });
-    expect(monitorHotkeyIntent({ key: "ArrowRight", code: "ArrowRight", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "nudge", seconds: 1 });
+    expect(monitorHotkeyIntent({ key: "ArrowLeft", code: "ArrowLeft", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "frame", direction: -1 });
+    expect(monitorHotkeyIntent({ key: "ArrowRight", code: "ArrowRight", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "frame", direction: 1 });
+    expect(monitorHotkeyIntent({ key: "ArrowLeft", code: "ArrowLeft", metaKey: false, ctrlKey: false, altKey: true }, false)).toEqual({ kind: "nudge", seconds: -1 });
+    expect(monitorHotkeyIntent({ key: "ArrowRight", code: "ArrowRight", metaKey: false, ctrlKey: false, altKey: true }, false)).toEqual({ kind: "nudge", seconds: 1 });
     expect(monitorHotkeyIntent({ key: "j", code: "KeyJ", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "shuttle", key: "j" });
     expect(monitorHotkeyIntent({ key: "k", code: "KeyK", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "shuttle", key: "k" });
     expect(monitorHotkeyIntent({ key: "l", code: "KeyL", metaKey: false, ctrlKey: false }, false)).toEqual({ kind: "shuttle", key: "l" });
@@ -143,16 +145,16 @@ describe("monitorHotkeyIntent(纯函数)", () => {
 });
 
 describe("R-01:监视器栏聚焦后的打点/播放键", () => {
-  it("F6 落在栏 landmark 上:I 设入点、O 设出点、→ 前进一秒、空格播放", async () => {
+  it("F6 落在栏 landmark 上:I 设入点、O 设出点、⌥→ 前进一秒(R13:裸 → 归逐帧)、空格播放", async () => {
     const region = await renderInPane();
     region.focus();
     press(region, "i", "KeyI");
     expect(await screen.findByText("已设置入点")).toBeTruthy();
-    press(region, "ArrowRight", "ArrowRight");
+    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true });
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 13.5 });
     // V-04:这里的假播放器 seek 永远不落地(状态一直报 12.5)。← 要从「刚才要去的 13.5」退一秒,
     // 不是从旧读数 12.5 —— 否则真机上就是 3.1 ↔ 8.1 来回跳。
-    press(region, "ArrowLeft", "ArrowLeft");
+    fireEvent.keyDown(region, { key: "ArrowLeft", code: "ArrowLeft", altKey: true });
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 12.5 });
     press(region, "o", "KeyO");
     expect(await screen.findByText("已设置出点")).toBeTruthy();
@@ -161,20 +163,22 @@ describe("R-01:监视器栏聚焦后的打点/播放键", () => {
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
   });
 
-  it("J/K/L:J 暂停并回退一秒,K 暂停,L 播放", async () => {
+  it("J/K/L:J 暂停进入倒退,K 暂停并回 ×1,L 以 ×1 播放(R12 §5 原生真变速)", async () => {
     const region = await renderInPane();
     region.focus();
+    // R12 §5:素材一就绪监视器先发一条 pause(点卡片 = 预览),不算这组按键的输出。
+    apiMocks.playerCommand.mockClear();
     press(region, "j", "KeyJ");
     await flush();
-    expect(apiMocks.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([
-      { type: "pause" },
-      { type: "seek_abs", seconds: 11.5 },
-    ]);
+    expect(apiMocks.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([{ type: "pause" }]);
     apiMocks.playerCommand.mockClear();
     press(region, "k", "KeyK");
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" });
+    await flush();
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "set_speed", speed: 1 });
     apiMocks.playerCommand.mockClear();
     press(region, "l", "KeyL");
+    await flush();
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
   });
 
@@ -212,14 +216,15 @@ describe("R-01:监视器栏聚焦后的打点/播放键", () => {
 
 describe("R11 §1.2 / §3:建议段、逐帧、⌥±5 s、⇧L 循环、S 保存(纯函数)", () => {
   const base = { metaKey: false, ctrlKey: false };
-  it("Enter 采纳、N/⇧N 切换建议、, . 逐帧、⌥←/→ ±5 s、⇧L 循环、S 保存;⌘ 组合与 IME 一律不接", () => {
+  it("Enter 采纳、N/⇧N 切换建议、, . 逐帧、⇧←/→ ±5 s、⇧L 循环、S 保存;⌘ 组合与 IME 一律不接", () => {
     expect(monitorHotkeyIntent({ ...base, key: "Enter", code: "Enter" }, false)).toEqual({ kind: "adopt-suggestion" });
     expect(monitorHotkeyIntent({ ...base, key: "n", code: "KeyN" }, false)).toEqual({ kind: "step-suggestion", direction: 1 });
     expect(monitorHotkeyIntent({ ...base, key: "N", code: "KeyN", shiftKey: true }, false)).toEqual({ kind: "step-suggestion", direction: -1 });
     expect(monitorHotkeyIntent({ ...base, key: ",", code: "Comma" }, false)).toEqual({ kind: "frame", direction: -1 });
     expect(monitorHotkeyIntent({ ...base, key: ".", code: "Period" }, false)).toEqual({ kind: "frame", direction: 1 });
-    expect(monitorHotkeyIntent({ ...base, key: "ArrowLeft", code: "ArrowLeft", altKey: true }, false)).toEqual({ kind: "nudge", seconds: -5 });
-    expect(monitorHotkeyIntent({ ...base, key: "ArrowRight", code: "ArrowRight", altKey: true }, false)).toEqual({ kind: "nudge", seconds: 5 });
+    // R13 剪映键位:±5 s 是 ⇧←/→(⌥←/→ 变成 ±1 s)。
+    expect(monitorHotkeyIntent({ ...base, key: "ArrowLeft", code: "ArrowLeft", shiftKey: true }, false)).toEqual({ kind: "nudge", seconds: -5 });
+    expect(monitorHotkeyIntent({ ...base, key: "ArrowRight", code: "ArrowRight", shiftKey: true }, false)).toEqual({ kind: "nudge", seconds: 5 });
     expect(monitorHotkeyIntent({ ...base, key: "L", code: "KeyL", shiftKey: true }, false)).toEqual({ kind: "toggle-loop" });
     expect(monitorHotkeyIntent({ ...base, key: "l", code: "KeyL" }, false)).toEqual({ kind: "shuttle", key: "l" });
     expect(monitorHotkeyIntent({ ...base, key: "s", code: "KeyS" }, false)).toEqual({ kind: "save" });

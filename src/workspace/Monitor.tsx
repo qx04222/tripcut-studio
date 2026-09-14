@@ -11,6 +11,7 @@ import {
 } from "../api";
 
 export { monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
+import { notePlayerStatus } from "./guides";
 import { MonitorControls } from "./MonitorControls";
 import { MonitorIdle } from "./OnboardingCard";
 import { IoRail, MonitorFrame, Placeholder, monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
@@ -104,7 +105,10 @@ export function Monitor(): JSX.Element {
     setStatus(null);
   }, [selectedClipId]);
 
-  const onStatusChange = useCallback((next: PlayerStatus | null) => setStatus(next), []);
+  const onStatusChange = useCallback((next: PlayerStatus | null) => {
+    setStatus(next);
+    notePlayerStatus(next); // R13 §3:「连播」气泡在第一次播完时出
+  }, []);
   const enterImmersive = useCallback(
     () => dispatchWorkspace({ type: "set-immersive", immersive: true }),
     [],
@@ -143,6 +147,15 @@ export function Monitor(): JSX.Element {
   });
   const onNudge = transport.nudge;
   const onSeek = transport.seekTo;
+  // Y-10:J 倒退中 mpv 是暂停的,单看 status 会把空格 / 走带按钮当成「播放」—— 倒退中一律等于 K(停下)。
+  const { rewinding, shuttle } = transport;
+  const togglePlayback = useCallback(() => {
+    if (rewinding) {
+      shuttle("k");
+      return;
+    }
+    onPlayPause();
+  }, [rewinding, shuttle, onPlayPause]);
 
   // 当前建议一变(载入 / N / ⇧N)就把入出点填成它 —— I / O 微调、S 或 Enter 保存,都是同一条路。
   const { current: currentSuggestion, index: suggestionIndex } = suggestions;
@@ -163,10 +176,10 @@ export function Monitor(): JSX.Element {
   // 广播:`tripcut:toggle-playback`(播放/暂停,播完则从头)与 `tripcut:seek-ratio`
   // ({ratio} 0..1)。监视器是唯一握着嵌入通道的人,在这里收。用 ref 拿最新的处理函数,
   // 监听器只挂一次,不跟着 80ms 的状态轮询反复拆装。
-  const latest = useRef({ onPlayPause, onSeek, status });
+  const latest = useRef({ onPlayPause: togglePlayback, onSeek, status });
   useEffect(() => {
-    latest.current = { onPlayPause, onSeek, status };
-  }, [onPlayPause, onSeek, status]);
+    latest.current = { onPlayPause: togglePlayback, onSeek, status };
+  }, [togglePlayback, onSeek, status]);
   useEffect(() => {
     const toggle = () => latest.current.onPlayPause();
     const seekRatio = (event: Event) => {
@@ -231,7 +244,7 @@ export function Monitor(): JSX.Element {
     onMark: markAt,
     onNudge,
     onShuttle: transport.shuttle,
-    onTogglePlayback: onPlayPause,
+    onTogglePlayback: togglePlayback,
     onAdoptSuggestion: suggestionIndex >= 0 ? () => void onSaveSegment() : undefined,
     onStepSuggestion,
     onFrame: transport.frame,
@@ -324,18 +337,22 @@ export function Monitor(): JSX.Element {
         saving={saving}
         muted={transport.muted}
         speedLabel={transport.speedLabel}
+        rewinding={transport.rewinding}
         looping={transport.looping}
         suggestions={suggestions}
-        onPlayPause={onPlayPause}
+        onPlayPause={togglePlayback}
         onNudge={onNudge}
         onToggleMute={transport.toggleMute}
         onCycleSpeed={() => transport.shuttle("l")}
+        onSelectSpeed={transport.setRate}
         onMarkIn={() => markAt("in")}
         onMarkOut={() => markAt("out")}
         onSaveSegment={() => void onSaveSegment()}
         onStepSuggestion={onStepSuggestion}
         onRequestImmersive={enterImmersive}
         onSeek={onSeek}
+        autoAdvance={transport.autoAdvance}
+        onToggleAutoAdvance={transport.toggleAutoAdvance}
       />
     </MonitorFrame>
   );

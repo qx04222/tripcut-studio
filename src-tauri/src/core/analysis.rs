@@ -12,7 +12,13 @@ use serde_json::{json, Value};
 use super::error::{CoreError, Result};
 use super::jobs::Job;
 
-pub const SCENE_THRESHOLD: f64 = 0.35;
+// 场景切换:在 10 fps 采样上比较相邻帧(见 `analysis_args`),阈值 0.25。
+// R14 实测:v4 在 2 fps 采样上判切点,相邻样本隔 0.5 s,平滑摇镜(10%/s)本身就差到
+// 0.33–0.35(tilt_fast 0.3456 离误判一线之隔),而夜景硬切只有 0.22–0.30——两者在
+// 2 fps 上根本分不开,0.35 只能"都不认"。改成 10 fps 后摇镜相邻样本只差 ≤0.17,
+// 夜景硬切仍是 0.29–0.37(切点分数与采样率无关),0.25 落在中间。
+pub const SCENE_THRESHOLD: f64 = 0.25;
+pub const SCENE_SAMPLE_FPS: u32 = 10;
 pub const DARK_YAVG_THRESHOLD: f64 = 40.0;
 // 过曝判定基于 YHIGH(90 百分位亮度)而非 YMAX(整帧最亮的单个像素)。
 // 实测教训:任何画面里有一处高光(天空/路灯/反光/字幕白字)YMAX 就到 255,
@@ -36,9 +42,24 @@ pub const LOW_ENTROPY_GUARD: f64 = 4.5;
 // 运动守卫:vmafmotion.score 高说明画面在动(运动模糊,可能可接受),
 // 低才是相机基本静止时的对焦失败。实测:静止帧≈0,正常手持运镜 60+。
 pub const MOTION_BLUR_GUARD: f64 = 25.0;
-// 欠曝:10 百分位贴近黑位且整帧偏暗。
+// 欠曝:10 百分位贴近黑位且整帧偏暗,且画面里没有真实高光。
+// R14 实测(2026-09-14,6 条真实样片):正确曝光的夜景(路灯/窗户/手机屏幕)
+// YLOW=16、YAVG 34–48 —— 前两条单独用会把每一帧都判成欠曝(under=1.00,时刻分
+// 「曝光正常」占比 0),这正是 verify-v1 记的「夜景被判曝光不正常」。区别在高光:
+// 夜景 YMAX 242–255;真欠曝(整段曝光不足)是全画面一起压暗,最亮像素也到不了白位
+// (合成 eq=brightness=-0.35 样本 YMAX≈166)。分析前已缩到 640 宽,单个热像素被平均掉,
+// YMAX 在这里比 YHIGH 可靠(YHIGH 是 90 百分位,夜景里的高光面积不到 10%)。
 pub const UNDEREXPOSED_YLOW_THRESHOLD: f64 = 16.0;
 pub const UNDEREXPOSED_YAVG_THRESHOLD: f64 = 60.0;
+pub const UNDEREXPOSED_HIGHLIGHT_YMAX: f64 = 200.0;
+
+/// 单帧欠曝判定:暗部贴黑位 + 整帧偏暗 + 没有高光。L1 汇总与 R11 时刻分共用同一条判据,
+/// 池子角标「欠曝」与时刻分「曝光正常」不会互相打架。
+pub fn frame_underexposed(ylow: f64, yavg: f64, ymax: f64) -> bool {
+    ylow <= UNDEREXPOSED_YLOW_THRESHOLD
+        && yavg <= UNDEREXPOSED_YAVG_THRESHOLD
+        && ymax < UNDEREXPOSED_HIGHLIGHT_YMAX
+}
 // 广播范围溢出像素占比(BRNG),直接量化过曝/欠曝的面积。
 pub const BRNG_RATIO_THRESHOLD: f64 = 0.25;
 pub const AUDIO_CLIP_PEAK_DB: f64 = -0.1;
@@ -52,8 +73,10 @@ const FOCUS_HEIGHT: usize = 180;
 // 新增欠曝/动态范围/虚焦(blurdetect+运动+纹理三重守卫)。
 // v4:场景检测挪到 2fps/640 降采样之后(此前 select 跑在全分辨率原始流上,
 // 是分析阶段 CPU 的大头);解码阶段开硬解(VideoToolbox),失败自动软解重跑。
+// v5(R14):欠曝加「无高光」守卫(夜景不再整段判欠曝);时刻分同判据;
+// 场景检测改在 10 fps/640 上比较相邻帧(2 fps 下摇镜与夜景硬切分不开),阈值 0.35→0.25。
 // 版本号变化会让旧结果被 enqueue_missing 重新排队重算。
-const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v4";
+const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v5";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipAnalysis {
@@ -233,12 +256,7 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
         "ffmpeg",
     )?;
     let ffprobe = crate::core::settings::configured_ffprobe(connection, &ffmpeg)?;
-    let scene_threshold = crate::core::settings::number_value(
-        connection,
-        crate::core::settings::SCENE_THRESHOLD_KEY,
-        SCENE_THRESHOLD,
-    )?
-    .clamp(0.0, 1.0);
+    let scene_threshold = effective_scene_threshold(connection)?;
     let computation = analyze_source(&source, &ffmpeg, &ffprobe, scene_threshold)?;
     persist_analysis(connection, &source, &computation)?;
     // R11:时刻分是 L1 的后续步骤,用的是同一份日志(不再解码第二次)。
@@ -272,6 +290,20 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
         &source.quick_hash,
     )?;
     Ok(())
+}
+
+/// 场景阈值:读设置;旧库里种下的 0.35(v4 的默认,从未在界面暴露)当作没改过,
+/// 用当前默认——否则版本升级重算时还是拿 2 fps 时代的阈值去比 10 fps 的相邻帧。
+pub(crate) fn effective_scene_threshold(connection: &Connection) -> Result<f64> {
+    let stored = crate::core::settings::number_value(
+        connection,
+        crate::core::settings::SCENE_THRESHOLD_KEY,
+        SCENE_THRESHOLD,
+    )?;
+    if (stored - crate::core::settings::LEGACY_SCENE_THRESHOLD).abs() < 1e-9 {
+        return Ok(SCENE_THRESHOLD);
+    }
+    Ok(stored.clamp(0.0, 1.0))
 }
 
 pub fn get_clip_analysis(connection: &Connection, clip_id: i64) -> Result<Option<ClipAnalysis>> {
@@ -381,9 +413,11 @@ fn load_source(connection: &Connection, payload: &AnalyzeL1Payload) -> Result<Cl
 }
 
 /// 一次解码拿全部粗筛信号:曝光(含 BRNG 溢出占比)、模糊度、纹理熵、运动能量、场景切点。
-/// 先降采样到 2fps/640 宽再堆滤镜(含场景检测)——滤镜串联代价是相加的,
+/// 先降采样到 10fps/640 宽再堆滤镜——滤镜串联代价是相加的,
 /// 全帧率堆滤镜会慢两个数量级,而筛素材这个任务对降采样后的统计精度不敏感
 /// (实测 30s 4K 素材:v3 全分辨率跑场景检测 CPU 19.6s → v4 降采样后跑 <3s)。
+/// 场景检测在 10 fps 上比相邻帧(摇镜相邻帧差得小、硬切差得大);统计量再抽到 2 fps
+/// (与 R11 时刻分的 0.5 s 窗口对齐)。
 /// `hardware_decode` 为真时在 `-i` 前插入 VideoToolbox 硬解前缀。
 fn analysis_args(
     path: &Path,
@@ -392,9 +426,9 @@ fn analysis_args(
     hardware_decode: bool,
 ) -> Vec<OsString> {
     let mut filter = format!(
-        "[0:v:0]fps=2,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
+        "[0:v:0]fps={SCENE_SAMPLE_FPS},scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
          [scene_src]select='eq(n,0)+gt(scene,{scene_threshold})',showinfo[scene_out];\
-         [stats_src]signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
+         [stats_src]fps=2,signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
          metadata=mode=print[stats_out]"
     );
     if has_audio {
@@ -536,6 +570,9 @@ fn analyze_source(
             "overexposed_yavg": OVEREXPOSED_YAVG_THRESHOLD,
             "overexposed_ratio": OVEREXPOSED_RATIO_THRESHOLD,
             "soft_focus": SOFT_FOCUS_THRESHOLD,
+            "underexposed_ylow": UNDEREXPOSED_YLOW_THRESHOLD,
+            "underexposed_yavg": UNDEREXPOSED_YAVG_THRESHOLD,
+            "underexposed_highlight_ymax": UNDEREXPOSED_HIGHLIGHT_YMAX,
             "audio_clip_peak_db": AUDIO_CLIP_PEAK_DB
         },
         "preprocess": {
@@ -580,10 +617,13 @@ pub(crate) fn scan_windows(
 /// 自己选的输出时基里(实测 time_base=1/2,pts=2 表示 t=1s),不再等于源流的
 /// tb_num/tb_den。改用 `pts_time:`(滤镜链任何一段都以秒为单位、与源时基无关)
 /// 再乘回源 tb_den/tb_num 换算成素材自己的 tick。
+/// R14:`select='eq(n,0)+…'` 放出来的第一帧靠 showinfo 的 `n: 0` 识别,不靠 `pts_time>0`——
+/// 首帧 pts 不为 0 的文件(B 帧延迟/编辑列表,合成夹具首帧落在 0.1 s)会把它当成一个切点。
 fn scene_cuts_from_log(log: &str, tb_num: i64, tb_den: i64) -> Vec<i64> {
     let mut scene_cuts = log
         .lines()
         .filter(|line| line.contains("showinfo") && line.contains("pts_time:"))
+        .filter(|line| showinfo_index(line).is_none_or(|index| index > 0))
         .filter_map(|line| token_prefixed_f64(line, "pts_time:"))
         .filter(|seconds| *seconds > 0.0)
         .map(|seconds| seconds_to_ticks(seconds, tb_num, tb_den))
@@ -602,12 +642,14 @@ fn parse_signal_log(
     let yavg = values_after(log, "lavfi.signalstats.YAVG=");
     let ymin = values_after(log, "lavfi.signalstats.YMIN=");
     let yhigh = values_after(log, "lavfi.signalstats.YHIGH=");
-    if yavg.is_empty() || yavg.len() != ymin.len() || yavg.len() != yhigh.len() {
+    let ymax = values_after(log, "lavfi.signalstats.YMAX=");
+    if yavg.is_empty() || yavg.len() != ymin.len() || yavg.len() != yhigh.len() || yavg.len() != ymax.len() {
         return Err(CoreError::Analysis(format!(
-            "signalstats 输出不完整：YAVG {} 项，YMIN {} 项，YHIGH {} 项",
+            "signalstats 输出不完整：YAVG {} 项，YMIN {} 项，YHIGH {} 项，YMAX {} 项",
             yavg.len(),
             ymin.len(),
-            yhigh.len()
+            yhigh.len(),
+            ymax.len()
         )));
     }
     let ylow = values_after(log, "lavfi.signalstats.YLOW=");
@@ -638,13 +680,10 @@ fn parse_signal_log(
         .count();
     let overexposed_ratio = overexposed_frames as f64 / frames as f64;
 
-    // 欠曝:10 百分位贴近黑位 且 整帧偏暗。
+    // 欠曝:10 百分位贴近黑位 且 整帧偏暗 且 没有高光(见 `frame_underexposed`)。
     let underexposed_frames = if ylow.len() == yavg.len() {
-        ylow.iter()
-            .zip(yavg.iter())
-            .filter(|(low, avg)| {
-                **low <= UNDEREXPOSED_YLOW_THRESHOLD && **avg <= UNDEREXPOSED_YAVG_THRESHOLD
-            })
+        (0..frames)
+            .filter(|index| frame_underexposed(ylow[*index], yavg[*index], ymax[*index]))
             .count()
     } else {
         0
@@ -962,6 +1001,20 @@ fn values_after_colon(log: &str, marker: &str) -> Vec<f64> {
         .collect()
 }
 
+/// showinfo 行里的帧序号:`n:   3`(冒号后有对齐空格,值是下一个 token)。
+fn showinfo_index(line: &str) -> Option<u64> {
+    let mut tokens = line.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "n:" {
+            return tokens.next()?.parse().ok();
+        }
+        if let Some(value) = token.strip_prefix("n:") {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
 /// 取形如 `pts_time:1.5` 的单个 token(前缀与值中间没有空格)。
 fn token_prefixed_f64(line: &str, prefix: &str) -> Option<f64> {
     line.split_whitespace()
@@ -1185,13 +1238,36 @@ mod tests {
 
     #[test]
     fn analysis_filter_runs_scene_detection_after_downscale_and_bumps_pipeline_version() {
-        assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v4");
-        let args = analysis_args(Path::new("/x.mp4"), 0.35, false, true);
+        assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v5");
+        let args = analysis_args(Path::new("/x.mp4"), 0.25, false, true);
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.starts_with("-hide_banner -nostdin -hwaccel videotoolbox -i"));
         let filter = args.iter().position(|a| a == "-filter_complex").map(|i| args[i + 1].to_string_lossy().into_owned()).unwrap();
-        assert!(filter.starts_with("[0:v:0]fps=2,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src]"));
-        assert!(filter.contains("[scene_src]select='eq(n,0)+gt(scene,0.35)',showinfo[scene_out]"));
+        // R14:场景检测在 10 fps 上比相邻帧,统计量再抽到 2 fps。
+        assert!(filter.starts_with("[0:v:0]fps=10,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src]"));
+        assert!(filter.contains("[scene_src]select='eq(n,0)+gt(scene,0.25)',showinfo[scene_out]"));
+        assert!(filter.contains("[stats_src]fps=2,signalstats"));
+        assert_eq!(SCENE_THRESHOLD, 0.25);
+    }
+
+    #[test]
+    fn legacy_scene_threshold_setting_maps_to_the_current_default() {
+        let directory = TestDirectory::new();
+        let connection = crate::core::db::open_project(&directory.path().join("p.db")).unwrap();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?1, '0.35', 'now')",
+                [crate::core::settings::SCENE_THRESHOLD_KEY],
+            )
+            .unwrap();
+        assert_eq!(effective_scene_threshold(&connection).unwrap(), SCENE_THRESHOLD);
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?1, '0.4', 'now')",
+                [crate::core::settings::SCENE_THRESHOLD_KEY],
+            )
+            .unwrap();
+        assert_eq!(effective_scene_threshold(&connection).unwrap(), 0.4);
     }
 
     #[test]
@@ -1236,15 +1312,18 @@ mod tests {
     #[test]
     fn parses_scene_exposure_and_clipping_values_from_ffmpeg_log() {
         let log = "
-[Parsed_showinfo_2] n: 0 pts: 90000 pts_time:1
+[Parsed_showinfo_2] n: 0 pts: 0 pts_time:0
+[Parsed_showinfo_2] n: 1 pts: 90000 pts_time:1
 frame:0 pts:0
 lavfi.signalstats.YAVG=20
 lavfi.signalstats.YMIN=16
 lavfi.signalstats.YHIGH=250
+lavfi.signalstats.YMAX=255
 frame:1 pts:1
 lavfi.signalstats.YAVG=200
 lavfi.signalstats.YMIN=16
 lavfi.signalstats.YHIGH=250
+lavfi.signalstats.YMAX=255
 [Parsed_astats_5] Peak level dB: -0.05
 [Parsed_astats_5] Peak count: 4
 [Parsed_astats_5] Dynamic range: 18.25
@@ -1263,7 +1342,7 @@ lavfi.signalstats.YHIGH=250
     fn undefined_flat_frame_blur_does_not_poison_analysis_storage() {
         let mut connection = analysis_connection();
         let source = insert_source(&connection, Path::new("flat.mov"), "flat");
-        let log = "lavfi.signalstats.YAVG=235\nlavfi.signalstats.YMIN=235\nlavfi.signalstats.YHIGH=235\nlavfi.blur=nan\nlavfi.entropy.entropy.normal.Y=0\nlavfi.vmafmotion.score=0\n";
+        let log = "lavfi.signalstats.YAVG=235\nlavfi.signalstats.YMIN=235\nlavfi.signalstats.YHIGH=235\nlavfi.signalstats.YMAX=235\nlavfi.blur=nan\nlavfi.entropy.entropy.normal.Y=0\nlavfi.vmafmotion.score=0\n";
         let mut result = computation(Vec::new());
         result.signals = parse_signal_log(log, false, 1, 1000).unwrap();
         persist_analysis(&mut connection, &source, &result).unwrap();
@@ -1333,6 +1412,21 @@ lavfi.signalstats.YHIGH=250
     }
 
     #[test]
+    fn night_frames_with_highlights_are_not_underexposed_but_crushed_frames_are() {
+        // R14:夜景每帧 YLOW=16、YAVG≈41 但 YMAX≈244(路灯/窗户);真欠曝最亮像素也到不了白位。
+        let frame = |yavg: u32, ymax: u32| format!(
+            "lavfi.signalstats.YAVG={yavg}\nlavfi.signalstats.YMIN=16\nlavfi.signalstats.YLOW=16\nlavfi.signalstats.YHIGH=86\nlavfi.signalstats.YMAX={ymax}\nlavfi.blur=5\nlavfi.entropy.entropy.normal.Y=5.6\nlavfi.vmafmotion.score=15\n"
+        );
+        let night = parse_signal_log(&format!("{}{}", frame(41, 244), frame(38, 242)), false, 1, 1000).unwrap();
+        assert_eq!(night.underexposed_ratio, 0.0);
+        let crushed = parse_signal_log(&format!("{}{}", frame(20, 166), frame(41, 244)), false, 1, 1000).unwrap();
+        assert_eq!(crushed.underexposed_ratio, 0.5);
+        assert!(frame_underexposed(16.0, 20.0, 166.0));
+        assert!(!frame_underexposed(16.0, 41.0, 244.0));
+        assert!(!frame_underexposed(16.0, 100.0, 166.0), "中灰正常、只是暗部压死不算欠曝");
+    }
+
+    #[test]
     fn signal_parser_rejects_incomplete_exposure_output() {
         let error = parse_signal_log("lavfi.signalstats.YAVG=42", false, 1, 1000).unwrap_err();
         assert!(error.to_string().contains("signalstats 输出不完整"));
@@ -1353,6 +1447,18 @@ lavfi.signalstats.YHIGH=250
         let edged_score = laplacian_variance_rgb(&edged, 5, 5).unwrap();
         assert_eq!(flat_score, 0.0);
         assert!(edged_score > flat_score);
+    }
+
+    #[test]
+    fn first_selected_frame_with_nonzero_pts_is_not_a_scene_cut() {
+        // R14:首帧 pts=0.1 s 的文件(合成夹具经 VideoToolbox 编码)此前被当成一个切点。
+        let log = "\
+[Parsed_showinfo_4 @ 0x1] n:   0 pts:      1 pts_time:0.1     duration:      1
+[Parsed_showinfo_4 @ 0x1] n:   1 pts:     34 pts_time:3.4     duration:      1
+";
+        assert_eq!(scene_cuts_from_log(log, 1, 1000), vec![3400]);
+        assert_eq!(showinfo_index("[Parsed_showinfo_4 @ 0x1] n:  12 pts: 1"), Some(12));
+        assert_eq!(showinfo_index("[Parsed_showinfo_4 @ 0x1] n:7 pts: 1"), Some(7));
     }
 
     #[test]

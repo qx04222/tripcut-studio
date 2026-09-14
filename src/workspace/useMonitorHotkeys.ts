@@ -1,12 +1,14 @@
 import { useEffect, useRef, type RefObject } from "react";
 
-import { isActivatableControl, isPaneShortcutTarget, physicalKey } from "./useRatingHotkeys";
+import { lookupAction, type KeymapIndex } from "./keymap";
+import { getKeymap } from "./keymapStore";
+import { isActivatableControl, isPaneShortcutTarget } from "./useRatingHotkeys";
 import { dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 /**
  * 监视器栏的单键(R10 R-01):传输条上画着 `Kbd I` / `Kbd O`,帮助页也列了播放键,
  * 但新壳只把打点挂在按钮上 —— F6 聚焦监视器后按 I / O / ← / → 全无反应。
- * 键位与沉浸态 `PlayerOverlay` 一致:I/O 打点,←/→ ±1 s(同传输条的两枚按钮),
+ * 键位查 `keymap.ts`(R13,默认剪映预设):I/O 打点,←/→ 逐帧,⇧←/→ ±5 s,⌥←/→ ±1 s,
  * J/K/L 穿梭,空格播放/暂停。目标判定沿用媒体池那套:栏 landmark 本身或栏内任何
  * 非编辑控件;输入框/滑杆不接管;空格留给按钮自己。
  */
@@ -37,40 +39,51 @@ export interface MonitorHotkeyHandlers {
 
 type HotkeyEvent = Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey"> & Partial<Pick<KeyboardEvent, "shiftKey" | "altKey">>;
 
-/** 纯函数:一次 keydown 该做什么。composing=true(IME 组合中)与 ⌘/Ctrl 组合一律 null。 */
-export function monitorHotkeyIntent(event: HotkeyEvent, composing: boolean): MonitorHotkeyIntent | null {
-  if (composing || event.metaKey || event.ctrlKey) return null;
-  const key = physicalKey(event).toLowerCase();
-  const shift = event.shiftKey === true;
-  const alt = event.altKey === true;
-  switch (key) {
-    case "i":
+/**
+ * 纯函数:一次 keydown 该做什么。composing=true(IME 组合中)一律 null。
+ * R13 §1:改为查键位表(默认剪映预设:← → 逐帧、⇧← → ±5 s、⌥← → ±1 s);⌘ 组合归全局表,
+ * 这里不再一刀切拒掉 —— 用户把某个动作绑到 ⌘ 组合上也能用。
+ */
+export function monitorHotkeyIntent(event: HotkeyEvent, composing: boolean, index: KeymapIndex = getKeymap().index): MonitorHotkeyIntent | null {
+  if (composing) return null;
+  const action = lookupAction(index, "monitor", event);
+  switch (action) {
+    case "mark-in":
       return { kind: "mark", edge: "in" };
-    case "o":
+    case "mark-out":
       return { kind: "mark", edge: "out" };
-    case "l":
-      return shift ? { kind: "toggle-loop" } : { kind: "shuttle", key };
-    case "j":
-    case "k":
-      return { kind: "shuttle", key };
-    case "n":
-      return { kind: "step-suggestion", direction: shift ? -1 : 1 };
-    case "s":
+    case "shuttle-back":
+      return { kind: "shuttle", key: "j" };
+    case "shuttle-pause":
+      return { kind: "shuttle", key: "k" };
+    case "shuttle-forward":
+      return { kind: "shuttle", key: "l" };
+    case "toggle-loop":
+      return { kind: "toggle-loop" };
+    case "next-suggestion":
+      return { kind: "step-suggestion", direction: 1 };
+    case "prev-suggestion":
+      return { kind: "step-suggestion", direction: -1 };
+    case "save-range":
       return { kind: "save" };
-    case "arrowleft":
-      return { kind: "nudge", seconds: alt ? -5 : -1 };
-    case "arrowright":
-      return { kind: "nudge", seconds: alt ? 5 : 1 };
-    case ",":
+    case "nudge-back-1s":
+      return { kind: "nudge", seconds: -1 };
+    case "nudge-forward-1s":
+      return { kind: "nudge", seconds: 1 };
+    case "jump-back-5s":
+      return { kind: "nudge", seconds: -5 };
+    case "jump-forward-5s":
+      return { kind: "nudge", seconds: 5 };
+    case "frame-back":
       return { kind: "frame", direction: -1 };
-    case ".":
+    case "frame-forward":
       return { kind: "frame", direction: 1 };
-    case "enter":
+    case "adopt-suggestion":
       return { kind: "adopt-suggestion" };
-    case " ":
-    case "spacebar":
+    case "play-pause":
       return { kind: "toggle-playback" };
     default:
+      // split-before / split-after(Q/W)只登记:分割到剪映里做。
       return null;
   }
 }

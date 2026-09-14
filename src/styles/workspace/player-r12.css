@@ -1,0 +1,24 @@
+/*
+ * R12 车道 D(播放器行为 + 原生真变速):§5 监视器工具条上的「连播」开关、速度菜单与
+ * 状态行速度标记。选择器都挂在 .monitor 之下;颜色只用 styles.css 的 token。
+ * @import 在 workspace.css 头部(尾部会被 postcss 静默丢掉)。
+ */
+
+/* ---------- §5 · 「连播」开关:文字 + 32×18 滑块,贴在全屏按钮左边 ---------- */
+
+.monitor .monitor-auto-advance {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 中栏最小宽度(520px)下先收掉文字,滑块留着 —— AX 名在滑块上,不靠文字。 */
+@media (max-width: 1180px) {
+  .monitor .monitor-auto-advance-text {
+    display: none;
+  }
+}

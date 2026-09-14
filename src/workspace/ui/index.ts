@@ -15,3 +15,5 @@ export { Sheet, type SheetProps } from "./Sheet";
 export { Tabs, type TabItem, type TabsProps } from "./Tabs";
 export { Toggle, type ToggleProps } from "./Toggle";
 export { Menu, type MenuItem, type MenuProps } from "./Menu";
+export { ToastHost, showToast, dismissToast, useToast, type ToastItem, type ToastOptions, type ToastTone } from "./Toast";
+export { Guide, type GuideProps } from "./Guide";

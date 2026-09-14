@@ -24,14 +24,20 @@ export const UI_SETTING_DEFAULTS = {
   "ui.deliver.target_seconds": "",
   "ui.deliver.contact_sheet": "true",
   "ui.deliver.jianying_draft": "false",
-  // R11 §1.2 / §3(车道 C):播放器偏好。默认全开,不用进设置页。
+  // R11 §1.2 / §3(车道 C):播放器偏好。R12 §5:点卡片 = 预览(停在最精彩处,不开播),
+  // 「连播」是监视器上的显式开关、默认关 —— 默认开会让新手的选中自己跑走(verify-v1 V-05)。
   "ui.player.start_at_best": "true",
-  "ui.player.auto_advance": "true",
+  "ui.player.auto_advance": "false",
   "ui.player.muted": "false",
   // R11 车道 E:快速导出上次用的文件夹(空串 = 还没选过;首次或目录不可用时弹一次文件夹面板)。
   "ui.export.last_dir": "",
   // R11 简化专项:首启三步引导「看过了」(库里一有素材或点关闭就写 true)。
   "onboarding.steps_seen": "false",
+  // R12 §1:每步首次进入时导航条下方的一条提示,点「知道了」写 true(Rust ONBOARDING_FLAG_KEYS 白名单)。
+  "pipeline.hint_seen.1": "false",
+  "pipeline.hint_seen.2": "false",
+  "pipeline.hint_seen.3": "false",
+  "pipeline.hint_seen.4": "false",
 } as const satisfies Readonly<Record<string, string>>;
 
 export const WORKSPACE_FLAG_KEY = "ui.workspace_v2";

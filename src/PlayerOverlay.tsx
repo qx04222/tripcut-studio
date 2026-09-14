@@ -42,6 +42,12 @@ export function seekSettled(pos: number, target: number, fps: number): boolean {
   return Math.abs(pos - target) <= frame / 2 + 1e-6;
 }
 
+/** R12 §5:一批命令是否以原生逐帧收尾 —— mpv 的 frame-step 也是异步落地,读数要等位置变了再交出去。 */
+export function endsWithFrameStep(commands: readonly PlayerCommand[]): boolean {
+  const last = commands[commands.length - 1];
+  return last?.type === "step_fwd" || last?.type === "step_back";
+}
+
 /** 一批命令里最后一条 seek 的目标;没有 seek 返回 null。 */
 export function lastSeekTarget(commands: readonly PlayerCommand[]): number | null {
   for (let index = commands.length - 1; index >= 0; index -= 1) {
@@ -360,8 +366,9 @@ export function PlayerOverlay({
       settleGeneration.current += 1;
     };
   }, [clip.id]);
-  const settleSeek = useCallback(
-    async (target: number) => {
+  // 按节拍补读,直到 `settled(next)` 成立或超时;超时也把最后一次读到的状态交出去。
+  const settleUntil = useCallback(
+    async (settled: (next: PlayerStatus) => boolean) => {
       const generation = ++settleGeneration.current;
       for (let attempt = 0; attempt < SEEK_SETTLE_MAX_POLLS; attempt += 1) {
         let next: PlayerStatus;
@@ -377,7 +384,7 @@ export function PlayerOverlay({
           return;
         }
         const last = attempt === SEEK_SETTLE_MAX_POLLS - 1;
-        if (next.phase !== "ready" || seekSettled(next.pos, target, fps) || last) {
+        if (next.phase !== "ready" || settled(next) || last) {
           setStatus(next);
           setOpening(next.phase !== "ready");
           return;
@@ -386,11 +393,18 @@ export function PlayerOverlay({
         if (generation !== settleGeneration.current) return;
       }
     },
-    [fps, reportFailure],
+    [reportFailure],
+  );
+  const settleSeek = useCallback((target: number) => settleUntil((next) => seekSettled(next.pos, target, fps)), [fps, settleUntil]);
+  // 原生逐帧之后等位置变了(半帧以上)再交出状态(R12 §5)。
+  const settleStep = useCallback(
+    (before: number | null) => settleUntil((next) => before === null || !seekSettled(next.pos, before, fps)),
+    [fps, settleUntil],
   );
 
   const sendCommands = useCallback(
     async (commands: PlayerCommand[]) => {
+      const before = statusRef.current?.phase === "ready" ? statusRef.current.pos : null;
       try {
         for (const command of commands) await playerCommand(command);
       } catch (reason) {
@@ -398,12 +412,14 @@ export function PlayerOverlay({
         return;
       }
       // 停表期间(暂停)发出的 play 不会被轮询看见 —— 命令之后立刻补读一次,
-      // 让 paused 翻成 false,80ms 的表才重新走起来。带 seek 的一批要等 seek 落地。
+      // 让 paused 翻成 false,80ms 的表才重新走起来。带 seek 的一批要等 seek 落地;
+      // 原生逐帧收尾的一批要等位置变了(R12 §5)。
       const target = lastSeekTarget(commands);
-      if (target === null) await refreshStatus();
-      else await settleSeek(target);
+      if (target !== null) await settleSeek(target);
+      else if (endsWithFrameStep(commands)) await settleStep(before);
+      else await refreshStatus();
     },
-    [refreshStatus, reportFailure, settleSeek],
+    [refreshStatus, reportFailure, settleSeek, settleStep],
   );
 
   useEffect(() => {

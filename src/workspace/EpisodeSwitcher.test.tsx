@@ -105,14 +105,15 @@ describe("EpisodeSwitcher", () => {
     await flush();
     expect(apiMock.getCurrentEpisode.mock.calls.length).toBeGreaterThan(callsAfterMount);
     const dialog = screen.getByRole("dialog", { name: "切换集" });
-    expect(dialog.textContent).toContain("21 素材");
+    expect(dialog.textContent).toContain("21 条素材");
   });
 
-  it("点开 popover 有集列表、「重命名本集」与「封存本集」", async () => {
+  it("点开 popover 有集列表、「重命名本集」与「结束本集」(Y-11:不再叫「封存本集」)", async () => {
     render(<EpisodeSwitcher />);
     await openSwitcher();
     expect(await screen.findByRole("button", { name: "重命名本集" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "封存本集" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "结束本集" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "封存本集" })).toBeNull();
     expect(screen.getByRole("dialog", { name: "切换集" })).toBeTruthy();
     expect(within(screen.getByRole("dialog", { name: "切换集" })).getByText("EP00")).toBeTruthy();
   });
@@ -253,7 +254,7 @@ describe("「重命名本集」表单(R10 U-32:设计系统组件)", () => {
     expect(within(form).getByLabelText("集标题")).toBeTruthy();
     expect(within(form).getByLabelText("集主题")).toBeTruthy();
     expect(within(form).getByRole("combobox", { name: "目标平台" }).closest(".ui-select")).not.toBeNull();
-    const orientation = within(form).getByRole("group", { name: "画布方向" });
+    const orientation = within(form).getByRole("group", { name: "画面方向" });
     expect(within(orientation).getAllByRole("button").map((chip) => chip.textContent)).toEqual(["横屏", "竖屏", "同时"]);
     expect(within(orientation).getByRole("button", { name: "横屏" }).getAttribute("aria-pressed")).toBe("true");
     expect(form.querySelector('input[type="radio"]')).toBeNull();
@@ -265,7 +266,7 @@ describe("「重命名本集」表单(R10 U-32:设计系统组件)", () => {
   it("改方向 chip、改标题后保存:调 renameCurrentEpisode + setEpisodePlatform", async () => {
     const form = await openRename();
     await act(async () => {
-      within(within(form).getByRole("group", { name: "画布方向" })).getByRole("button", { name: "竖屏" }).click();
+      within(within(form).getByRole("group", { name: "画面方向" })).getByRole("button", { name: "竖屏" }).click();
     });
     const title = within(form).getByLabelText("集标题") as HTMLInputElement;
     await act(async () => {

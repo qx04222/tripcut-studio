@@ -79,6 +79,9 @@ describe("P5-F5 settings page redesign", () => {
     expect(appearanceAttributes({ "appearance.theme": "system" }).theme).toBeNull();
     expect(appearanceAttributes({ "appearance.theme": "light" }).theme).toBe("light");
     expect(appearanceAttributes({ "appearance.theme": "dark" }).theme).toBe("dark");
+    // R13 §5:第四档「剪映风格深色」是自己的 data-theme 值,不折成 dark;坏值仍回落跟随系统。
+    expect(appearanceAttributes({ "appearance.theme": "jianying-dark" }).theme).toBe("jianying-dark");
+    expect(appearanceAttributes({ "appearance.theme": "neon" }).theme).toBeNull();
   });
 
   it("renders every settings group and the destructive cache confirmation entry", () => {

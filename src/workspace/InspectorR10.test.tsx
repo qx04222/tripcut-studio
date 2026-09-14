@@ -258,12 +258,12 @@ describe("U-27:「加载中」要有终态", () => {
     await renderReady();
     const summaryOf = (title: string) =>
       Array.from(document.querySelectorAll("summary")).find((node) => node.textContent?.includes(title))!;
-    expect(summaryOf("音轨与 LUT").textContent).toContain("加载中");
+    expect(summaryOf("声音与调色").textContent).toContain("加载中");
     expect(summaryOf("相似镜头").textContent).toContain("加载中");
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, SECTION_LOADING_TIMEOUT_MS + 50));
     });
-    expect(summaryOf("音轨与 LUT").textContent).toContain("未探测");
+    expect(summaryOf("声音与调色").textContent).toContain("未探测");
     expect(summaryOf("相似镜头").textContent).toContain("暂无数据");
   }, 12_000);
 
@@ -276,13 +276,13 @@ describe("U-27:「加载中」要有终态", () => {
       dispatchWorkspace({ type: "select-clip", clipId: 2 });
     });
     await waitFor(() => expect(summaryOf("相似镜头").textContent).toContain("无"));
-    await waitFor(() => expect(summaryOf("音轨与 LUT").textContent).toContain("未探测"));
+    await waitFor(() => expect(summaryOf("声音与调色").textContent).toContain("未探测"));
   });
 
   it("读音轨失败也是终态:上报 0 → 「未探测」", async () => {
     apiMocks.listAudioTracks.mockRejectedValue(new Error("ffprobe 不在"));
     await renderReady();
-    const summary = () => Array.from(document.querySelectorAll("summary")).find((node) => node.textContent?.includes("音轨与 LUT"))!;
+    const summary = () => Array.from(document.querySelectorAll("summary")).find((node) => node.textContent?.includes("声音与调色"))!;
     await waitFor(() => expect(summary().textContent).toContain("未探测"));
   });
 });
@@ -299,12 +299,12 @@ describe("U-28:LUT 下拉有「添加 LUT…」", () => {
     apiMocks.importLut.mockResolvedValue(["/luts/teal.cube", "/luts/Teal-Orange.cube"]);
     await renderReady();
     await revealQuietSections();
-    const selects = await screen.findAllByRole("combobox", { name: "选择显示 LUT" });
+    const selects = await screen.findAllByRole("combobox", { name: "选择预览调色" });
     const select = selects[selects.length - 1] as HTMLSelectElement;
     fireEvent.change(select, { target: { value: ADD_LUT_OPTION } });
     await waitFor(() => expect(apiMocks.importLut).toHaveBeenCalledWith("/Users/x/Downloads/Teal-Orange.cube"));
     await waitFor(() =>
-      expect(Array.from(select.options).map((option) => option.textContent)).toEqual(["无", "teal.cube", "Teal-Orange.cube", "添加 LUT…"]),
+      expect(Array.from(select.options).map((option) => option.textContent)).toEqual(["无", "teal.cube", "Teal-Orange.cube", "添加调色文件…"]),
     );
     expect(apiMocks.setDisplayLut).not.toHaveBeenCalled();
     expect(screen.queryByText(/luts\//)).toBeNull();
@@ -315,10 +315,10 @@ describe("U-28:LUT 下拉有「添加 LUT…」", () => {
     apiMocks.importLut.mockRejectedValue(new Error("luts/ 里已有同名但内容不同的 teal.cube"));
     await renderReady();
     await revealQuietSections();
-    const selects = await screen.findAllByRole("combobox", { name: "选择显示 LUT" });
+    const selects = await screen.findAllByRole("combobox", { name: "选择预览调色" });
     const select = selects[selects.length - 1] as HTMLSelectElement;
     fireEvent.change(select, { target: { value: ADD_LUT_OPTION } });
-    expect((await screen.findByText(/同名但内容不同/)).textContent).toContain("添加 LUT 失败");
+    expect((await screen.findByText(/同名但内容不同/)).textContent).toContain("添加调色文件没成功");
     expect(screen.getByRole("button", { name: "已放好，刷新列表" })).toBeTruthy();
   });
 
@@ -326,9 +326,9 @@ describe("U-28:LUT 下拉有「添加 LUT…」", () => {
     apiMocks.pickLutFile.mockResolvedValue(null);
     await renderReady();
     await revealQuietSections();
-    const selects = await screen.findAllByRole("combobox", { name: "选择显示 LUT" });
+    const selects = await screen.findAllByRole("combobox", { name: "选择预览调色" });
     const select = selects[selects.length - 1] as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.textContent)).toEqual(["无", "teal.cube", "添加 LUT…"]);
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual(["无", "teal.cube", "添加调色文件…"]);
     const callsBefore = apiMocks.listDisplayLuts.mock.calls.length;
     fireEvent.change(select, { target: { value: ADD_LUT_OPTION } });
     expect(apiMocks.setDisplayLut).not.toHaveBeenCalled();
@@ -370,12 +370,12 @@ describe("R11 简化专项 #4:没东西可看的折叠段收进「更多信息�
   it("八维待判定、相似镜头无、音轨未探测 → 三段标成安静、默认藏起;技术检查与 AI 描述照常;点「更多信息」展开", async () => {
     apiMocks.listAudioTracks.mockRejectedValue(new Error("ffprobe 不在"));
     await renderReady();
-    await waitFor(() => expect(summaryOf("音轨与 LUT").textContent).toContain("未探测"));
+    await waitFor(() => expect(summaryOf("声音与调色").textContent).toContain("未探测"));
     await waitFor(() => expect(summaryOf("相似镜头").textContent).toContain("无"));
     const toggle = screen.getByRole("button", { name: /更多信息/ });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(toggle.textContent).toContain("3 项暂无内容");
-    for (const title of ["八维评分", "音轨与 LUT", "相似镜头"]) {
+    for (const title of ["画面评分", "声音与调色", "相似镜头"]) {
       expect(slotOf(title).className).toContain("is-quiet");
       expect(slotOf(title).hidden).toBe(true);
     }
@@ -385,11 +385,11 @@ describe("R11 简化专项 #4:没东西可看的折叠段收进「更多信息�
     }
     // DOM 顺序不变:五段仍按 技术检查 / 八维 / AI / 音轨 / 相似 排,安静的只是 hidden + order。
     expect(Array.from(document.querySelectorAll(".inspector-collapsible-slot summary")).map((node) => node.textContent?.slice(0, 4))).toEqual([
-      "技术检查", "八维评分", "AI 描", "音轨与 ", "相似镜头",
+      "技术检查", "画面评分", "AI 描", "声音与调", "相似镜头",
     ]);
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    for (const title of ["八维评分", "音轨与 LUT", "相似镜头"]) expect(slotOf(title).hidden).toBe(false);
+    for (const title of ["画面评分", "声音与调色", "相似镜头"]) expect(slotOf(title).hidden).toBe(false);
   });
 
   it("有内容的段不算安静:相似镜头有 1 组时照常显示,只有八维与音轨收进去", async () => {
@@ -399,10 +399,10 @@ describe("R11 简化专项 #4:没东西可看的折叠段收进「更多信息�
     apiMocks.listAudioTracks.mockRejectedValue(new Error("ffprobe 不在"));
     await renderReady();
     await waitFor(() => expect(summaryOf("相似镜头").textContent).toContain("1 组"));
-    await waitFor(() => expect(summaryOf("音轨与 LUT").textContent).toContain("未探测"));
+    await waitFor(() => expect(summaryOf("声音与调色").textContent).toContain("未探测"));
     expect(slotOf("相似镜头").hidden).toBe(false);
-    expect(slotOf("八维评分").hidden).toBe(true);
-    expect(slotOf("音轨与 LUT").hidden).toBe(true);
+    expect(slotOf("画面评分").hidden).toBe(true);
+    expect(slotOf("声音与调色").hidden).toBe(true);
     expect(screen.getByRole("button", { name: /更多信息/ }).textContent).toContain("2 项暂无内容");
   });
 });

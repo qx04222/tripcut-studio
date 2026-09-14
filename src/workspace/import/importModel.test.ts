@@ -27,7 +27,7 @@ describe("importModel", () => {
     expect(batchStatusLabel("cancelled")).toEqual({ label: "已停止", tone: "neutral" });
     expect(batchStatusLabel("scanning")).toEqual({ label: "正在扫描", tone: "accent" });
     expect(batchStatusLabel("failed")).toEqual({ label: "扫描未完成，可重试", tone: "danger" });
-    expect(batchStatusLabel("completed")).toEqual({ label: "索引完成", tone: "neutral" });
+    expect(batchStatusLabel("completed")).toEqual({ label: "登记完成", tone: "neutral" });
     expect(batchStatusLabel("queued")).toEqual({ label: "等待处理", tone: "neutral" });
     // 真实状态集见 import_control.rs::list_batches;旧 fixture 的 done / running 别名也要落到同一文案。
     expect(batchStatusLabel("done")).toEqual(batchStatusLabel("completed"));
@@ -68,18 +68,18 @@ describe("R10 U-08:三段式流水线", () => {
   const quality = { done: 10, running: 4, failed: 0, waiting: 7 };
   const motion = { done: 0, running: 0, failed: 0, waiting: 21 };
 
-  it("索引按 ImportProgress、画质 / 运镜按可用素材数,各自百分比", () => {
+  it("登记按 ImportProgress、画质 / 运镜按可用素材数,各自百分比", () => {
     const segments = pipelineSegments(progress({}), 21, quality, motion);
     expect(segments.map((s) => [s.label, s.done, s.total, s.percent])).toEqual([
-      ["索引", 21, 21, 100], ["画质分析", 10, 21, 48], ["运镜分析", 0, 21, 0],
+      ["登记", 21, 21, 100], ["画质分析", 10, 21, 48], ["运镜分析", 0, 21, 0],
     ]);
-    expect(pipelineHeadline(segments)).toBe("索引完成，分析进行中");
+    expect(pipelineHeadline(segments)).toBe("登记完成，分析进行中");
   });
-  it("标题四态:没有素材 / 正在索引 / 分析进行中 / 全部完成", () => {
+  it("标题四态:没有素材 / 正在登记 / 分析进行中 / 全部完成", () => {
     expect(pipelineHeadline(pipelineSegments(progress({ total: 0, done: 0 }), 0, motion, motion))).toBe("还没有素材");
-    expect(pipelineHeadline(pipelineSegments(progress({ done: 10, running: 2 }), 10, quality, motion))).toBe("正在索引 48%");
+    expect(pipelineHeadline(pipelineSegments(progress({ done: 10, running: 2 }), 10, quality, motion))).toBe("正在登记 48%");
     const all = { done: 21, running: 0, failed: 0, waiting: 0 };
-    expect(pipelineHeadline(pipelineSegments(progress({}), 21, all, all))).toBe("索引与分析全部完成");
+    expect(pipelineHeadline(pipelineSegments(progress({}), 21, all, all))).toBe("登记与分析全部完成");
   });
   it("decodeQueueHint:内存暂停优先;许可排队只在还有任务在跑 / 在等时显示;不再输出「等待解码许可」", () => {
     const busy = pipelineSegments(progress({ waiting_for_permit: 38 }), 21, quality, motion);

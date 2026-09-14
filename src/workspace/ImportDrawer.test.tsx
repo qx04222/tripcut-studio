@@ -132,7 +132,7 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     await openImportDrawer();
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
     expect(within(dialog).getByRole("button", { name: "添加素材文件夹" }).className).toContain("ui-button--primary");
-    expect(within(dialog).getByText("只建立索引，不复制或改写原片")).toBeTruthy();
+    expect(within(dialog).getByText("只登记素材位置,不复制或改写原片")).toBeTruthy();
     // R10 U-07 起路径拆成头 / 尾两段做中间省略,整条路径在 aria-label 上。
     expect(await within(dialog).findByLabelText("/Volumes/TRIP_2026")).toBeTruthy();
     expect(within(dialog).getByText("上次同步 2026-09-11 08:00")).toBeTruthy();
@@ -199,9 +199,9 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     render(<WorkspaceShell />);
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
     expect(await within(dialog).findByText("已处理 59 / 60")).toBeTruthy();
-    for (const stage of ["索引", "画质分析", "运镜分析"]) expect(within(dialog).getByText(stage)).toBeTruthy();
+    for (const stage of ["登记", "画质分析", "运镜分析"]) expect(within(dialog).getByText(stage)).toBeTruthy();
     // R10 U-08 起三段各有自己的进度条,索引那条按名字找。
-    expect(within(dialog).getByRole("progressbar", { name: "索引进度" }).getAttribute("aria-valuenow")).toBe("59");
+    expect(within(dialog).getByRole("progressbar", { name: "登记进度" }).getAttribute("aria-valuenow")).toBe("59");
     expect(within(dialog).getByText("2026-08-12")).toBeTruthy();
     // Badge 的文字在内层 label span 里,角标 class 挂在外层。
     expect(within(dialog).getByText("正在扫描").closest(".ui-badge")?.className).toContain("ui-badge");
@@ -328,7 +328,7 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
       await Promise.resolve();
     });
     expect(within(list).getByRole("tab", { name: "任务", selected: true })).toBeTruthy();
-    expect(await screen.findByText("索引进度")).toBeTruthy();
+    expect(await screen.findByText("导入进度")).toBeTruthy();
   });
 });
 

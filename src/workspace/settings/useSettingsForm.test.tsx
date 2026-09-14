@@ -240,7 +240,7 @@ describe("R10 U-34:云端补镜空 Key 与无 Key 启用都要有反馈", () => 
     const { result } = renderHook(useSettingsForm);
     await act(async () => { await result.current.saveMinimaxKey(); });
     expect(apiMock.setMinimaxKey).not.toHaveBeenCalled();
-    expect(result.current.minimaxKeyNotice).toBe("请先粘贴 MiniMax API Key，再保存。");
+    expect(result.current.minimaxKeyNotice).toBe("请先粘贴 MiniMax 密钥，再保存。");
     act(() => result.current.setMinimaxKeyDraft("   "));
     await act(async () => { await result.current.saveMinimaxKey(); });
     expect(apiMock.setMinimaxKey).not.toHaveBeenCalled();
@@ -250,7 +250,7 @@ describe("R10 U-34:云端补镜空 Key 与无 Key 启用都要有反馈", () => 
     await waitFor(() => expect(result.current.settingsLoaded).toBe(true));
     await act(async () => { await result.current.saveMinimaxEnabled(true); });
     expect(apiMock.setSetting).toHaveBeenCalledWith("minimax_enabled", "true");
-    expect(result.current.minimaxKeyNotice).toContain("还没有 API Key");
+    expect(result.current.minimaxKeyNotice).toContain("还没有密钥");
     await act(async () => { await result.current.saveMinimaxEnabled(false); });
     expect(result.current.minimaxKeyNotice).toBeNull();
   });

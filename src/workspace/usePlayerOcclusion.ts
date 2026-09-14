@@ -1,7 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { playerSetOccluded } from "../api";
-import { isAnyModalOpen, subscribeModalStack } from "./modalStack";
+import { isPlayerOccluded, popOccluder, pushOccluder, subscribeModalStack } from "./modalStack";
 
 /** 解除遮挡后广播给 PlayerOverlay:把区域矩形重新提交一次,原生视图与 DOM 井对齐。 */
 export const PLAYER_VIEWPORT_REFRESH_EVENT = "tripcut:player-viewport-refresh";
@@ -21,7 +21,7 @@ export function usePlayerOcclusion(): void {
   useEffect(() => {
     let sent: boolean | null = null;
     const sync = () => {
-      const occluded = isAnyModalOpen();
+      const occluded = isPlayerOccluded();
       if (occluded === sent) return;
       sent = occluded;
       void playerSetOccluded(occluded)
@@ -38,4 +38,18 @@ export function usePlayerOcclusion(): void {
       if (sent) void playerSetOccluded(false).catch(() => undefined);
     };
   }, []);
+}
+
+/**
+ * 非模态覆盖物(首页、引导气泡)挂在监视器上方时登记为遮挡者(R13 真机 Y-01/Y-02):
+ * `active` 为真期间原生视频视图藏起来,变假 / 卸载时撤掉。不进模态栈,Esc 语义不变。
+ */
+export function useOccludesPlayer(active = true): void {
+  const token = useRef({});
+  useEffect(() => {
+    if (!active) return;
+    const current = token.current;
+    pushOccluder(current);
+    return () => popOccluder(current);
+  }, [active]);
 }

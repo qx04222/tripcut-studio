@@ -68,7 +68,7 @@ describe("EpisodePanel", () => {
     const toggle = container.querySelector<HTMLButtonElement>(".episode-current");
     await act(async () => toggle?.click());
     expect(container.textContent).toContain("EP01");
-    expect(container.textContent).toContain("已封存 2026-08-30");
+    expect(container.textContent).toContain("已结束 2026-08-30");
   });
 
   it("refreshes counts when the library changes", async () => {
@@ -96,20 +96,20 @@ describe("EpisodePanel", () => {
     await act(async () => root.render(<EpisodePanel />));
     const toggle = container.querySelector<HTMLButtonElement>(".episode-current");
     await act(async () => toggle?.click());
-    const archiveButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "封存本集");
+    const archiveButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "结束本集");
     await act(async () => archiveButton?.click());
     expect(apiMock.archiveCurrentEpisode).not.toHaveBeenCalled();
     expect(container.textContent).toContain("再次点击确认");
-    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("确认封存"));
+    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("确认结束"));
     await act(async () => confirm?.click());
     expect(apiMock.archiveCurrentEpisode).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("已封存");
+    expect(container.textContent).toContain("已结束");
   });
 
   it("archive dialog preselects the current episode's platform/orientation and passes the chosen ones", async () => {
     await act(async () => root.render(<EpisodePanel />));
     await act(async () => container.querySelector<HTMLButtonElement>(".episode-current")?.click());
-    const archiveButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "封存本集");
+    const archiveButton = [...container.querySelectorAll("button")].find((b) => b.textContent === "结束本集");
     await act(async () => archiveButton?.click());
 
     const platformSelect = container.querySelector<HTMLSelectElement>(
@@ -134,7 +134,7 @@ describe("EpisodePanel", () => {
       landscapeRadio?.click();
     });
 
-    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("确认封存"));
+    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("确认结束"));
     await act(async () => {
       confirm?.click();
       await Promise.resolve();
@@ -150,7 +150,7 @@ describe("EpisodePanel", () => {
     await act(async () => container.querySelector<HTMLButtonElement>(".episode-current")?.click());
 
     const archiveButton = [...container.querySelectorAll("button")]
-      .find((button) => button.textContent === "空集无需封存") as HTMLButtonElement | undefined;
+      .find((button) => button.textContent === "这一集还没有素材") as HTMLButtonElement | undefined;
     expect(archiveButton?.disabled).toBe(true);
     expect(container.textContent).toContain("请先导入素材");
     expect(apiMock.archiveCurrentEpisode).not.toHaveBeenCalled();
@@ -227,10 +227,10 @@ describe("EpisodePanel", () => {
     await act(async () => root.render(<EpisodePanel />));
     await act(async () => container.querySelector<HTMLButtonElement>(".episode-current")?.click());
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "封存本集")?.click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "结束本集")?.click();
     });
     await act(async () => {
-      [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("确认封存"))?.click();
+      [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("确认结束"))?.click();
       await Promise.resolve();
       await Promise.resolve();
     });

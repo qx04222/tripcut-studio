@@ -4,7 +4,8 @@ import { Button, Card, Icon } from "../ui";
 import { STAGE_LABELS, formatDuration, isExportActive } from "./deliverModel";
 import { DeliverProgressCard } from "./DeliverProgressCard";
 import { DeliverItemList } from "./DeliverProgressCard";
-import { folderDisplayName, quickDoneLine, quickLeadLine, selectionCount } from "./quickExportModel";
+import { failedClipIds, folderDisplayName, quickDoneLine, quickLeadLine, selectionCount } from "./quickExportModel";
+import { MissingSourcesNotice } from "./MissingSourcesNotice";
 import type { QuickExport } from "./useQuickExport";
 
 export interface QuickExportPanelProps {
@@ -44,6 +45,11 @@ export function QuickExportPanel({ quick, status }: QuickExportPanelProps): JSX.
           <Button variant="secondary" size="sm" icon="deliver" onClick={() => void quick.reveal()}>
             在 Finder 中显示
           </Button>
+          {failedClipIds(status).length > 0 ? (
+            <Button variant="primary" size="sm" busy={quick.busy} onClick={() => void quick.retryFailed()}>
+              只重试失败的
+            </Button>
+          ) : null}
           <DeliverItemList items={status.items.filter((item) => item.status === "failed")} />
         </Card>
       </section>
@@ -65,6 +71,11 @@ export function QuickExportPanel({ quick, status }: QuickExportPanelProps): JSX.
               </p>
             ) : null}
           </div>
+          {failedClipIds(status).length > 0 ? (
+            <Button variant="primary" size="sm" busy={quick.busy} onClick={() => void quick.retryFailed()}>
+              只重试失败的
+            </Button>
+          ) : null}
         </Card>
       </section>
     );
@@ -74,8 +85,8 @@ export function QuickExportPanel({ quick, status }: QuickExportPanelProps): JSX.
     return (
       <section className="quick-export" aria-label="快速导出">
         <Card className="quick-export-empty" padding={4}>
-          <p className="quick-export-empty-title">还没有可导出的片段</p>
-          <p className="quick-export-empty-body">在播放器打上入出点后点「保存片段」，或在媒体池按 F 收藏整条素材，再回来导出。</p>
+          <p className="quick-export-empty-title">第 ② 步还没做:先挑几段</p>
+          <p className="quick-export-empty-body">在媒体池按 F 收藏或点顶栏「下一步:自动挑选」;也可以在监视器打上入出点后点「保存片段」,再回来导出。</p>
         </Card>
       </section>
     );
@@ -92,9 +103,10 @@ export function QuickExportPanel({ quick, status }: QuickExportPanelProps): JSX.
           </Button>
         </p>
       ) : null}
+      <MissingSourcesNotice missing={quick.plan?.missing} />
       <Card className="quick-export-list-card" padding={4}>
         <p className="quick-export-summary">
-          {status.selected_segment_count} 段精选片段 · {status.selected_whole_count} 条整条收藏 · 共 {formatDuration(status.total_duration_seconds)}
+          {status.selected_segment_count} 段精选片段 · {status.selected_whole_count} 条收藏的整条视频 · 共 {formatDuration(status.total_duration_seconds)}
         </p>
         {quick.plan ? (
           <ul className="quick-export-list" aria-label="将导出的文件">
@@ -120,7 +132,11 @@ export interface QuickExportFooterProps {
   onClose(): void;
 }
 
-/** 快速模式页脚:一句状态 + 「更改文件夹…」(ghost)+ 主按钮「导出」(AX 名「导出到上次文件夹」)。 */
+/**
+ * 快速模式页脚:一句状态 + 「更改文件夹…」(ghost)+ 主按钮「导出」。
+ * Y-08:还没记过文件夹时按钮(可见文字与 AX 名)都是「导出…」,记过之后才叫「导出到上次文件夹」——
+ * 第一次导出正文说「会让你选一个文件夹」,按钮却叫「导出到上次文件夹」是自相矛盾。
+ */
 export function QuickExportFooter({ quick, status, onClose }: QuickExportFooterProps): JSX.Element {
   const active = isExportActive(status);
   const processed = status.completed_items + status.failed_items;
@@ -155,7 +171,7 @@ export function QuickExportFooter({ quick, status, onClose }: QuickExportFooterP
           icon="deliver"
           busy={quick.busy}
           disabled={!quick.canExport}
-          aria-label="导出到上次文件夹"
+          aria-label={quick.lastDir ? "导出到上次文件夹" : "导出…"}
           title={quick.lastDir ? `导出到 ${quick.lastDir}` : "先选一个文件夹，以后记住"}
           onClick={() => void quick.exportNow()}
         >

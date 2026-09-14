@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
 
+import { BandJianyingButton } from "./BandJianyingButton";
+import { BandTimelineStage } from "./BandTimeRuler";
+import { foldKey } from "./bandGeometry";
+import { useBandTimeline } from "./useBandTimeline";
+
 import {
   DndContext,
   DragOverlay,
@@ -16,21 +21,19 @@ import {
   dismissStoryGap,
   generationAvailability,
   reopenStoryGap,
-  undoAutoSelect,
   type GenerationAvailability,
   type StoryGap,
   type Storyboard,
 } from "../api";
 import { GenerationDialog } from "../GenerationDialog";
 import { BandAccessory, BandTabs, BandViewToggle, MusicRuler } from "./BandAccessory";
-import { BandAutoSelect, autoSelectToast } from "./BandAutoSelect";
+import { BandAutoSelect } from "./BandAutoSelect";
 import { PaneHead } from "./PaneHead";
-import { BandChapterSection, BandToast } from "./BandChapters";
+import { BandChapterSection } from "./BandChapters";
 import { DragGhost, generationDisabledHint } from "./BandSegment";
 import { ShotBandPicker } from "./ShotBandPicker";
 import { bandPickerCandidates } from "./bandTemplateModel";
 import { TakeStrip } from "./BandTakeStrip";
-import { chapterOffsets } from "./bandGeometry";
 import {
   BAND_SEGMENT_PITCH,
   BAND_VIEWPORT_HEIGHT,
@@ -44,22 +47,25 @@ import {
 } from "./shotBandModel";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { planBandReorder, planBandStep, useBandDrag } from "./useBandDrag";
+import { useBandArrange } from "./useBandArrange";
 import { useBandTakes, type BandTakesState } from "./useBandTakes";
 import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { BandEmpty } from "./emptyStates";
 import { failureText } from "./errorText";
+import { Button } from "./ui";
+import { showToast } from "./ui/Toast";
 
 export { BAND_CHAPTER_HEADER_WIDTH, chapterOffsets } from "./bandGeometry";
 export { ratingPatch } from "./useBandTakes";
 
 /** 一个分段的固定宽度(含间距);章节横向偏移按它算,虚拟化窗口才有尺可量。 */
 export const BAND_SEGMENT_WIDTH = BAND_SEGMENT_PITCH;
-/** 提示自动消失的时长。 */
+/** 提示自动消失的时长(R12 起走全局 Toast,这两个数只是它的停留时长)。 */
 export const BAND_TOAST_MS = 4_000;
 /** 「已忽略缺口 · 撤销」的窗口(R10 U-17)。 */
 export const GAP_UNDO_MS = 5_000;
-
+export { arrangeToast, autoSelectPlacedToast, skippedChaptersFrom } from "./useBandArrange";
 export function ShotBand(): JSX.Element {
   const feed = useClipsFeed();
   const bandMode = useWorkspace((state) => state.bandMode);
@@ -77,19 +83,9 @@ export function ShotBand(): JSX.Element {
   const [generationGap, setGenerationGap] = useState<StoryGap | null>(null);
   // 「从媒体池选择…」打开在哪一章上(R10 U-17 / U-18);null = 没开。
   const [picker, setPicker] = useState<BandChapter | null>(null);
-  // 「忽略」缺口后的可撤销提示(R10 U-17):5 秒内点「撤销」调 reopen_story_gap。
-  const [gapToast, setGapToast] = useState<{ gapId: number; text: string } | null>(null);
-  // R11 §1.2:自动挑选的结果 toast(batchId ≥ 0 可「撤销这批」;-1 = 出错,只能关)。
-  const [autoToast, setAutoToast] = useState<{ batchId: string | null; text: string } | null>(null);
-  const onUndoAutoSelect = useCallback(() => {
-    if (autoToast === null || autoToast.batchId === null) return;
-    const { batchId } = autoToast;
-    setAutoToast(null);
-    undoAutoSelect(batchId)
-      .then(() => refreshClipsFeed(true))
-      .catch((error) => setAutoToast({ batchId: null, text: failureText("撤销", error) }));
-  }, [autoToast]);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  // R12 §2 / §3:一键排入、这章够了、回到第 2 步、自动挑选结果 toast(逻辑在 useBandArrange)。
+  const { skipped, onSkipChapter, arranging, onArrange, onBackToSelect, onAutoSelected } = useBandArrange();
 
   useEffect(() => {
     let active = true;
@@ -117,8 +113,8 @@ export function ShotBand(): JSX.Element {
     () =>
       effectiveBoard === null
         ? []
-        : buildBandChapters(effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById),
-    [effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById],
+        : buildBandChapters(effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById, skipped),
+    [effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById, skipped],
   );
   // 按时间 / 仅缺口是纯函数视图;按章节原样返回,不多算一遍。
   const chapters = useMemo(() => applyBandView(allChapters, view, feed.clipsById), [allChapters, view, feed.clipsById]);
@@ -142,7 +138,10 @@ export function ShotBand(): JSX.Element {
   );
   const indexOf = useCallback((key: string) => segments.findIndex((segment) => segment.key === key), [segments]);
 
-  const offsets = useMemo(() => chapterOffsets(chapters), [chapters]);
+  // R13 §4:时间线化 —— 折叠 / 刻度 / 播放头 / 点击定位 / 拖边裁剪(状态在 useBandTimeline,换算在 bandTimeline)。
+  const selectedClipId = selection?.kind === "clip" ? selection.clipId : null;
+  const timeline = useBandTimeline({ chapters, board: effectiveBoard, clipsById: feed.clipsById, selectedClipId, selectClip });
+  const { offsets, folded, trim, seekInSegment } = timeline;
   const activeChapterIndex = useMemo(() => {
     if (scrollLeft !== null) {
       let active = 0;
@@ -206,61 +205,61 @@ export function ShotBand(): JSX.Element {
   // Take 条的状态层在下面才装配(它需要 selectSegment),这里先留一个 ref 给 selectSegment 用。
   const takesRef = useRef<BandTakesState | null>(null);
   const selectSegment = useCallback(
-    (segment: BandSegment) => {
+    (segment: BandSegment, ratio?: number) => {
       if (segment.kind === "slot" && segment.chapterId !== null && segment.slot !== null) {
         selectSlot(segment.chapterId, segment.slot);
       } else if (segment.clipId !== null) {
         selectClip(segment.clipId);
+        // R13 §4:点在镜块几分之几处就定位到本段的那一刻(整条素材 = 素材的那一刻)。
+        if (ratio !== undefined) seekInSegment(segment, ratio);
       }
       takesRef.current?.resetTakes();
       // 单键评级只认「事件目标就是容器本身」(useRatingHotkeys 的既有语义) ——
       // 点完分段把焦点交回带本身,否则点一下之后 F/X/1–5 就全哑了。
       viewportRef.current?.focus();
     },
-    [selectClip, selectSlot],
+    [selectClip, selectSlot, seekInSegment],
   );
 
   const takes = useBandTakes({ selection, selectedClip, selectedStack, clipsById: feed.clipsById, segments, selectedIndex, selectSegment });
   takesRef.current = takes;
 
-  // 提示自己会走:4 秒后消失。之前 `dismissNotice` 根本没人调,一条「已调整顺序」
-  // 会一直挂在带下面,直到下一次拖排把它换掉。
-  const { notice, dismissNotice } = drag;
+  // R12 §3:拖排 / 加入镜头带的提示改走全局 Toast(带「撤销」时给 5 秒),镜头带底部那行小字退役。
+  const { notice, undoable, undo: undoDrag, dismissNotice } = drag;
   useEffect(() => {
     if (notice === null) return;
-    const timer = window.setTimeout(dismissNotice, BAND_TOAST_MS);
-    return () => window.clearTimeout(timer);
-  }, [notice, dismissNotice]);
-
-  useEffect(() => {
-    if (gapToast === null) return;
-    const timer = window.setTimeout(() => setGapToast(null), GAP_UNDO_MS);
-    return () => window.clearTimeout(timer);
-  }, [gapToast]);
+    const failed = notice.includes("没成功");
+    showToast(notice, {
+      tone: failed ? "danger" : undoable ? "success" : "neutral",
+      durationMs: undoable ? GAP_UNDO_MS : BAND_TOAST_MS,
+      action: undoable ? { label: "撤销", onClick: undoDrag } : undefined,
+    });
+    dismissNotice();
+  }, [notice, undoable, undoDrag, dismissNotice]);
 
   const onDismissGap = useCallback((gap: StoryGap) => {
     void dismissStoryGap(gap.id)
       .then(() => {
-        setGapToast({ gapId: gap.id, text: `已忽略缺口「${gap.slot_label_zh}」` });
+        showToast(`已忽略缺口「${gap.slot_label_zh}」`, {
+          durationMs: GAP_UNDO_MS,
+          action: {
+            label: "撤销",
+            onClick: () => {
+              void reopenStoryGap(gap.id)
+                .then(() => refreshClipsFeed(true))
+                .catch((error) => showToast(failureText("撤销", error), { tone: "danger" }));
+            },
+          },
+        });
         return refreshClipsFeed(true);
       })
-      .catch((error) => setGapToast({ gapId: -1, text: failureText("忽略缺口", error) }));
+      .catch((error) => showToast(failureText("忽略缺口", error), { tone: "danger" }));
   }, []);
 
-  const onUndoDismiss = useCallback(() => {
-    if (gapToast === null || gapToast.gapId < 0) return;
-    const { gapId } = gapToast;
-    setGapToast(null);
-    void reopenStoryGap(gapId)
-      .then(() => refreshClipsFeed(true))
-      .catch((error) => setGapToast({ gapId: -1, text: failureText("撤销", error) }));
-  }, [gapToast]);
-
   const closePicker = useCallback(() => setPicker(null), []);
-  const pickerCandidates = useMemo(
-    () => (picker === null ? [] : bandPickerCandidates(feed.clips, board)),
-    [picker, feed.clips, board],
-  );
+  // 候选一直算着(不只在弹层打开时):缺口卡 / 空章卡按它决定主动作是「从挑好的片段里选」还是「回到第 2 步挑几条」。
+  const pickerCandidates = useMemo(() => bandPickerCandidates(feed.clips, board), [feed.clips, board]);
+  const hasCandidates = pickerCandidates.length > 0;
   const { insert } = drag;
   const onPick = useCallback(
     (clipId: number) => {
@@ -280,15 +279,23 @@ export function ShotBand(): JSX.Element {
     <div className="shot-band workspace-pane" aria-label="镜头带" role="region" data-pane="band" tabIndex={-1}>
       <PaneHead title="镜头带" meta={chapters.length > 0 ? `${chapters.length} 章 · ${bandCountLabel(clipTotal, gapTotal)}` : "空"}>
         <BandViewToggle value={view} onChange={setView} />
-        <BandAutoSelect
-          disabled={readOnly}
-          onOutcome={(outcome) => setAutoToast({ batchId: outcome.batch_id, text: autoSelectToast(outcome) })}
-          onError={(text) => setAutoToast({ batchId: null, text })}
-        />
+        <BandAutoSelect disabled={readOnly} onOutcome={onAutoSelected} onError={(text) => showToast(text, { tone: "danger" })} />
+        {/* R12 §2:镜头带唯一的主动作 —— 把挑好的片段按章排进带上。带还是空的时候这个入口
+            由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。 */}
+        {chapters.length > 0 ? (
+          <Button variant="primary" size="sm" className="band-arrange" aria-label="一键排入" busy={arranging} disabled={readOnly} onClick={onArrange}>
+            一键排入
+          </Button>
+        ) : null}
         <BandTabs />
       </PaneHead>
-      {/* 音乐模式的刻度轨在带**上方**,与镜头带共用同一条时间轴(规格 §3.4)。 */}
-      {bandMode === "music" ? <MusicRuler segmentCount={segments.length} scrollLeft={scrollLeft ?? 0} /> : null}
+      {/* R13 §4:刻度 + 视口 + 播放头同在一个 stage 里;音乐模式的刻度轨仍在带上方,与镜头带共用同一条时间轴(规格 §3.4)。 */}
+      <BandTimelineStage
+        timeline={timeline}
+        scrollLeft={scrollLeft ?? 0}
+        ruler={bandMode === "music" ? <MusicRuler segmentCount={segments.length} scrollLeft={scrollLeft ?? 0} /> : chapters.length > 0 ? "time" : null}
+        actions={<BandJianyingButton disabled={readOnly} />}
+      >
       <div
         className="band-viewport"
         ref={viewportRef}
@@ -337,12 +344,19 @@ export function ShotBand(): JSX.Element {
                 onGenerate={setGenerationGap}
                 onDismiss={onDismissGap}
                 onPickFromPool={setPicker}
+                onBackToSelect={onBackToSelect}
+                onSkipChapter={onSkipChapter}
+                hasCandidates={hasCandidates}
+                collapsed={folded.has(foldKey(chapter))}
+                onToggleFold={timeline.toggleFold}
+                trim={trim}
               />
             ))}
           </SortableContext>
           <DragOverlay>{draggingSegment ? <DragGhost segment={draggingSegment} /> : null}</DragOverlay>
         </DndContext>
       </div>
+      </BandTimelineStage>
       {/* 空态放在 grid 外面(WebKit 会把 role=grid 的非 row 子节点从 AX 树剔掉,按钮在里面按名字找不到);
           R11 简化专项 #5:一句话 + 一个按钮。 */}
       {chapters.length === 0 ? (
@@ -361,15 +375,6 @@ export function ShotBand(): JSX.Element {
           activeIndex={takes.takeIndex}
           onPick={(member) => void takes.promoteTake(member)}
         />
-      ) : null}
-      {drag.notice ? (
-        <BandToast notice={drag.notice} undoable={drag.undoable} onDismiss={drag.dismissNotice} onUndo={drag.undo} />
-      ) : null}
-      {gapToast ? (
-        <BandToast notice={gapToast.text} undoable={gapToast.gapId >= 0} onDismiss={() => setGapToast(null)} onUndo={onUndoDismiss} />
-      ) : null}
-      {autoToast ? (
-        <BandToast notice={autoToast.text} undoable={autoToast.batchId !== null} onDismiss={() => setAutoToast(null)} onUndo={onUndoAutoSelect} />
       ) : null}
       {picker ? (
         <ShotBandPicker chapterTitle={picker.chapterId === null ? null : picker.title} candidates={pickerCandidates} busy={drag.busy} onPick={onPick} onClose={closePicker} />

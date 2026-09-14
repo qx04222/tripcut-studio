@@ -186,6 +186,141 @@ pub(crate) fn relink_volume_with(
     Ok(outcome)
 }
 
+/// Z-07:「原片不在原来的位置」的一句话原因(导出拒绝 / 任务失败 / 缺失页都用它,不出现内部词)。
+pub const MISSING_SOURCE_REASON: &str = "原片不在原来的位置(可能拔了卡或移了文件夹)";
+/// Z-07:跟在原因后面的下一步。
+pub const MISSING_SOURCE_NEXT: &str = "去缺失素材页重新定位";
+
+/// 一轮存活检查的结果:查了多少条、新标为缺失多少条、从缺失恢复多少条。
+#[derive(Debug, Default, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct MissingRefresh {
+    pub checked: usize,
+    pub newly_missing: usize,
+    pub restored: usize,
+}
+
+/// Z-07:廉价的存活检查——对每条素材 `stat` 一次绝对路径,不在就写 `missing_since`,
+/// 回来了就清掉。这是 `clips.missing_since` 唯一的生产写入点(此前只有重绑置 NULL),
+/// 缺失素材页、媒体池「缺失」角标与导出预检都读它。`clip_ids` 为 `None` 时查整库。
+pub fn refresh_missing_flags(connection: &Connection, clip_ids: Option<&[i64]>) -> Result<MissingRefresh> {
+    refresh_missing_flags_with(connection, clip_ids, resolve_uuid_mount)
+}
+
+pub(crate) fn refresh_missing_flags_with(
+    connection: &Connection,
+    clip_ids: Option<&[i64]>,
+    mut resolve_mount: impl FnMut(&str) -> Option<PathBuf>,
+) -> Result<MissingRefresh> {
+    struct Row {
+        clip_id: i64,
+        volume_uuid: String,
+        rel_path: String,
+        missing: bool,
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, volume_uuid, rel_path, missing_since IS NOT NULL FROM clips ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(Row {
+            clip_id: row.get(0)?,
+            volume_uuid: row.get(1)?,
+            rel_path: row.get(2)?,
+            missing: row.get::<_, i64>(3)? == 1,
+        })
+    })?;
+    // 外置卷的挂载点按卷只探一次(diskutil 慢),同卷的素材共用。
+    let mut mounts: std::collections::HashMap<String, Option<PathBuf>> = std::collections::HashMap::new();
+    let mut outcome = MissingRefresh::default();
+    for row in rows {
+        let row = row?;
+        if clip_ids.is_some_and(|ids| !ids.contains(&row.clip_id)) {
+            continue;
+        }
+        outcome.checked += 1;
+        let stored = PathBuf::from(&row.rel_path);
+        let present = if stored.is_absolute() {
+            stored.is_file()
+        } else {
+            let mount = mounts
+                .entry(row.volume_uuid.clone())
+                .or_insert_with(|| resolve_mount(&row.volume_uuid));
+            mount.as_ref().is_some_and(|mount| mount.join(&stored).is_file())
+        };
+        match (present, row.missing) {
+            (false, false) => {
+                connection.execute(
+                    "UPDATE clips SET missing_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1 AND missing_since IS NULL",
+                    [row.clip_id],
+                )?;
+                outcome.newly_missing += 1;
+            }
+            (true, true) => {
+                connection.execute(
+                    "UPDATE clips SET missing_since = NULL WHERE id = ?1",
+                    [row.clip_id],
+                )?;
+                outcome.restored += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(outcome)
+}
+
+/// Z-07:同一库 `interval` 内最多真查一次(状态条每 3 秒轮询缺失列表,不能每次都 stat 全库)。
+/// 返回 `None` 表示这次被节流跳过。
+pub fn refresh_missing_flags_throttled(
+    connection: &Connection,
+    interval: std::time::Duration,
+) -> Result<Option<MissingRefresh>> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST_RUN: OnceLock<Mutex<std::collections::HashMap<String, Instant>>> = OnceLock::new();
+    let key = connection.path().unwrap_or("<memory>").to_owned();
+    let last_run = LAST_RUN.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    {
+        let mut guard = last_run.lock().unwrap_or_else(|error| error.into_inner());
+        if guard.get(&key).is_some_and(|at| at.elapsed() < interval) {
+            return Ok(None);
+        }
+        guard.insert(key, Instant::now());
+    }
+    refresh_missing_flags(connection, None).map(Some)
+}
+
+/// Z-07:一组素材里此刻缺失的文件名(先做一轮存活检查再读旗标)。导出预检用:非空就拒绝。
+pub fn missing_file_names(connection: &Connection, clip_ids: &[i64]) -> Result<Vec<String>> {
+    if clip_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    refresh_missing_flags(connection, Some(clip_ids))?;
+    let mut names = Vec::new();
+    for clip_id in clip_ids {
+        let rel_path: Option<String> = connection
+            .query_row(
+                "SELECT rel_path FROM clips WHERE id = ?1 AND missing_since IS NOT NULL",
+                [clip_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(rel_path) = rel_path {
+            names.push(file_name_of(&rel_path));
+        }
+    }
+    Ok(names)
+}
+
+/// 「原片不在原来的位置(可能拔了卡或移了文件夹):A.mov、B.mov;去缺失素材页重新定位」。
+pub fn missing_source_message(names: &[String]) -> String {
+    let listed = if names.len() > 3 {
+        format!("{} 等 {} 条", names[..3].join("、"), names.len())
+    } else {
+        names.join("、")
+    };
+    format!("{MISSING_SOURCE_REASON}:{listed};{MISSING_SOURCE_NEXT}")
+}
+
 #[derive(Debug)]
 struct StoredSource {
     volume_uuid: String,
@@ -248,6 +383,15 @@ fn resolve_and_verify(
         stored_path
     };
     let candidate = candidate.canonicalize().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            // Z-07:文件不在了就顺手记为缺失(缺失页 / 状态条据此亮起),给用户的是一句人话。
+            let _ = connection.execute(
+                "UPDATE clips SET missing_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND missing_since IS NULL",
+                [clip_id],
+            );
+            return CoreError::MediaSource(missing_source_message(&[file_name_of(&source.rel_path)]));
+        }
         CoreError::MediaSource(format!(
             "素材 {clip_id} 当前不可访问（{}）：{error}",
             candidate.display()
@@ -320,6 +464,104 @@ fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::core::{db, import, test_support::TestDirectory};
+
+    fn seed_clip(connection: &Connection, id: i64, path: &Path) {
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path) VALUES (?1, 'fixture', ?2)",
+                rusqlite::params![id, path.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+    }
+
+    fn missing_since(connection: &Connection, id: i64) -> Option<String> {
+        connection
+            .query_row("SELECT missing_since FROM clips WHERE id = ?1", [id], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Z-07:文件夹移走 → 标缺失;移回来 → 清掉。这是 `missing_since` 的唯一生产写入点。
+    #[test]
+    fn refresh_missing_flags_marks_moved_folder_and_clears_when_it_returns() {
+        let directory = TestDirectory::new();
+        let trip = directory.path().join("trip");
+        std::fs::create_dir_all(&trip).unwrap();
+        let clip_a = trip.join("IMG_0830.mov");
+        let clip_b = trip.join("IMG_0831.mov");
+        std::fs::write(&clip_a, b"a").unwrap();
+        std::fs::write(&clip_b, b"b").unwrap();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('fixture')", []).unwrap();
+        seed_clip(&connection, 1, &clip_a);
+        seed_clip(&connection, 2, &clip_b);
+
+        let before = refresh_missing_flags(&connection, None).unwrap();
+        assert_eq!(before, MissingRefresh { checked: 2, newly_missing: 0, restored: 0 });
+        assert!(list_missing_clips(&connection).unwrap().is_empty());
+
+        let moved = directory.path().join("trip-moved");
+        std::fs::rename(&trip, &moved).unwrap();
+        let gone = refresh_missing_flags(&connection, None).unwrap();
+        assert_eq!(gone, MissingRefresh { checked: 2, newly_missing: 2, restored: 0 });
+        assert!(missing_since(&connection, 1).is_some());
+        let listed = list_missing_clips(&connection).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].file_name, "IMG_0830.mov");
+        // 再查一次不重复计数、不改时间戳。
+        let stamp = missing_since(&connection, 1);
+        let again = refresh_missing_flags(&connection, None).unwrap();
+        assert_eq!(again, MissingRefresh { checked: 2, newly_missing: 0, restored: 0 });
+        assert_eq!(missing_since(&connection, 1), stamp);
+
+        std::fs::rename(&moved, &trip).unwrap();
+        let back = refresh_missing_flags(&connection, None).unwrap();
+        assert_eq!(back, MissingRefresh { checked: 2, newly_missing: 0, restored: 2 });
+        assert!(missing_since(&connection, 1).is_none());
+        assert!(list_missing_clips(&connection).unwrap().is_empty());
+    }
+
+    /// Z-07:外置卷解析不到挂载点(拔卡)= 该卷全部缺失;只查给定 id 时别的素材不动。
+    #[test]
+    fn refresh_missing_flags_uses_mount_resolution_and_honours_clip_id_filter() {
+        let directory = TestDirectory::new();
+        let mount = directory.path().join("card");
+        std::fs::create_dir_all(mount.join("DCIM")).unwrap();
+        std::fs::write(mount.join("DCIM/A.MOV"), b"a").unwrap();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('CARD')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path) VALUES (1, 'CARD', 'DCIM/A.MOV'), (2, 'CARD', 'DCIM/B.MOV')",
+                [],
+            )
+            .unwrap();
+        let outcome =
+            refresh_missing_flags_with(&connection, Some(&[1]), |_| Some(mount.clone())).unwrap();
+        assert_eq!(outcome, MissingRefresh { checked: 1, newly_missing: 0, restored: 0 });
+        assert!(missing_since(&connection, 2).is_none(), "未列入 id 的素材不动");
+
+        let unplugged = refresh_missing_flags_with(&connection, None, |_| None).unwrap();
+        assert_eq!(unplugged, MissingRefresh { checked: 2, newly_missing: 2, restored: 0 });
+        let names = missing_file_names(&connection, &[1, 2]).unwrap();
+        assert_eq!(names, vec!["A.MOV".to_owned(), "B.MOV".to_owned()]);
+        let message = missing_source_message(&names);
+        assert!(message.starts_with("原片不在原来的位置(可能拔了卡或移了文件夹):A.MOV、B.MOV"));
+        assert!(message.ends_with("去缺失素材页重新定位"));
+    }
+
+    /// Z-07 / Z-08:导出时解析到不存在的文件 → 人话原因 + 顺手记为缺失。
+    #[test]
+    fn verified_clip_path_reports_plain_reason_and_flags_missing_file() {
+        let directory = TestDirectory::new();
+        let gone = directory.path().join("gone/IMG_0830_早餐.mov");
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('fixture')", []).unwrap();
+        seed_clip(&connection, 1, &gone);
+        let error = verified_clip_path(&connection, 1).unwrap_err().to_string();
+        assert!(error.contains("原片不在原来的位置(可能拔了卡或移了文件夹):IMG_0830_早餐.mov"), "{error}");
+        assert!(!error.contains("os error"), "{error}");
+        assert!(missing_since(&connection, 1).is_some());
+    }
 
     #[test]
     fn external_rebind_rejects_same_name_file_with_wrong_full_hash() {

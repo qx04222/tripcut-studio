@@ -4,6 +4,7 @@ import type { ClipListItem, ShotStack, ShotStackMember } from "../api";
 import { orderedTakes } from "./shotBandModel";
 import { poolDurationLabel } from "./poolModel";
 import { Badge, Button, Card, CoverImage, Icon } from "./ui";
+import { stackGroupLabel, takeLabel } from "./copy";
 
 /** 候选条先露几条;其余折在尾部「还有 n 条」后面(U-26)。 */
 export const POOL_STACK_PREVIEW = 6;
@@ -35,13 +36,13 @@ export function PoolStackStrip({
   const hidden = showAll ? 0 : Math.max(0, takes.length - POOL_STACK_PREVIEW);
   const shown = hidden > 0 ? takes.slice(0, POOL_STACK_PREVIEW) : takes;
   return (
-    <div className="pool-stack-strip" role="group" aria-label={`${stack.scene_name} 的候选`}>
+    <div className="pool-stack-strip" role="group" aria-label={stackGroupLabel(stack.scene_name)}>
       <div className="pool-stack-head">
         <span className="pool-stack-title">
           <Icon name="chevron-down" size={12} />
-          {stack.scene_name} · {takes.length} 条候选
+          {stack.scene_name} · 同一镜头 {takes.length} 条
         </span>
-        <Button variant="ghost" size="sm" aria-label="收起候选" onClick={onClose}>
+        <Button variant="ghost" size="sm" aria-label="收起同一镜头" onClick={onClose}>
           收起
         </Button>
       </div>
@@ -58,7 +59,7 @@ export function PoolStackStrip({
               key={`${member.clip_id}:${member.segment_id ?? "whole"}`}
               className="pool-take-card"
               aria-current={active ? "true" : undefined}
-              aria-label={`Take ${index + 1} · ${name}`}
+              aria-label={takeLabel(index + 1, name)}
               onClick={() => onPick(member)}
             >
               <span className="pool-take-thumb" aria-hidden="true">

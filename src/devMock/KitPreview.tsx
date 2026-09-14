@@ -49,7 +49,7 @@ function ModalsSection(): JSX.Element {
           <p className="kit-muted">抽屉正文:Task 5 换成原生内容。按 Esc、点遮罩或右上「关闭」都能关。</p>
         </div>
       </Drawer>
-      <Drawer open={open === "right"} title="生成交付包" side="right" width="min(720px, 60vw)" onClose={close} actions={<Button variant="primary" size="sm" icon="deliver">生成</Button>}>
+      <Drawer open={open === "right"} title="导出" side="right" width="min(720px, 60vw)" onClose={close} actions={<Button variant="primary" size="sm" icon="deliver">生成</Button>}>
         <div className="kit-modal-body kit-form">
           <Field label="本次交付平台" htmlFor="kit-modal-platform" help="不改本集设置。">
             <Select id="kit-modal-platform" defaultValue="generic">

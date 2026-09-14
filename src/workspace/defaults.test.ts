@@ -8,7 +8,7 @@ vi.mock("../api", () => ({
   getSettings: vi.fn(async () => ({})),
 }));
 
-import { AUTO_SELECT_DEFAULT_SCOPE, AUTO_SELECT_FALLBACK_BUDGET_SECS, AUTO_SELECT_SCOPES, platformBudgetSecs } from "./BandAutoSelect";
+import { AUTO_SELECT_DEFAULT_SCOPE, AUTO_SELECT_FALLBACK_BUDGET_SECS, AUTO_SELECT_SCOPES, defaultScopeFor, platformBudgetSecs } from "./BandAutoSelect";
 import { DEFAULT_EXPORT_MODE } from "./deliver/quickExportModel";
 import { STEPS_SEEN_KEY } from "./onboarding";
 import { UI_SETTING_DEFAULTS, readUiBool } from "./uiSettings";
@@ -18,13 +18,14 @@ import { UI_SETTING_DEFAULTS, readUiBool } from "./uiSettings";
  * 这张表就是默认值的契约 —— 改任何一项都要在这里改,并说明为什么新手需要先去设置页。
  */
 describe("开包即用的默认值表", () => {
-  it("播放器:选中从最精彩处开播、播完自动播下一条,默认开;不静音", () => {
+  it("播放器:选中预览停在最精彩处,默认开;「连播」默认关(R12 §5 / V-05);不静音", () => {
     expect(UI_SETTING_DEFAULTS["ui.player.start_at_best"]).toBe("true");
-    expect(UI_SETTING_DEFAULTS["ui.player.auto_advance"]).toBe("true");
+    // R12 §5:点卡片 = 预览,不自动开播;播完自动下一条改成监视器上的「连播」开关,默认关。
+    expect(UI_SETTING_DEFAULTS["ui.player.auto_advance"]).toBe("false");
     expect(UI_SETTING_DEFAULTS["ui.player.muted"]).toBe("false");
-    // 没写过任何设置(空表)也是开的 —— 不用先去设置页。
+    // 没写过任何设置(空表)也是这样 —— 不用先去设置页。
     expect(readUiBool({}, "ui.player.start_at_best")).toBe(true);
-    expect(readUiBool({}, "ui.player.auto_advance")).toBe(true);
+    expect(readUiBool({}, "ui.player.auto_advance")).toBe(false);
   });
 
   it("交付抽屉:默认快速导出", () => {
@@ -39,6 +40,9 @@ describe("开包即用的默认值表", () => {
     expect(AUTO_SELECT_SCOPES.map((item) => item.scope)).toEqual(["favorites", "favorites_or_rated3", "all"]);
     expect(await platformBudgetSecs()).toBe(45);
     expect(AUTO_SELECT_FALLBACK_BUDGET_SECS).toBe(30);
+    // X-01:全新库(0 收藏、0 打星)预选「全部素材」——什么都没做也能一键出结果。
+    expect(defaultScopeFor([])).toBe("all");
+    expect(defaultScopeFor([{ binary_rating: 1, star_rating: null }])).toBe(AUTO_SELECT_DEFAULT_SCOPE);
   });
 
   it("首启:三步引导默认未看过(第一次打开就出现);新壳默认开", () => {

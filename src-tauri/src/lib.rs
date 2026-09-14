@@ -27,7 +27,7 @@ use crate::core::doctor::DoctorReport;
 use crate::core::error::{CoreError, Result};
 use crate::core::generation_settings::{GenerationAvailability, GenerationLedgerSummary};
 use crate::core::import::{ClipListItem, ImportProgress, ImportStart};
-use crate::core::jianying::{JianyingAvailability, JianyingDraftResult};
+use crate::core::jianying::{HumanCheck, JianyingAvailability, JianyingDraftResult};
 use crate::core::llm::{
     AiDescriptionResult, DirectorAnswerResult, DirectorContext, LlmLedgerEntry, LlmStatus,
 };
@@ -363,11 +363,13 @@ fn undo_narrative_op(
 }
 
 #[tauri::command]
+/// Z-14:`episode_id` 是新增的可选参数(只读查看已封存集时传被查看的集);不传 = 当前集。
 fn list_story_gaps(
+    episode_id: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<Vec<core::story_gap::StoryGap>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    core::story_gap::list(&connection).map_err(|error| error.to_string())
+    core::story_gap::list_for(&connection, episode_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -447,6 +449,10 @@ fn rescan_watched_folders(
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<core::import::RescanOutcome, String> {
     let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    // Z-07:手动「立即扫描」顺带做一轮原片存活检查(移走 / 拔卡的素材从这里进缺失页)。
+    if let Err(error) = core::media_source::refresh_missing_flags(&connection, None) {
+        tracing::warn!(%error, "missing-source refresh during manual rescan failed");
+    }
     core::import::rescan_watched_folders(&mut connection).map_err(|error| error.to_string())
 }
 
@@ -918,8 +924,8 @@ async fn pick_relink_folder() -> std::result::Result<Option<String>, String> {
 #[tauri::command]
 async fn pick_whisper_model_file() -> std::result::Result<Option<String>, String> {
     Ok(rfd::AsyncFileDialog::new()
-        .set_title("选择 Whisper ggml 模型文件")
-        .add_filter("ggml 模型", &["bin"])
+        .set_title("选择转写模型文件")
+        .add_filter("转写模型", &["bin"])
         .pick_file()
         .await
         .map(|file| file.path().to_string_lossy().into_owned()))
@@ -936,10 +942,12 @@ async fn pick_lut_file() -> std::result::Result<Option<String>, String> {
         .map(|file| file.path().to_string_lossy().into_owned()))
 }
 
+/// 交付包 / 快速导出共用的文件夹面板。`title` 由调用方按模式给(R13 真机 Y-08:快速导出
+/// 传「选择导出文件夹」);不传仍是交付包那句,旧调用方一字不动。
 #[tauri::command]
-async fn pick_export_folder() -> std::result::Result<Option<String>, String> {
+async fn pick_export_folder(title: Option<String>) -> std::result::Result<Option<String>, String> {
     Ok(rfd::AsyncFileDialog::new()
-        .set_title("选择交付包保存位置")
+        .set_title(title.as_deref().unwrap_or("选择交付包保存位置"))
         .pick_folder()
         .await
         .map(|folder| folder.path().to_string_lossy().into_owned()))
@@ -1123,6 +1131,15 @@ fn list_missing_clips(
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<Vec<core::media_source::MissingClip>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    // Z-07:状态条每 3 秒问一次;每分钟最多真 stat 一轮,拔卡 / 移文件夹一分钟内会被发现。
+    if !state.read_only {
+        if let Err(error) = core::media_source::refresh_missing_flags_throttled(
+            &connection,
+            std::time::Duration::from_secs(60),
+        ) {
+            tracing::warn!(%error, "throttled missing-source refresh failed");
+        }
+    }
     core::media_source::list_missing_clips(&connection).map_err(|error| error.to_string())
 }
 
@@ -1419,6 +1436,38 @@ fn undo_auto_select(
     core::smart_select::undo_auto_select(&mut connection, &batch_id).map_err(|error| error.to_string())
 }
 
+/// R12 车道 B:「一键排入」—— 本集全部精选段按章写进镜头带;`mode` 不传 = append。
+#[tauri::command]
+fn arrange_selected_segments(
+    mode: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::arrange::ArrangeOutcome, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let mode = core::arrange::ArrangeMode::parse(mode.as_deref()).map_err(|error| error.to_string())?;
+    core::arrange::arrange_selected_segments(&mut connection, mode).map_err(|error| error.to_string())
+}
+
+/// 只撤一批排入,返回撤掉的行数。
+#[tauri::command]
+fn undo_arrange(
+    batch_id: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<usize, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::arrange::undo_arrange(&mut connection, &batch_id).map_err(|error| error.to_string())
+}
+
+/// 「这章够了」:把一章标成跳过(不算缺口)/ 取消。
+#[tauri::command]
+fn skip_chapter(
+    chapter_id: i64,
+    skipped: bool,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::arrange::skip_chapter(&connection, chapter_id, skipped).map_err(|error| error.to_string())
+}
+
 /// 状态条「补齐时刻分 n/m」。
 #[tauri::command]
 fn get_moments_progress(
@@ -1531,11 +1580,13 @@ fn set_shot_stack_user_state(
 }
 
 #[tauri::command]
+/// Z-14:`episode_id` 是新增的可选参数(只读查看已封存集时传被查看的集);不传 = 当前集。
 fn get_storyboard(
+    episode_id: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<Storyboard, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    core::story::get_storyboard(&connection).map_err(|error| error.to_string())
+    core::story::get_storyboard_for(&connection, episode_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1908,18 +1959,65 @@ fn reveal_export(
 }
 
 #[tauri::command]
-fn get_jianying_availability() -> JianyingAvailability {
-    core::jianying::availability()
+fn get_jianying_availability(state: tauri::State<'_, RuntimeState>) -> std::result::Result<JianyingAvailability, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    Ok(core::jianying::availability(&connection))
+}
+
+/// R14 §9 A:「可以用」/「打不开」—— 只认待验证名单里的版本,值只认 ok / fail。
+#[tauri::command]
+fn set_jianying_human_check(
+    version: String,
+    verdict: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<JianyingAvailability, String> {
+    let verdict = match HumanCheck::parse(&verdict) {
+        Some(verdict @ (HumanCheck::Ok | HumanCheck::Fail)) => verdict,
+        _ => return Err(format!("验证结果只能是 ok 或 fail,收到 {verdict}")),
+    };
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::jianying::set_human_check(&connection, &version, verdict).map_err(|error| error.to_string())?;
+    Ok(core::jianying::availability(&connection))
+}
+
+/// R13 §5「已生成剪映草稿 · 打开剪映」:前端能让本机打开的应用**只有**剪映专业版。
+/// 这不是一个通用的 `open -b` 出口 —— 白名单之外的 bundle id 一律拒绝,连 `open` 都不会跑。
+const OPEN_APP_ALLOWED_BUNDLES: &[&str] = &["com.lemon.lvpro"];
+
+fn open_app_allowed(bundle_id: &str) -> bool {
+    OPEN_APP_ALLOWED_BUNDLES.contains(&bundle_id)
+}
+
+#[tauri::command]
+fn open_app(bundle_id: String) -> std::result::Result<(), String> {
+    if !open_app_allowed(&bundle_id) {
+        return Err(format!("不允许打开应用 {bundle_id}"));
+    }
+    let status = std::process::Command::new("open")
+        .arg("-b")
+        .arg(&bundle_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| format!("无法启动剪映：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("没找到剪映专业版；可以到剪映首页「本地草稿」里打开".to_owned())
+    }
 }
 
 #[tauri::command]
 async fn generate_jianying_draft(
+    force: Option<bool>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<JianyingDraftResult, String> {
     let db_path = state.db_path.clone();
+    let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = core::db::open_project(&db_path)?;
-        core::jianying::generate_native_draft(&mut connection)
+        core::jianying::generate_native_draft(&mut connection, force)
     })
     .await
     .map_err(|error| format!("剪映草稿任务异常结束：{error}"))?
@@ -2108,6 +2206,20 @@ async fn player_command(
         .map_err(|error| format!("播放器命令任务异常结束：{error}"))?
 }
 
+/// R12 §5 真变速:`player_command` 的 `set_speed` 的直呼版本(前端 `playerSetSpeed`)。
+/// 夹紧在 `player::clamp_playback_speed` 里做,两条入口同一个范围。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn player_set_speed(
+    speed: f64,
+    player: tauri::State<'_, PlayerManager>,
+) -> std::result::Result<(), String> {
+    let player = player.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || player.command(PlayerCommand::SetSpeed { speed }))
+        .await
+        .map_err(|error| format!("播放器变速任务异常结束：{error}"))?
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn player_status(player: tauri::State<'_, PlayerManager>) -> PlayerStatus {
@@ -2183,9 +2295,73 @@ async fn simulate_wake(app: tauri::AppHandle) -> std::result::Result<(), String>
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// R14 车道 B:「剪映素材包」—— 按镜头带顺序把每个镜 remux 成 `NN_<章名>_<素材名>.mp4`,平铺在
+/// `dest_dir/<集名>_剪映素材包_<日期>`(同名 `-2`),附「顺序.txt」。`dest_dir` 缺省时用记住的
+/// `ui.export.last_dir`;没记过 / 用不了时错误文本含 `dest_unavailable`,前端据此弹一次文件夹面板。
+/// 进度走 `get_export_status`(`mode = "kit"`)。
+#[tauri::command]
+async fn export_jianying_kit(
+    dest_dir: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::KitExportOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能导出".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        let dest = match dest_dir.filter(|dir| !dir.trim().is_empty()) {
+            Some(dir) => dir,
+            None => {
+                let remembered = core::settings::string_value(&connection, "ui.export.last_dir", "")?;
+                if remembered.trim().is_empty() {
+                    return Err(core::error::CoreError::Export(format!(
+                        "{}: 还没选过导出文件夹",
+                        core::deliver::QUICK_EXPORT_DEST_UNAVAILABLE
+                    )));
+                }
+                remembered
+            }
+        };
+        core::deliver::start_jianying_kit(&mut connection, &PathBuf::from(dest))
+    })
+    .await
+    .map_err(|error| format!("导出任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+/// R14 车道 B:只算不排——素材包将写的文件夹与按镜头带顺序编号的文件清单(抽屉面板读它)。
+#[tauri::command]
+fn plan_jianying_kit(
+    dest_dir: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::KitExportOutcome, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::deliver::plan_jianying_kit(&connection, dest_dir.as_deref().map(std::path::Path::new))
+        .map_err(|error| error.to_string())
+}
+
 pub fn run() {
     let clean_shutdown_root = Arc::new(Mutex::new(None::<PathBuf>));
     let setup_clean_shutdown_root = clean_shutdown_root.clone();
+    // X-07:SIGTERM / SIGINT 走与 ⌘Q 相同的收尾(清哨兵,再请求应用退出)。必须在起任何线程之前装。
+    let signal_app_handle: Arc<Mutex<Option<tauri::AppHandle>>> = Arc::new(Mutex::new(None));
+    {
+        let root = clean_shutdown_root.clone();
+        let handle = signal_app_handle.clone();
+        if let Err(error) = core::shutdown::watch(move |signal| {
+            if let Err(error) = core::shutdown::finish_session_for_signal(&root, signal) {
+                tracing::warn!(%error, signal, "signal shutdown could not clear clean-shutdown sentinel");
+            }
+            match handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+                Some(app) => app.exit(0),
+                None => std::process::exit(0),
+            }
+        }) {
+            tracing::warn!(%error, "could not install graceful signal handling");
+        }
+    }
+    let setup_signal_app_handle = signal_app_handle.clone();
     let mut context = tauri::generate_context!();
     // QA 用本地 http 端点跑正/负例;生产端点写死在 tauri.conf.json 里。改的是配置本身,
     // 原因见 updater.rs 顶部注释(前端 check() 读的是插件 clone 的那份配置)。
@@ -2212,6 +2388,9 @@ pub fn run() {
         .manage(ProvisioningState::default())
         .setup(move |app| {
             packaging::configure(app);
+            *setup_signal_app_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app.handle().clone());
             let root = development_root()?;
             let db_path = root.join("project.db");
             let cache_root = root.join("cache");
@@ -2288,6 +2467,14 @@ pub fn run() {
                 std::thread::spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_secs(300));
                     if let Ok(mut sync_connection) = core::db::open_project(&sync_db_path) {
+                        // Z-07:每轮同步顺带 stat 一遍原片,移走 / 拔卡的素材进缺失页,回来的自动恢复。
+                        match core::media_source::refresh_missing_flags(&sync_connection, None) {
+                            Ok(outcome) if outcome.newly_missing > 0 || outcome.restored > 0 => {
+                                tracing::info!(?outcome, "missing-source refresh changed flags");
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(%error, "missing-source refresh failed"),
+                        }
                         match core::import::rescan_watched_folders(&mut sync_connection) {
                             Ok(outcome) if outcome.enqueued > 0 => {
                                 tracing::info!(
@@ -2330,6 +2517,17 @@ pub fn run() {
                     {
                         report.record_cache_check_error(&error);
                     }
+                }
+                // Z-07:启动时做一轮原片存活检查(节流键与前端轮询共用,一分钟内不重复)。
+                match core::media_source::refresh_missing_flags_throttled(
+                    &connection,
+                    std::time::Duration::from_secs(60),
+                ) {
+                    Ok(Some(outcome)) if outcome.newly_missing > 0 || outcome.restored > 0 => {
+                        tracing::info!(?outcome, "missing-source refresh at startup changed flags");
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "missing-source refresh at startup failed"),
                 }
                 let metadata_jobs = core::import::enqueue_metadata_backfill(&mut connection)?;
                 if metadata_jobs > 0 {
@@ -2700,6 +2898,9 @@ pub fn run() {
             suggest_segments,
             auto_select_episode,
             undo_auto_select,
+            arrange_selected_segments,
+            undo_arrange,
+            skip_chapter,
             get_moments_progress,
             enqueue_moments_backfill,
             search_transcripts,
@@ -2736,6 +2937,10 @@ pub fn run() {
             reveal_export,
             get_jianying_availability,
             generate_jianying_draft,
+            set_jianying_human_check,
+            open_app,
+            export_jianying_kit,
+            plan_jianying_kit,
             #[cfg(target_os = "macos")]
             player_set_viewport,
             #[cfg(target_os = "macos")]
@@ -2746,6 +2951,8 @@ pub fn run() {
             player_close,
             #[cfg(target_os = "macos")]
             player_command,
+            #[cfg(target_os = "macos")]
+            player_set_speed,
             #[cfg(target_os = "macos")]
             player_status,
             simulate_wake
@@ -2793,6 +3000,25 @@ mod generation_command_guard_tests {
                 "命令 {name} 缺少只读窗口闸"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod open_app_tests {
+    use super::{open_app, open_app_allowed};
+
+    #[test]
+    fn only_jianying_bundle_id_is_allowed() {
+        assert!(open_app_allowed("com.lemon.lvpro"));
+        for other in ["com.apple.Terminal", "com.lemon.lvpro.evil", "", "COM.LEMON.LVPRO", "/Applications/Calculator.app"] {
+            assert!(!open_app_allowed(other), "{other} 不该被放行");
+        }
+    }
+
+    #[test]
+    fn open_app_refuses_before_spawning_anything() {
+        let error = open_app("com.apple.Terminal".to_owned()).unwrap_err();
+        assert!(error.contains("不允许打开应用"), "{error}");
     }
 }
 

@@ -17,9 +17,12 @@ export interface ShotStackWallItem {
   semanticScore?: number;
 }
 
+// R14:「疑似废片」= 曝光/对焦/声音真有问题的角标;「过暗」已退场(夜景不是废片),
+// 换成后端联合判定的「欠曝」,并补上同为画面缺陷的「虚焦」。手持抖动不算废片(可稳定/裁切)。
 const SUSPECT_BADGES = new Set<AnalysisBadgeKind>([
-  "dark",
+  "underexposed",
   "overexposed",
+  "out_of_focus",
   "clipped",
   "soft_focus",
 ]);

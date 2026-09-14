@@ -242,7 +242,7 @@ describe("媒体池 —— 搜索与筛选条", () => {
     expect(screen.queryByText("排除普通疑似废片")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
     expect(screen.getByRole("dialog", { name: "更多筛选" })).toBeTruthy();
-    for (const label of ["八维筛选", "排除普通疑似废片", "只看每组首选", "竖屏"]) {
+    for (const label of ["画面筛选", "排除普通疑似废片", "只看每组首选", "竖屏"]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
   });
@@ -268,7 +268,7 @@ describe("媒体池 —— 搜索与筛选条", () => {
     ]);
     await renderPool();
     fireEvent.click(screen.getByRole("button", { name: "更多筛选" }));
-    fireEvent.change(screen.getByRole("combobox", { name: /八维筛选/ }), {
+    fireEvent.change(screen.getByRole("combobox", { name: /画面筛选/ }), {
       target: { value: "function" },
     });
     await waitFor(() => expect(getWorkspaceSnapshot().dimension).toBe("function"));
@@ -451,14 +451,14 @@ describe("媒体池 —— Stack 展开(U-02 / U-26)", () => {
     apiMocks.listShotStacks.mockResolvedValue([stackOf(7, [1, 2, 3, 4, 5, 6, 7, 8])]);
   });
 
-  it("「8 条候选」角标可点展开候选条;卡片 aria-expanded 跟着变", async () => {
+  it("「同一镜头 8 条」角标可点展开候选条;卡片 aria-expanded 跟着变", async () => {
     await renderPool();
-    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("同一镜头 8 条")).toBeTruthy());
     const card = screen.getByRole("gridcell", { name: /clip-1\.mov/ });
     expect(card.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("group", { name: /登机口 的候选/ })).toBeNull();
-    fireEvent.click(screen.getByText("8 条候选"));
-    expect(await screen.findByRole("group", { name: /登机口 的候选/ })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: /同一镜头 · 登机口/ })).toBeNull();
+    fireEvent.click(screen.getByText("同一镜头 8 条"));
+    expect(await screen.findByRole("group", { name: /同一镜头 · 登机口/ })).toBeTruthy();
     expect(screen.getByRole("gridcell", { name: /clip-1\.mov/ }).getAttribute("aria-expanded")).toBe("true");
     // 点角标不改变选中(选中仍是点击卡片本体的事)。
     expect(getWorkspaceSnapshot().selection).toBeNull();
@@ -466,22 +466,22 @@ describe("媒体池 —— Stack 展开(U-02 / U-26)", () => {
 
   it("焦点在 Stack 卡片上按 Tab 也展开;再按 Tab 收起", async () => {
     await renderPool();
-    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("同一镜头 8 条")).toBeTruthy());
     const card = screen.getByRole("gridcell", { name: /clip-1\.mov/ });
     fireEvent.click(card);
     await waitFor(() => expect(getWorkspaceSnapshot().anchorClipId).toBe(1));
     card.focus();
     expect(fireEvent.keyDown(card, { key: "Tab", code: "Tab" })).toBe(false);
-    expect(await screen.findByRole("group", { name: /登机口 的候选/ })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: /同一镜头 · 登机口/ })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("gridcell", { name: /clip-1\.mov/ }), { key: "Tab", code: "Tab" });
-    await waitFor(() => expect(screen.queryByRole("group", { name: /登机口 的候选/ })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("group", { name: /同一镜头 · 登机口/ })).toBeNull());
   });
 
   it("U-26:候选条先露 6 条,尾部「还有 2 条」点开后全部列出,每条带缩略图", async () => {
     await renderPool();
-    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
-    fireEvent.click(screen.getByText("8 条候选"));
-    const strip = await screen.findByRole("group", { name: /登机口 的候选/ });
+    await waitFor(() => expect(screen.getByText("同一镜头 8 条")).toBeTruthy());
+    fireEvent.click(screen.getByText("同一镜头 8 条"));
+    const strip = await screen.findByRole("group", { name: /同一镜头 · 登机口/ });
     expect(strip.querySelectorAll(".pool-take-card").length).toBe(6);
     expect(strip.querySelectorAll(".pool-take-card img").length).toBe(6);
     fireEvent.click(screen.getByRole("button", { name: "还有 2 条" }));
@@ -491,10 +491,10 @@ describe("媒体池 —— Stack 展开(U-02 / U-26)", () => {
 
   it("点候选条里的一条 → 选中那条素材", async () => {
     await renderPool();
-    await waitFor(() => expect(screen.getByText("8 条候选")).toBeTruthy());
-    fireEvent.click(screen.getByText("8 条候选"));
-    await screen.findByRole("group", { name: /登机口 的候选/ });
-    fireEvent.click(screen.getByRole("button", { name: /Take 3 · clip-3\.mov/ }));
+    await waitFor(() => expect(screen.getByText("同一镜头 8 条")).toBeTruthy());
+    fireEvent.click(screen.getByText("同一镜头 8 条"));
+    await screen.findByRole("group", { name: /同一镜头 · 登机口/ });
+    fireEvent.click(screen.getByRole("button", { name: /第 3 条 · clip-3\.mov/ }));
     await waitFor(() =>
       expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 3 }),
     );
@@ -502,10 +502,11 @@ describe("媒体池 —— Stack 展开(U-02 / U-26)", () => {
 });
 
 describe("媒体池 —— 空态(U-06)", () => {
-  it("库为空:「还没有素材」+ 大号「导入素材」按钮打开导入抽屉", async () => {
+  it("库为空:「第 ① 步:先导入」+ 大号「导入素材」按钮打开导入抽屉", async () => {
     apiMocks.listClips.mockResolvedValue([]);
     render(<MediaPool />);
-    expect(await screen.findByText("还没有素材")).toBeTruthy();
+    // R12 §1 第三条:空态按当前步说话(原「还没有素材」退到正文)。
+    expect(await screen.findByText("第 ① 步:先导入")).toBeTruthy();
     expect(screen.queryByText("没有匹配的素材")).toBeNull();
     // R-07:空态必须在 role=grid 之外 —— WebKit 会把 grid 的非 row 子节点从 AX 树剔掉,按钮按名字找不到。
     const importButton = screen.getByRole("button", { name: "导入第一批素材" });
@@ -524,7 +525,7 @@ describe("媒体池 —— 空态(U-06)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "搜索" }));
     expect(await screen.findByText("没有匹配的素材")).toBeTruthy();
-    expect(screen.queryByText("还没有素材")).toBeNull();
+    expect(screen.queryByText("第 ① 步:先导入")).toBeNull();
     expect(screen.queryByRole("button", { name: "导入第一批素材" })).toBeNull();
     const resetButton = screen.getByRole("button", { name: "清空筛选" });
     expect(resetButton.closest('[role="grid"]')).toBeNull();

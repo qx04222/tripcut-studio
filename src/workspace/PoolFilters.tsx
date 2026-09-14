@@ -10,6 +10,7 @@ import {
 } from "./poolModel";
 import { Button, Chip, Icon } from "./ui";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
+import { DIMENSION_FILTER_LABEL } from "./copy";
 
 /**
  * 媒体池顶部的搜索 + 筛选条(规格 §1.1)。评级筛选折叠成**一行 chips**,
@@ -175,7 +176,7 @@ export function PoolFilters({
           {moreOpen ? (
             <div className="pool-more-popover" role="dialog" aria-label="更多筛选">
               <label className="pool-more-row">
-                <span>八维筛选</span>
+                <span>{DIMENSION_FILTER_LABEL}</span>
                 <select
                   value={dimension}
                   onChange={(event) => {

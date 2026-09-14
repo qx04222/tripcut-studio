@@ -1,0 +1,115 @@
+/*
+ * R13 车道 A:设置 → 「快捷键」分区。只用 styles.css / workspace.css 已有的 token。
+ * 表的气质:像一张键位卡 —— 组名是细小的分栏标题,键帽用 .ui-kbd,冲突行左侧一道警告色细线。
+ */
+.settings-keymap .settings-keymap-preset {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-keymap .settings-keymap-table {
+  width: 100%;
+  margin-top: var(--space-4);
+  border-collapse: collapse;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.settings-keymap .settings-keymap-table thead th {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-hair);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-weight: 500;
+  text-align: left;
+}
+
+.settings-keymap .settings-keymap-group-row th {
+  padding: var(--space-4) var(--space-2) var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: left;
+}
+
+.settings-keymap .settings-keymap-table tbody tr:not(.settings-keymap-group-row) {
+  border-bottom: 1px solid var(--border-hair);
+}
+
+.settings-keymap .settings-keymap-table tbody th[scope="row"],
+.settings-keymap .settings-keymap-table tbody td {
+  padding: var(--space-2);
+  vertical-align: middle;
+  text-align: left;
+}
+
+.settings-keymap .settings-keymap-table tbody th[scope="row"] {
+  width: 44%;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.settings-keymap .settings-keymap-table tbody th[scope="row"] small,
+.settings-keymap .settings-keymap-table td small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.settings-keymap .settings-keymap-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.settings-keymap .settings-keymap-keys {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* 登记但暂不执行的行(分割 / 撤销):整行灰,说明写在动作名下面。 */
+.settings-keymap tr.is-pending th[scope="row"] > span,
+.settings-keymap tr.is-pending .ui-kbd {
+  opacity: 0.55;
+}
+
+/* 撞键的行:左侧一道警告色细线 + 键帽下一行说明。 */
+.settings-keymap tr.is-conflict {
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.settings-keymap .settings-keymap-conflict {
+  color: var(--warning);
+}
+
+/* 录制中的行:强调色底,提醒「现在按的键会被记下来」。 */
+.settings-keymap tr.is-recording {
+  background: var(--accent-tint);
+}
+
+.settings-keymap .settings-keymap-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* R13 §2:每个分区顶部一句「这里管什么」。 */
+.settings-sheet .settings-sheet-intro {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-tint);
+  border-radius: 0 8px 8px 0;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}

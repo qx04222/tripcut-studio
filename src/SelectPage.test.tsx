@@ -292,13 +292,14 @@ describe("selection workbench", () => {
   });
 
   it("excludes only the calibrated suspected-waste badge set", () => {
+    // R14:疑似废片看后端联合判定的欠曝占比,不看平均亮度(夜景平均亮度也低)。
     const dark = clip(1);
     dark.analysis_status = "done";
     dark.analysis = {
       clip_id: 1,
       exposure_yavg: 20,
       overexposed_ratio: 0,
-      underexposed_ratio: 0,
+      underexposed_ratio: 0.3,
       dynamic_range: 100,
       blur_mean: 4,
       entropy_mean: 6,
@@ -314,7 +315,7 @@ describe("selection workbench", () => {
     };
     const silent = clip(2);
     silent.analysis_status = "done";
-    silent.analysis = { ...dark.analysis, clip_id: 2, exposure_yavg: 80, has_audio: false };
+    silent.analysis = { ...dark.analysis, clip_id: 2, exposure_yavg: 80, underexposed_ratio: 0, has_audio: false };
 
     expect(filterSelectionClips([dark, silent], "all", true).map((item) => item.id)).toEqual([2]);
     expect(filterSelectionClips([dark, silent], "all", true, new Set([1])).map((item) => item.id))

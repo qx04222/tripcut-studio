@@ -1,4 +1,4 @@
-import type { ExportStatus, PlatformPreset, RoughCutTargetSeconds, SettingsMap, TargetPlatform } from "../../api";
+import type { ExportStatus, JianyingDraftResult, PlatformPreset, RoughCutTargetSeconds, SettingsMap, TargetPlatform } from "../../api";
 import { readUiBool, readUiSetting } from "../uiSettings";
 
 /** 交付表单的纯常量与纯函数(R9 Task 6a):从 `DeliverPage` 移入,那里 re-export。 */
@@ -113,17 +113,17 @@ export function itemStatusLabel(status: string): string {
 }
 
 /**
- * 「整条收藏 0 条」但精选段 > 0 时补一句(R10 U-33):有精选段的收藏按片段导出,不再整条
+ * 「收藏的整条视频 0 条」但精选段 > 0 时补一句(R10 U-33):有精选段的收藏按片段导出,不再整条
  * remux——池里明明收藏了 1 条,摘要却写 0,用户以为收藏丢了。
  */
 export function wholeFavoritesNote(status: ExportStatus): string | null {
   return status.selected_whole_count === 0 && status.selected_segment_count > 0 ? "有精选段的收藏已按片段导出" : null;
 }
 
-/** 交付项汇总一行(规格 §4.2 第 2 条):「4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05」。 */
+/** 交付项汇总一行(规格 §4.2 第 2 条):「4 项 · 3 段精选片段 · 1 条收藏的整条视频 · 预计 3:05」。 */
 export function summaryLine(status: ExportStatus): string {
   const note = wholeFavoritesNote(status);
-  const whole = `${status.selected_whole_count} 条整条收藏${note ? `（${note}）` : ""}`;
+  const whole = `${status.selected_whole_count} 条收藏的整条视频${note ? `（${note}）` : ""}`;
   return `${status.selected_count} 项 · ${status.selected_segment_count} 段精选片段 · ${whole} · 预计 ${formatDuration(status.total_duration_seconds)}`;
 }
 
@@ -168,5 +168,14 @@ export function readCanvas(...sources: ReadonlyArray<unknown>): CanvasSize | nul
 }
 
 export function canvasLabel(canvas: CanvasSize | null): string | null {
-  return canvas ? `画布 ${canvas.width}×${canvas.height}` : null;
+  return canvas ? `${canvas.height > canvas.width ? "竖版" : "横版"} ${canvas.width}×${canvas.height}` : null;
+}
+
+/**
+ * V14-05:草稿结果卡的内容一句「n 章 · 已带配乐 · m 段」—— 章数来自 `chapter_marks`(素材名前缀,0 = 没分章)、
+ * 配乐来自 `has_music`(草稿里有没有音频轨),用户不用打开草稿就知道章节标记与配乐进没进去。
+ */
+export function draftContentLine(result: Pick<JianyingDraftResult, "chapter_marks" | "has_music" | "selected_count">): string {
+  const chapters = result.chapter_marks > 0 ? `${result.chapter_marks} 章(看素材名前缀)` : "没分章";
+  return `${chapters} · ${result.has_music ? "已带配乐" : "未带配乐"} · ${result.selected_count} 段`;
 }

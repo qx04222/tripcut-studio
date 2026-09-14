@@ -49,6 +49,8 @@ const SHELL_DEFAULTS: Record<string, () => unknown> = {
   getMusicAnalysisProgress: () => ({ total: 0, done: 0, failed: 0, running: 0, pending: 0 }),
   // R10 U-19:壳挂载时桥接 Tauri 事件,卸载时调返回的解除函数——替身也得回一个函数。
   bridgeMusicAnalyzedEvents: () => () => undefined,
+  // X-04:状态条自己桥接 import_probe 完成事件,同样要回一个解除函数。
+  bridgeImportProbeEvents: () => () => undefined,
   getImportProgress: () => ({
     total: 0,
     done: 0,

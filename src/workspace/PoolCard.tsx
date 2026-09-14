@@ -5,6 +5,7 @@ import type { ClipListItem } from "../api";
 import { clipAriaLabel, fileNameLines, poolDateLabel, poolDurationLabel, poolRatingLabel } from "./poolModel";
 import { Badge, Card, CoverImage, Icon } from "./ui";
 import { usePoolScrub } from "./usePoolScrub";
+import { stackCountLabel } from "./copy";
 
 /**
  * 媒体池的一张卡(规格 §3.5,视觉按 A 稿「编辑台密度」)。从 `MediaPool.tsx` 拆出来只为
@@ -145,12 +146,17 @@ export function PoolCard({
             AI 生成
           </Badge>
         ) : null}
+        {clip.missing_since ? (
+          <Badge tone="danger" icon="warning" className="pool-card-missing-source">
+            缺失
+          </Badge>
+        ) : null}
         {stackCount !== undefined ? (
           <Badge
             tone="ink"
             className={`pool-card-stack${onToggleStack ? " expandable" : ""}${stackExpanded ? " expanded" : ""}`}
           >
-            {stackCount} 条候选
+            {stackCountLabel(stackCount)}
           </Badge>
         ) : null}
         {semanticScore !== undefined ? (

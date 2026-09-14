@@ -10,7 +10,9 @@ export type IconName =
   | "volume" | "volume-off" | "fullscreen" | "mark-in" | "mark-out" | "save" | "star" | "heart"
   | "x" | "check" | "chevron-down" | "chevron-right" | "grip" | "plus" | "close" | "info" | "warning" | "film"
   | "settings-appearance" | "settings-performance" | "settings-timeline" | "settings-tools"
-  | "settings-analysis" | "settings-generation" | "settings-privacy" | "settings-about" | "settings-cache";
+  | "settings-analysis" | "settings-generation" | "settings-privacy" | "settings-about" | "settings-cache"
+  | "settings-keymap"
+  | "arrow-left" | "arrow-right";
 
 export type IconSize = 12 | 16 | 20 | 32;
 
@@ -38,6 +40,9 @@ const SHAPES: Record<IconName, readonly Shape[]> = {
   pause: [{ d: "M4.75 3v10M11.25 3v10" }],
   prev: [{ d: "M12 3.25v9.5L5.5 8z" }, { d: "M3.5 3v10" }],
   next: [{ d: "M4 3.25v9.5L10.5 8z" }, { d: "M12.5 3v10" }],
+  // X-03:镜块「往前 / 往后」——横向带上就是左右箭头,不用像播放控制的 ⏮ ⏭。
+  "arrow-left": [{ d: "M13 8H3.5" }, { d: "M7.5 4L3.5 8l4 4" }],
+  "arrow-right": [{ d: "M3 8h9.5" }, { d: "M8.5 4l4 4-4 4" }],
   volume: [{ d: "M2.5 6h2.25L8.25 3v10L4.75 10H2.5z" }, { d: "M10.5 5.75a3.2 3.2 0 010 4.5" }, { d: "M12.5 3.75a6 6 0 010 8.5" }],
   "volume-off": [{ d: "M2.5 6h2.25L8.25 3v10L4.75 10H2.5z" }, { d: "M10.5 6l3.5 4M14 6l-3.5 4" }],
   fullscreen: [{ d: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" }],
@@ -69,6 +74,8 @@ const SHAPES: Record<IconName, readonly Shape[]> = {
   "settings-generation": [{ d: "M8 2l1.4 3.6L13 7l-3.6 1.4L8 12l-1.4-3.6L3 7l3.6-1.4z" }, { d: "M12.75 11.25l.5 1.25 1.25.5-1.25.5-.5 1.25-.5-1.25-1.25-.5 1.25-.5z" }],
   "settings-privacy": [{ d: "M8 1.75L13.5 4v3.75c0 3.3-2.3 5.55-5.5 6.5-3.2-.95-5.5-3.2-5.5-6.5V4z" }, { d: "M5.75 8.25L7.25 9.75l3-3.25" }],
   "settings-about": [{ circle: [8, 8, 6.25] }, { d: "M6.25 6.5a1.75 1.75 0 113 1.25c-.6.5-1.25.85-1.25 1.75" }, { circle: [8, 11.75, 0.4] }],
+  // R13:设置「快捷键」分区 —— 一枚键帽:圆角矩形 + 三颗键 + 空格条。
+  "settings-keymap": [{ d: "M2.25 5.25a1 1 0 011-1h9.5a1 1 0 011 1v5.5a1 1 0 01-1 1h-9.5a1 1 0 01-1-1z" }, { d: "M4.75 6.75h.5M7.75 6.75h.5M10.75 6.75h.5" }, { d: "M5.25 9.25h5.5" }],
   "settings-cache": [{ d: "M2.75 4.25c0-1.1 2.35-2 5.25-2s5.25.9 5.25 2-2.35 2-5.25 2-5.25-.9-5.25-2z" }, { d: "M2.75 4.25V8c0 1.1 2.35 2 5.25 2s5.25-.9 5.25-2V4.25" }, { d: "M2.75 8v3.75c0 1.1 2.35 2 5.25 2s5.25-.9 5.25-2V8" }],
 };
 

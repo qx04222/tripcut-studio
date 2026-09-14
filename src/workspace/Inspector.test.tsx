@@ -369,7 +369,7 @@ describe("检查器 · 默认层", () => {
     expect(row.querySelector(".inspector-chevron")!.getAttribute("class")).toContain("is-open");
   });
 
-  it("「技术检查」与「音轨与 LUT」展开体里没有 TechCheckPanel 自己那行重名小标题(R9 Task 8a)", async () => {
+  it("「技术检查」与「声音与调色」展开体里没有 TechCheckPanel 自己那行重名小标题(R9 Task 8a)", async () => {
     selectLoneClip();
     await renderReady();
     const row = findSummary("技术检查");
@@ -388,7 +388,7 @@ describe("检查器 · 默认层", () => {
     ]);
     selectClipInStack();
     render(<Inspector />);
-    const strip = await screen.findByRole("group", { name: /的候选$/ });
+    const strip = await screen.findByRole("group", { name: /^同一镜头 · / });
     expect(strip.querySelectorAll("img").length).toBe(2);
     const current = strip.querySelector(".ui-card--selected")!;
     expect(current.textContent).toContain("第 1 条");
@@ -482,14 +482,14 @@ describe("检查器 · 默认层", () => {
     );
 
     await renderReady();
-    expect(findSummary("音轨与 LUT").textContent).toContain("加载中");
+    expect(findSummary("声音与调色").textContent).toContain("加载中");
     expect(findSummary("相似镜头").textContent).toContain("加载中");
 
     resolveTracks([
       { clip_id: 1, stream_index: 0, channels: 2, channel_layout: "stereo", sample_rate: 48000, role_guess: "onboard_mic" },
       { clip_id: 1, stream_index: 1, channels: 1, channel_layout: null, sample_rate: 48000, role_guess: "wireless_mic" },
     ]);
-    await waitFor(() => expect(findSummary("音轨与 LUT").textContent).toContain("2 条音轨"));
+    await waitFor(() => expect(findSummary("声音与调色").textContent).toContain("2 条音轨"));
 
     resolveGroups([]);
     await waitFor(() => expect(findSummary("相似镜头").textContent).toContain("无"));

@@ -11,7 +11,7 @@ const apiMock = await vi.hoisted(async () => {
 });
 vi.mock("../api", () => apiMock);
 
-import type { EpisodeSummary, ExportCanvas, ExportStatus, PlatformPreset } from "../api";
+import { JIANYING_BUNDLE_ID, type EpisodeSummary, type ExportCanvas, type ExportStatus, type PlatformPreset } from "../api";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 
@@ -83,7 +83,8 @@ afterEach(cleanup);
 
 async function openDeliverDrawer(): Promise<void> {
   await act(async () => {
-    const button = screen.getByRole("button", { name: "生成交付包" });
+    // R12:顶栏主按钮迁为「流水线下一步」(去向随步变),开导出抽屉走导航条「第 4 步 导出」。
+    const button = screen.getByRole("button", { name: "第 4 步 导出" });
     button.focus();
     button.click();
     await Promise.resolve();
@@ -98,10 +99,10 @@ async function openDeliverDrawer(): Promise<void> {
 }
 
 describe("交付抽屉", () => {
-  it("点「生成交付包」从右侧滑入,抽屉内有「本次交付平台」(冒烟 drawer.deliver.platform)", async () => {
+  it("导出抽屉从右侧滑入,抽屉内有「本次交付平台」(冒烟 drawer.deliver.platform)", async () => {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    const dialog = await screen.findByRole("dialog", { name: "生成交付包" });
+    const dialog = await screen.findByRole("dialog", { name: "导出" });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(await screen.findByText("本次交付平台")).toBeTruthy();
   });
@@ -112,12 +113,12 @@ describe("交付抽屉", () => {
     // sheet.settings.* 连环 FAIL。这条用例把"抽屉该不该响应 Esc"钉在代码层面。
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    await screen.findByRole("dialog", { name: "生成交付包" });
+    await screen.findByRole("dialog", { name: "导出" });
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await Promise.resolve();
     });
-    expect(screen.queryByRole("dialog", { name: "生成交付包" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "导出" })).toBeNull();
   });
 
   it("抽屉有一个可见的「关闭」按钮 —— Esc 不能是唯一出口", async () => {
@@ -126,19 +127,19 @@ describe("交付抽屉", () => {
     // 抽屉/sheet 以前**一个可见的关闭控件都没有**,遮罩也不可点。
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    const dialog = await screen.findByRole("dialog", { name: "生成交付包" });
+    const dialog = await screen.findByRole("dialog", { name: "导出" });
     const close = within(dialog).getByRole("button", { name: "关闭" });
     await act(async () => {
       close.click();
       await Promise.resolve();
     });
-    expect(screen.queryByRole("dialog", { name: "生成交付包" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "导出" })).toBeNull();
   });
 
   it("点抽屉外的遮罩也能关", async () => {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    const dialog = await screen.findByRole("dialog", { name: "生成交付包" });
+    const dialog = await screen.findByRole("dialog", { name: "导出" });
     const overlay = dialog.parentElement;
     expect(overlay).not.toBeNull();
     await act(async () => {
@@ -146,13 +147,13 @@ describe("交付抽屉", () => {
       fireEvent.click(overlay!);
       await Promise.resolve();
     });
-    expect(screen.queryByRole("dialog", { name: "生成交付包" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "导出" })).toBeNull();
   });
 
   it("抽屉内有「联系表」(冒烟 drawer.deliver.contact,硬断言)", async () => {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    await screen.findByRole("dialog", { name: "生成交付包" });
+    await screen.findByRole("dialog", { name: "导出" });
     expect((await screen.findAllByText(/联系表/)).length).toBeGreaterThan(0);
   });
 });
@@ -161,7 +162,7 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
   async function openDialog(): Promise<HTMLElement> {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    return screen.findByRole("dialog", { name: "生成交付包" });
+    return screen.findByRole("dialog", { name: "导出" });
   }
 
   it("不再包装旧 DeliverPage:没有英文 kicker", async () => {
@@ -192,13 +193,13 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
 
   it("交付项汇总是一行", async () => {
     const dialog = await openDialog();
-    expect(await within(dialog).findByText("4 项 · 3 段精选片段 · 1 条整条收藏 · 预计 3:05")).toBeTruthy();
+    expect(await within(dialog).findByText("4 项 · 3 段精选片段 · 1 条收藏的整条视频 · 预计 3:05")).toBeTruthy();
   });
 
   it("主按钮「开始生成」primary(R10 U-20 起与顶栏「生成交付包」不同名);点它选目录并 startExport", async () => {
     apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
     const dialog = await openDialog();
-    expect(within(dialog).queryByRole("button", { name: "生成交付包" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "导出" })).toBeNull();
     const button = within(dialog).getByRole("button", { name: "开始生成" });
     expect(button.className).toContain("ui-button--primary");
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
@@ -222,6 +223,8 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
       jianying_version: "11.4.0",
       selected_count: 4,
       subtitle_count: 0,
+      chapter_marks: 0,
+      has_music: false,
       message: "草稿已生成并通过回读自检",
     });
     const dialog = await openDialog();
@@ -243,6 +246,17 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
     expect(apiMock.startExport).not.toHaveBeenCalled();
     expect(await within(dialog).findByText("剪映草稿已生成")).toBeTruthy();
     expect(within(dialog).getByText("EP05")).toBeTruthy();
+    // R13 §5 交接感:完成 toast「已生成剪映草稿 · 打开剪映」,「打开剪映」只许打开剪映的 bundle id。
+    const toast = await waitFor(() => {
+      const node = screen.getAllByRole("status").find((candidate) => candidate.textContent?.includes("已生成剪映草稿"));
+      if (!node) throw new Error("no jianying toast yet");
+      return node;
+    });
+    await act(async () => {
+      within(toast).getByRole("button", { name: "打开剪映" }).click();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(apiMock.openApp).toHaveBeenCalledWith(JIANYING_BUNDLE_ID));
   });
 
   it("剪映 11.4.13169 待人工核对:开关禁用,拒绝原因原样透出", async () => {
@@ -334,7 +348,7 @@ describe("R10 U-20:抽屉记住上次选择,画布尺寸", () => {
   async function openDialog(): Promise<HTMLElement> {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    return screen.findByRole("dialog", { name: "生成交付包" });
+    return screen.findByRole("dialog", { name: "导出" });
   }
 
   it("平台 / 时长 / 联系表 / 剪映草稿改一次写一次 ui.deliver.*;重开抽屉按记住的值预选", async () => {
@@ -378,13 +392,13 @@ describe("R10 U-20:抽屉记住上次选择,画布尺寸", () => {
     apiMock.getSettings.mockResolvedValue({});
     apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, canvas: { width: 1080, height: 1920 } } as never);
     const dialog = await openDialog();
-    expect(await within(dialog).findByText(/画布 1080×1920/)).toBeTruthy();
+    expect(await within(dialog).findByText(/竖版 1080×1920/)).toBeTruthy();
     cleanup();
     __resetWorkspaceForTests();
     apiMock.getExportStatus.mockResolvedValue(idleStatus);
     const plain = await openDialog();
     await within(plain).findByText("本次交付平台");
-    expect(plain.querySelector(".deliver-subtitle")?.textContent).not.toContain("画布");
+    expect(plain.querySelector(".deliver-subtitle")?.textContent).not.toMatch(/竖版|横版/);
   });
 });
 
@@ -399,7 +413,7 @@ describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是
   async function openDialog(): Promise<HTMLElement> {
     render(<WorkspaceShell />);
     await openDeliverDrawer();
-    return screen.findByRole("dialog", { name: "生成交付包" });
+    return screen.findByRole("dialog", { name: "导出" });
   }
 
   it("副标题显示「画布 W×H · 来源」;点「横版」后按 override 重算并显示「本次手动」", async () => {
@@ -408,14 +422,14 @@ describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是
       orientation === "landscape" ? landscapeOverride : portraitPreset,
     );
     const dialog = await openDialog();
-    expect(await within(dialog).findByText(/画布 1080×1920 · 平台习惯/)).toBeTruthy();
-    const group = within(dialog).getByRole("group", { name: "本次交付画布方向" });
+    expect(await within(dialog).findByText(/竖版 1080×1920 · 平台习惯/)).toBeTruthy();
+    const group = within(dialog).getByRole("group", { name: "本次交付画面方向" });
     expect(within(group).getByRole("button", { name: "竖版" }).getAttribute("aria-pressed")).toBe("true");
     await act(async () => {
       within(group).getByRole("button", { name: "横版" }).click();
       await Promise.resolve();
     });
-    expect(await within(dialog).findByText(/画布 1920×1080 · 本次手动/)).toBeTruthy();
+    expect(await within(dialog).findByText(/横版 1920×1080 · 本次手动/)).toBeTruthy();
     expect(apiMock.previewExportCanvas).toHaveBeenLastCalledWith(null, "landscape");
     expect(within(group).getByRole("button", { name: "横版" }).getAttribute("aria-pressed")).toBe("true");
     // 一次性覆盖不落盘
@@ -426,7 +440,7 @@ describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是
     apiMock.getSettings.mockResolvedValue({});
     apiMock.previewExportCanvas.mockResolvedValue(portraitPreset);
     const dialog = await openDialog();
-    await within(dialog).findByText(/画布 1080×1920/);
+    await within(dialog).findByText(/竖版 1080×1920/);
     const row = within(dialog).getByText("参考粗剪", { selector: ".deliver-content-name" }).parentElement!;
     // R11 术语清扫:H.264 → 「通用 MP4」。
     expect(row.textContent).toContain("1080×1920 通用 MP4");
@@ -441,7 +455,7 @@ describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是
     apiMock.startExportWithCanvas.mockResolvedValue(idleStatus);
     apiMock.startExport.mockResolvedValue(idleStatus);
     const dialog = await openDialog();
-    await within(dialog).findByText(/画布 1080×1920/);
+    await within(dialog).findByText(/竖版 1080×1920/);
     const button = within(dialog).getByRole("button", { name: "开始生成" });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     await act(async () => {
@@ -452,7 +466,7 @@ describe("R10 U-05:抽屉里的画布来自 previewExportCanvas,横/竖切换是
     expect(apiMock.startExportWithCanvas).not.toHaveBeenCalled();
 
     await act(async () => {
-      within(within(dialog).getByRole("group", { name: "本次交付画布方向" })).getByRole("button", { name: "横版" }).click();
+      within(within(dialog).getByRole("group", { name: "本次交付画面方向" })).getByRole("button", { name: "横版" }).click();
       await Promise.resolve();
     });
     await act(async () => {

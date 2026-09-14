@@ -285,6 +285,8 @@ describe("stable delivery view", () => {
           jianying_version: "11.3.0",
           selected_count: 4,
           subtitle_count: 1,
+          chapter_marks: 0,
+          has_music: false,
           message: "草稿已生成；请回到剪映首页打开并核对",
         }}
         onGenerate={() => undefined}

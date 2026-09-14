@@ -1,6 +1,8 @@
 import type { AiDescriptionResult, ClipListItem, ShotStack } from "../api";
 import { activeRatingValue, ratingLabelFor, sortTakeMembers, takeDateLabel, type SlotOption } from "./inspectorModel";
-import { Badge, Button, Card, Chip, CoverImage, Field, Icon, Kbd, Select } from "./ui";
+import { ActionKbd } from "./KeymapKbd";
+import { Badge, Button, Card, Chip, CoverImage, Field, Icon, Select } from "./ui";
+import { stackGroupLabel } from "./copy";
 
 /**
  * 检查器共用的展示片段(同 Task 2 `poolModel.ts` 的技术):旧壳
@@ -204,7 +206,7 @@ export function TakeSwitcher({
 }) {
   const ordered = sortTakeMembers(stack.members, clipsById);
   return (
-    <div className="inspector-take-strip" role="group" aria-label={`${stack.scene_name} 的候选`}>
+    <div className="inspector-take-strip" role="group" aria-label={stackGroupLabel(stack.scene_name)}>
       {ordered.map((member, index) => {
         const memberClip = clipsById.get(member.clip_id);
         const generated = Boolean(memberClip?.generated_source);
@@ -274,7 +276,7 @@ export function RatingControls({
           aria-pressed={binary === 1}
           onClick={() => onRate("binary", 1)}
         >
-          收藏 <Kbd>F</Kbd>
+          收藏 <ActionKbd action="favorite" />
         </Button>
         <Button
           size="sm"
@@ -284,10 +286,10 @@ export function RatingControls({
           aria-pressed={binary === -1}
           onClick={() => onRate("binary", -1)}
         >
-          拒绝 <Kbd>X</Kbd>
+          拒绝 <ActionKbd action="reject" />
         </Button>
         <Button size="sm" disabled={busy} aria-label="清除" onClick={onClear}>
-          清除 <Kbd>0</Kbd>
+          清除 <ActionKbd action="clear-rating" />
         </Button>
       </div>
       <div className="inspector-stars" role="group" aria-label={star === null ? "未评星" : `${star} 星`}>

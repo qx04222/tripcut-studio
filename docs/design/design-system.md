@@ -153,7 +153,8 @@ npm run preview:kit         # preview-shots.mjs --kit-only,只截套件预览页
 R9 从头到尾**没有改**下列 AX 名（`src/workspace/axNames.test.tsx` 与
 `scripts/qa/smoke-gui.mjs` 共同钉住，见 `docs/qa/2026-09-12-unattended-r9.md` §4）：
 
-- 顶栏按钮（4）：`导入素材` `切换集` `生成交付包` `设置`
+- 顶栏按钮（4）：`导入素材` `切换集` `流水线下一步`（R12 起，原 `生成交付包` 解冻迁移；可见文案随步变化） `设置`
+- 流水线导航条（R12）：`nav` 名 `流水线`；四颗按钮 `第 1 步 导入` `第 2 步 挑选` `第 3 步 排列` `第 4 步 导出`（计数不进名字）
 - landmark（5）：`媒体池` `预览监视器` `镜头带` `检查器` `后台状态`
 - 附属带 tablist：`镜头带附属视图`，tab 名 `故事 音乐 旅程 地点卡 模板`
 - 三个模态的冻结串（9 处）：
@@ -211,8 +212,118 @@ R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道�
 - **设置 → 外观（车道 C）**：switch「选中素材从最精彩处开播」「播完自动播下一条」。
 - **媒体池（车道 C）**：`.pool-card-bolt`（aria-hidden，title「有建议段」，即闪电角标）、`.pool-card-scrub`（`data-testid="pool-card-scrub"`，悬停刮擦条）。
 - **交付抽屉 / 检查器 / 媒体池（车道 E）**：chip「快速导出」「完整交付包」（`aria-pressed`，group「导出方式」）；button「导出到上次文件夹」（可见「导出」/「导出…」）、「更改文件夹」（可见「更改文件夹…」）、「导出所选」（检查器精选段区按钮 + 媒体池右键 menuitem，可见「导出所选…」/「导出所选（n 条）…」）、「在 Finder 中显示」；list「将导出的文件」；section「快速导出」；menu「素材操作」（`ui/Menu` 右键菜单）。
-- **首启引导（简化专项）**：group「三步上手」；button「选择素材文件夹」「自动挑选」「导出片段」「关闭引导」。
+- **首启引导（简化专项 → R12 四步卡）**：group「四步上手」；button「开始使用」「关闭引导」（R12 起，原「三步上手」与「选择素材文件夹」「自动挑选」「导出片段」释放）。
+- **工具链横幅（R12）**：region「视频处理组件缺失」；button「去安装」「关闭提示」。新壳不再有「先把本地工具链接好」dialog。
 - **设置页三分区（简化专项）**：tab「常用」「工具与模型」「关于」（九个旧分区 id 原样保留，见车道报告搬迁表）；button「云端补镜」「隐私与诊断」（左轨「直达」按钮，取代原 tab）；button「更改…」/「选择…」（导出文件夹，常用段新增一行）；button「更多信息」（检查器折叠段，`aria-expanded`）；button「打开导入」「回到按章节」（镜头带空态）、「去添加文件夹」（导入任务空态）；switch「启用增强分析」（原「启用 L3 增强」）、「自动生成轻量预览文件」（原「自动生成 540p 代理」）；combobox「后台并行任务数」（原「worker 并发」）；text「安装检查」「全部就绪」。
 - **修复车道**：button「回到当前集」（媒体池只读查看横幅内，`role=status` 的 `.workspace-pool-scope` 里，N-2 修复新增）；帮助页「媒体池」组空格条目的 keys 改为 `Space, K`（旧 id `immersive-player` 不变，V-05 修复把 `K` 接入 `toggle-playback`）。
 
 **术语清扫（简化专项，改名而非新增，记在这里免得被当成漏改）**：可见文案里 remux/L1/L3/Stack/VFR/PTS/tick/worker 等内部术语已替换为白话（完整清单见 `.superpowers/sdd/r11/lane-simplify-report.md` §3），新增门禁 `src/workspace/terminology.test.ts` 扫描回归；AX 名同步迁移的包括「启用 L3 增强」→「启用增强分析」、「Take n」可见文字→「第 n 条」（`aria-label="Take n · 文件名"` 本身按 R10 冻结未动，留给 R12）、「只看 Stack 首选」→「只看每组首选」。
+
+## 11. R12 术语 v2 —— 冻结 AX 名改名表（车道 C）
+
+> 依据：`docs/superpowers/specs/2026-09-14-r12-pipeline-design.md` §4；车道报告 `.superpowers/sdd/r12/lane-terms-report.md`。
+> 本轮是 R9 §6 冻结以来**第一次给冻结名改名**：所有新名从 `src/workspace/copy.ts` 导出，`axNames.test.tsx` 钉住常量值，`terminology.test.ts` 禁旧词回流。§6 / §8 / §10 里出现的旧名以本表为准。
+
+| 旧名 | 新名 | 类型 / 位置 | 常量 |
+| --- | --- | --- | --- |
+| `Take n · 文件名` | `第 n 条 · 文件名` | button（池内候选条 `MediaPoolStackStrip`） | `takeLabel(n, name)` |
+| `{scene_name} 的候选` | `同一镜头 · {scene_name}` | group（池内候选条、镜头带 `BandTakeStrip`、检查器 `TakeSwitcher`） | `stackGroupLabel(scene)` |
+| `n 条候选` | `同一镜头 n 条` | 池卡片角标（`PoolCard`，可点） | `stackCountLabel(n)` |
+| `收起候选` | `收起同一镜头` | button（池内候选条） | — |
+| `八维评分` | `画面评分` | 检查器折叠段 summary | `INSPECTOR_TITLES.dimensions` |
+| `音轨与 LUT` | `声音与调色` | 检查器折叠段 summary | `INSPECTOR_TITLES.audio` |
+| `八维筛选` | `画面筛选` | combobox（媒体池「更多筛选」） | `DIMENSION_FILTER_LABEL` |
+| `选择显示 LUT` / `显示 LUT` / `添加 LUT…` | `选择预览调色` / `预览调色` / `添加调色文件…` | combobox 与 option（`TechCheckPanel`） | — |
+| `画布方向` | `画面方向` | group（集表单 `EpisodeForms`） | `ORIENTATION_LABEL` |
+| `本次交付画布方向` | `本次交付画面方向` | group（交付抽屉 `DeliverForm`） | `DELIVER_ORIENTATION_LABEL` |
+| `画布 W×H`（交付抽屉副标题） | `竖版 W×H` / `横版 W×H` | text（`canvasLabel`） | — |
+| `索引进度` / `索引` | `导入进度` / `登记` | section 与 progressbar（导入抽屉「任务」分页；progressbar 名随段名成「登记进度」） | `IMPORT_PROGRESS_LABEL` |
+| `Whisper 模型档位` / `Whisper 模型文件` | `转写模型` / `转写模型文件` | combobox / group（设置 → 工具链） | — |
+| `FFmpeg 路径` / `FFprobe 路径` / `whisper-cli 路径` | `视频处理组件的位置` / `媒体信息组件的位置` / `转写组件的位置` | textbox（设置 → 工具链；读数标题同步为「视频处理组件 已就绪」，路径与版本号收进 `details`「详情」） | — |
+| `MiniMax API Key` / `默认模型` | `MiniMax 密钥` / `生成模型` | textbox / combobox（设置 → 云端补镜） | — |
+| `后台并行任务数` / `自动生成轻量预览文件` | `后台同时处理几条` / `预览用小文件` | combobox / switch（设置 → 性能） | — |
+| `可选：提供已校验的 Whisper 模型` / `初始化本地 Chinese-CLIP 环境` | `转写(可选)` / `画面识别(可选)` | 首启弹窗与「安装检查」卡的步骤标题（`toolchainSteps`） | `OPTIONAL_TRANSCRIBE_TITLE` / `OPTIONAL_VISION_TITLE` |
+| `生成交付包`（交付抽屉标题） | `导出` | dialog（`DeliverDrawer`；命令面板项同步为「打开导出」）— R12 验收 X-05 解冻 | `DELIVER_DRAWER_TITLE` |
+| `n 条整条收藏` | `n 条收藏的整条视频` | text（交付抽屉汇总行 / 内容清单 / 快速导出面板）— X-05 | — |
+| `第n段·hh:mm-hh:mm`（自动章节默认名） | `第 n 章 · hh:mm-hh:mm` | 镜头带章标题（Rust `core::story` 生成）— X-05 | — |
+| `上移` / `下移`（镜头带镜块） | `往前` / `往后` | button（`BandSegment`，图标同步改 `arrow-left`/`arrow-right`）— R12 验收 X-03 | — |
+| `生成交付包`（顶栏主按钮，旧冻结名） | `流水线下一步`（AX 名固定；可见文案随步骤变化） | button（顶栏，`PipelineRail` 车道 A）— 解冻迁移 | — |
+
+## 12. R12 新组件（车道 A/B/D）
+
+> 依据：`docs/superpowers/specs/2026-09-14-r12-pipeline-design.md` §1–§6；车道报告
+> `.superpowers/sdd/r12/lane-shell-report.md`、`lane-player-report.md`、`lane-fix2-report.md`（车道 B/C 报告未入库，
+> 相关组件由合并提交 `cb98969`/`b14541e` 的 diff 复原，详见 `docs/qa/2026-09-14-unattended-r12-r13.md` §2）。
+
+| 组件 | 文件 | Props 摘要 | 行为 / 视觉 |
+|---|---|---|---|
+| `PipelineRail` | `src/workspace/PipelineRail.tsx` | `step: PipelineStep`，`stepCounts`，`onStepClick(step)` | 顶栏中央集切换器右侧四步导航：`nav「流水线」`，四颗 `button「第 n 步 导入/挑选/排列/导出」`（计数不进 AX 名），`aria-current="step"` 标记当前步，完成打勾，1280px 以下只留数字与勾。点击调 `pipelineActions.focusPipelineStep`（导入抽屉 / 聚焦媒体池 / 聚焦镜头带 / 导出抽屉）。数据来自 `usePipeline.ts`（`pipelineModel.ts` 纯函数 `derivePipeline`），与首启四步卡、空态提示同一份推导。 |
+| `PipelineHint` | `src/workspace/PipelineHint.tsx` | `step`，`seen: boolean`，`onDismiss()` | 导航条下方每步首次进入时出现的一条可关提示（`status「第 n 步提示」` + `button「知道了」`），写 `pipeline.hint_seen.n`（Rust `ONBOARDING_FLAG_KEYS` 白名单）。 |
+| `ToolchainBanner` | `src/workspace/ToolchainBanner.tsx` | `requiredToolsMissing: boolean`，`onInstall()`，`onDismiss()` | 替代旧「本机准备」工具链模态：只在 ffmpeg/ffprobe 缺失时顶栏下出现一条非模态横幅（`region「视频处理组件缺失」` + `button「去安装」「关闭提示」`），关闭只对本次启动生效。 |
+| `Toast` / `toastStore` | `src/workspace/ui/Toast.tsx`、`src/workspace/ui/toastStore.ts` | `message`，`tone: "status"\|"danger"`，`action?: {label, onClick}`，`durationMs`（3–5 s） | 套件新增的顶部居中提示条，最多同时 1 条，`role=status`（danger 时 `role=alert`）；自动挑选结果、撤销、拖排、忽略缺口、排入完成、导出完成/失败全部改走它，替代镜头带底部原来的小字提示。 |
+| `arrangeSelectedSegments` / `undoArrange` / `skipChapter`（`useBandArrange.ts`） | `src/workspace/useBandArrange.ts` + Rust `core::arrange.rs` | — | 「一键排入」把本集精选段按章节（有章按章、无章按拍摄时间）排成 `story_order`，只写既有列、可撤销；「这章够了」把 0 镜章标记跳过，不算缺口。自动挑选完成后默认已排入。 |
+| `MonitorControls` 「连播」开关 | `src/workspace/MonitorControls.tsx` | `autoAdvance: boolean`，`onToggle()` | 工具条 Spacer 之后、全屏之前，`switch「连播」`（新名），写 `ui.player.auto_advance`，**默认改为 false**（R11 默认是自动播完接力，本轮改为需要显式打开）。 |
+| 「播放速度」菜单 | `src/workspace/MonitorControls.tsx` + `ui/Menu` | — | 点「×1」按钮弹 `menu「播放速度」`，`menuitem「速度 ×0.5」「速度 ×1」「速度 ×2」「速度 ×4」`（新名），选中即调原生 `player_set_speed`；按钮加 `aria-haspopup="menu"`/`aria-expanded`。 |
+
+### R12 新增 AX 名（冻结名一个未动，术语改名见 §11）
+
+- **壳 / 导航（车道 A）**：nav「流水线」；button「第 1 步 导入」「第 2 步 挑选」「第 3 步 排列」「第 4 步 导出」；固定 AX 名「流水线下一步」（顶栏主按钮，文案随步骤变化）；group「四步上手」+ button「开始使用」（替代 R11 的「三步上手」/「选择素材文件夹」等三名，已释放）；dialog「流水线手册」（`HelpOverlay` 标题，`aria-labelledby` 未动）；region「视频处理组件缺失」+ button「去安装」「关闭提示」；status「第 n 步提示」+ button「知道了」。
+- **导出抽屉（车道 A）**：chip「导出片段」（替代 R11「快速导出」，锚点已迁）、「完整交付包」、「剪映草稿」（不可用时可见文案带「(待验证)」+ `role=status` 一句白话）；checkbox「出一份联系表 PDF…」「出一份镜头表(表格)」；button「只重试失败的」。
+- **镜头带（车道 B）**：button「一键排入」（primary，可撤销）、「去自动挑选」（空态主动作）、「这章够了」；text「片段 a–b s」（镜块小标）；button「往前」「往后」（见 §11 改名表，X-03 常显修复）。
+- **反馈系统（车道 B）**：`Toast` 的 `role=status`/`role=alert`，无固定文案 AX 名（每条消息即时生成）。
+- **播放器 / 变速（车道 D）**：switch「连播」；menu「播放速度」+ menuitem「速度 ×0.5/×1/×2/×4」；button「播放速度」（名未变，新增 `aria-haspopup`/`aria-expanded`，可见文案多了「×0.5」「倒退」两种状态尾缀）。
+- **修复车道**：dialog「导出」（原「生成交付包」，X-05 解冻，`DELIVER_DRAWER_TITLE`，命令面板项同步「打开导出」）。
+
+## 13. R13 新组件与新增 AX 名（车道 A/B/C）
+
+> 依据：`docs/superpowers/specs/2026-09-14-r13-jianying-alignment-design.md` §1–§5；车道报告
+> `.superpowers/sdd/r13/lane-guides-report.md`、`lane-timeline-report.md`（车道 A 报告未入库，
+> 由合并提交 `5c33622` 的 diff 复原）。
+
+| 组件 | 文件 | Props 摘要 | 行为 / 视觉 |
+|---|---|---|---|
+| `keymap.ts` / `keymapStore.ts` | `src/workspace/keymap.ts`、`src/workspace/keymapStore.ts` | 动作枚举 → 键位表，三套预设 JSON（剪映/Premiere Pro/Final Cut Pro）+ 自定义覆盖 | `useGlobalHotkeys`/`useMonitorHotkeys`/`useRatingHotkeys` 改为查表而非硬编码；**默认预设改为剪映键位**（空格播放、I/O 入出点、← → 逐帧、⇧← → 前后 5 s、J/K/L、⌘Z/⇧⌘Z 撤销重做、⌘E 导出、F 收藏、X 拒绝、1–5 打星、Enter 采用建议、N/⇧N 建议切换）；设置键 `keymap.preset` + `keymap.custom`（白名单）。 |
+| `KeymapSection` | `src/workspace/settings/KeymapSection.tsx` | — | 设置 →「快捷键」分区：预设下拉、动作表（动作 · 当前键 · 修改录制 · 冲突提示）、「恢复默认」。帮助页/工具条 `KeymapKbd` 提示随预设变化。 |
+| 设置六分区（`SETTINGS_GROUPS`） | `src/workspace/settings/settingsGroups.ts` | `id: "project"\|"keymap"\|"playback"\|"performance"\|"tools"\|"about"` | 分区名与顺序改为剪映式六块：「项目与缓存 / 快捷键 / 播放与导出 / 性能 / 工具与模型 / 关于」，每块顶部一句 `intro` 说明「这里管什么」；**去掉 R12 遗留的「高级…」折叠**，所有项一行一控件。九个旧分区 id（`SettingsSectionId`）全部保留，只是重新分配进六块。 |
+| `Guide` / `guides.ts` | `src/workspace/ui/Guide.tsx`、`src/workspace/guides.ts` | `anchor: ref\|selector`，`text`，`onDismiss()`，`onAction?()` | 剪映式一次性功能气泡：锚点 300ms 轮询跟随（零依赖），找不到超 2.5s 让位；`dialog「新手引导」`（`role=dialog`，无 `aria-modal`，不抢焦点，`prefers-reduced-motion` 关动画）。`guides.ts` 纯函数表 `GUIDES` + `nextGuide()`，同一时刻恰好一个；键 `guide.<id>.viewed`（Rust 白名单前缀规则，值只许 true/false）。首批 7 个：导航条、热力条、自动挑选按钮、镜头带镜块、缺口卡、导出抽屉、连播开关。 |
+| `HomeScreen` / `HomeCards` | `src/workspace/HomeScreen.tsx`、`src/workspace/HomeCards.tsx`、`src/workspace/homeModel.ts`、`src/workspace/homeStore.ts` | `visible`，`recentEpisodes`，`onStart()`，`onOpenEpisode(id)`，`onTemplate(id)` | 空库自动出现 / 点顶栏 logo 进入；**盖在**三栏与状态条上（`inert`，不是替换，三栏保持挂载）；`region「首页」`，`button「开始一个新旅程」`，`list「最近的集」`，`group「从模板开始」`（旅行日记/电影感/快节奏），`status「模板确认」`（当前集有素材时先确认再新建，不悄悄封存）；R12 四步卡内容并入首页顶部（`group「四步上手」`，同一 `usePipeline` 数据源）。 |
+| `useBandTimeline` / `bandTimeline.ts` | `src/workspace/useBandTimeline.ts`、`src/workspace/bandTimeline.ts` | — | 镜头带时间刻度 + 播放头：节距轴（每块固定 168px，与时长无关）到时间的分段线性映射，刻度/播放头/点击定位三处共用；`img「时间刻度」`（视口上方常驻）；播放头（红线，token `--playhead`）250ms 轮询 `player_status` 换算位置，不改 `player/mod.rs`。 |
+| `useBandTrim`（拖边裁剪） | `src/workspace/useBandTrim.ts` | — | 精选段镜块两侧把手 `button「调整入点」「调整出点」`，拖动吸附 0.1s，← → 一次 0.1s；`status「<新时长> s」`（拖动中块内预览）。后端无「更新精选段」命令，走「新建→`set_story_order` 换引用→删旧」三步，失败回滚新段不动旧段；新段星级不继承旧段（评级挂在 `segment_id`）。 |
+| 轨头折叠 | `src/workspace/BandChapters.tsx` | `folded: Set<chapterId>` | 章名行 sticky 贴左，`button「折叠第 n 章」/「展开第 n 章」`（`aria-expanded`），折叠格显示 `button「<n> 镜 · 已收起」`（点击展开）；偏移表/刻度/虚拟化按折叠后几何重算。 |
+| 「导入剪映继续剪」+ 交接 toast | `src/workspace/BandJianyingButton.tsx` + Rust `open_app` 命令 | — | 镜头带刻度行右端常驻，`button「导入剪映继续剪」`（AX 名不带「(待验证)」，可见文案带）；`SUPPORTED_JIANYING_VERSIONS` 白名单可用为 primary、否则 secondary + 白话说明；点击落到抽屉剪映模式，草稿生成后全局 toast「已生成剪映草稿」+ `button「打开剪映」`；`open_app(bundle_id)` 白名单仅 `com.lemon.lvpro`，名单外不跑 `open`。 |
+| 剪映风格深色主题 | `src/styles/tokens.css`（`html[data-theme="jianying-dark"]`） | — | 近黑冷炭灰四级 + 青绿强调 `#2fd6c4` + 红播放头 `#ff4d4a`；`tokens.test` 钉住 27 个必须重定义的键；设置外观「主题」新增第四段 `button「剪映风格深色」`；不默认。 |
+
+### R13 新增 AX 名（冻结名一个未动）
+
+- **快捷键 / 设置六分区（车道 A）**：设置分区 tab 从「常用/工具与模型/关于」三个改为「项目与缓存/快捷键/播放与外/性能/工具与模型/关于」六个（原三分区 tab 名释放，六分区为新名）；「快捷键」分区内表格行、录制态、冲突提示（无固定枚举文案，逐条生成）。
+- **引导（车道 B）**：dialog「新手引导」；button「知道了」「试试自动挑选」；button「重置新手引导」（设置「关于」）。
+- **首页（车道 B）**：button「首页」（顶栏 logo，带 `aria-pressed`）；region「首页」；button「开始一个新旅程」；list「最近的集」；group「从模板开始」；status「模板确认」；img「四步进度:n/4」。释放：button「开始使用」「关闭引导」（R12 四步卡不再是独立入口，并入首页）。
+- **镜头带时间线化（车道 C）**：img「时间刻度」；button「在时间刻度上定位」（铺满刻度的透明按钮）；button「调整入点」「调整出点」；status「<新时长> s」；button「折叠第 n 章」/「展开第 n 章」；button「<n> 镜 · 已收起」；`gridcell` 新增 `data-guide="shot"|"gap"`（供车道 B 引导气泡锚定）。
+- **交接感（车道 C）**：button「导入剪映继续剪」；toast「已生成剪映草稿」+ button「打开剪映」；设置外观 button「剪映风格深色」。
+
+**未决 AX 事项**：R13 验收 v1 报告尚未产出（见 `docs/qa/2026-09-14-unattended-r12-r13.md` §4），上表 AX 名均按车道报告与代码 diff 记录，尚未经过真机走查逐条核对；若走查发现锚点/文案需要调整，以走查报告为准更新本节。
+
+## 14. R14 新组件与新增 AX 名（车道 draftforce/kit/draftcontent）
+
+> 依据：规格 §9 A/B/C（`docs/superpowers/specs/2026-09-14-r13-jianying-alignment-design.md`）；车道报告
+> `.superpowers/sdd/r14/lane-draftforce-report.md`、`lane-kit-report.md`、`lane-draftcontent-report.md`；
+> 真机验证 `.superpowers/sdd/r14/verify-v1.md`。均已经真机走查核对（verify-v1 §A/§B）。
+
+| 组件 / 位置 | 文件 | AX 名 | 行为 |
+|---|---|---|---|
+| 剪映草稿试验开关（车道 draftforce） | `src/workspace/deliver/DeliverForm.tsx`、`DeliverResultCard.tsx` | button「仍然试着生成」（可见文案「我知道风险，仍然试着生成（试验）」）；button「可以用」；button「打不开」 | 待验证版本才出现；点「仍然试着生成」走 force 生成，不弹选目录；结果卡三步裁定走「可以用」「可以用」/「打不开」，裁定后按钮换「已记下「可以用」」（`role=status`）。结果卡里的「打开剪映」沿用既有名。 |
+| 剪映可用性广播（车道 draftforce） | `src/workspace/deliver/jianyingHumanCheck.ts` | 事件名 `tripcut:jianying-availability-changed`（非 AX，供开关/chip/按钮跨组件即时刷新） | 裁定写 settings 成功后广播，监听方（`useDeliverForm`）立即翻转 `jianying.supported`/`canGenerateNative`，不需要重启。 |
+| 剪映素材包 chip（车道 kit） | `src/workspace/deliver/DeliverDrawer.tsx` | chip「剪映素材包」（导出方式 group 内第二枚，四枚顺序：剪映草稿 / 剪映素材包 / 导出片段 / 完整交付包） | 剪映不可用时默认落点；剪映草稿 chip 仍保留（带「(待验证)」，给试验开关留入口）。 |
+| 素材包主按钮 / 面板（车道 kit） | `src/workspace/deliver/JianyingKitPanel.tsx` | button「导出剪映素材包到上次文件夹」（可见文案「导出素材包」/「导出素材包…」，「更改文件夹」沿用）；section「剪映素材包」；list「将导出的文件」（沿用）；结果卡三步 list「接下来在剪映里」；button「打开剪映」「在 Finder 中显示」 | 面板一句话「按镜头带顺序编号导出，拖进剪映时间线就是这个顺序」+ 编号清单 + 「附『顺序.txt』」；页脚「导出到 <上次文件夹>」；与快速导出共用 `ui.export.last_dir`。 |
+| 镜头带右上按钮（车道 kit） | `src/workspace/deliver/BandJianyingButton.tsx` | 不可用时 button「导出剪映素材包」（不再带「(待验证)」）；可用时仍「导入剪映继续剪」 | 不可用 → `openDeliverAs("kit")`；仍是 secondary（镜头带一次只许一个 primary）。 |
+| 待验证态文案（车道 fix，V14-03） | `src/workspace/deliver/quickExportModel.ts`、`DeliverDrawer.tsx` | 无新 AX 名，`deliver-mode-hint`（role=status）文案改写 | 顶行改「这个剪映版本（v）还没核对过草稿格式。可以先导出素材包，或试着生成一份草稿在剪映里打开看看。」，未知版本/没装剪映的兜底从「完整交付包」改「剪映素材包」。 |
+| 章节折叠（沿用 R13 §13，本轮真机核对） | `src/workspace/BandChapters.tsx` | button「折叠第 n 章」/「展开第 n 章」；button「<n> 镜 · 已收起」 | verify-v1 A6/Y-12：`axgeom` 确认三者均在 AX 树内，`axpanel press` 直接生效（R13 §13 记录的 AX 名本轮真机复核通过，非新名）。 |
+
+**新事件（非 AX，供接线参考）**：`tripcut:jianying-availability-changed`（车道 draftforce 广播，车道 kit 的
+`BandJianyingButton`/`DeliverDrawer` 尚未监听，需接线人各加一行 `onJianyingAvailabilityChanged` 订阅——见
+`docs/qa/2026-09-14-unattended-r14.md` §7 第 4 条）。
+
+**未改的冻结名**：结果卡「打开剪映」按钮名沿用 R13；镜头带右上按钮的 AX 名「导入剪映继续剪」/「导出剪映
+素材包」二选一互斥，不新增第三个名。
+
+未改的冻结名：顶栏四按钮、五个 landmark、附属带 tablist 与五个 tab、三个模态的 9 处冻结串、集切换两串、首启弹窗标题「先把本地工具链接好」与按钮「暂时进入工作台」（`smoke-gui.mjs` / `ax-helpers.mjs` 锚点，车道 A 若撤弹窗一并处理）。

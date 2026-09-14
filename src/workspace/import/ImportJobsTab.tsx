@@ -4,9 +4,10 @@ import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
-import { batchStatusLabel, decodeQueueHint, lastPathSegment, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
+import { batchStatusLabel, decodeQueueHint, lastPathSegment, ownedElsewhereLines, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
 import { useImportJobs } from "./useImportJobs";
 import { dispatchWorkspace } from "../WorkspaceStore";
+import { IMPORT_PROGRESS_LABEL } from "../copy";
 
 /** 三段式的一段(R10 U-08):标签 + 「已处理 n / N」+ 百分比 + 自己的进度条 + 处理中 / 等待 / 失败。 */
 function PipelineTile({ segment }: { segment: PipelineSegment }): JSX.Element {
@@ -38,8 +39,10 @@ function PipelineTile({ segment }: { segment: PipelineSegment }): JSX.Element {
 /** 任务分页(规格 §4.1):进度卡(三段式:索引 / 画质 / 运镜)、批次卡、批量操作行、确认框。 */
 export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Element {
   const jobs = useImportJobs({ onChanged });
-  const { progress, readyClips, quality, motion, batches, busy, notice, confirmation, refreshError } = jobs;
+  const { progress, clips, readyClips, quality, motion, batches, busy, notice, confirmation, refreshError } = jobs;
   const segments = pipelineSegments(progress, readyClips.length, quality, motion);
+  // Z-13:「重复 n」里属于别的集的那几条要说清在哪一集。
+  const elsewhere = ownedElsewhereLines(clips);
   const hint = decodeQueueHint(progress, segments);
   // 确认框接在批次列表之后,列表一长就在视口外;弹出时滚到它并把焦点交给它(alertdialog)。
   const confirmRef = useRef<HTMLDivElement | null>(null);
@@ -52,8 +55,8 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
 
   return (
     <div className="import-tab import-jobs">
-      <section className="import-section" aria-label="索引进度">
-        <SectionHeader title="索引进度" meta={pipelineHeadline(segments)} />
+      <section className="import-section" aria-label={IMPORT_PROGRESS_LABEL}>
+        <SectionHeader title={IMPORT_PROGRESS_LABEL} meta={pipelineHeadline(segments)} />
         <Card className="import-index import-index--pipeline" aria-live="polite">
           <ul className="import-pipeline" aria-label="流水线三阶段">
             {segments.map((segment) => (
@@ -128,6 +131,13 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
             })}
           </ul>
         )}
+        {elsewhere.length > 0 ? (
+          <ul className="import-jobs-elsewhere" aria-label="已属于其他集的文件">
+            {elsewhere.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        ) : null}
       </section>
 
       {confirmation ? (

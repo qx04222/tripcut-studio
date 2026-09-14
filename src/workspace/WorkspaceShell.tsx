@@ -7,9 +7,16 @@ import { MediaPool } from "./MediaPool";
 import { ShotBand } from "./ShotBand";
 import { bandMinHeight, bandPanelHeight, bandPanelMinHeight } from "./shotBandModel";
 import { StatusStrip } from "./StatusStrip";
+import { PipelineHint } from "./PipelineHint";
+import { GuideHost } from "./GuideHost";
+import { HomeScreen } from "./HomeScreen";
+import { useHomeVisible } from "./homeModel";
+import { ToolchainBanner } from "./ToolchainBanner";
+import { ToastHost } from "./ui/Toast";
 import { TopBar } from "./TopBar";
 import { popModal, pushModal } from "./modalStack";
 import { getClipsFeedSnapshot } from "./useClipsFeed";
+import { loadKeymap } from "./keymapStore";
 import { useGlobalHotkeys } from "./useGlobalHotkeys";
 import { selectionBelongsToEpisode } from "./useSelection";
 import { autoCollapseTransition, useRestoreSelection } from "./shellLayout";
@@ -106,6 +113,14 @@ export function WorkspaceShell(): JSX.Element {
   const bandPanelRef = usePanelRef();
   const [helpOpen, setHelpOpen] = useState(false);
   const helpToken = useRef({});
+  // R13 §3:首页盖在三栏与状态条上(空库自动 / 点 logo);三栏保持挂载(store、feed、面板尺寸都不丢),
+  // 只是 inert —— 键盘与 AX 都到不了被盖住的控件。顶栏、抽屉、toast、气泡宿主照常。
+  const homeOpen = useHomeVisible();
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    for (const node of shell.querySelectorAll<HTMLElement>(".workspace-columns, .workspace-status")) node.toggleAttribute("inert", homeOpen);
+  }, [homeOpen]);
 
   // 拖动期间只改 CSS 变量,不 setState —— 三栏不重渲染(规格 §10);
   // 松手(onLayoutChanged)才把最终值 dispatch 出去,由 store 的 400ms debounce 落盘。
@@ -227,6 +242,8 @@ export function WorkspaceShell(): JSX.Element {
   // 规格 §3.2 的整张全局键位表(F6 轮栏、⌘1/⌘2 折叠、⌘⏎ 沉浸、⌘, 设置、⌘I 导入、
   // ? 帮助、Esc 四级优先级)都在这个 hook 里,壳本身不再各挂各的 keydown。
   useGlobalHotkeys();
+  // R13 §1:键位表从 settings 水合一次(失败保持剪映默认)。
+  useEffect(() => void loadKeymap(), []);
 
   useEffect(() => {
     // R10 U-19:后端的 `tripcut:music-analyzed` Tauri 事件在壳层桥接一次成同名 window 事件,
@@ -261,6 +278,13 @@ export function WorkspaceShell(): JSX.Element {
   return (
     <div className="workspace-shell" ref={shellRef}>
       <TopBar />
+      <ToolchainBanner />
+      {homeOpen ? null : <PipelineHint />}
+      {/* R12 §3:全应用唯一的 toast 宿主(顶部居中、一条、3–5 秒);各栏只 showToast,不各自挂。 */}
+      <ToastHost />
+      {/* R13 §3:功能气泡宿主,全应用一份;首页(空库 / 点 logo)盖在三栏上。 */}
+      <GuideHost />
+      {homeOpen ? <HomeScreen /> : null}
       <Group orientation="horizontal" className="workspace-columns" onLayoutChanged={commitSizes}>
         {/*
           竖条与整栏是两个不同 id / key 的 Panel,而不是同一个 Panel 换 props:

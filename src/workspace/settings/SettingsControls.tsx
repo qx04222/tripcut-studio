@@ -77,8 +77,12 @@ export function ToolReadout({ label, status }: { label: string; status: ToolStat
           {status?.available ? "已就绪" : "未找到"}
         </StatusPill>
       </div>
-      <code>{status?.resolved_path || "等待检测"}</code>
-      <small>{status?.version ?? status?.note ?? "读取版本首行确认工具可执行"}</small>
+      {/* R12 术语 v2:路径与版本号收进「详情」,新手只看到「视频处理组件 已就绪」一行。 */}
+      <details className="settings-sheet-readout-details">
+        <summary>详情</summary>
+        <code>{status?.resolved_path || "等待检测"}</code>
+        <small>{status?.version ?? status?.note ?? "读取版本首行确认工具可执行"}</small>
+      </details>
     </div>
   );
 }

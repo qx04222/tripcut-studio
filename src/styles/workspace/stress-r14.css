@@ -1,0 +1,65 @@
+/*
+ * R14 车道 stress(压力测试 Z-01…Z-17 修复)的样式。只在 workspace.css 头部 @import。
+ * 选择器都带自己面板的根类;颜色只用 styles.css 的 token。
+ */
+
+/* Z-07:交付抽屉清单上方的「原片缺失」通知(快速导出 / 剪映素材包共用)。 */
+.deliver-drawer .deliver-missing-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  border-color: var(--danger);
+  background: var(--danger-tint);
+}
+.deliver-drawer .deliver-missing-icon {
+  display: inline-flex;
+  color: var(--danger);
+}
+.deliver-drawer .deliver-missing-text {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* Z-07:媒体池卡片的「缺失」角标(压在封面左上,与「AI 生成」同一层)。 */
+.media-pool .pool-card-missing-source {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  height: auto;
+  padding: 2px var(--space-1);
+  border-radius: 3px;
+  font-size: var(--text-11);
+  line-height: 1;
+  font-weight: 500;
+}
+.media-pool .pool-card:has(.pool-card-missing-source) .pool-card-image {
+  filter: grayscale(0.6);
+}
+
+/* Z-14:只读查看已封存集时的导出抽屉 —— 一句话 + 「回到当前集再导出」。 */
+.deliver-drawer .deliver-readonly {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+.deliver-drawer .deliver-readonly-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.deliver-drawer .deliver-readonly-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+/* Z-03:顶栏主按钮旁的 ghost「补缺口 n 章」。 */
+.workspace-topbar .pipeline-gap {
+  margin-right: 4px;
+  white-space: nowrap;
+}

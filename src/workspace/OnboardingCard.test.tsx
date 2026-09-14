@@ -5,36 +5,57 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(async () => ({}) as Record<string, string>),
   setSetting: vi.fn(async () => undefined),
+  arrangeSelectedSegments: vi.fn(async () => ({ placed: 0, chapters: 0 })),
 }));
 vi.mock("../api", () => apiMocks);
+vi.mock("./useClipsFeed", () => ({ refreshClipsFeed: vi.fn(async () => undefined) }));
+// 卡片的勾 / 当前步与顶栏导航同一套数据:直接喂 usePipeline 的输出。
+const pipelineMock = vi.hoisted(() => ({ state: null as unknown }));
+vi.mock("./usePipeline", () => ({ usePipeline: () => pipelineMock.state }));
 
 import { MonitorIdle, OnboardingCard } from "./OnboardingCard";
-import { OPEN_AUTO_SELECT_EVENT, STEPS_SEEN_KEY } from "./onboarding";
+import { STEPS_SEEN_KEY } from "./onboarding";
+import { derivePipeline, type PipelineInput } from "./pipelineModel";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
+
+const base: PipelineInput = { clipCount: 0, analysisPending: 0, segmentCount: 0, chapters: [], exportCount: 0 };
 
 beforeEach(() => {
   __resetWorkspaceForTests();
+  pipelineMock.state = derivePipeline(base);
   apiMocks.getSettings.mockReset().mockResolvedValue({});
   apiMocks.setSetting.mockReset().mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
-/** R11 简化专项 #1:首启三步引导是空工作区里的一张轻卡片,不是模态。 */
+/** R11 简化专项 #1 → R12 §1:首启四步引导是空工作区里的一张轻卡片,不是模态。 */
 describe("OnboardingCard", () => {
-  it("库空且没看过:三步各一句 + 三个按钮;只有「选择素材文件夹」是 primary,其余两个先禁用", async () => {
+  it("库空且没看过:四步各一句,第 ① 步 aria-current;唯一的 primary 是「开始使用」,点它打开导入抽屉", async () => {
     render(<OnboardingCard clipCount={0} loading={false} />);
-    const card = await screen.findByRole("group", { name: "三步上手" });
+    const card = await screen.findByRole("group", { name: "四步上手" });
     expect(card.getAttribute("aria-modal")).toBeNull();
     expect(card.closest("[role='dialog']")).toBeNull();
-    for (const text of ["导入素材", "挑选片段", "导出"]) expect(screen.getByText(text)).toBeTruthy();
-    const importButton = screen.getByRole("button", { name: "选择素材文件夹" });
-    expect(importButton.className).toContain("ui-button--primary");
-    expect((screen.getByRole("button", { name: "自动挑选" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "导出片段" }) as HTMLButtonElement).disabled).toBe(true);
+    for (const text of ["导入", "挑选", "排列", "导出"]) expect(screen.getByText(text)).toBeTruthy();
+    expect(card.querySelectorAll("li")).toHaveLength(4);
+    expect(card.querySelector("li[aria-current='step']")?.textContent).toContain("导入");
+    const start = screen.getByRole("button", { name: "开始使用" });
+    expect(start.className).toContain("ui-button--primary");
     expect(card.querySelectorAll(".ui-button--primary").length).toBe(1);
-    importButton.click();
+    // 旧三步卡的三颗按钮不再存在(AX 名释放)。
+    for (const name of ["选择素材文件夹", "自动挑选", "导出片段"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    start.click();
     expect(getWorkspaceSnapshot().openDrawer).toBe("import");
     expect(getWorkspaceSnapshot().importTab).toBe("source");
+  });
+
+  it("勾与当前步来自流水线数据:① 完成打勾、② 当前", async () => {
+    pipelineMock.state = derivePipeline({ ...base, clipCount: 3 });
+    render(<OnboardingCard clipCount={0} loading={false} />);
+    const card = await screen.findByRole("group", { name: "四步上手" });
+    const items = card.querySelectorAll("li");
+    expect(items[0].className).toContain("onboarding-step--done");
+    expect(items[0].querySelector("svg[data-icon='check']")).not.toBeNull();
+    expect(items[1].getAttribute("aria-current")).toBe("step");
   });
 
   it("「关闭引导」收起卡片并写 onboarding.steps_seen=true", async () => {
@@ -44,7 +65,7 @@ describe("OnboardingCard", () => {
       close.click();
       await Promise.resolve();
     });
-    expect(screen.queryByRole("group", { name: "三步上手" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "四步上手" })).toBeNull();
     expect(apiMocks.setSetting).toHaveBeenCalledWith(STEPS_SEEN_KEY, "true");
   });
 
@@ -54,26 +75,13 @@ describe("OnboardingCard", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByRole("group", { name: "三步上手" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "四步上手" })).toBeNull();
     unmount();
 
     apiMocks.getSettings.mockResolvedValue({});
     render(<OnboardingCard clipCount={5} loading={false} />);
     await waitFor(() => expect(apiMocks.setSetting).toHaveBeenCalledWith(STEPS_SEEN_KEY, "true"));
-    expect(screen.queryByRole("group", { name: "三步上手" })).toBeNull();
-  });
-
-  it("有素材时「自动挑选」广播打开镜头带的自动挑选面板,「导出片段」打开交付抽屉", async () => {
-    // 这两个按钮只在库里有素材时可点 —— 用「已看过 = false、库非空」以外的路径:直接给 clipCount 传 0 但强制显示不合理,
-    // 所以这里验证的是按钮的去向本身(组件暴露的 visible 判定已在 onboarding.test 里钉住)。
-    const heard = vi.fn();
-    window.addEventListener(OPEN_AUTO_SELECT_EVENT, heard);
-    render(<OnboardingCard clipCount={0} loading={false} forceEnabled />);
-    (await screen.findByRole("button", { name: "自动挑选" })).click();
-    expect(heard).toHaveBeenCalledTimes(1);
-    screen.getByRole("button", { name: "导出片段" }).click();
-    expect(getWorkspaceSnapshot().openDrawer).toBe("deliver");
-    window.removeEventListener(OPEN_AUTO_SELECT_EVENT, heard);
+    expect(screen.queryByRole("group", { name: "四步上手" })).toBeNull();
   });
 
   it("MonitorIdle:卡片不可见时落回监视器原句「从左侧媒体池选一条素材」", async () => {
@@ -91,7 +99,7 @@ describe("MonitorIdle 持有引导状态", () => {
       close.click();
       await Promise.resolve();
     });
-    expect(screen.queryByRole("group", { name: "三步上手" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "四步上手" })).toBeNull();
     expect(screen.getByText("从左侧媒体池选一条素材")).toBeTruthy();
   });
 });

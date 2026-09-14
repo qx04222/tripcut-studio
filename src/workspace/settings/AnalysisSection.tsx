@@ -22,9 +22,9 @@ export function AnalysisSection(): JSX.Element {
 
   return (
     <>
-      <SectionHeader title="分析与 AI" description="分析阈值与可选的大模型增强集中管理；既有结果不会被静默改写。" />
+      <SectionHeader title="分析与 AI" description="分析严格程度与可选的大模型增强集中管理；既有结果不会被静默改写。" />
       <div className="settings-sheet-subhead">
-        <strong>分析阈值</strong>
+        <strong>分析严格程度</strong>
         <small>新任务执行时读取当前值。</small>
       </div>
       <div className="settings-sheet-group">
@@ -78,7 +78,7 @@ export function AnalysisSection(): JSX.Element {
       </div>
 
       <SectionHeader
-        title="订阅大模型增强"
+        title="大模型增强(可选)"
         description="默认关闭且不选择 provider。只在你明确触发 AI 描述、导演问答或叙事编排时启动一次短命 CLI 子进程。"
         className="settings-sheet-section-gap"
       />

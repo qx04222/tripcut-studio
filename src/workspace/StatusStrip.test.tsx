@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 状态条一挂载就轮询三个后端命令;jsdom 里没有 tauri 的 invoke,不打桩的话三条
@@ -10,7 +10,8 @@ const apiMocks = await vi.hoisted(async () => {
 });
 vi.mock("../api", () => apiMocks);
 
-import { StatusStrip, summaryPhrases } from "./StatusStrip";
+import { IMPORT_PROBE_DONE_EVENT } from "../api";
+import { StatusStrip, analysisPhrase, estimateRemaining, formatRemaining, summaryPhrases } from "./StatusStrip";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 beforeEach(() => {
@@ -28,12 +29,15 @@ afterEach(cleanup);
 
 describe("summaryPhrases", () => {
   it("按存在性依次显示中文短语", () => {
+    // R12 §3:「正在分析 12/500」,估得出剩余时间时再接「,大约还要 30 秒」。
     expect(summaryPhrases({ analyzed: 12, analyzeTotal: 500, transcribing: 3, generating: 1, missing: 2 }))
-      .toEqual(["分析 12/500", "转写 3", "云端生成 1 排队", "缺失素材 2"]);
+      .toEqual(["正在分析 12/500", "转写 3", "云端生成 1 排队", "缺失素材 2"]);
+    expect(summaryPhrases({ analyzed: 12, analyzeTotal: 500, transcribing: 0, generating: 0, missing: 0 }, "30 秒"))
+      .toEqual(["正在分析 12/500,大约还要 30 秒"]);
   });
   it("为 0 的项不出现", () => {
     expect(summaryPhrases({ analyzed: 500, analyzeTotal: 500, transcribing: 0, generating: 0, missing: 2 }))
-      .toEqual(["分析 500/500", "缺失素材 2"]);
+      .toEqual(["分析完成 · 500 条", "缺失素材 2"]);
   });
   it("全空显示「后台空闲」单行", () => {
     expect(summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0 }))
@@ -64,20 +68,34 @@ describe("StatusStrip", () => {
     apiMocks.listMissingClips.mockResolvedValue([{ clip_id: 1, file_name: "A.MP4", volume_uuid: "v", volume_label: null, rel_path: "A.MP4", missing_since: "" }]);
     render(<StatusStrip />);
     const strip = await screen.findByRole("status", { name: "后台状态" });
-    await screen.findByText("分析 58/60");
-    const analysing = screen.getByText("分析 58/60").closest(".workspace-status-phrase") as HTMLElement;
+    await screen.findByText("正在分析 58/60");
+    const analysing = screen.getByText("正在分析 58/60").closest(".workspace-status-phrase") as HTMLElement;
     expect(analysing.querySelector("svg[data-icon=\"play\"]")).not.toBeNull();
     expect(screen.getByRole("button", { name: /缺失素材 1/ }).querySelector("svg[data-icon=\"warning\"]")).not.toBeNull();
     expect(strip.querySelector(".workspace-status-library svg[data-icon=\"check\"]")).not.toBeNull();
   });
-  it("分析完成后短语图标换成 check,进度条满格", async () => {
-    apiMocks.getImportProgress.mockResolvedValue({ total: 60, done: 60, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false });
-    apiMocks.listMissingClips.mockResolvedValue([]);
-    render(<StatusStrip />);
-    await screen.findByText("分析 60/60");
-    const done = screen.getByText("分析 60/60").closest(".workspace-status-phrase") as HTMLElement;
-    expect(done.querySelector("svg[data-icon=\"check\"]")).not.toBeNull();
-    expect((done.querySelector(".workspace-status-progress") as HTMLElement).style.getPropertyValue("--progress")).toBe("100%");
+  it("分析完成后短语「分析完成 · 60 条」图标换成 check,进度条满格;3 秒后收起(R12 §3)", async () => {
+    // 纯假时钟(不随真实时间走):全量并行跑时 shouldAdvanceTime 会让 3 秒收起在断言前真的过去,门禁两次假红。
+    vi.useFakeTimers();
+    try {
+      apiMocks.getImportProgress.mockResolvedValue({ total: 60, done: 60, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false });
+      apiMocks.listMissingClips.mockResolvedValue([]);
+      render(<StatusStrip />);
+      // 让首轮轮询与 mock 的 promise 在假时钟下落地。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      const done = screen.getByText("分析完成 · 60 条").closest(".workspace-status-phrase") as HTMLElement;
+      expect(done.querySelector("svg[data-icon=\"check\"]")).not.toBeNull();
+      expect((done.querySelector(".workspace-status-progress") as HTMLElement).style.getPropertyValue("--progress")).toBe("100%");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(screen.queryByText("分析完成 · 60 条")).toBeNull();
+      expect(screen.queryByText(/正在分析/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("「查看后台任务详情」前有 info 图标,AX 名不变", async () => {
     render(<StatusStrip />);
@@ -94,16 +112,110 @@ describe("R10 U-19 音乐分析计数", () => {
     view.unmount();
     apiMocks.getMusicAnalysisProgress.mockResolvedValue({ total: 3, done: 2, failed: 1, running: 0, pending: 0 });
     render(<StatusStrip />);
-    expect(await screen.findByText("分析 12/500")).toBeTruthy();
+    expect(await screen.findByText("正在分析 12/500")).toBeTruthy();
     expect(screen.queryByText(/音乐分析/)).toBeNull();
   });
 
   it("summaryPhrases:音乐分析短语排在素材分析之后、转写之前", () => {
     expect(
       summaryPhrases({ analyzed: 1, analyzeTotal: 2, transcribing: 0, generating: 0, missing: 0, musicDone: 1, musicTotal: 3, musicActive: 2 }),
-    ).toEqual(["分析 1/2", "音乐分析 1/3"]);
+    ).toEqual(["正在分析 1/2", "音乐分析 1/3"]);
     expect(
       summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0, musicDone: 3, musicTotal: 3, musicActive: 0 }),
     ).toEqual(["后台空闲"]);
+  });
+});
+
+describe("R12 §3 剩余时间估算(按最近 10 秒的速率)", () => {
+  it("estimateRemaining:窗口内 10 秒做了 4 条、还剩 12 条 → 30 秒;没进展 / 样本不够 → null;窗口外的旧样本不算", () => {
+    const t = 100_000;
+    const samples = [
+      { at: t - 30_000, done: 0 }, // 早于 10 秒窗口,不参与速率
+      { at: t - 10_000, done: 8 },
+      { at: t - 5_000, done: 10 },
+      { at: t, done: 12 },
+    ];
+    expect(estimateRemaining(samples, 24, t)).toBe(30_000);
+    expect(estimateRemaining([{ at: t - 10_000, done: 12 }, { at: t, done: 12 }], 24, t)).toBeNull();
+    expect(estimateRemaining([{ at: t, done: 12 }], 24, t)).toBeNull();
+    expect(estimateRemaining([{ at: t - 500, done: 11 }, { at: t, done: 12 }], 24, t)).toBeNull();
+  });
+
+  it("formatRemaining:< 60 秒按 5 秒向上取整说「n 秒」,≥ 60 秒说「n 分钟」", () => {
+    expect(formatRemaining(30_000)).toBe("30 秒");
+    expect(formatRemaining(31_000)).toBe("35 秒");
+    expect(formatRemaining(2_000)).toBe("5 秒");
+    expect(formatRemaining(90_000)).toBe("2 分钟");
+    expect(formatRemaining(60_000)).toBe("1 分钟");
+  });
+
+  it("analysisPhrase:估不出来时只说进度;完成说「分析完成 · n 条」", () => {
+    expect(analysisPhrase(12, 21, null)).toBe("正在分析 12/21");
+    expect(analysisPhrase(12, 21, "30 秒")).toBe("正在分析 12/21,大约还要 30 秒");
+    expect(analysisPhrase(21, 21, "30 秒")).toBe("分析完成 · 21 条");
+  });
+
+  it("状态条:两次轮询之间有进展就带上「大约还要」", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMocks.getImportProgress.mockResolvedValue({ total: 24, done: 8, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      render(<StatusStrip />);
+      await screen.findByText("正在分析 8/24");
+      apiMocks.getImportProgress.mockResolvedValue({ total: 24, done: 10, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      await act(async () => {
+        vi.advanceTimersByTime(3_100);
+      });
+      // 3 秒做了 2 条 → 还剩 14 条 ≈ 21 秒 → 向上到 25 秒。
+      await screen.findByText(/^正在分析 10\/24,大约还要 \d+ 秒$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("X-04:每条素材分析完(tripcut:import-probe-done)立刻刷新计数,不等 3 秒轮询;够两个样本就带「大约还要」", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMocks.getImportProgress.mockResolvedValue({ total: 166, done: 130, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      render(<StatusStrip />);
+      await screen.findByText("正在分析 130/166");
+      expect(apiMocks.bridgeImportProbeEvents).toHaveBeenCalled();
+      const polls = apiMocks.getImportProgress.mock.calls.length;
+      apiMocks.getImportProgress.mockResolvedValue({ total: 166, done: 131, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent(IMPORT_PROBE_DONE_EVENT, { detail: { job_id: 7, status: "done" } }));
+        vi.advanceTimersByTime(200);
+      });
+      await screen.findByText("正在分析 131/166");
+      expect(apiMocks.getImportProgress.mock.calls.length).toBe(polls + 1);
+      // 2.5 秒后又完成一条:两个样本跨度够了 → 「大约还要」出现。
+      await act(async () => {
+        vi.advanceTimersByTime(2_500);
+      });
+      apiMocks.getImportProgress.mockResolvedValue({ total: 166, done: 132, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent(IMPORT_PROBE_DONE_EVENT, { detail: { job_id: 8, status: "done" } }));
+        vi.advanceTimersByTime(200);
+      });
+      await screen.findByText(/^正在分析 132\/166,大约还要 \d+ 秒$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("X-04:一口气完成多条时事件合并成一次刷新(100 ms 内多条只打一次后端)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMocks.getImportProgress.mockResolvedValue({ total: 24, done: 8, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+      render(<StatusStrip />);
+      await screen.findByText("正在分析 8/24");
+      const polls = apiMocks.getImportProgress.mock.calls.length;
+      await act(async () => {
+        for (let i = 0; i < 5; i += 1) window.dispatchEvent(new CustomEvent(IMPORT_PROBE_DONE_EVENT, { detail: { job_id: i, status: "done" } }));
+        vi.advanceTimersByTime(200);
+      });
+      expect(apiMocks.getImportProgress.mock.calls.length).toBe(polls + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -11,6 +11,9 @@ vi.mock("../api", () => ({
   listGenerationRequests: vi.fn(async () => []),
   // R10 U-19:状态条把音乐分析进度并进了轮询。
   getMusicAnalysisProgress: vi.fn(async () => ({ total: 0, done: 0, failed: 0, running: 0, pending: 0 })),
+  // X-04:状态条自己桥接 import_probe 完成事件。
+  IMPORT_PROBE_DONE_EVENT: "tripcut:import-probe-done",
+  bridgeImportProbeEvents: vi.fn(async () => () => undefined),
   setSetting: vi.fn(async () => undefined),
 }));
 

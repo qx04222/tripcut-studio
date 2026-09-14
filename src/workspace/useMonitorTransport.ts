@@ -6,24 +6,24 @@ import { usePlayerPrefs, writePlayerPref } from "./playerPrefs";
 import { nextPoolClipId } from "./poolOrder";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
-/** 变速 / 反向的「假走带」节拍:每 200ms 一次 seek_abs。播放器通道没有 set_speed,只能这样。 */
-export const SHUTTLE_TICK_MS = 200;
+/** J「倒退」的节拍:mpv 不支持负速,按 8 fps 定时发原生 `frame-back-step`。 */
+export const REWIND_TICK_MS = 125;
 
 /** 手动换素材之后这么久内不「播完自动下一条」(V-05)。 */
 export const AUTO_ADVANCE_SUPPRESS_MS = 1_000;
 
-/** L 依次 1× → 2× → 4×;J 依次 −1× → −2× → −4×;K 归零。 */
-export type ShuttleSpeed = -4 | -2 | -1 | 0 | 1 | 2 | 4;
+/** 真变速的档位(mpv `speed` 属性;原生层再夹一次 0.25–4)。L 循环 1 → 2 → 4 → 1;菜单可选 0.5。 */
+export type PlaybackRate = 0.5 | 1 | 2 | 4;
+export const PLAYBACK_RATES: readonly PlaybackRate[] = [0.5, 1, 2, 4];
 
-export function nextShuttleSpeed(current: ShuttleSpeed, key: "j" | "k" | "l"): ShuttleSpeed {
-  if (key === "k") return 0;
-  if (key === "l") return current <= 0 ? 1 : current === 1 ? 2 : 4;
-  return current >= 0 ? -1 : current === -1 ? -2 : -4;
+export function nextPlaybackRate(current: PlaybackRate): PlaybackRate {
+  if (current === 1) return 2;
+  if (current === 2) return 4;
+  return 1;
 }
 
-export function shuttleSpeedLabel(speed: ShuttleSpeed): string {
-  if (speed === 0 || speed === 1) return "×1";
-  return speed < 0 ? `◀×${-speed}` : `×${speed}`;
+export function playbackRateLabel(rate: PlaybackRate, rewinding: boolean): string {
+  return rewinding ? "倒退" : `×${rate}`;
 }
 
 export function clipFps(clip: Pick<ClipListItem, "fps_num" | "fps_den"> | null): number {
@@ -37,16 +37,19 @@ export interface MonitorTransportDeps {
   send(commands: PlayerCommand[]): Promise<void>;
   inPoint: number | null;
   outPoint: number | null;
-  /** 最高分时刻(秒);素材一就绪就从这里开播(设置 `ui.player.start_at_best`)。 */
+  /** 最高分时刻(秒);素材一就绪预览帧就停在这里(设置 `ui.player.start_at_best`)。 */
   bestStart: number | null;
   /** 时刻分已经拉完(成功或失败)—— 没到齐之前不决定从哪开播。 */
   momentsLoaded: boolean;
 }
 
 export interface MonitorTransport {
-  speed: ShuttleSpeed;
+  rate: PlaybackRate;
+  rewinding: boolean;
   speedLabel: string;
   shuttle(key: "j" | "k" | "l"): void;
+  /** 「×1」按钮的速度菜单:设 mpv 速度;暂停时顺带开播。 */
+  setRate(rate: PlaybackRate): void;
   frame(direction: 1 | -1): void;
   nudge(seconds: number): void;
   /** 绝对定位;监视器的所有 seek 都从这里走,位置锚点才跟得上(V-04)。 */
@@ -62,26 +65,33 @@ export interface MonitorTransport {
   stopLoop(): void;
   muted: boolean;
   toggleMute(): void;
+  /** R12 §5:「连播」—— 播完自动下一条,监视器上的显式开关(默认关)。 */
+  autoAdvance: boolean;
+  toggleAutoAdvance(): void;
 }
 
 /**
- * R11 §3 的走带逻辑,全部只用既有 `player_*` 命令:
- * - 变速 / 反向 = 暂停 + 定时 seek_abs(通道没有 set_speed);到头 / 到尾自动归零;
- * - 逐帧 = 暂停 + seek_abs(pos ± 1/fps);
+ * R11 §3 的走带逻辑,R12 §5 换成原生真变速:
+ * - 变速 = `set_speed`(mpv `speed` 属性,L 循环 ×1 → ×2 → ×4 → ×1,K 停并回 ×1);
+ * - 反向 = 「倒退」:mpv 不支持负速,暂停后按 8 fps 定时发原生 `step_back`,退到 0 自动停;
+ * - 逐帧 = 原生 `step_fwd` / `step_back`(mpv `frame-step` / `frame-back-step`);
  * - ⇧L 循环 = 播放头越过出点就回入点(保存后由监视器调 stopLoop);
- * - 播完自动下一条 = 顺媒体池当前可见顺序,末尾停;循环中不跳;
+ * - 播完自动下一条(「连播」,默认关)= 顺媒体池当前可见顺序,末尾停;循环中不跳;
  * - 静音记忆 = `ui.player.muted`,素材就绪时补发一次 set_mute;
- * - 从最高分时刻开播 = 素材就绪 + 时刻分到齐后 seek 一次(每条素材只做一次)。
+ * - 点卡片 = 预览(R12 §5):素材就绪先暂停,时刻分到齐后停在最高分时刻(每条素材只做一次)。
  */
 export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded }: MonitorTransportDeps): MonitorTransport {
   const prefs = usePlayerPrefs();
-  const [speed, setSpeed] = useState<ShuttleSpeed>(0);
+  const [rate, setRateState] = useState<PlaybackRate>(1);
+  const [rewinding, setRewinding] = useState(false);
   const [looping, setLooping] = useState(false);
   const clipId = clip?.id ?? null;
   const ready = status?.phase === "ready" && status.clip_id === clipId;
 
-  const latest = useRef({ status, send, inPoint, outPoint, looping, speed });
-  latest.current = { status, send, inPoint, outPoint, looping, speed };
+  const latest = useRef({ status, send, inPoint, outPoint, looping, rate, rewinding });
+  latest.current = { status, send, inPoint, outPoint, looping, rate, rewinding };
+  // mpv 的 `speed` 属性跨 loadfile 保留:记住最后一次发给它的值,换素材就绪时不是 1 就补发。
+  const mpvRate = useRef<PlaybackRate>(1);
 
   // V-04:暂停态 seek 的位置锚点。mpv 的 seek 异步落地,命令回来时 status.pos 多半还是旧值;
   // 连按 . 或 ⌥→ 再按 I 都不能拿旧值算,所以记住「最后要去的位置」,状态追上(半帧内)或
@@ -115,70 +125,80 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     [sendAnchored],
   );
 
-  // 换素材:变速、循环、位置锚点归零(入出点由监视器自己清)。
+  // 换素材:速度标签、倒退、循环、位置锚点归零(入出点由监视器自己清);mpv 侧的 speed 在就绪时补发。
   useEffect(() => {
-    setSpeed(0);
+    setRateState(1);
+    setRewinding(false);
     setLooping(false);
     anchor.current = null;
   }, [clipId]);
 
-  // 用户按了播放 / 暂停按钮(不经 shuttle):speed 跟着实际 paused 走,别让 ×2 的标签留在暂停的画面上。
+  // 「倒退」:按 8 fps 发原生 step_back;退到头(不足一帧)自动停。
   useEffect(() => {
-    if (!status || status.phase !== "ready") return;
-    if (status.paused && speed === 1) setSpeed(0);
-    if (!status.paused && speed === 0) setSpeed(1);
-  }, [status, speed]);
-
-  // 变速 / 反向的假走带。
-  useEffect(() => {
-    if (speed === 0 || speed === 1) return;
+    if (!rewinding) return;
     const timer = window.setInterval(() => {
       const current = latest.current.status;
       if (!current || current.phase !== "ready") return;
-      const target = current.pos + speed * (SHUTTLE_TICK_MS / 1000);
-      if (target <= 0 || target >= current.duration) {
-        void latest.current.send([{ type: "seek_abs", seconds: Math.min(current.duration, Math.max(0, target)) }]);
-        setSpeed(0);
+      if (current.pos <= 1 / fps / 2 + 1e-6) {
+        setRewinding(false);
         return;
       }
-      void latest.current.send([{ type: "seek_abs", seconds: target }]);
-    }, SHUTTLE_TICK_MS);
+      void latest.current.send([{ type: "step_back" }]);
+    }, REWIND_TICK_MS);
     return () => window.clearInterval(timer);
-  }, [speed]);
+  }, [rewinding, fps]);
+
+  /** 设速度并(暂停时)开播:L 与速度菜单共用。播完再开播从头放(U-09)。 */
+  const playAt = useCallback((next: PlaybackRate) => {
+    const current = latest.current.status;
+    if (!current || current.phase !== "ready") return;
+    setRewinding(false);
+    setRateState(next);
+    mpvRate.current = next;
+    const commands: PlayerCommand[] = [{ type: "set_speed", speed: next }];
+    if (current.paused) {
+      if (isAtEnd(current)) commands.push({ type: "seek_abs", seconds: 0 });
+      commands.push({ type: "play" });
+    }
+    void latest.current.send(commands);
+  }, []);
 
   const shuttle = useCallback(
     (key: "j" | "k" | "l") => {
       const current = latest.current.status;
       if (!current || current.phase !== "ready") return;
-      const next = nextShuttleSpeed(latest.current.speed, key);
-      setSpeed(next);
-      if (next === 1) {
-        void latest.current.send(isAtEnd(current) ? [{ type: "seek_abs", seconds: 0 }, { type: "play" }] : [{ type: "play" }]);
-      } else if (next === 0) {
-        void latest.current.send([{ type: "pause" }]);
-      } else if (next === -1) {
-        // 第一下 J:暂停并先退一秒(沉浸态同一张表),然后由假走带继续倒着走。
-        void latest.current.send([{ type: "pause" }, { type: "seek_abs", seconds: Math.max(0, current.pos - 1) }]);
-      } else if (!current.paused) {
-        void latest.current.send([{ type: "pause" }]);
+      const { rate: currentRate, rewinding: isRewinding } = latest.current;
+      if (key === "l") {
+        // 暂停 / 倒退中按 L = 从 ×1 开播;播放中 = 下一档(×1 → ×2 → ×4 → ×1)。
+        playAt(current.paused || isRewinding ? 1 : nextPlaybackRate(currentRate));
+        return;
       }
+      if (key === "k") {
+        setRewinding(false);
+        setRateState(1);
+        mpvRate.current = 1;
+        void latest.current.send([{ type: "pause" }, { type: "set_speed", speed: 1 }]);
+        return;
+      }
+      if (isRewinding) return;
+      setRewinding(true);
+      anchor.current = null;
+      void latest.current.send([{ type: "pause" }]);
     },
-    [],
+    [playAt],
   );
 
-  const frame = useCallback(
-    (direction: 1 | -1) => {
-      const current = latest.current.status;
-      const from = position();
-      if (!current || current.phase !== "ready" || from === null) return;
-      const step = 1 / fps;
-      // 1/25 = 0.04 在浮点里是 12.540000000000001;按毫秒取整,别把脏尾巴发给播放器。
-      const target = Math.round(Math.min(current.duration, Math.max(0, from + direction * step)) * 1000) / 1000;
-      setSpeed(0);
-      sendAnchored([{ type: "pause" }, { type: "seek_abs", seconds: target }], target);
-    },
-    [fps, position, sendAnchored],
-  );
+  const setRate = useCallback((next: PlaybackRate) => playAt(next), [playAt]);
+
+  // 逐帧走原生 frame-step / frame-back-step:mpv 自己暂停、自己算下一帧的位置,不再按
+  // pos ± 1/fps 发 seek(V-04 的算错位置从根上没了);读数由通道等到位置变了再交出去。
+  const frame = useCallback((direction: 1 | -1) => {
+    const current = latest.current.status;
+    if (!current || current.phase !== "ready") return;
+    setRewinding(false);
+    anchor.current = null;
+    void latest.current.send([{ type: direction > 0 ? "step_fwd" : "step_back" }]);
+  }, []);
 
   const nudge = useCallback(
     (seconds: number) => {
@@ -212,7 +232,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     const { inPoint: currentIn, outPoint: currentOut, status: current, looping: on } = latest.current;
     if (currentIn === null || currentOut === null || currentOut <= currentIn || !current || current.phase !== "ready") return;
     if (!on) {
-      setSpeed(1);
+      setRewinding(false);
       wrapToIn(currentIn);
     }
     setLooping(!on);
@@ -256,18 +276,35 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     dispatchWorkspace({ type: "select-clip", clipId: next });
   }, [ready, clipId, status, looping, prefs.autoAdvance]);
 
-  // 静音记忆 + 从最高分时刻开播:每条素材就绪后各做一次。
+  // R12 §5:点卡片 = 预览。mpv 载入即播(player_open 把 pause 翻成 false),素材一就绪
+  // 先把它停住 —— 不等时刻分,等一拍画面就跑起来了;静音记忆也在这一拍补发。
+  const pausedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (!ready || clipId === null || pausedFor.current === clipId) return;
+    pausedFor.current = clipId;
+    const commands: PlayerCommand[] = [{ type: "pause" }];
+    if (prefs.muted) commands.push({ type: "set_mute", muted: true });
+    if (mpvRate.current !== 1) {
+      mpvRate.current = 1;
+      commands.push({ type: "set_speed", speed: 1 });
+    }
+    void send(commands);
+  }, [ready, clipId, prefs.muted, send]);
+
+  // 「从最精彩处」:时刻分到齐后把预览帧停在最高分时刻(每条素材只做一次);
+  // 拉失败的素材 bestStart 是 null,停在首帧。开播仍由用户按空格 / 点播放。
   const preparedFor = useRef<number | null>(null);
   useEffect(() => {
     if (!ready || clipId === null || preparedFor.current === clipId) return;
-    // 时刻分还没拉完就等(到齐后 effect 会重跑);拉失败的素材 bestStart 是 null,从 0 开始。
-    if (prefs.startAtBest && !momentsLoaded) return;
+    if (!prefs.startAtBest) return;
+    if (!momentsLoaded) return;
     preparedFor.current = clipId;
-    const commands: PlayerCommand[] = [];
-    if (prefs.muted) commands.push({ type: "set_mute", muted: true });
-    if (prefs.startAtBest && bestStart !== null && bestStart > 0) commands.push({ type: "seek_abs", seconds: bestStart });
-    if (commands.length > 0) void send(commands);
-  }, [ready, clipId, prefs.muted, prefs.startAtBest, bestStart, momentsLoaded, send]);
+    if (bestStart !== null && bestStart > 0) void send([{ type: "seek_abs", seconds: bestStart }]);
+  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send]);
+
+  const toggleAutoAdvance = useCallback(() => {
+    void writePlayerPref("ui.player.auto_advance", !prefs.autoAdvance);
+  }, [prefs.autoAdvance]);
 
   const toggleMute = useCallback(() => {
     const next = !prefs.muted;
@@ -276,9 +313,11 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   }, [prefs.muted]);
 
   return {
-    speed,
-    speedLabel: shuttleSpeedLabel(speed),
+    rate,
+    rewinding,
+    speedLabel: playbackRateLabel(rate, rewinding),
     shuttle,
+    setRate,
     frame,
     nudge,
     seekTo,
@@ -288,5 +327,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     stopLoop,
     muted: prefs.muted,
     toggleMute,
+    autoAdvance: prefs.autoAdvance,
+    toggleAutoAdvance,
   };
 }

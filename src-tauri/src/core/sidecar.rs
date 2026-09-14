@@ -344,7 +344,7 @@ fn resolve_launch() -> Result<(PathBuf, PathBuf)> {
     let python = paths.python;
     if !service.is_file() || !python.is_file() {
         return Err(CoreError::Sidecar(
-            "Chinese-CLIP 签名组件包尚未安装；正式版不会在线安装 Python 运行环境，画面语义搜索暂不可用"
+            "画面识别组件尚未安装；正式版不会在线安装，按画面搜索暂不可用"
                 .to_owned(),
         ));
     }
@@ -362,7 +362,7 @@ fn spawn_process(python: &Path, service: &Path) -> Result<RunningSidecar> {
         .spawn()
         .map_err(|error| {
             CoreError::Sidecar(format!(
-                "无法启动 Chinese-CLIP 签名组件包：{error}；请重新安装受信任的组件包"
+                "无法启动画面识别组件：{error}；请重新安装受信任的组件包"
             ))
         })?;
     let stdin = child.stdin.take().ok_or_else(|| {

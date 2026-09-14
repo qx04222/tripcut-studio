@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useId, useRef, useState, type JSX } from "react";
 
-import { autoSelectEpisode, getCurrentEpisode, listPlatformPresets, type AutoSelectOutcome, type AutoSelectScope } from "../api";
+import {
+  autoSelectEpisode,
+  getCurrentEpisode,
+  getMomentsProgress,
+  listPlatformPresets,
+  type AutoSelectOutcome,
+  type AutoSelectScope,
+  type ClipListItem,
+} from "../api";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
-import { refreshClipsFeed } from "./useClipsFeed";
+import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { Button, Chip } from "./ui";
 import { failureText } from "./errorText";
 
@@ -21,9 +29,30 @@ export const AUTO_SELECT_SCOPES: ReadonlyArray<{ scope: AutoSelectScope; label: 
 ];
 export const AUTO_SELECT_DEFAULT_SCOPE: AutoSelectScope = "favorites_or_rated3";
 
-/** toast 文案:「已挑选 n 段 · 共 m s · 覆盖 k 章」。 */
+/**
+ * X-01:默认 chip 按库状态推导——一条收藏或 ≥3 星都没有的库(全新库)预选「全部素材」,
+ * 否则才是「收藏 + 3 星以上」。后端对默认范围还有一道兜底降级(`fell_back`)。
+ */
+export function defaultScopeFor(clips: readonly Pick<ClipListItem, "binary_rating" | "star_rating">[]): AutoSelectScope {
+  const curated = clips.some((clip) => clip.binary_rating === 1 || (clip.star_rating ?? 0) >= 3);
+  return curated ? AUTO_SELECT_DEFAULT_SCOPE : "all";
+}
+
+/** toast 文案:「已挑选 n 段 · 共 m s · 覆盖 k 章」;后端降级到「全部」时先说明为什么。 */
 export function autoSelectToast(outcome: AutoSelectOutcome): string {
-  return `已挑选 ${outcome.created.length} 段 · 共 ${Math.round(outcome.total_secs)} s · 覆盖 ${outcome.chapters_covered} 章`;
+  const tail = `共 ${Math.round(outcome.total_secs)} s · 覆盖 ${outcome.chapters_covered} 章`;
+  if (outcome.fell_back) return `你还没收藏或打星,已按全部素材挑了 ${outcome.created.length} 段 · ${tail}`;
+  return `已挑选 ${outcome.created.length} 段 · ${tail}`;
+}
+
+/** X-02:失败时的「下一步」——分析真没跑完才劝等分析,否则用兜底「再试一次」。 */
+export async function autoSelectNextStep(): Promise<string | undefined> {
+  try {
+    const progress = await getMomentsProgress();
+    return progress.pending + progress.running > 0 ? "先让画面分析跑完,再试一次" : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 当前集的平台预算(秒);拉不到就用兜底。 */
@@ -53,7 +82,10 @@ export function BandAutoSelect({
   onError(message: string): void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [scope, setScope] = useState<AutoSelectScope>(AUTO_SELECT_DEFAULT_SCOPE);
+  // 用户没点过 chip 之前,范围跟着库状态走(X-01);点过就以用户的为准。
+  const [chosenScope, setScope] = useState<AutoSelectScope | null>(null);
+  const { clips } = useClipsFeed();
+  const scope = chosenScope ?? defaultScopeFor(clips);
   const [budget, setBudget] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const budgetId = useId();
@@ -95,10 +127,13 @@ export function BandAutoSelect({
     try {
       const outcome = await autoSelectEpisode({ scope, budgetSecs: Number.isFinite(seconds) && seconds > 0 ? seconds : undefined });
       setOpen(false);
-      onOutcome(outcome);
+      // Y-03:全新库(0 收藏 0 打星)按「全部」挑时,后端的 fell_back 永远走不到 —— 前端已经预选了「全部」。
+      // 「为什么按全部」由前端按同一份库状态说清,toast 文案与后端降级一致。
+      const uncurated = scope === "all" && defaultScopeFor(clips) === "all";
+      onOutcome(uncurated ? { ...outcome, fell_back: true } : outcome);
       await refreshClipsFeed(true);
     } catch (error) {
-      onError(failureText("自动挑选", error, "先让画面分析跑完,再试一次"));
+      onError(failureText("自动挑选", error, await autoSelectNextStep()));
     } finally {
       setBusy(false);
     }

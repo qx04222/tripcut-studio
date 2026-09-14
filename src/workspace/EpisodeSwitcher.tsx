@@ -48,6 +48,13 @@ export function EpisodeSwitcher(): JSX.Element {
 
   useFocusTrap(popoverRef, open);
 
+  // R13 §1:全局键位「切换集」(默认 ⇧⌘E)发这个事件,这里开 popover。
+  useEffect(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener("tripcut:open-episode-switcher", onOpen);
+    return () => window.removeEventListener("tripcut:open-episode-switcher", onOpen);
+  }, []);
+
   // popover 打开期间进模态栈:监视器据此把原生视频视图藏起来(R9 D1),
   // 壳的全局 Esc 也知道这一下轮不到它。
   useEffect(() => {
@@ -191,8 +198,9 @@ export function EpisodeSwitcher(): JSX.Element {
           setNotice(null);
         }}
       >
-        <span className="workspace-episode-label">{current ? current.title : "切换集"}</span>
-        {current ? (
+        {/* Z-14:只读查看已封存集时胶囊写被查看的集名(此前仍写当前集,和媒体池对不上)。 */}
+        <span className="workspace-episode-label">{viewingEpisode ? `只读 · ${viewingEpisode.title}` : current ? current.title : "切换集"}</span>
+        {current && !viewingEpisode ? (
           <>
             <span className="workspace-episode-sep" aria-hidden="true">
               ·

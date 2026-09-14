@@ -105,7 +105,7 @@ function jobsClip(id: number, analysis: StageStatus, motion: StageStatus): ClipL
 }
 
 describe("R10 U-08:任务分页顶部三段式,内部状态码不直出", () => {
-  it("索引 21/21 100% 时标题写「索引完成，分析进行中」,画质 / 运镜各有自己的计数与百分比", async () => {
+  it("索引 21/21 100% 时标题写「登记完成，分析进行中」,画质 / 运镜各有自己的计数与百分比", async () => {
     apiMocks.getImportProgress.mockResolvedValue({ total: 21, done: 21, failed: 0, running: 0, waiting_for_permit: 38, paused_for_memory: false });
     __resetClipsFeedForTests();
     apiMocks.getClipsRevision.mockResolvedValue("rev-u08" as never);
@@ -118,7 +118,7 @@ describe("R10 U-08:任务分页顶部三段式,内部状态码不直出", () => 
     __resetWorkspaceForTests({ openDrawer: "import", importTab: "jobs" });
     render(<WorkspaceShell />);
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
-    await within(dialog).findByText("索引完成，分析进行中");
+    await within(dialog).findByText("登记完成，分析进行中");
     const tiles = within(dialog).getAllByRole("listitem").filter((node) => node.className.includes("import-pipeline-tile"));
     expect(tiles.map((tile) => tile.querySelector(".import-pipeline-count")?.textContent)).toEqual(["已处理 21 / 21", "已处理 10 / 21", "已处理 0 / 21"]);
     expect(tiles.map((tile) => tile.querySelector(".import-pipeline-percent")?.textContent)).toEqual(["100%", "48%", "0%"]);
@@ -137,7 +137,7 @@ describe("R10 U-08:任务分页顶部三段式,内部状态码不直出", () => 
     __resetWorkspaceForTests({ openDrawer: "import", importTab: "jobs" });
     render(<WorkspaceShell />);
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
-    await within(dialog).findByText("索引与分析全部完成");
+    await within(dialog).findByText("登记与分析全部完成");
     expect(dialog.textContent).not.toContain("解码通道");
     expect(dialog.textContent).not.toContain("等待解码许可");
   });

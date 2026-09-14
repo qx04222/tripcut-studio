@@ -32,7 +32,26 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 // 旧的是像素量纲的绝对值）；旧版本算出的 clip_motion 行必须用新算法重跑，
 // 否则会拿旧量纲的分数去和新的 DEFAULT_JITTER_THRESHOLD 比较。版本号变化会让
 // `enqueue_missing` 把它们重新入队。
-const TOOL_VERSION: &str = "analyze_motion/v5";
+// v6（R14）：抖动分只用「块向量一致」的帧对算（见 `PAIR_AGREEMENT_MIN`）。
+// 此前 6 条真实样片（三脚架固定机位 + 前景人物走动、跟拍、硬切拼接）全部被判成
+// 手持抖动（0.34–0.73）：主体运动/径向光流/硬切让 64 个块向量互相打架，中位数
+// 成了随机噪声，噪声的高频占比天然接近 1。旧结果必须重算。
+const TOOL_VERSION: &str = "analyze_motion/v6";
+/// 帧对可信度门槛：与全局中位向量相差 ≤1 px 的块占比低于此值时，说明画面不是在
+/// 整体平移（主体运动、径向光流、硬切、纯色区域），这一对的"全局向量"不可信，
+/// 不参与抖动分；抖动是整幅画面一起动，可信帧对里的高频才算抖。
+pub const PAIR_AGREEMENT_MIN: f64 = 0.6;
+const AGREEMENT_TOLERANCE_PX: f64 = 1.0;
+/// 抖动的高频分量至少要有这么大的幅度(160 px 分析分辨率下的 RMS,≈1.2% 画幅)才算抖:
+/// 块匹配是整像素的,近乎静止的机位会在 ±1 px 之间跳(R14 实测三脚架样片高频 RMS 1.1–1.3 px),
+/// 这种量化抖动的"高频占比"天然接近 1,但画面上根本看不出来。
+pub const SHAKE_MIN_HIGH_FREQ_RMS_PX: f64 = 2.0;
+/// 块纹理门槛(16×16 块的灰度标准差):低于此值的块(平色墙/天空/暗部)在任何偏移下
+/// SAD 都差不多,匹配出来的向量是随机的;它们既不参与全局向量的中位数,也不参与一致性。
+/// R14 实测:三脚架样片的静止帧对一致性从 0.42–0.53(含平色块)升到 ≥0.8。
+const BLOCK_TEXTURE_STD_MIN: f64 = 6.0;
+/// 可信块不足这个数时整对帧不可信(agreement=0),全局向量退回全部块的中位数。
+const MIN_TEXTURED_BLOCKS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipMotion {
@@ -72,6 +91,8 @@ struct PairMotion {
     global: MotionVector,
     zoom_corr: f64,
     residual_rms: f64,
+    /// 与全局中位向量一致（Chebyshev 距离 ≤1 px）的块占比，[0,1]。
+    agreement: f64,
 }
 
 pub(crate) struct CommandOutput<T = Vec<u8>> {
@@ -391,25 +412,35 @@ fn estimate_pair(previous: &[u8], next: &[u8]) -> Result<PairMotion> {
     }
 
     let mut vectors = Vec::with_capacity(GRID_SIZE * GRID_SIZE);
+    let mut textured = Vec::with_capacity(GRID_SIZE * GRID_SIZE);
     let offsets = search_offsets();
     for row in 0..GRID_SIZE {
         for column in 0..GRID_SIZE {
             let x = GRID_ORIGIN + column * BLOCK_SIZE;
             let y = GRID_ORIGIN + row * BLOCK_SIZE;
             vectors.push(best_block_vector(previous, next, x, y, offsets));
+            textured.push(block_texture_std(previous, x, y) >= BLOCK_TEXTURE_STD_MIN);
         }
     }
+    let textured_count = textured.iter().filter(|flag| **flag).count();
+    let enough_texture = textured_count >= MIN_TEXTURED_BLOCKS;
+    let trusted = |index: usize| !enough_texture || textured[index];
 
     let global = MotionVector {
-        dx: median(vectors.iter().map(|vector| vector.dx).collect()),
-        dy: median(vectors.iter().map(|vector| vector.dy).collect()),
+        dx: median(vectors.iter().enumerate().filter(|(i, _)| trusted(*i)).map(|(_, v)| v.dx).collect()),
+        dy: median(vectors.iter().enumerate().filter(|(i, _)| trusted(*i)).map(|(_, v)| v.dy).collect()),
     };
     let center_x = (MOTION_WIDTH as f64 - 1.0) / 2.0;
     let center_y = (MOTION_HEIGHT as f64 - 1.0) / 2.0;
     let mut radial_dot = 0.0;
     let mut residual_energy = 0.0;
     let mut radial_energy = 0.0;
+    let mut counted = 0_usize;
     for (index, vector) in vectors.iter().enumerate() {
+        if !trusted(index) {
+            continue;
+        }
+        counted += 1;
         let row = index / GRID_SIZE;
         let column = index % GRID_SIZE;
         let block_center_x = (GRID_ORIGIN + column * BLOCK_SIZE) as f64
@@ -429,12 +460,44 @@ fn estimate_pair(previous: &[u8], next: &[u8]) -> Result<PairMotion> {
     } else {
         (radial_dot / (residual_energy * radial_energy).sqrt()).clamp(-1.0, 1.0)
     };
-    let residual_rms = (residual_energy / vectors.len() as f64).sqrt();
+    let residual_rms = (residual_energy / counted.max(1) as f64).sqrt();
+    let agreement = if enough_texture {
+        vectors
+            .iter()
+            .enumerate()
+            .filter(|(index, vector)| {
+                textured[*index]
+                    && (vector.dx - global.dx).abs() <= AGREEMENT_TOLERANCE_PX
+                    && (vector.dy - global.dy).abs() <= AGREEMENT_TOLERANCE_PX
+            })
+            .count() as f64
+            / textured_count as f64
+    } else {
+        0.0
+    };
     Ok(PairMotion {
         global,
         zoom_corr,
         residual_rms,
+        agreement,
     })
+}
+
+/// 16×16 块的灰度标准差,量化"这个块有没有可供匹配的纹理"。
+fn block_texture_std(frame: &[u8], x: usize, y: usize) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut sum_squares = 0.0_f64;
+    for block_y in 0..BLOCK_SIZE {
+        let offset = (y + block_y) * MOTION_WIDTH + x;
+        for value in &frame[offset..offset + BLOCK_SIZE] {
+            let value = f64::from(*value);
+            sum += value;
+            sum_squares += value * value;
+        }
+    }
+    let count = (BLOCK_SIZE * BLOCK_SIZE) as f64;
+    let mean = sum / count;
+    (sum_squares / count - mean * mean).max(0.0).sqrt()
 }
 
 fn search_offsets() -> &'static [(isize, isize)] {
@@ -516,6 +579,7 @@ fn aggregate_motion(pairs: &[PairMotion]) -> Result<ClipMotion> {
     let start_shake = high_freq_energy_ratio(&pairs[..endpoint_span.min(pairs.len())]);
     let end_shake = high_freq_energy_ratio(&pairs[pairs.len().saturating_sub(endpoint_span)..]);
     let residual_rms = pairs.iter().map(|pair| pair.residual_rms).sum::<f64>() / pair_count;
+    let trusted_pairs = pairs.iter().filter(|pair| pair.agreement >= PAIR_AGREEMENT_MIN).count();
     let direction_coherence = coherent_direction_ratio(pairs);
     let second_shake = per_second_shake_scores(pairs)
         .into_iter()
@@ -548,7 +612,7 @@ fn aggregate_motion(pairs: &[PairMotion]) -> Result<ClipMotion> {
         is_shaky: shake_is_flagged(shake_score, super::settings::DEFAULT_JITTER_THRESHOLD),
         sample_pairs: pairs.len() as i64,
         tool_version: format!(
-            "{TOOL_VERSION};mean_magnitude={mean_magnitude:.6};residual_rms={residual_rms:.6};direction_coherence={direction_coherence:.6};start_shake={start_shake:.6};end_shake={end_shake:.6};second_shake={second_shake}"
+            "{TOOL_VERSION};mean_magnitude={mean_magnitude:.6};residual_rms={residual_rms:.6};direction_coherence={direction_coherence:.6};trusted_pairs={trusted_pairs};start_shake={start_shake:.6};end_shake={end_shake:.6};second_shake={second_shake}"
         ),
     })
 }
@@ -604,27 +668,42 @@ const HIGH_FREQ_WINDOW: usize = 3;
 /// 高频抖动，≥0.22）之间有清晰间隔，阈值取 0.15（见 `DEFAULT_JITTER_THRESHOLD`），
 /// 落在间隔中段偏稳定一侧，让温和手持（如 dubai 原片 0.09–0.11）仍判非抖，更明显的
 /// 手持/合成抖动判为抖。
+///
+/// v6：只在「块向量一致」的连续帧对段上算（`PAIR_AGREEMENT_MIN`）。不可信的帧对
+/// （主体运动、径向光流、硬切）把轨迹切成若干段，各段分别取低通、能量相加；
+/// 可信帧对不足一个窗口时给 0（无证据不算抖）。R14 实测：6 条真实样片的
+/// 抖动分从 0.34–0.73 降到 ≤0.05，合成随机抖动夹具仍 ≥0.5。
 fn high_freq_energy_ratio(pairs: &[PairMotion]) -> f64 {
-    if pairs.len() < HIGH_FREQ_WINDOW {
-        return 0.0;
-    }
-    let dx = pairs.iter().map(|pair| pair.global.dx).collect::<Vec<_>>();
-    let dy = pairs.iter().map(|pair| pair.global.dy).collect::<Vec<_>>();
-    let low_dx = moving_average(&dx, HIGH_FREQ_WINDOW);
-    let low_dy = moving_average(&dy, HIGH_FREQ_WINDOW);
-
     let mut total_energy = 0.0;
     let mut high_energy = 0.0;
-    for i in 0..pairs.len() {
-        total_energy += dx[i] * dx[i] + dy[i] * dy[i];
-        let high_dx = dx[i] - low_dx[i];
-        let high_dy = dy[i] - low_dy[i];
-        high_energy += high_dx * high_dx + high_dy * high_dy;
+    let mut trusted = 0_usize;
+    for run in pairs.split(|pair| pair.agreement < PAIR_AGREEMENT_MIN) {
+        if run.len() < HIGH_FREQ_WINDOW {
+            continue;
+        }
+        trusted += run.len();
+        let dx = run.iter().map(|pair| pair.global.dx).collect::<Vec<_>>();
+        let dy = run.iter().map(|pair| pair.global.dy).collect::<Vec<_>>();
+        let low_dx = moving_average(&dx, HIGH_FREQ_WINDOW);
+        let low_dy = moving_average(&dy, HIGH_FREQ_WINDOW);
+        for i in 0..run.len() {
+            total_energy += dx[i] * dx[i] + dy[i] * dy[i];
+            let high_dx = dx[i] - low_dx[i];
+            let high_dy = dy[i] - low_dy[i];
+            high_energy += high_dx * high_dx + high_dy * high_dy;
+        }
+    }
+    if trusted < HIGH_FREQ_WINDOW {
+        return 0.0;
     }
     // 轨迹总能量过低（近乎静止）时比例在数值上不稳定（分母接近 0），
     // 且此时无论比例多少都谈不上"抖"——静止画面的传感器噪声不该被判成手持抖动。
-    let floor = STATIC_MOTION_THRESHOLD * STATIC_MOTION_THRESHOLD * pairs.len() as f64;
+    let floor = STATIC_MOTION_THRESHOLD * STATIC_MOTION_THRESHOLD * trusted as f64;
     if total_energy <= floor {
+        return 0.0;
+    }
+    // 高频幅度本身也要够大(见 `SHAKE_MIN_HIGH_FREQ_RMS_PX`),否则是整像素量化在跳。
+    if high_energy / (trusted as f64) < SHAKE_MIN_HIGH_FREQ_RMS_PX * SHAKE_MIN_HIGH_FREQ_RMS_PX {
         return 0.0;
     }
     (high_energy / total_energy).clamp(0.0, 1.0)
@@ -643,7 +722,7 @@ fn moving_average(values: &[f64], window: usize) -> Vec<f64> {
         .collect()
 }
 
-fn shake_is_flagged(shake_score: f64, jitter_threshold: f64) -> bool {
+pub(crate) fn shake_is_flagged(shake_score: f64, jitter_threshold: f64) -> bool {
     shake_score.is_finite()
         && jitter_threshold.is_finite()
         && shake_score > jitter_threshold.max(0.0)
@@ -944,7 +1023,88 @@ mod tests {
             global: MotionVector { dx, dy },
             zoom_corr,
             residual_rms,
+            agreement: 1.0,
         }
+    }
+
+    fn untrusted_pair(dx: f64, dy: f64) -> PairMotion {
+        PairMotion {
+            global: MotionVector { dx, dy },
+            zoom_corr: 0.0,
+            residual_rms: 6.0,
+            agreement: 0.2,
+        }
+    }
+
+    #[test]
+    fn untrusted_pairs_do_not_count_as_shake() {
+        // R14:主体运动/硬切让块向量打架时中位数是噪声,不能把噪声的高频当抖动。
+        let noisy = [
+            untrusted_pair(3.0, -2.0),
+            untrusted_pair(-4.0, 1.0),
+            untrusted_pair(2.0, 3.0),
+            untrusted_pair(-3.0, -3.0),
+            untrusted_pair(4.0, 0.0),
+            untrusted_pair(-2.0, 2.0),
+        ];
+        assert_eq!(high_freq_energy_ratio(&noisy), 0.0);
+        let motion = aggregate_motion(&noisy).unwrap();
+        assert!(!motion.is_shaky);
+        assert!(motion.tool_version.contains("trusted_pairs=0"));
+
+        // 同样的随机轨迹但块向量一致(整幅画面一起抖)——这才是手持抖动。
+        let shaky = noisy
+            .iter()
+            .map(|p| pair(p.global.dx, p.global.dy, 0.0, 0.1))
+            .collect::<Vec<_>>();
+        assert!(high_freq_energy_ratio(&shaky) > crate::core::settings::DEFAULT_JITTER_THRESHOLD);
+    }
+
+    #[test]
+    fn sub_two_pixel_flicker_of_a_locked_camera_is_not_shake() {
+        // R14:三脚架机位的块匹配在 ±1 px 之间跳,高频占比接近 1 但幅度只有 1 px。
+        let flicker = [
+            pair(-1.0, 0.0, 0.0, 0.1),
+            pair(0.0, -2.0, 0.0, 0.1),
+            pair(1.0, 0.0, 0.0, 0.1),
+            pair(1.0, 1.0, 0.0, 0.1),
+            pair(-1.0, 2.0, 0.0, 0.1),
+            pair(-1.0, 0.0, 0.0, 0.1),
+            pair(0.0, -1.0, 0.0, 0.1),
+            pair(0.0, 2.0, 0.0, 0.1),
+        ];
+        assert_eq!(high_freq_energy_ratio(&flicker), 0.0);
+        // 同样随机但幅度 ×4 —— 这才看得见。
+        let visible = flicker
+            .iter()
+            .map(|p| pair(p.global.dx * 4.0, p.global.dy * 4.0, 0.0, 0.1))
+            .collect::<Vec<_>>();
+        assert!(high_freq_energy_ratio(&visible) > crate::core::settings::DEFAULT_JITTER_THRESHOLD);
+    }
+
+    #[test]
+    fn hard_cut_pair_in_a_smooth_pan_does_not_poison_shake() {
+        // 平滑摇镜中间夹一对硬切(块向量不一致、全局向量随机):切点两侧各自成段,
+        // 抖动分仍应接近 0。
+        let mut pairs = (0..6).map(|_| pair(4.0, 0.0, 0.0, 0.1)).collect::<Vec<_>>();
+        pairs.push(untrusted_pair(-7.0, 6.0));
+        pairs.extend((0..6).map(|_| pair(-3.0, 0.5, 0.0, 0.1)));
+        assert!(high_freq_energy_ratio(&pairs) < 0.05, "{}", high_freq_energy_ratio(&pairs));
+    }
+
+    #[test]
+    fn block_agreement_is_high_for_global_translation_and_low_for_conflicting_blocks() {
+        let previous = patterned_frame();
+        let next = translated_frame(&previous, 3, -2);
+        let pair = estimate_pair(&previous, &next).unwrap();
+        assert!(pair.agreement >= PAIR_AGREEMENT_MIN, "{}", pair.agreement);
+
+        // 上半幅右移、下半幅左移:没有一个全局平移能解释整幅画面。
+        let mut split = translated_frame(&previous, 5, 0);
+        let lower = translated_frame(&previous, -5, 0);
+        split[FRAME_BYTES / 2..].copy_from_slice(&lower[FRAME_BYTES / 2..]);
+        let conflicting = estimate_pair(&previous, &split).unwrap();
+        assert!(conflicting.agreement < 0.75, "{}", conflicting.agreement);
     }
 
     fn fixture_motion() -> ClipMotion {
@@ -1393,6 +1553,30 @@ mod tests {
         assert_eq!(pan.class, "pan");
         assert!(pan.shake_score < jitter.shake_score);
         assert!(pan.shake_score < crate::core::settings::DEFAULT_JITTER_THRESHOLD);
+    }
+
+    /// 真素材逐帧对抽样(只读):`TRIPCUT_MOTION_SAMPLE=<路径> cargo test -- motion_sample --ignored --nocapture`。
+    #[test]
+    #[ignore = "需要真素材路径,只用于标定"]
+    fn motion_sample_pairs_are_printed() {
+        let Ok(sample) = std::env::var("TRIPCUT_MOTION_SAMPLE") else { return };
+        let frames = extract_gray_frames(Path::new(&sample), &test_ffmpeg()).unwrap();
+        let pairs = frames
+            .windows(2)
+            .map(|pair| estimate_pair(&pair[0], &pair[1]).unwrap())
+            .collect::<Vec<_>>();
+        for (index, pair) in pairs.iter().enumerate() {
+            eprintln!(
+                "pair {index:3} t={:5.1}s dx={:+5.1} dy={:+5.1} agree={:.2} residual={:.2} zoom={:+.2}",
+                index as f64 / MOTION_SAMPLE_FPS as f64,
+                pair.global.dx,
+                pair.global.dy,
+                pair.agreement,
+                pair.residual_rms,
+                pair.zoom_corr
+            );
+        }
+        eprintln!("{:?}", aggregate_motion(&pairs).unwrap());
     }
 
     #[test]

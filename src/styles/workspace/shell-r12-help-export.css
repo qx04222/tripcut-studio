@@ -1,0 +1,202 @@
+/*
+ * R12 车道 A(壳)第二份:流水线手册(帮助浮层)、每步提示、导出抽屉的第 ④ 步头 / 模式提示 /
+ * 「也顺便…」。与 shell-r12.css 同一车道、同一约定(只用令牌、选择器带根类),拆开只为守
+ * 单文件 <400 行。由 workspace.css 头部 @import 挂进来。
+ */
+
+/* ---------- 5. 流水线手册(帮助浮层第一节;基础皮在 styles.css 的 .help-*) ---------- */
+
+.help-dialog .pipeline-manual-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-dialog .pipeline-manual-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-panel);
+}
+
+.help-dialog .pipeline-manual-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--text-15);
+  line-height: var(--lh-15);
+}
+
+.help-dialog .pipeline-manual-index {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-12);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.help-dialog .pipeline-manual-howto {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.help-dialog .pipeline-manual-howto li::marker {
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.help-dialog .pipeline-manual-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border-hair);
+}
+
+.help-dialog .pipeline-manual-key {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+@media (width < 900px) {
+  .help-dialog .pipeline-manual-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 6. 每步首次进入的提示(导航条下方一行,可关) ---------- */
+
+.workspace-shell .pipeline-hint {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-4);
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--ok-tint);
+  color: var(--text-primary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .pipeline-hint-icon {
+  flex: none;
+  color: var(--accent-text);
+}
+
+.workspace-shell .pipeline-hint-text {
+  display: flex;
+  flex: 1;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.workspace-shell .pipeline-hint-text strong {
+  color: var(--accent-text);
+}
+
+.workspace-shell .pipeline-hint-text span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 7. 导出抽屉:第 ④ 步头、三枚模式 chip 的提示、「也顺便…」 ---------- */
+
+.deliver-drawer .deliver-step {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+  padding: var(--space-4) var(--space-5) 0;
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.deliver-drawer .deliver-step-mark {
+  color: var(--accent);
+  font-size: var(--text-20);
+  line-height: var(--lh-20);
+}
+
+.deliver-drawer .deliver-step strong {
+  color: var(--text-primary);
+}
+
+.deliver-drawer .deliver-step > span:last-child {
+  color: var(--text-secondary);
+}
+
+/* 模式提示改成独立一行(三枚 chip 之后放不下),白话原因用警示色。 */
+.deliver-drawer .deliver-mode + .deliver-mode-hint {
+  margin: var(--space-2) var(--space-5) 0;
+}
+
+.deliver-drawer .deliver-mode-hint--warn {
+  color: var(--warn);
+}
+
+.deliver-drawer .deliver-extras {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--border-hair);
+  border-radius: var(--radius-10);
+}
+
+.deliver-drawer .deliver-extras-legend {
+  padding: 0 var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--lh-12);
+}
+
+.deliver-drawer .deliver-extra {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  cursor: pointer;
+}
+
+.deliver-drawer .deliver-extra input {
+  accent-color: var(--accent);
+}
+
+.deliver-drawer .deliver-extras-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}

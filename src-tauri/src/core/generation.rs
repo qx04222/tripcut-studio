@@ -1264,6 +1264,10 @@ fn import_downloaded_clip(
             jobs::mark_done_with_result_path(connection, probe_job.id, probe_job.attempt, &path)?;
             Some(path)
         }
+        // Z-13:生成物路径已属于另一集(与此前的 Err 分支同义:不改写归属)。
+        Ok(super::import::ImportProbeOutcome::OwnedElsewhere { note, .. }) => {
+            return Err(CoreError::Generation(format!("生成物导入失败：{note}")));
+        }
         Err(error) => {
             return Err(CoreError::Generation(format!("生成物导入失败：{error}")));
         }

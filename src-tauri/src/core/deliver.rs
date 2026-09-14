@@ -32,6 +32,14 @@ const QUICK_SUFFIX: &str = "导出";
 pub const QUICK_EXPORT_DEST_UNAVAILABLE: &str = "dest_unavailable";
 const MODE_FULL: &str = "full";
 const MODE_QUICK: &str = "quick";
+/// R14 车道 B:「剪映素材包」—— 按镜头带顺序把每个镜 remux 成 `NN_<章名>_<素材名>.mp4`,
+/// 平铺在 `<集名>_剪映素材包_<日期>`(同名 `-2`)里,附 [`KIT_ORDER_FILE`];剪映不可用时的交接路。
+const MODE_KIT: &str = "kit";
+const KIT_SUFFIX: &str = "剪映素材包";
+/// 素材包里的顺序清单:每行 `NN 章名 素材名 时长`,拖进剪映时间线时照着核对。
+pub const KIT_ORDER_FILE: &str = "顺序.txt";
+/// 素材没有章时文件名里的章名。
+const KIT_NO_CHAPTER: &str = "未分章";
 /// 文件系统里集名最长保留多少个字符(Finder 显示 + 路径长度都受得了)。
 const PACKAGE_TITLE_MAX_CHARS: usize = 40;
 const SELECTED_DIRECTORY: &str = "01_精选原片";
@@ -87,7 +95,7 @@ pub(crate) struct ExportClip {
     is_vfr: bool,
     captured_at: Option<String>,
     #[serde(default)]
-    chapter_title: String,
+    pub(crate) chapter_title: String,
     #[serde(default)]
     beat_label: String,
     stars: Option<i64>,
@@ -285,6 +293,9 @@ struct ExportJobPayload {
     rough_cut_actual_tb_num: Option<i64>,
     #[serde(default)]
     rough_cut_actual_tb_den: Option<i64>,
+    /// Z-11:「只重试失败的」要写回的上一次文件夹(快速导出专用);`None` = 照常新建文件夹。
+    #[serde(default)]
+    retry_into: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -303,6 +314,44 @@ pub struct QuickExportSelection {
     pub segment_ids: Option<Vec<i64>>,
     #[serde(default)]
     pub clip_ids: Option<Vec<i64>>,
+    /// Z-11:「只重试失败的」时上一次快速导出的作业 id —— 重试写回**同一个文件夹**、沿用原编号,
+    /// 已经导好的文件跳过;不再另开 `-2` 文件夹从 001 重排。
+    #[serde(default)]
+    pub retry_of_job_id: Option<i64>,
+}
+
+/// Z-11:上一次快速导出留下的文件夹与「(素材, 段) → 原文件名」表。
+struct RetryContext {
+    output_path: PathBuf,
+    names: std::collections::HashMap<(i64, Option<i64>), String>,
+}
+
+/// 读上一次快速导出作业的负载:必须是快速导出、文件夹还在。不满足就返回 None(退回普通导出)。
+fn retry_context(connection: &Connection, job_id: i64) -> Result<Option<RetryContext>> {
+    let payload_json: Option<String> = connection
+        .query_row(
+            "SELECT payload FROM jobs WHERE id = ?1 AND kind = 'export_package'",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload_json) = payload_json else {
+        return Ok(None);
+    };
+    let previous = parse_payload(&payload_json)?;
+    if previous.mode != MODE_QUICK {
+        return Ok(None);
+    }
+    let Some(output_path) = previous.output_path.map(PathBuf::from).filter(|path| path.is_dir()) else {
+        return Ok(None);
+    };
+    let names = previous
+        .clips
+        .iter()
+        .zip(previous.progress.items.iter())
+        .map(|(clip, item)| ((clip.clip_id, clip.segment_id), item.output_name.clone()))
+        .collect();
+    Ok(Some(RetryContext { output_path, names }))
 }
 
 impl QuickExportSelection {
@@ -326,6 +375,22 @@ pub struct QuickExportOutcome {
     pub dir: String,
     pub files: Vec<String>,
     pub skipped: Vec<QuickExportSkipped>,
+    /// Z-07:原片此刻不在原位的文件名;非空时导出会被拒绝,抽屉据此给「去缺失素材页重新定位」。
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+/// `export_jianying_kit` / `plan_jianying_kit` 的结果:`dir` 是将写(或已排)的文件夹,`files`
+/// 是按镜头带顺序编号的文件名,`order_file` 是顺序清单的文件名(固定 [`KIT_ORDER_FILE`])。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct KitExportOutcome {
+    pub job_id: Option<i64>,
+    pub dir: String,
+    pub files: Vec<String>,
+    pub order_file: String,
+    /// Z-07:原片此刻不在原位的文件名;非空时导出会被拒绝,抽屉据此给「去缺失素材页重新定位」。
+    #[serde(default)]
+    pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,27 +710,95 @@ pub fn plan_quick_export(
         |row| row.get(0),
     )?;
     let project_name = package_project_name(&episode_title);
-    let dir = match destination {
+    let retry = match selection.and_then(|selection| selection.retry_of_job_id) {
+        Some(job_id) => retry_context(connection, job_id)?,
+        None => None,
+    };
+    let dir = match (&retry, destination) {
+        // Z-11:重试写回上一次的文件夹。
+        (Some(retry), _) => retry.output_path.to_string_lossy().into_owned(),
         // 与任务运行时同一条规范化路径(/var → /private/var),前端拿到的就是最终会出现的那个。
-        Some(destination) => unique_quick_path(
+        (None, Some(destination)) => unique_quick_path(
             &destination.canonicalize().unwrap_or_else(|_| destination.to_path_buf()),
             &project_name,
             &date,
         )
         .to_string_lossy()
         .into_owned(),
-        None => quick_folder_name(&project_name, &date),
+        (None, None) => quick_folder_name(&project_name, &date),
     };
+    let missing = missing_source_names(connection, &clips)?;
     Ok(QuickExportOutcome {
         job_id: None,
         dir,
         files: clips
             .iter()
             .enumerate()
-            .map(|(index, clip)| export_file_name(index + 1, &clip.file_name))
+            .map(|(index, clip)| quick_output_name(retry.as_ref(), index, clip))
             .collect(),
         skipped,
+        missing,
     })
+}
+
+/// R14 车道 B:剪映素材包 —— 复用快速导出管线(同一个 `export_package` 作业,负载
+/// `mode = kit`),但文件按镜头带顺序编号为 `NN_<章名>_<素材名>.mp4`,并附「顺序.txt」。
+/// 目标目录不存在 / 不可写时报 [`QUICK_EXPORT_DEST_UNAVAILABLE`] 前缀的错误。
+pub fn start_jianying_kit(connection: &mut Connection, destination: &Path) -> Result<KitExportOutcome> {
+    ensure_writable_directory(destination)?;
+    let plan = plan_jianying_kit(connection, Some(destination))?;
+    let job_id = enqueue_export(connection, destination, None, None, false, None, MODE_KIT, None)?;
+    Ok(KitExportOutcome {
+        job_id: Some(job_id),
+        ..plan
+    })
+}
+
+/// 只算不排:素材包将写哪个文件夹、哪些文件(顺序 = 镜头带顺序,见 [`selected_clips`] 的排序)。
+pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) -> Result<KitExportOutcome> {
+    let episode_title: String = connection
+        .query_row("SELECT title FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+        .map_err(|_| CoreError::Export("没有进行中的 Episode，无法导出".to_owned()))?;
+    let (clips, _skipped) = filter_quick_selection(selected_clips(connection)?, None)?;
+    let date: String = connection.query_row(
+        "SELECT strftime('%Y-%m-%d', 'now', 'localtime')",
+        [],
+        |row| row.get(0),
+    )?;
+    let project_name = package_project_name(&episode_title);
+    let dir = match destination {
+        Some(destination) => unique_kit_path(
+            &destination.canonicalize().unwrap_or_else(|_| destination.to_path_buf()),
+            &project_name,
+            &date,
+        )
+        .to_string_lossy()
+        .into_owned(),
+        None => kit_folder_name(&project_name, &date),
+    };
+    let missing = missing_source_names(connection, &clips)?;
+    Ok(KitExportOutcome {
+        job_id: None,
+        dir,
+        files: clips
+            .iter()
+            .enumerate()
+            .map(|(index, clip)| kit_file_name(index + 1, &clip.chapter_title, &clip.file_name))
+            .collect(),
+        order_file: KIT_ORDER_FILE.to_owned(),
+        missing,
+    })
+}
+
+/// Z-07:交付项里此刻原片不在原位的文件名(去重,保持镜头带顺序)。
+fn missing_source_names(connection: &Connection, clips: &[ExportClip]) -> Result<Vec<String>> {
+    let mut ids: Vec<i64> = Vec::new();
+    for clip in clips {
+        if !ids.contains(&clip.clip_id) {
+            ids.push(clip.clip_id);
+        }
+    }
+    super::media_source::missing_file_names(connection, &ids)
 }
 
 /// 按 `selection` 裁剪交付项:段 id 命中的段、素材 id 命中的段 / 整条收藏。命不中的 id
@@ -785,6 +918,11 @@ fn enqueue_export(
     )?
     .into();
     let (clips, _skipped) = filter_quick_selection(selected_clips(&transaction)?, selection)?;
+    // Z-07 / Z-08:排队前先 stat 原片——不在了就拒绝,给一句人话,不让任务跑到一半才「交付失败」。
+    let missing = missing_source_names(&transaction, &clips)?;
+    if !missing.is_empty() {
+        return Err(CoreError::Export(super::media_source::missing_source_message(&missing)));
+    }
     let selected_bytes = clips.iter().map(selected_estimated_bytes).sum::<u64>();
     let required_bytes = estimated_required_bytes(selected_bytes);
     let available_bytes = available_space_bytes(&destination)?;
@@ -795,13 +933,22 @@ fn enqueue_export(
         [],
         |row| row.get(0),
     )?;
+    // Z-11:快速导出的「只重试失败的」写回上一次的文件夹、沿用原编号。
+    let retry = match selection.and_then(|selection| selection.retry_of_job_id) {
+        Some(job_id) if mode == MODE_QUICK => retry_context(&transaction, job_id)?,
+        _ => None,
+    };
     let items = clips
         .iter()
         .enumerate()
         .map(|(index, clip)| ExportItemStatus {
             clip_id: clip.clip_id,
             file_name: clip.file_name.clone(),
-            output_name: export_file_name(index + 1, &clip.file_name),
+            output_name: if mode == MODE_KIT {
+                kit_file_name(index + 1, &clip.chapter_title, &clip.file_name)
+            } else {
+                quick_output_name(retry.as_ref(), index, clip)
+            },
             status: "pending".to_owned(),
             note: None,
             warning: false,
@@ -834,6 +981,7 @@ fn enqueue_export(
         rough_cut_actual_ticks: None,
         rough_cut_actual_tb_num: None,
         rough_cut_actual_tb_den: None,
+        retry_into: retry.map(|retry| retry.output_path.to_string_lossy().into_owned()),
     };
     let payload_json = serialize_payload(&payload)?;
     let payload_hash = canonical_payload_hash(&payload)?;
@@ -1185,8 +1333,20 @@ fn run_export_package_with(
     )?;
 
     // R11 车道 E:快速导出平铺在 `<集名>_导出_<日期>` 根目录,不建交付包的分层目录。
-    let quick = payload.mode == MODE_QUICK;
-    let final_path = if quick {
+    // R14 车道 B:剪映素材包同样平铺,文件夹叫 `<集名>_剪映素材包_<日期>`,多一份「顺序.txt」。
+    let kit = payload.mode == MODE_KIT;
+    let quick = payload.mode == MODE_QUICK || kit;
+    // Z-11:重试写回上一次的文件夹(它还在才算;被删了就照常新建)。
+    let retry_into = payload
+        .retry_into
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir());
+    let final_path = if let Some(existing) = retry_into.clone() {
+        existing
+    } else if kit {
+        unique_kit_path(&destination, &payload.project_name, &payload.date)
+    } else if quick {
         unique_quick_path(&destination, &payload.project_name, &payload.date)
     } else {
         unique_package_path(&destination, &payload.project_name, &payload.date)
@@ -1235,6 +1395,22 @@ fn run_export_package_with(
                 .join(SELECTED_DIRECTORY)
                 .join(&payload.progress.items[index].output_name)
         };
+        // Z-11:重试时上次已经导好的文件不再重做(也不覆盖)。
+        if let Some(existing) = retry_into
+            .as_ref()
+            .map(|folder| folder.join(&payload.progress.items[index].output_name))
+            .filter(|path| path.is_file())
+        {
+            payload.progress.items[index].status = "done".to_owned();
+            payload.progress.items[index].note = Some("上次已导好,跳过".to_owned());
+            payload.progress.completed_items += 1;
+            successful.push(SuccessfulClip {
+                clip: payload.clips[index].clone(),
+                path: existing,
+            });
+            persist_progress(connection, job, &payload)?;
+            continue;
+        }
         let temporary_path = jobs::temporary_output_path(&output_path, job.attempt);
         remove_file_if_exists(&temporary_path)?;
         match export_clip(
@@ -1275,7 +1451,12 @@ fn run_export_package_with(
         ));
     }
 
-    if !quick {
+    if kit {
+        write_synced(
+            &staging_path.join(KIT_ORDER_FILE),
+            kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
+        )?;
+    } else if !quick {
         write_package_extras(connection, job, &mut payload, &successful, &staging_path, ffmpeg, ffprobe, &cancellation.flag)?;
     }
 
@@ -1307,7 +1488,13 @@ fn run_export_package_with(
 /// 交付完成的一句话:快速导出报文件数,交付包报"已生成"(失败条数照旧点出来)。
 fn completion_message(payload: &ExportJobPayload) -> String {
     let failed = payload.progress.failed_items;
-    if payload.mode == MODE_QUICK {
+    if payload.mode == MODE_KIT {
+        if failed == 0 {
+            format!("已导出 {} 个片段", payload.progress.completed_items)
+        } else {
+            format!("已导出 {} 个片段；{failed} 条没导出来", payload.progress.completed_items)
+        }
+    } else if payload.mode == MODE_QUICK {
         if failed == 0 {
             format!("已导出 {} 个文件", payload.progress.completed_items)
         } else {
@@ -1419,8 +1606,22 @@ fn finalize_export(
     cancellation: &AtomicBool,
 ) -> Result<()> {
     check_cancelled(cancellation)?;
-    std::fs::rename(&staging_path, final_path)?;
-    staging.promoted = true;
+    if payload.retry_into.is_some() && final_path.is_dir() {
+        // Z-11:写回已有文件夹 —— 把暂存目录里的文件逐个搬进去(只会是这次新导出的),暂存目录随后删掉。
+        for entry in std::fs::read_dir(&staging_path)? {
+            let entry = entry?;
+            let target = final_path.join(entry.file_name());
+            if target.exists() {
+                continue;
+            }
+            std::fs::rename(entry.path(), &target)?;
+        }
+        let _ = std::fs::remove_dir_all(&staging_path);
+        staging.promoted = true;
+    } else {
+        std::fs::rename(&staging_path, final_path)?;
+        staging.promoted = true;
+    }
     if let Some(parent) = final_path.parent() {
         let _ = File::open(parent).and_then(|directory| directory.sync_all());
     }
@@ -1699,6 +1900,12 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
     } else {
         None
     };
+    let jitter_threshold = super::settings::number_value(
+        connection,
+        super::settings::JITTER_THRESHOLD_KEY,
+        super::settings::DEFAULT_JITTER_THRESHOLD,
+    )?
+    .clamp(0.0, 1.0);
     let mut statement = connection.prepare(
         "WITH live_selects AS (
              SELECT id, clip_id, in_ticks, out_ticks
@@ -1747,10 +1954,12 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
                  LIMIT 1) AS srt_rel_path,
                 selected_segment.id, selected_segment.in_ticks, selected_segment.out_ticks,
                 c.volume_uuid, c.quick_hash, c.full_hash, c.selected_transcribe_track,
-                c.manual_rotation
+                c.manual_rotation,
+                a.underexposed_ratio, a.out_of_focus_ratio, m.shake_score
          FROM clips c
          LEFT JOIN live_selects selected_segment ON selected_segment.clip_id = c.id
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
+         LEFT JOIN clip_motion m ON m.clip_id = c.id
          LEFT JOIN chapters chapter
            ON chapter.id = c.chapter_id AND chapter.tombstone = 0
          LEFT JOIN narrative_beats narrative_beat
@@ -1825,6 +2034,11 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
         let has_audio = row.get::<_, Option<i64>>(20)?.map(|value| value == 1);
         let focus_scores = row.get::<_, Option<String>>(21)?;
         let transcript_text = row.get::<_, Option<String>>(22)?;
+        let underexposed = row.get::<_, Option<f64>>(31)?;
+        let out_of_focus = row.get::<_, Option<f64>>(32)?;
+        let shaky = row
+            .get::<_, Option<f64>>(33)?
+            .map(|shake| super::motion::shake_is_flagged(shake, jitter_threshold));
         Ok(ExportClip {
             clip_id: row.get(0)?,
             segment_id,
@@ -1857,6 +2071,9 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
             l1_summary: l1_summary(
                 exposure,
                 overexposed,
+                underexposed,
+                out_of_focus,
+                shaky,
                 audio_clipped,
                 has_audio,
                 focus_scores.as_deref(),
@@ -1872,8 +2089,32 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
     let mut clips = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(CoreError::from)?;
+    sort_by_band_order(connection, &mut clips)?;
     attach_audio_tracks(connection, &mut clips)?;
     Ok(clips)
+}
+
+/// V14-01:三条导出(素材包 / 原生草稿 / 导出片段)与交付包的顺序 = 镜头带「按章节」视图的
+/// 顺序,唯一来源是 [`super::story::ordered_band_items`]。上面 SQL 的 `story.position` 全局序是
+/// 挑选先后 —— 两次自动挑选、后一批拍得更早时,它与带上画的顺序对不上(真机 V14-01)。
+/// 不在带上的(候选、无 position)保持 SQL 原序排在带序之后;稳定排序,不打乱同键相对顺序。
+fn sort_by_band_order(connection: &Connection, clips: &mut [ExportClip]) -> Result<()> {
+    let band = super::story::ordered_band_items(connection)?;
+    if band.is_empty() {
+        return Ok(());
+    }
+    let rank: HashMap<String, usize> = band
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| (item.key, index))
+        .collect();
+    clips.sort_by_key(|clip| {
+        let item_kind = if clip.segment_id.is_some() { "segment" } else { "whole" };
+        rank.get(&super::story::story_key(item_kind, clip.clip_id, clip.segment_id))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    Ok(())
 }
 
 /// R3 Task 6：`clip_audio_tracks` 是独立表，主查询已经很宽了，不再往里塞
@@ -1933,9 +2174,16 @@ fn dialogue_summary(text: Option<&str>) -> String {
         .collect()
 }
 
+/// 导出清单里的「质量」一列。R14:与池子角标(`src/AnalysisPanel.tsx` `analysisBadgeKinds`)
+/// 同一套口径——欠曝/过曝/虚焦/手持抖动/削波/静音/疑似失焦;「过暗」不再单独列
+/// (它只是平均亮度低,夜景也低,判不了好坏,已随欠曝的高光守卫一起退场)。
+#[allow(clippy::too_many_arguments)]
 fn l1_summary(
     exposure: Option<f64>,
     overexposed: Option<f64>,
+    underexposed: Option<f64>,
+    out_of_focus: Option<f64>,
+    shaky: Option<bool>,
     audio_clipped: Option<bool>,
     has_audio: Option<bool>,
     focus_scores: Option<&str>,
@@ -1943,12 +2191,19 @@ fn l1_summary(
     if exposure.is_none() {
         return "未分析".to_owned();
     }
+    let ratio = super::analysis::OVEREXPOSED_RATIO_THRESHOLD;
     let mut labels = Vec::new();
-    if exposure.is_some_and(|value| value < super::analysis::DARK_YAVG_THRESHOLD) {
-        labels.push("过暗");
-    }
-    if overexposed.is_some_and(|value| value > super::analysis::OVEREXPOSED_RATIO_THRESHOLD) {
+    if overexposed.is_some_and(|value| value > ratio) {
         labels.push("过曝");
+    }
+    if underexposed.is_some_and(|value| value > ratio) {
+        labels.push("欠曝");
+    }
+    if out_of_focus.is_some_and(|value| value > ratio) {
+        labels.push("虚焦");
+    }
+    if shaky == Some(true) {
+        labels.push("手持抖动");
     }
     if audio_clipped == Some(true) {
         labels.push("削波");
@@ -3844,12 +4099,85 @@ fn unique_quick_path(destination: &Path, project_name: &str, date: &str) -> Path
     unreachable!()
 }
 
+fn kit_folder_name(project_name: &str, date: &str) -> String {
+    format!("{project_name}_{KIT_SUFFIX}_{date}")
+}
+
+/// 素材包的文件夹:`<集名>_剪映素材包_<日期>`,同名追加 `-2`、`-3`(与快速导出同一规则)。
+fn unique_kit_path(destination: &Path, project_name: &str, date: &str) -> PathBuf {
+    let base = kit_folder_name(project_name, date);
+    let first = destination.join(&base);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2_u64.. {
+        let candidate = destination.join(format!("{base}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// 文件名里的章名:走集名同一套清洗(非法字符、控制符、长度);空的记「未分章」。
+fn kit_chapter_name(chapter_title: &str) -> String {
+    if chapter_title.trim().is_empty() {
+        return KIT_NO_CHAPTER.to_owned();
+    }
+    let cleaned = package_project_name(chapter_title);
+    if cleaned == PROJECT_NAME {
+        KIT_NO_CHAPTER.to_owned()
+    } else {
+        cleaned
+    }
+}
+
+/// 素材包文件名 `NN_<章名>_<素材名>.mp4`:NN 两位起(超过 99 自然变三位),素材名与快速导出同一套
+/// 清洗(`export_file_name` 的 stem 规则)。
+fn kit_file_name(sequence: usize, chapter_title: &str, source_name: &str) -> String {
+    let stem = export_file_name(0, source_name);
+    let stem = stem
+        .strip_prefix("000_")
+        .and_then(|rest| rest.strip_suffix(".mp4"))
+        .unwrap_or("clip");
+    format!("{sequence:02}_{}_{stem}.mp4", kit_chapter_name(chapter_title))
+}
+
+/// 顺序清单里的时长:`12.4 秒`(新手看得懂的形式,不用 HH:MM:SS.mmm)。
+fn kit_duration_label(seconds: f64) -> String {
+    format!("{:.1} 秒", seconds.max(0.0))
+}
+
+/// 「顺序.txt」:每行 `NN 章名 素材名 时长`(与文件顺序一致;没导出来的行照写,编号不跳)。
+fn kit_order_text(clips: &[ExportClip], items: &[ExportItemStatus]) -> String {
+    let mut text = String::new();
+    for (index, clip) in clips.iter().enumerate() {
+        let failed = items.get(index).is_some_and(|item| item.status == "failed");
+        text.push_str(&format!(
+            "{:02} {} {} {}{}\n",
+            index + 1,
+            kit_chapter_name(&clip.chapter_title),
+            clip.file_name,
+            kit_duration_label(clip_duration_seconds(clip)),
+            if failed { "(没导出来)" } else { "" }
+        ));
+    }
+    text
+}
+
 fn staging_path(final_path: &Path, job_id: i64, attempt: i64) -> PathBuf {
     let name = final_path
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "tripcut-export".to_owned());
     final_path.with_file_name(format!(".{name}.tmp-{job_id}-{attempt}"))
+}
+
+/// Z-11:重试时沿用上一次的文件名(同一素材同一段),找不到才按新序号起名。
+fn quick_output_name(retry: Option<&RetryContext>, index: usize, clip: &ExportClip) -> String {
+    retry
+        .and_then(|retry| retry.names.get(&(clip.clip_id, clip.segment_id)).cloned())
+        .unwrap_or_else(|| export_file_name(index + 1, &clip.file_name))
 }
 
 fn export_file_name(sequence: usize, source_name: &str) -> String {
@@ -4051,6 +4379,7 @@ mod tests {
             rough_cut_actual_ticks: None,
             rough_cut_actual_tb_num: None,
             rough_cut_actual_tb_den: None,
+        retry_into: None,
         }
     }
 
@@ -6483,6 +6812,85 @@ esac
         assert_eq!(finished.items.iter().filter(|item| item.clip_id == whole_id).count(), 1);
     }
 
+    /// Z-11:「只重试失败的」写回同一个文件夹、沿用原编号,已导好的不重做;不再另开 `-2` 从 001 重排。
+    #[test]
+    fn quick_export_retry_writes_into_same_folder_with_original_numbers() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let first = directory.path().join("aaa.mp4");
+        let second = directory.path().join("bbb.mp4");
+        let third = directory.path().join("ccc.mp4");
+        if !generate_fixture(&ffmpeg, &first) || !generate_fixture(&ffmpeg, &third) {
+            eprintln!("skipping quick export retry fixture: encoder unavailable");
+            return;
+        }
+        // 第二条先放一个假视频:remux 必然失败。
+        std::fs::write(&second, b"not a video at all").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let first_id = insert_clip(&connection, &first, "2026-08-31T10:00:00Z", &[1], None);
+        let second_id = insert_clip(&connection, &second, "2026-08-31T11:00:00Z", &[1], None);
+        let third_id = insert_clip(&connection, &third, "2026-08-31T12:00:00Z", &[1], None);
+        let dest = directory.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+
+        let outcome = start_quick_export(&mut connection, &dest, None).unwrap();
+        assert_eq!(outcome.files.len(), 3, "{outcome:?}");
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+        let finished = get_export_status(&connection, Some(job.id)).unwrap();
+        assert_eq!((finished.completed_items, finished.failed_items), (2, 1), "{:?}", finished.items);
+        let folder = PathBuf::from(finished.output_path.clone().unwrap());
+        let failed_item = finished.items.iter().find(|item| item.status == "failed").unwrap();
+        assert_eq!(failed_item.clip_id, second_id);
+        assert!(failed_item.output_name.starts_with("002_"), "{}", failed_item.output_name);
+        assert!(!folder.join(&failed_item.output_name).exists());
+
+        // 用户把第二条换回真视频(模拟「腾出空间 / 修好文件」);素材身份跟着更新。
+        assert!(generate_fixture(&ffmpeg, &second));
+        let (quick, bytes) = crate::core::import::quick_fingerprint(&second).unwrap();
+        let full = crate::core::import::full_fingerprint(&second).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET byte_size = ?1, quick_hash = ?2, full_hash = ?3 WHERE id = ?4",
+                params![bytes as i64, quick, full, second_id],
+            )
+            .unwrap();
+
+        let retry = QuickExportSelection { segment_ids: None, clip_ids: Some(vec![second_id]), retry_of_job_id: Some(job.id) };
+        let plan = plan_quick_export(&connection, Some(&dest), Some(&retry)).unwrap();
+        assert_eq!(PathBuf::from(&plan.dir), folder, "重试写回上一次的文件夹,不是 -2");
+        assert_eq!(plan.files, vec![failed_item.output_name.clone()], "沿用原编号");
+        let retried = start_quick_export(&mut connection, &dest, Some(&retry)).unwrap();
+        let retry_job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(Some(retry_job.id), retried.job_id);
+        run_export_package_with(&mut connection, &retry_job, &ffmpeg, &ffprobe).unwrap();
+        let done = get_export_status(&connection, Some(retry_job.id)).unwrap();
+        assert_eq!(done.status, "done", "{:?}", done.error);
+        assert_eq!((done.completed_items, done.failed_items), (1, 0), "{:?}", done.items);
+        assert_eq!(done.output_path.as_deref().map(PathBuf::from), Some(folder.clone()));
+        assert!(folder.join(&failed_item.output_name).is_file());
+        assert!(!dest.join(format!("{}-2", folder.file_name().unwrap().to_string_lossy())).exists(), "不能另开 -2 文件夹");
+        let mut names: Vec<String> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".mp4"))
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names[0].starts_with("001_") && names[1].starts_with("002_") && names[2].starts_with("003_"), "{names:?}");
+        let _ = (first_id, third_id);
+
+        // 再重试一次:文件已在,跳过不重做。
+        let again = start_quick_export(&mut connection, &dest, Some(&retry)).unwrap();
+        let again_job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(Some(again_job.id), again.job_id);
+        let before = std::fs::metadata(folder.join(&failed_item.output_name)).unwrap().modified().unwrap();
+        run_export_package_with(&mut connection, &again_job, &ffmpeg, &ffprobe).unwrap();
+        let skipped = get_export_status(&connection, Some(again_job.id)).unwrap();
+        assert_eq!(skipped.items[0].note.as_deref(), Some("上次已导好,跳过"));
+        assert_eq!(std::fs::metadata(folder.join(&failed_item.output_name)).unwrap().modified().unwrap(), before);
+    }
+
     /// 目标目录不存在 / 不可写 → 带 `dest_unavailable` 前缀的错误,前端据此回落到保存面板。
     #[test]
     fn quick_export_rejects_unwritable_destination() {
@@ -6509,6 +6917,44 @@ esac
             .query_row("SELECT count(*) FROM jobs WHERE kind = 'export_package'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(pending, 0, "不可写目录不能留下排队任务");
+    }
+
+    /// Z-07 / Z-08:原片不在原位 → 清单里列出、排队被拒、一句人话 + 下一步;文件回来就恢复。
+    #[test]
+    fn quick_export_refuses_missing_sources_with_plain_reason() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let trip = directory.path().join("trip");
+        std::fs::create_dir_all(&trip).unwrap();
+        let source = trip.join("IMG_0830_早餐.mov");
+        std::fs::write(&source, b"clip bytes").unwrap();
+        insert_clip(&connection, &source, "2026-08-31T10:00:00Z", &[1], None);
+        let dest = directory.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let moved = directory.path().join("trip-moved");
+        std::fs::rename(&trip, &moved).unwrap();
+        let plan = plan_quick_export(&connection, Some(&dest), None).unwrap();
+        assert_eq!(plan.missing, vec!["IMG_0830_早餐.mov".to_owned()]);
+        let kit_plan = plan_jianying_kit(&connection, Some(&dest)).unwrap();
+        assert_eq!(kit_plan.missing, vec!["IMG_0830_早餐.mov".to_owned()]);
+
+        let error = start_quick_export(&mut connection, &dest, None).unwrap_err().to_string();
+        assert!(error.contains("原片不在原来的位置(可能拔了卡或移了文件夹):IMG_0830_早餐.mov"), "{error}");
+        assert!(error.contains("去缺失素材页重新定位"), "{error}");
+        assert!(!error.contains("os error"), "{error}");
+        let queued: i64 = connection
+            .query_row("SELECT count(*) FROM jobs WHERE kind = 'export_package'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "原片缺失不能留下排队任务");
+        assert_eq!(super::super::media_source::list_missing_clips(&connection).unwrap().len(), 1);
+
+        std::fs::rename(&moved, &trip).unwrap();
+        let plan = plan_quick_export(&connection, Some(&dest), None).unwrap();
+        assert!(plan.missing.is_empty(), "{:?}", plan.missing);
+        assert!(super::super::media_source::list_missing_clips(&connection).unwrap().is_empty());
+        let outcome = start_quick_export(&mut connection, &dest, None).unwrap();
+        assert!(outcome.job_id.is_some());
     }
 
     /// 同名文件夹追加 `-2`、`-3`(规格 §2;交付包那边的 `_2` 不动)。
@@ -6549,7 +6995,7 @@ esac
         let by_segment = plan_quick_export(
             &connection,
             None,
-            Some(&QuickExportSelection { segment_ids: Some(vec![first, 9_999]), clip_ids: None }),
+            Some(&QuickExportSelection { segment_ids: Some(vec![first, 9_999]), clip_ids: None, retry_of_job_id: None }),
         )
         .unwrap();
         assert_eq!(by_segment.files.len(), 1);
@@ -6559,14 +7005,14 @@ esac
         let by_clip = plan_quick_export(
             &connection,
             None,
-            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![segmented]) }),
+            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![segmented]), retry_of_job_id: None }),
         )
         .unwrap();
         assert_eq!(by_clip.files.len(), 2, "该素材的两段精选");
         let by_whole_clip = plan_quick_export(
             &connection,
             None,
-            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![whole]) }),
+            Some(&QuickExportSelection { segment_ids: None, clip_ids: Some(vec![whole]), retry_of_job_id: None }),
         )
         .unwrap();
         assert_eq!(by_whole_clip.files.len(), 1, "整条收藏");
@@ -6574,8 +7020,208 @@ esac
         let nothing = plan_quick_export(
             &connection,
             None,
-            Some(&QuickExportSelection { segment_ids: Some(vec![]), clip_ids: Some(vec![]) }),
+            Some(&QuickExportSelection { segment_ids: Some(vec![]), clip_ids: Some(vec![]), retry_of_job_id: None }),
         );
         assert!(nothing.is_err(), "选了个空集要报错,不能静默导出全部");
+    }
+
+    // ---------- R14 车道 B:剪映素材包 ----------
+
+    /// 章的 `start_at` 决定它在镜头带上的先后(V14-01:导出顺序 = 镜头带顺序)。
+    fn insert_chapter_at(connection: &Connection, title: &str, start_at: &str) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO chapters(title, start_at, end_at, manual, episode_id)
+                 VALUES (?1, ?2, '2026-08-31T23:59:59Z', 1,
+                         (SELECT id FROM episodes WHERE status = 'active'))",
+                params![title, start_at],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    fn put_in_story_order(connection: &Connection, clip_id: i64, segment_id: Option<i64>, position: i64) {
+        connection
+            .execute(
+                "INSERT INTO story_order(
+                    item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, 0, '2026-08-31T13:00:00Z', '2026-08-31T13:00:00Z',
+                    (SELECT id FROM episodes WHERE status = 'active')
+                 )",
+                params![if segment_id.is_some() { "segment" } else { "whole" }, clip_id, segment_id, position],
+            )
+            .unwrap();
+    }
+
+    /// 两章三镜(海边 2 镜、山里 1 镜),镜头带顺序与拍摄时间相反(山里这一章排在海边前面,
+    /// 海边章内 b 先于 a):文件按镜头带顺序 01/02/03 编号,章名与素材名进文件名,
+    /// 顺序.txt 每行 `NN 章名 素材名 时长`。
+    #[test]
+    fn jianying_kit_plan_numbers_files_by_story_order_with_chapter_and_source_name() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let sea = insert_chapter_at(&connection, "海边", "2026-08-31T06:00:00Z");
+        let hill = insert_chapter_at(&connection, "山里", "2026-08-31T05:00:00Z");
+        let a = insert_clip(&connection, Path::new("IMG_0001.mov"), "2026-08-31T10:00:00Z", &[1], None);
+        let b = insert_clip(&connection, Path::new("IMG_0002.mov"), "2026-08-31T11:00:00Z", &[1], None);
+        let c = insert_clip(&connection, Path::new("IMG_0003.mov"), "2026-08-31T12:00:00Z", &[1], None);
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id IN (?2, ?3)", params![sea, a, b]).unwrap();
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id = ?2", params![hill, c]).unwrap();
+        let seg_b = insert_select_segment(&connection, b, 200, 1400, 0);
+        // 镜头带:c(整条)→ b(精选段)→ a(整条),与拍摄时间相反。
+        put_in_story_order(&connection, c, None, 0);
+        put_in_story_order(&connection, b, Some(seg_b), 1);
+        put_in_story_order(&connection, a, None, 2);
+
+        let plan = plan_jianying_kit(&connection, None).unwrap();
+        assert_eq!(
+            plan.files,
+            vec!["01_山里_IMG_0003.mp4", "02_海边_IMG_0002.mp4", "03_海边_IMG_0001.mp4"]
+        );
+        assert_eq!(plan.order_file, KIT_ORDER_FILE);
+        assert!(plan.dir.starts_with("EP01_剪映素材包_20"), "{}", plan.dir);
+        assert!(plan.job_id.is_none());
+
+        let clips = selected_clips(&connection).unwrap();
+        let items: Vec<ExportItemStatus> = Vec::new();
+        assert_eq!(
+            kit_order_text(&clips, &items),
+            "01 山里 IMG_0003.mov 2.0 秒\n02 海边 IMG_0002.mov 1.2 秒\n03 海边 IMG_0001.mov 2.0 秒\n"
+        );
+    }
+
+    /// V14-01:两章、挑选顺序与章节顺序相反(先挑晚章两镜,再挑早章一镜)。镜头带「按章节」画的是
+    /// 早章在前、章内按 position;素材包 / 导出片段 / `selected_clips`(草稿也从它取)都必须按这份
+    /// 顺序,而不是 `position` 的全局序(即挑选先后)。
+    #[test]
+    fn exports_follow_band_order_not_pick_order_across_chapters() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let late = insert_chapter_at(&connection, "第 7 章", "2026-08-31T14:00:00Z");
+        let early = insert_chapter_at(&connection, "第 1 章", "2026-08-31T09:00:00Z");
+        // Z-07 之后导出规划会真的探原片是否在位:用目录里的真文件,否则三条都被判「缺失」、退出镜头带,排序就没得比。
+        let make = |name: &str| {
+            let path = directory.path().join(name);
+            std::fs::write(&path, b"placeholder").unwrap();
+            path
+        };
+        let img_a = insert_clip(&connection, &make("IMG_0831.mov"), "2026-08-31T14:40:00Z", &[1], None);
+        let img_b = insert_clip(&connection, &make("IMG_0832.mov"), "2026-08-31T14:41:00Z", &[1], None);
+        let clip_1 = insert_clip(&connection, &make("clip_1.mp4"), "2026-08-31T09:00:00Z", &[1], None);
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id IN (?2, ?3)", params![late, img_a, img_b]).unwrap();
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id = ?2", params![early, clip_1]).unwrap();
+        let seg_b = insert_select_segment(&connection, img_b, 200, 1400, 0);
+        // 挑选先后(position 全局序):img_a → img_b(精选段)→ clip_1。
+        put_in_story_order(&connection, img_a, None, 0);
+        put_in_story_order(&connection, img_b, Some(seg_b), 1);
+        put_in_story_order(&connection, clip_1, None, 2);
+
+        let band = crate::core::story::ordered_band_items(&connection).unwrap();
+        assert_eq!(band.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![clip_1, img_a, img_b]);
+
+        let clips = selected_clips(&connection).unwrap();
+        assert_eq!(
+            clips.iter().map(|clip| (clip.clip_id, clip.segment_id)).collect::<Vec<_>>(),
+            vec![(clip_1, None), (img_a, None), (img_b, Some(seg_b))],
+            "selected_clips(草稿 / 交付包的输入)按镜头带顺序"
+        );
+        let kit = plan_jianying_kit(&connection, None).unwrap();
+        assert_eq!(
+            kit.files,
+            vec!["01_第 1 章_clip_1.mp4", "02_第 7 章_IMG_0831.mp4", "03_第 7 章_IMG_0832.mp4"]
+        );
+        let quick = plan_quick_export(&connection, None, None).unwrap();
+        assert_eq!(
+            quick.files.iter().map(|name| name.split('_').next().unwrap().to_owned()).collect::<Vec<_>>(),
+            vec!["001", "002", "003"]
+        );
+        assert!(quick.files[0].contains("clip_1"), "{:?}", quick.files);
+        assert!(quick.files[2].contains("IMG_0832"), "{:?}", quick.files);
+    }
+
+    #[test]
+    fn kit_file_name_sanitizes_chapter_and_source_and_grows_past_two_digits() {
+        assert_eq!(kit_file_name(1, "海边", "IMG_0001.MOV"), "01_海边_IMG_0001.mp4");
+        assert_eq!(kit_file_name(7, "", "b:c.mp4"), "07_未分章_b_c.mp4");
+        assert_eq!(kit_file_name(12, "第一天: 出发?", "x.mov"), "12_第一天 出发_x.mp4");
+        assert_eq!(kit_file_name(100, "尾声", "y.mov"), "100_尾声_y.mp4");
+    }
+
+    /// 真跑一遍(有 ffmpeg 才跑):两章三镜 → 文件夹 `<集名>_剪映素材包_<日期>` 里三个 mp4 编号连续、
+    /// 顺序与镜头带一致,顺序.txt 内容正确;状态 `mode = kit`;完成语「已导出 3 个片段」。
+    #[test]
+    fn jianying_kit_export_writes_numbered_files_and_order_file() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let first = directory.path().join("first.mp4");
+        let second = directory.path().join("second.mp4");
+        let third = directory.path().join("third.mp4");
+        if !generate_fixture(&ffmpeg, &first) || !generate_fixture(&ffmpeg, &second) || !generate_fixture(&ffmpeg, &third) {
+            eprintln!("skipping kit export fixture: encoder unavailable");
+            return;
+        }
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let sea = insert_chapter_at(&connection, "海边", "2026-08-31T06:00:00Z");
+        let hill = insert_chapter_at(&connection, "山里", "2026-08-31T05:00:00Z");
+        let a = insert_clip(&connection, &first, "2026-08-31T10:00:00Z", &[1], None);
+        let b = insert_clip(&connection, &second, "2026-08-31T11:00:00Z", &[1], None);
+        let c = insert_clip(&connection, &third, "2026-08-31T12:00:00Z", &[1], None);
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id IN (?2, ?3)", params![sea, a, b]).unwrap();
+        connection.execute("UPDATE clips SET chapter_id = ?1 WHERE id = ?2", params![hill, c]).unwrap();
+        let meta = crate::core::import::probe_media(&second).unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET tb_num = ?1, tb_den = ?2, duration_ticks = ?3 WHERE id = ?4",
+                params![meta.tb_num, meta.tb_den, meta.duration_ticks, b],
+            )
+            .unwrap();
+        let frame = meta.tb_den / meta.tb_num / 25;
+        let seg_b = insert_select_segment(&connection, b, 0, frame * 10, 0);
+        put_in_story_order(&connection, c, None, 0);
+        put_in_story_order(&connection, b, Some(seg_b), 1);
+        put_in_story_order(&connection, a, None, 2);
+        let dest = directory.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+
+        let outcome = start_jianying_kit(&mut connection, &dest).unwrap();
+        assert_eq!(outcome.files, vec!["01_山里_third.mp4", "02_海边_second.mp4", "03_海边_first.mp4"]);
+        let job_id = outcome.job_id.expect("kit export enqueues a job");
+        let queued = get_export_status(&connection, Some(job_id)).unwrap();
+        assert_eq!(queued.mode.as_deref(), Some("kit"));
+        assert_eq!(
+            queued.items.iter().map(|item| item.output_name.clone()).collect::<Vec<_>>(),
+            outcome.files
+        );
+
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
+        let finished = get_export_status(&connection, Some(job_id)).unwrap();
+        assert_eq!(finished.status, "done", "{:?}", finished.error);
+        assert_eq!(finished.completed_items, 3, "{:?}", finished.items);
+        let output = PathBuf::from(finished.output_path.unwrap());
+        assert_eq!(output, PathBuf::from(&outcome.dir));
+        let folder = output.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(folder.starts_with("EP01_剪映素材包_20"), "{folder}");
+        let mut entries: Vec<String> = std::fs::read_dir(&output)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != COMPLETION_MARKER_FILE)
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["01_山里_third.mp4", "02_海边_second.mp4", "03_海边_first.mp4", KIT_ORDER_FILE]
+        );
+        let order = std::fs::read_to_string(output.join(KIT_ORDER_FILE)).unwrap();
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(lines.len(), 3, "{order}");
+        assert!(lines[0].starts_with("01 山里 third.mp4 "), "{order}");
+        assert!(lines[1].starts_with("02 海边 second.mp4 0.4 秒"), "{order}");
+        assert!(lines[2].starts_with("03 海边 first.mp4 "), "{order}");
+        assert!(!output.join(SELECTED_DIRECTORY).exists());
+        assert!(!output.join(README_FILE).exists());
+        let payload = parse_payload(&connection.query_row("SELECT payload FROM jobs WHERE id = ?1", [job_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();
+        assert_eq!(completion_message(&payload), "已导出 3 个片段");
     }
 }

@@ -72,7 +72,6 @@ describe("L1 analysis presentation", () => {
     );
 
     for (const label of [
-      "过暗",
       "过曝",
       "欠曝",
       "削波",
@@ -99,6 +98,8 @@ describe("L1 analysis presentation", () => {
     ]) {
       expect(panel).toContain(value);
     }
+    // R14:平均亮度低不再单独发「过暗」角标(夜景也低),欠曝由后端联合判定。
+    expect(badges).not.toContain("过暗");
     expect(panel).toContain("场景片段");
     expect(panel).toContain("3");
     expect(panel).toContain("手持 / Handheld");

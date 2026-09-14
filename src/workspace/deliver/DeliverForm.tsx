@@ -1,6 +1,6 @@
 import { useId, type JSX } from "react";
 import type { TargetPlatform } from "../../api";
-import { Badge, Card, Chip, Field, SectionHeader, Select, Toggle, type BadgeTone } from "../ui";
+import { Badge, Button, Card, Chip, Field, SectionHeader, Select, Toggle, type BadgeTone } from "../ui";
 import {
   PLATFORM_LABELS,
   PLATFORM_OPTIONS,
@@ -11,6 +11,7 @@ import {
 } from "./deliverModel";
 import type { DeliverForm as DeliverFormState } from "./useDeliverForm";
 import type { ExportOrientation } from "./useExportCanvas";
+import { DELIVER_ORIENTATION_LABEL, ORIENTATION_LABEL } from "../copy";
 
 const ORIENTATION_OPTIONS: ReadonlyArray<{ value: ExportOrientation; label: string }> = [
   { value: "landscape", label: "横版" },
@@ -38,6 +39,10 @@ function jianyingBadge(form: DeliverFormState): { tone: BadgeTone; text: string 
   return { tone: "accent", text: form.jianying.installed_version };
 }
 
+/** R14 §9 A:待验证版本的试验开关。AX 名「仍然试着生成」;可见文案带「(试验)」。 */
+export const FORCE_DRAFT_LABEL = "仍然试着生成";
+const FORCE_DRAFT_LINE = "试验草稿只新增一份、用新名字;就算剪映打不开,也不影响剪映里已有的草稿。";
+
 /** 交付目标(平台 / 时长)+ 输出格式(联系表 / 剪映草稿)两节(规格 §4.2 第 1 条)。 */
 export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }: DeliverFormProps): JSX.Element {
   const platformId = useId();
@@ -53,7 +58,7 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
           meta={`本集设置:${PLATFORM_LABELS[form.episodePlatform]}`}
         />
         <Card className="deliver-fields" padding={4}>
-          <Field label="本次交付平台" htmlFor={platformId} help="只影响本次输出的画布与码率">
+          <Field label="本次交付平台" htmlFor={platformId} help="只影响本次输出的画面尺寸与清晰度">
             <Select
               id={platformId}
               aria-label="本次交付平台"
@@ -69,8 +74,8 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
             </Select>
           </Field>
           {/* R10 U-05:横/竖切换只覆盖本次交付(不写集记录);当前高亮 = 后端现算的画布方向。 */}
-          <Field label="画布方向" help={form.canvas ? `${form.canvas.width}×${form.canvas.height}` : "按集设置 / 平台习惯 / 素材多数自动"}>
-            <div className="deliver-orientation" role="group" aria-label="本次交付画布方向">
+          <Field label={ORIENTATION_LABEL} help={form.canvas ? `${form.canvas.width}×${form.canvas.height}` : "按集设置 / 平台习惯 / 素材多数自动"}>
+            <div className="deliver-orientation" role="group" aria-label={DELIVER_ORIENTATION_LABEL}>
               {ORIENTATION_OPTIONS.map((option) => (
                 <Chip
                   key={option.value}
@@ -107,7 +112,7 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
               <label className="deliver-switch-title" htmlFor={contactId}>
                 联系表.pdf
               </label>
-              <p className="deliver-switch-help">A4 网格联系表:封面缩略图 + 序号 / 入出点 / 章节,按本次交付平台的画布方向排横版或竖版</p>
+              <p className="deliver-switch-help">A4 网格联系表:封面缩略图 + 序号 / 入出点 / 章节,按本次交付平台的画面方向排横版或竖版</p>
             </div>
             <Toggle id={contactId} label="联系表.pdf" checked={form.includeContactSheet} onChange={form.setIncludeContactSheet} />
           </div>
@@ -123,6 +128,21 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
                 <span>{jianyingStatusText(form)}</span>
                 {form.jianying.supported ? <span> · 只新增一份草稿,不改剪映既有草稿;自检不过会自动降级为稳定包</span> : null}
               </p>
+              {!form.jianying.supported && form.jianying.force_allowed ? (
+                <div className="deliver-force-draft">
+                  <p className="deliver-switch-help">{FORCE_DRAFT_LINE}</p>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    aria-label={FORCE_DRAFT_LABEL}
+                    busy={form.nativeBusy}
+                    disabled={form.nativeBusy}
+                    onClick={() => void form.generateExperimental()}
+                  >
+                    我知道风险,仍然试着生成(试验)
+                  </Button>
+                </div>
+              ) : null}
             </div>
             <Toggle
               id={jianyingId}

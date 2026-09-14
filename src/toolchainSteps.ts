@@ -1,4 +1,5 @@
 import type { SettingsStatus } from "./api";
+import { OPTIONAL_TRANSCRIBE_TITLE, OPTIONAL_VISION_TITLE } from "./workspace/copy";
 
 /**
  * 工具链检查的纯逻辑(R11 简化专项 #1):首启弹窗 `FirstRunGuide` 与 设置 → 工具链 的
@@ -45,8 +46,8 @@ export function onboardingSteps(status: SettingsStatus): GuideStep[] {
   if (!status.whisper.model_available) {
     steps.push({
       id: "whisper-model",
-      title: "可选：提供已校验的 Whisper 模型",
-      description: `当前正式版不会联网下载模型。需要本地转写时，请将已合法取得并核验的对应 ggml 模型放到：${status.whisper.model_path}；不安装不会影响导入、筛片、播放与交付。`,
+      title: OPTIONAL_TRANSCRIBE_TITLE,
+      description: `把说话内容转成文字要用到转写模型;正式版不会联网下载。需要时请把已核验的模型文件放到：${status.whisper.model_path}；不装不影响导入、挑选、播放与导出。`,
     });
   }
 
@@ -60,8 +61,8 @@ export function onboardingSteps(status: SettingsStatus): GuideStep[] {
   } else if (!status.clip_sidecar.available) {
     steps.push({
       id: "clip-sidecar",
-      title: "初始化本地 Chinese-CLIP 环境",
-      description: "正式版不在线安装 Python 运行环境。画面语义搜索将在签名组件包可用后启用；其余核心筛片与交付不受影响。",
+      title: OPTIONAL_VISION_TITLE,
+      description: "按画面内容搜索要用到画面识别组件;正式版不在线安装，等带签名的组件包可用后自动启用。其余挑选与导出不受影响。",
     });
   }
 

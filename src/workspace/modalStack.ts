@@ -49,7 +49,31 @@ export function isTopModal(token: object): boolean {
   return stack.length > 0 && stack[stack.length - 1] === token;
 }
 
+/**
+ * 遮挡者(R13 真机 Y-01/Y-02):首页、引导气泡这类**非模态**覆盖物 —— 它们不抢 Esc、
+ * 不算「模态层」,但同样画在监视器上方,原生视频视图一样得让位。单独一组,
+ * 和模态栈共用订阅者;`isPlayerOccluded` 是监视器该看的那个问题。
+ */
+const occluders = new Set<object>();
+
+export function pushOccluder(token: object): void {
+  if (occluders.has(token)) return;
+  occluders.add(token);
+  notify();
+}
+
+export function popOccluder(token: object): void {
+  if (!occluders.delete(token)) return;
+  notify();
+}
+
+/** 原生视频视图现在该不该藏起来:模态层或遮挡者任一在场。 */
+export function isPlayerOccluded(): boolean {
+  return stack.length > 0 || occluders.size > 0;
+}
+
 export function __resetModalStackForTests(): void {
   stack.length = 0;
+  occluders.clear();
   listeners.clear();
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// R10 U-23:恢复页之后不再叠首启弹窗。api / tauri 桩与 App.test.tsx 同一套(那份已过 400 行,分出来)。
+// R10 U-23 → R12 §1:新壳没有工具链弹窗,必需组件缺失只出横幅。api / tauri 桩与 App.test.tsx 同一套(那份已过 400 行,分出来)。
 import { act } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // App() 先读 getDoctorReport 才肯渲染工作台,再读 getSettings 判旗。jsdom 里没有
@@ -142,22 +142,29 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("R10 U-23:恢复页之后不再叠首启弹窗", () => {
-  it("健康启动 + 必需组件(ffmpeg)缺失:首启弹窗照常出现(正断言兜底)", async () => {
+describe("R12 §1:新壳没有工具链弹窗,必需组件缺失只出顶栏下横幅(R10 U-23 的「不叠弹窗」由此成立)", () => {
+  it("健康启动 + 必需组件(ffmpeg)缺失:没有 dialog,顶栏下出现横幅「视频处理组件缺失」,「去安装」开设置", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
     vi.mocked(getSettings).mockResolvedValue({});
     const { default: App } = await import("./App");
     render(<App />);
     await screen.findByRole("region", { name: "媒体池" });
-    expect(await screen.findByRole("dialog", { name: "先把本地工具链接好" })).toBeTruthy();
+    const banner = await screen.findByRole("region", { name: "视频处理组件缺失" });
+    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
+    expect(banner.getAttribute("aria-modal")).toBeNull();
+    await act(async () => {
+      within(banner).getByRole("button", { name: "去安装" }).click();
+      await Promise.resolve();
+    });
+    const { getWorkspaceSnapshot } = await import("./workspace/WorkspaceStore");
+    expect(getWorkspaceSnapshot().openDrawer).toBe("settings");
   });
 
-  it("R11 简化:只缺可选组件(Whisper 模型)不再弹工具链引导,静默记 first_run_done", async () => {
+  it("R11 简化:只缺可选组件(Whisper 模型)既不弹也不出横幅", async () => {
     await withMissingWhisperModel();
     vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
     vi.mocked(getSettings).mockResolvedValue({});
-    vi.mocked(setFirstRunDone).mockClear();
     const { default: App } = await import("./App");
     render(<App />);
     await screen.findByRole("region", { name: "媒体池" });
@@ -166,10 +173,10 @@ describe("R10 U-23:恢复页之后不再叠首启弹窗", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-    expect(setFirstRunDone).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: "视频处理组件缺失" })).toBeNull();
   });
 
-  it("异常退出 → 恢复页 → 进入工作台:只有一道门,首启弹窗不再叠上来", async () => {
+  it("异常退出 → 恢复页 → 进入工作台:没有弹窗叠上来;横幅照常(它不是模态)", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue({ ...HEALTHY_REPORT, status: "WARN", abnormal_exit: true });
     vi.mocked(getSettings).mockResolvedValue({});
@@ -181,98 +188,23 @@ describe("R10 U-23:恢复页之后不再叠首启弹窗", () => {
       await Promise.resolve();
     });
     await screen.findByRole("region", { name: "媒体池" });
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
+    expect(await screen.findByRole("region", { name: "视频处理组件缺失" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("onboarding.first_run_done=true:健康启动也不弹", async () => {
+  it("横幅「关闭提示」本次启动收起;first_run_done 不再决定它出不出现(缺就是缺)", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
     vi.mocked(getSettings).mockResolvedValue({ "onboarding.first_run_done": "true" });
     const { default: App } = await import("./App");
     render(<App />);
     await screen.findByRole("region", { name: "媒体池" });
+    const banner = await screen.findByRole("region", { name: "视频处理组件缺失" });
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-  });
-});
-
-describe("R10 U-22:首启弹窗只看 onboarding.first_run_done,关过一次就不再重放", () => {
-  it("「暂时进入工作台」→ setFirstRunDone();随后切到旧壳再切回新壳都不再弹", async () => {
-    await withMissingFfmpeg();
-    vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
-    vi.mocked(getSettings).mockResolvedValue({});
-    vi.mocked(setFirstRunDone).mockClear();
-    const { default: App } = await import("./App");
-    render(<App />);
-    await screen.findByRole("region", { name: "媒体池" });
-    const dismiss = await screen.findByRole("button", { name: "暂时进入工作台" });
-    await act(async () => {
-      dismiss.click();
+      within(banner).getByRole("button", { name: "关闭提示" }).click();
       await Promise.resolve();
     });
-    expect(setFirstRunDone).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-    // 切旧壳
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent("tripcut:workspace-flag-changed", { detail: { workspaceV2: false } }));
-      await Promise.resolve();
-    });
-    await screen.findByRole("button", { name: /开始使用|稍后再说/ });
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-    // 切回新壳
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent("tripcut:workspace-flag-changed", { detail: { workspaceV2: true } }));
-      await Promise.resolve();
-    });
-    await screen.findByRole("region", { name: "媒体池" });
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-  });
-
-  it("旧壳安装向导走完(「开始使用 / 稍后再说」)→ setFirstRunDone()", async () => {
-    vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
-    vi.mocked(getSettings).mockResolvedValue({ "ui.workspace_v2": "false", "onboarding.first_run_done": "true" });
-    vi.mocked(setFirstRunDone).mockClear();
-    try { localStorage.removeItem("tripcut.wizard.done"); } catch { /* jsdom */ }
-    const { default: App } = await import("./App");
-    render(<App />);
-    const done = await screen.findByRole("button", { name: /开始使用|稍后再说/ });
-    await act(async () => {
-      done.click();
-      await Promise.resolve();
-    });
-    expect(setFirstRunDone).toHaveBeenCalledTimes(1);
-  });
-
-  it("工具链齐全、没有引导步骤:不弹,但静默记 first_run_done(下次启动不再检测)", async () => {
-    // 前面的用例用 mockResolvedValue 把 ffmpeg / 模型改成缺席,mock 不会自动复位——这里显式还原成齐全。
-    const status = await vi.mocked(getSettingsStatus).getMockImplementation()!();
-    vi.mocked(getSettingsStatus).mockResolvedValue({
-      ...status,
-      ffmpeg: { ...status.ffmpeg, available: true },
-      whisper: { ...status.whisper, model_available: true },
-    });
-    vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
-    vi.mocked(getSettings).mockResolvedValue({});
-    vi.mocked(setFirstRunDone).mockClear();
-    const { default: App } = await import("./App");
-    render(<App />);
-    await screen.findByRole("region", { name: "媒体池" });
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-    expect(setFirstRunDone).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: "视频处理组件缺失" })).toBeNull();
+    expect(setFirstRunDone).not.toHaveBeenCalled();
   });
 });

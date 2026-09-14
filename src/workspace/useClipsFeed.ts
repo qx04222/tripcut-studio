@@ -4,11 +4,13 @@ import {
   getClipsRevision,
   getCurrentEpisode,
   getStoryboard,
+  getStoryboardOf,
   listAssetSafety,
   listClipDimensions,
   listClips,
   listShotStacks,
   listStoryGaps,
+  listStoryGapsOf,
   type AssetSafetyInfo,
   type ClipDimension,
   type ClipListItem,
@@ -193,6 +195,11 @@ export async function refreshClipsFeed(force = false): Promise<void> {
       shouldFetchClips = true;
     }
 
+    // Z-14:只读查看已封存集时,镜头带与缺口按被查看的集取(此前永远是当前集的,
+    // 看着旧集会把新集的镜导出去);回到当前集后仍走不带参数的老命令(旧后端 / 桩兼容)。
+    const viewingId = episode.viewing?.id ?? null;
+    const fetchStoryboard = viewingId === null ? getStoryboard : () => getStoryboardOf(viewingId);
+    const fetchGaps = viewingId === null ? listStoryGaps : () => listStoryGapsOf(viewingId);
     // 元数据五路并行走 allSettled:任何一路挂掉都只丢自己那一份(留住上一轮的值),
     // 不能连坐 clips —— 镜头带一时拉不到,媒体池不该跟着变空。
     const [
@@ -204,8 +211,8 @@ export async function refreshClipsFeed(force = false): Promise<void> {
       episodeResult,
     ] = await Promise.allSettled([
       attempt(listShotStacks),
-      attempt(getStoryboard),
-      attempt(listStoryGaps),
+      attempt(fetchStoryboard),
+      attempt(fetchGaps),
       attempt(listClipDimensions),
       attempt(listAssetSafety),
       // 当前集不在 clips 修订号的覆盖范围内,所以每轮都问一次 —— 切集不顶

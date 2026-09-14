@@ -2,6 +2,7 @@
 // 帮助主题和它覆盖的分区绑定，避免两边各写一份 id 列表后悄悄漂移。
 export type SettingsSectionId =
   | "appearance"
+  | "keymap"
   | "performance"
   | "timeline"
   | "tools"

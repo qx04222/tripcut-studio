@@ -51,6 +51,9 @@ vi.mock("../api", async (importOriginal) => ({
 
 import type { ClipListItem, Storyboard, StoryGap, StoryItem } from "../api";
 import { ShotBand } from "./ShotBand";
+// R12 §3:提示改走全局 Toast(壳里挂一次的 ToastHost);单独渲染镜头带时得自己带上宿主。
+import { ToastHost } from "./ui/Toast";
+import { __resetToastsForTests } from "./ui/toastStore";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
 
@@ -148,6 +151,7 @@ const board: Storyboard = {
 };
 
 beforeEach(() => {
+  __resetToastsForTests();
   __resetClipsFeedForTests();
   __resetWorkspaceForTests();
   for (const mock of Object.values(apiMocks)) mock.mockClear();
@@ -172,8 +176,16 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** R12 §2:缺口卡只留一个主动作,云端补镜 / 忽略 / 去设置收进「···」(AX「更多」→ menu「缺口更多操作」)。 */
+async function openMore(cell: HTMLElement): Promise<HTMLElement> {
+  await act(async () => {
+    fireEvent.click(within(cell).getByRole("button", { name: "更多" }));
+  });
+  return screen.getByRole("menu", { name: "缺口更多操作" });
+}
+
 async function renderBand(): Promise<void> {
-  render(<ShotBand />);
+  render(<><ShotBand /><ToastHost /></>);
   await screen.findByRole("gridcell", { name: "镜头 1：A.MP4" });
 }
 
@@ -196,14 +208,19 @@ describe("U-17:空章算缺口,占位上有可点的入口", () => {
     expect(screen.queryByText("所有章节都没有缺口。")).toBeNull();
   });
 
-  it("空章占位:「生成候选」禁用并给「去设置」链接(打开设置 sheet + 云端补镜分区事件)", async () => {
+  it("缺口卡「···」里:「生成候选」禁用并给「去设置」(打开设置 sheet + 云端补镜分区事件);空章占位不再出现云端补镜", async () => {
+    apiMocks.listStoryGaps.mockResolvedValue([gap(10, 1, "REAL/ESTABLISHING", "建立镜头")]);
     await renderBand();
     const second = screen.getByRole("rowgroup", { name: "第 2 章 抵达" });
-    expect(within(second).getByRole("button", { name: "生成候选" })).toHaveProperty("disabled", true);
-    expect(within(second).getByText(/云端补镜未启用/)).toBeTruthy();
+    expect(within(second).queryByRole("button", { name: "生成候选" })).toBeNull();
+    expect(within(second).queryByText(/云端补镜/)).toBeNull();
+    const cell = screen.getByRole("gridcell", { name: "镜头 2：缺口 建立镜头" });
+    const menu = await openMore(cell);
+    expect(within(menu).getByRole("menuitem", { name: "生成候选" })).toHaveProperty("disabled", true);
+    expect(within(menu).getByText(/云端补镜未启用/)).toBeTruthy();
     const heard = vi.fn();
     window.addEventListener("tripcut:open-settings-section", heard);
-    fireEvent.click(within(second).getByRole("button", { name: "去设置" }));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "去设置" }));
     expect(getWorkspaceSnapshot().openDrawer).toBe("settings");
     expect(getWorkspaceSnapshot().settingsSection).toBe("generation");
     expect((heard.mock.calls[0]![0] as CustomEvent).detail).toEqual({ section: "generation" });
@@ -212,17 +229,18 @@ describe("U-17:空章算缺口,占位上有可点的入口", () => {
 
   it("空槽位:「忽略」后给 5 秒可撤销提示,「撤销」调 reopen_story_gap", async () => {
     apiMocks.listStoryGaps.mockResolvedValue([gap(10, 1, "REAL/ESTABLISHING", "建立镜头")]);
-    render(<ShotBand />);
+    render(<><ShotBand /><ToastHost /></>);
     const cell = await screen.findByRole("gridcell", { name: "镜头 2：缺口 建立镜头" });
-    expect(within(cell).getByRole("button", { name: "从媒体池选择…" })).toBeTruthy();
-    expect(within(cell).getByRole("button", { name: "去设置" })).toBeTruthy();
+    expect(within(cell).getByRole("button", { name: "从挑好的片段里选" })).toBeTruthy();
+    const menu = await openMore(cell);
+    expect(within(menu).getByRole("menuitem", { name: "去设置" })).toBeTruthy();
     await act(async () => {
-      fireEvent.click(within(cell).getByRole("button", { name: "忽略" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "忽略" }));
     });
     await waitFor(() => expect(apiMocks.dismissStoryGap).toHaveBeenCalledWith(10));
     const toast = await screen.findByText("已忽略缺口「建立镜头」");
     await act(async () => {
-      fireEvent.click(within(toast.closest(".band-toast")!).getByRole("button", { name: "撤销" }));
+      fireEvent.click(within(toast.closest(".ui-toast")!).getByRole("button", { name: "撤销" }));
     });
     await waitFor(() => expect(apiMocks.reopenStoryGap).toHaveBeenCalledWith(10));
   });
@@ -231,7 +249,7 @@ describe("U-17:空章算缺口,占位上有可点的入口", () => {
 describe("U-30:缺口说明可展开", () => {
   it("说明是 aria-expanded 的 disclosure,点一下展开、再点收回,且不换掉选中", async () => {
     apiMocks.listStoryGaps.mockResolvedValue([gap(10, 1, "REAL/ESTABLISHING", "建立镜头")]);
-    render(<ShotBand />);
+    render(<><ShotBand /><ToastHost /></>);
     const cell = await screen.findByRole("gridcell", { name: "镜头 2：缺口 建立镜头" });
     const reason = within(cell).getByRole("button", { name: /第 1 章计划了建立镜头/ });
     expect(reason.getAttribute("aria-expanded")).toBe("false");
@@ -244,11 +262,11 @@ describe("U-30:缺口说明可展开", () => {
   });
 });
 
-describe("U-18:「从媒体池选择…」是不靠拖拽的第二条路", () => {
+describe("U-18:「从挑好的片段里选」(R10 的「从媒体池选择…」)是不靠拖拽的第二条路", () => {
   it("列表只列收藏 ∪ ≥3 星且不在带上的素材;点一条 → set_story_order 追加到它的章末,提示说出章名", async () => {
     await renderBand();
     const second = screen.getByRole("rowgroup", { name: "第 2 章 抵达" });
-    fireEvent.click(within(second).getByRole("button", { name: "从媒体池选择…" }));
+    fireEvent.click(within(second).getByRole("button", { name: "从挑好的片段里选" }));
     const dialog = screen.getByRole("dialog", { name: "从媒体池选择" });
     expect(within(dialog).getAllByRole("button", { name: /^加入 / }).map((button) => button.textContent)).toEqual([
       "B.MP4收藏",
@@ -273,7 +291,7 @@ describe("U-18:「从媒体池选择…」是不靠拖拽的第二条路", () =>
     await renderBand();
     // 收藏之后后端才会把它列进候选:第二次 getStoryboard 给出带候选的那一份。
     apiMocks.getStoryboard.mockResolvedValue({ ...board, candidates: [...board.candidates, item(3, 1, "C.MP4", null)] });
-    fireEvent.click(within(screen.getByRole("rowgroup", { name: "第 2 章 抵达" })).getByRole("button", { name: "从媒体池选择…" }));
+    fireEvent.click(within(screen.getByRole("rowgroup", { name: "第 2 章 抵达" })).getByRole("button", { name: "从挑好的片段里选" }));
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "加入 C.MP4" }));
     });
@@ -287,14 +305,17 @@ describe("U-18:「从媒体池选择…」是不靠拖拽的第二条路", () =>
     expect(await screen.findByText("已加入第 1 章「出发」，并已自动收藏整条")).toBeTruthy();
   });
 
-  it("池里没有合格素材时给「去媒体池」而不是空列表", async () => {
+  it("池里没有合格素材时主动作变成「回到第 2 步挑几条」:焦点回媒体池并广播打开自动挑选,不弹空列表(R12 §2)", async () => {
     apiMocks.listClips.mockResolvedValue([clip(1, "A.MP4", { binary_rating: 1 }), clip(4, "D.MP4")]);
     await renderBand();
-    fireEvent.click(within(screen.getByRole("rowgroup", { name: "第 2 章 抵达" })).getByRole("button", { name: "从媒体池选择…" }));
-    const dialog = screen.getByRole("dialog", { name: "从媒体池选择" });
-    expect(within(dialog).getByText("没有素材满足『收藏或 ≥3 星』")).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "去媒体池" }));
+    const second = screen.getByRole("rowgroup", { name: "第 2 章 抵达" });
+    expect(within(second).queryByRole("button", { name: "从挑好的片段里选" })).toBeNull();
+    const heard = vi.fn();
+    window.addEventListener("tripcut:open-auto-select", heard);
+    fireEvent.click(within(second).getByRole("button", { name: "回到第 2 步挑几条" }));
+    window.removeEventListener("tripcut:open-auto-select", heard);
     expect(getWorkspaceSnapshot().focusedPane).toBe("pool");
+    expect(heard).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog", { name: "从媒体池选择" })).toBeNull();
   });
 });
@@ -318,12 +339,14 @@ describe("R-08:缺口卡片底行不被裁", () => {
   it("说明文字的 line-clamp 打在 <button> 里的 span 上(WebKit 的按钮不认 -webkit-box 截行,会撑成四行把底行挤出卡片)", async () => {
     apiMocks.listStoryGaps.mockResolvedValue([gap(10, 1, "REAL/ESTABLISHING", "建立镜头")]);
     apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-    render(<ShotBand />);
+    render(<><ShotBand /><ToastHost /></>);
     const cell = await screen.findByRole("gridcell", { name: "镜头 2：缺口 建立镜头" });
     const reason = within(cell).getByRole("button", { name: /第 1 章计划了建立镜头/ });
     expect(reason.querySelector(".band-slot-reason-text")?.textContent).toContain("第 1 章计划了建立镜头");
-    // 底行「云端补镜未启用 去设置」仍在
-    expect(within(cell).getByRole("button", { name: "去设置" })).toBeTruthy();
+    // 底行是主动作 + 「···」;「去设置」在菜单里(R12 §2)。
+    expect(within(cell).getByRole("button", { name: "更多" })).toBeTruthy();
+    const menu = await openMore(cell);
+    expect(within(menu).getByRole("menuitem", { name: "去设置" })).toBeTruthy();
   });
 
   it("CSS:说明按钮可收缩不撑高(min-height 0 / overflow hidden),按钮行与提示行不可收缩,内层 .band-slot 裁掉溢出", () => {

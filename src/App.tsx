@@ -171,24 +171,29 @@ export default function App() {
 
   if (!settingsLoaded) {
     // 中性骨架:没有顶栏、没有四步导航、没有媒体池——任何"哪个壳"的线索都不给。
-    return <div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台" />;
+    return (
+      <div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台">
+        正在准备工作台…
+      </div>
+    );
   }
 
   // 旗默认开(ui.workspace_v2 不在 Rust defaults() 里,没写过就是前端默认值 "true",
   // 见 UI_SETTING_DEFAULTS)。设置 sheet 的界面开关写回显式 "false" 才落到旧四页壳。
   // R10 U-22:关过一次(暂时进入 / 向导 / 无事可讲)就把 App 级状态翻成 true,切壳不会让它再挂回来。
+  // R12 §1:新壳没有工具链弹窗了 —— 必需组件缺失只在顶栏下出横幅(WorkspaceShell 里的 ToolchainBanner);
+  // 弹窗只剩旧四页壳还在用。
   const firstRunGuide = firstRunDone || recoveryShown ? null : <FirstRunGuide onDismiss={() => setFirstRunDone(true)} />;
   if (workspaceV2) {
     return (
       <>
         <WorkspaceShell />
         <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
-        {firstRunGuide}
       </>
     );
   }
   return (
-    <Suspense fallback={<div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台" />}>
+    <Suspense fallback={<div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台">正在准备工作台…</div>}>
       <LazyLegacyShell route={route} />
       {firstRunGuide}
     </Suspense>

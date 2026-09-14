@@ -69,7 +69,7 @@ afterEach(cleanup);
 describe("R10 U-24:Whisper 模型缺失态", () => {
   it("显示官方地址(可复制)、期望 SHA-256、目标路径与「导入模型文件…」", async () => {
     const panel = await openToolsPanel();
-    const card = await within(panel).findByRole("group", { name: "Whisper 模型文件" });
+    const card = await within(panel).findByRole("group", { name: "转写模型文件" });
     expect(within(card).getByText(MODEL_URL)).toBeTruthy();
     expect(within(card).getByText(MODEL_SHA)).toBeTruthy();
     expect(within(card).getByText(MODEL_PATH)).toBeTruthy();
@@ -82,7 +82,7 @@ describe("R10 U-24:Whisper 模型缺失态", () => {
     apiMocks.getSettingsStatus.mockResolvedValue({ ...status, whisper: { ...status.whisper, model_available: true } });
     const panel = await openToolsPanel();
     await within(panel).findByText("模型已安装");
-    expect(within(panel).queryByRole("group", { name: "Whisper 模型文件" })).toBeNull();
+    expect(within(panel).queryByRole("group", { name: "转写模型文件" })).toBeNull();
   });
 
   it("「导入模型文件…」:选文件 → importWhisperModel,忙态 aria-busy,成功后重新检测并提示", async () => {
@@ -90,7 +90,7 @@ describe("R10 U-24:Whisper 模型缺失态", () => {
     let finish: (value: unknown) => void = () => undefined;
     apiMocks.importWhisperModel.mockReturnValue(new Promise((resolve) => { finish = resolve; }) as never);
     const panel = await openToolsPanel();
-    const card = await within(panel).findByRole("group", { name: "Whisper 模型文件" });
+    const card = await within(panel).findByRole("group", { name: "转写模型文件" });
     const button = within(card).getByRole("button", { name: "导入模型文件…" });
     await act(async () => {
       button.click();
@@ -113,7 +113,7 @@ describe("R10 U-24:Whisper 模型缺失态", () => {
     apiMocks.pickWhisperModelFile.mockResolvedValue("/Users/x/Downloads/wrong.bin");
     apiMocks.importWhisperModel.mockRejectedValue(new Error("SHA-256 不匹配:期望 1fc70f77… 或 1be3a9b2…"));
     const panel = await openToolsPanel();
-    const card = await within(panel).findByRole("group", { name: "Whisper 模型文件" });
+    const card = await within(panel).findByRole("group", { name: "转写模型文件" });
     await act(async () => {
       within(card).getByRole("button", { name: "导入模型文件…" }).click();
       await Promise.resolve();
@@ -126,7 +126,7 @@ describe("R10 U-24:Whisper 模型缺失态", () => {
   it("取消文件选择:不调 importWhisperModel,也不报错", async () => {
     apiMocks.pickWhisperModelFile.mockResolvedValue(null);
     const panel = await openToolsPanel();
-    const card = await within(panel).findByRole("group", { name: "Whisper 模型文件" });
+    const card = await within(panel).findByRole("group", { name: "转写模型文件" });
     await act(async () => {
       within(card).getByRole("button", { name: "导入模型文件…" }).click();
       await Promise.resolve();

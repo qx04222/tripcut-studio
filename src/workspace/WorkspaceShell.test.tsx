@@ -79,10 +79,12 @@ describe("工作区骨架", () => {
       expect(screen.getByRole(name === "后台状态" ? "status" : "region", { name })).toBeTruthy();
     }
   });
-  it("顶栏三个按钮的 AX 名一字不差,且没有四步导航", () => {
+  it("顶栏三个按钮的 AX 名一字不差,且没有英文 kicker 式的旧四页导航", () => {
     render(<WorkspaceShell />);
     expect(screen.getByRole("button", { name: "导入素材" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "生成交付包" })).toBeTruthy();
+    // R12:主按钮 AX 名迁为「流水线下一步」,空库时可见文案「下一步:导入素材」。
+    expect(screen.getByRole("button", { name: "流水线下一步" }).textContent).toBe("下一步:导入素材");
+    expect(screen.queryByRole("button", { name: "生成交付包" })).toBeNull();
     expect(screen.getByRole("button", { name: "设置" })).toBeTruthy();
     expect(screen.queryByText("01 导入 INGEST")).toBeNull();
     expect(screen.queryByText(/INGEST|ROUGH CUT|LOCAL-FIRST/)).toBeNull();
@@ -377,24 +379,25 @@ describe("R-06:换集清选中", () => {
 });
 
 describe("R9 主屏 chrome(Task 2)", () => {
-  it("顶栏三个按钮是套件按钮:导入素材 secondary、生成交付包 primary、设置 icon,都带图标", () => {
+  it("顶栏三个按钮是套件按钮:导入素材 secondary、流水线下一步 primary、设置 icon,都带图标", () => {
     render(<WorkspaceShell />);
     const importButton = screen.getByRole("button", { name: "导入素材" });
     expect(importButton.className).toContain("ui-button--secondary");
     expect(importButton.querySelector("svg")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "生成交付包" }).className).toContain("ui-button--primary");
+    expect(screen.getByRole("button", { name: "流水线下一步" }).className).toContain("ui-button--primary");
     expect(screen.getByRole("button", { name: "设置" }).className).toContain("ui-button--icon");
     expect(screen.getByRole("button", { name: "切换集" }).querySelector("svg")).not.toBeNull();
   });
-  it("顶栏带 C 稿的键位提示:导入 ⌘I、交付 ⌘⏎、命令面板 ⌘K 都是 <kbd>,且不进 AX 名", () => {
+  it("顶栏带 C 稿的键位提示:导入 ⌘I、命令面板 ⌘K 都是 <kbd>,且不进 AX 名(R12:主按钮上不再挂 ⌘⏎——那是沉浸预览的键,不是导出)", () => {
     render(<WorkspaceShell />);
     const topbar = document.querySelector(".workspace-topbar");
     expect(topbar).not.toBeNull();
     const keys = [...(topbar as HTMLElement).querySelectorAll("kbd.ui-kbd")].map((node) => node.textContent);
-    expect(keys).toEqual(expect.arrayContaining(["⌘I", "⌘⏎", "⌘K"]));
+    expect(keys).toEqual(expect.arrayContaining(["⌘I", "⌘K"]));
+    expect(keys).not.toContain("⌘⏎");
     // 键位是视觉提示,不能混进冻结的按钮名(冒烟按名找控件)。
     expect(screen.getByRole("button", { name: "导入素材" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "生成交付包" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "流水线下一步" })).toBeTruthy();
   });
   it("栏标题条不是 heading,栏标题 + meta 都在", () => {
     render(<WorkspaceShell />);

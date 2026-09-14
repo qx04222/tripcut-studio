@@ -9,9 +9,9 @@ export function PerformanceSection(): JSX.Element {
   const { settings, workspaceV2 } = form;
   return (
     <>
-      <SectionHeader title="性能" description="控制后台处理速度与轻量预览文件的占用;原片始终保持只读。" />
+      <SectionHeader title="性能" description="控制后台处理速度与预览小文件的占用;原片始终保持只读。" />
       <div className="settings-sheet-group">
-        <SettingsRow title="后台并行任务数" help="可选 1–8;保存后在下次重启时生效。" htmlFor="settings-worker-count">
+        <SettingsRow title="后台同时处理几条" help="可选 1–8;保存后在下次重启时生效。" htmlFor="settings-worker-count">
           <Select
             id="settings-worker-count"
             value={settings["performance.worker_count"]}
@@ -22,14 +22,14 @@ export function PerformanceSection(): JSX.Element {
             ))}
           </Select>
         </SettingsRow>
-        <SettingsRow title="自动生成轻量预览文件" help="关闭后播放器直接读原片,新导入不再排队生成 540p 预览文件。" align="end">
+        <SettingsRow title="预览用小文件" help="关闭后播放器直接读原片,新导入不再排队生成预览小文件。" align="end">
           <Toggle
-            label="自动生成轻量预览文件"
+            label="预览用小文件"
             checked={settings["performance.proxy_enabled"] === "true"}
             onChange={(next) => void form.save("performance.proxy_enabled", String(next))}
           />
         </SettingsRow>
-        <SettingsRow title="内存档位" help="自动按本机内存选择；省内存档降低解码并发以避免大项目时被系统换出。" htmlFor="settings-memory-profile">
+        <SettingsRow title="内存档位" help="自动按本机内存选择；省内存档会放慢后台处理，避免大项目时卡顿。" htmlFor="settings-memory-profile">
           <Select
             id="settings-memory-profile"
             value={settings["performance.memory_profile"]}

@@ -84,7 +84,7 @@ export function planBandReorder(
   return { kind: "reorder", items: next.map((item, position) => ({ ...item, position })) };
 }
 
-/** ←→ 的一步前后移:与故事板的「上移/下移」同一个纯函数,章内不越界。 */
+/** ←→ 的一步前后移:与镜块「往前/往后」、故事板「上移/下移」同一个纯函数,章内不越界。 */
 export function planBandStep(
   board: Storyboard,
   itemKey: string,

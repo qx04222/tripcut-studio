@@ -19,7 +19,7 @@ export function GenerationSection(): JSX.Element {
         <SettingsRow title="启用云端补镜" help="关闭时后端在预算检查与调用之前直接拒绝全部生成请求。" align="end">
           <Toggle label="启用云端补镜" checked={settings.minimax_enabled === "true"} onChange={(next) => void form.saveMinimaxEnabled(next)} />
         </SettingsRow>
-        <SettingsRow title="MiniMax API Key" help="只写入 macOS 钥匙串，界面上永不回显已保存的值。" htmlFor="settings-minimax-key">
+        <SettingsRow title="MiniMax 密钥" help="只写入 macOS 钥匙串，界面上永不回显已保存的值。" htmlFor="settings-minimax-key">
           <div className="settings-sheet-keyrow">
             <Badge tone={minimaxHasKey ? "accent" : "neutral"} icon={minimaxHasKey ? "check" : undefined}>
               {minimaxHasKey ? "已配置" : "未配置"}
@@ -29,7 +29,7 @@ export function GenerationSection(): JSX.Element {
               className="settings-sheet-input"
               type="password"
               autoComplete="off"
-              placeholder={minimaxHasKey ? "已保存，如需更换请输入新的 Key" : "粘贴 MiniMax API Key"}
+              placeholder={minimaxHasKey ? "已保存，如需更换请输入新的密钥" : "粘贴 MiniMax 密钥"}
               value={minimaxKeyDraft}
               disabled={minimaxKeyBusy}
               onChange={(event) => form.setMinimaxKeyDraft(event.currentTarget.value)}
@@ -43,7 +43,7 @@ export function GenerationSection(): JSX.Element {
           </div>
           {minimaxKeyNotice ? <p className="settings-sheet-inline-notice" role="status">{minimaxKeyNotice}</p> : null}
         </SettingsRow>
-        <SettingsRow title="默认模型" help="H3-Max 更便宜，H3 支持首尾帧引导与 2K。" htmlFor="settings-minimax-model">
+        <SettingsRow title="生成模型" help="H3-Max 更便宜，H3 支持首尾帧引导与 2K。" htmlFor="settings-minimax-model">
           <Select id="settings-minimax-model" value={settings.minimax_model} onChange={(event) => void form.saveMinimaxModel(event.currentTarget.value)}>
             <option value="MiniMax-H3-Max">MiniMax-H3-Max</option>
             <option value="MiniMax-H3">MiniMax-H3</option>
@@ -87,7 +87,7 @@ export function GenerationSection(): JSX.Element {
             !generationStatus?.enabled
               ? "已关闭"
               : !generationStatus?.has_key
-                ? "未配置 API Key"
+                ? "未配置密钥"
                 : `剩余 $${generationStatus.budget_remaining_usd.toFixed(2)}`,
           ],
         ]}

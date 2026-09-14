@@ -29,6 +29,14 @@
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
 @import "./workspace/chrome.css";
+/* R14 车道 stress(压力测试修复:缺失素材 / 只读集 / 状态条),同样只能在头部 @import。 */
+@import "./workspace/stress-r14.css";
+/* R14 车道 A:剪映草稿试验开关与试验结果卡(同样只能在头部 @import)。 */
+@import "./workspace/draftforce-r14.css";
+/* R13 真机验收修复(Y-07 镜块整块可拖 / Y-12 章头进 AX 树),同样只能在头部 @import。 */
+@import "./workspace/r13-fix.css";
+/* R13 车道 A:设置「快捷键」分区(同样只能在头部 @import)。 */
+@import "./workspace/keymap-r13.css";
 /* R10 车道 E(壳 / 抽屉 / 设置 / 恢复页)——同样只能在这里 @import。 */
 @import "./workspace/shell-r10.css";
 /* 封面占位(R9 D4),跨栏共用,同样只能排在这里。 */
@@ -58,12 +66,27 @@
 @import "./workspace/band-inspector-r10.css";
 /* R11 车道 C(播放器与媒体池):热力条 / 建议行 / 悬停刮擦 / 闪电角标 / 自动挑选面板。同样只能在这里 @import。 */
 @import "./workspace/player-r11.css";
+/* R12 车道 A(壳):四步流水线导航 / 下一步按钮 / 首启 / 帮助 / 导出步。同样只能在这里 @import。 */
+@import "./workspace/shell-r12.css";
+@import "./workspace/shell-r12-help-export.css";
 /* R11 车道 E(交付抽屉的快速导出模式)。同样只能在这里 @import。 */
 @import "./workspace/export-r11.css";
+/* R14 车道 B(交付抽屉的剪映素材包模式)。同样只能在这里 @import。 */
+@import "./workspace/kit-r14.css";
 /* R11 简化专项(车道 simplify):三步引导卡 / 设置三分区 / 检查器「更多信息」。同样只能在这里 @import。 */
 @import "./workspace/simplify-r11.css";
 /* R11 真机复核修复车道(fix):只读查看横幅「回到当前集」。同样只能在这里 @import。 */
 @import "./workspace/fix-r11.css";
+/* R12 车道 D(播放器行为 + 真变速):「连播」开关 / 速度菜单 / 状态行速度标记。同样只能在这里 @import。 */
+@import "./workspace/player-r12.css";
+/* R12 车道 C(术语清扫 v2):工具链读数的「详情」折叠。同样只能在这里 @import。 */
+@import "./workspace/terms-r12.css";
+/* R12 车道 B(镜头带联动 + 反馈系统):Toast / 一键排入 / 往前往后 / 缺口卡单主动作。同样只能在这里 @import。 */
+@import "./workspace/band-r12.css";
+/* R13 车道 B(剪映式引导 + 首页):功能气泡 / 首页。同样只能在这里 @import。 */
+@import "./workspace/guides-r13.css";
+/* R13 车道 C(镜头带时间线化 + 交接感):时间刻度 / 播放头 / 轨头折叠 / 拖边把手 / 导入剪映。同样只能在这里 @import。 */
+@import "./workspace/timeline-r13.css";
 
 /* ---------- 1. 壳与设计令牌 ---------- */
 
@@ -1678,8 +1701,12 @@
    既没有顶栏也没有四步导航,所以旗是 true 还是 false 都不会先闪一下。 */
 
 .app-boot-skeleton {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   height: 100vh;
+  color: var(--text-muted);
+  font-size: var(--text-13, 13px);
   background: var(--bg);
 }

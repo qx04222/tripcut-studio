@@ -1,10 +1,12 @@
-import type { JSX } from "react";
+import { useRef, useState, type JSX } from "react";
 
 import { formatTimecode } from "../PlayerOverlay";
 import type { ClipListItem, PlayerStatus } from "../api";
 import { MonitorHeatStrip } from "./MonitorHeatStrip";
 import { MonitorSeekBar } from "./MonitorSeekBar";
-import { Button, Kbd, Toolbar } from "./ui";
+import { ActionKbd, useActionKey } from "./KeymapKbd";
+import { Button, Menu, Toggle, Toolbar } from "./ui";
+import { PLAYBACK_RATES, type PlaybackRate } from "./useMonitorTransport";
 import type { ClipSuggestionsState } from "./useClipSuggestions";
 
 export interface MonitorControlsProps {
@@ -15,21 +17,28 @@ export interface MonitorControlsProps {
   notice: string | null;
   saving: boolean;
   muted: boolean;
-  /** R11 §3:变速标签(×1 / ×2 / ×4 / ◀×2…),点一下等于按 L。 */
+  /** R11 §3 / R12 §5:速度标签(×1 / ×2 / ×4 / ×0.5 / 倒退)。 */
   speedLabel?: string;
+  /** Y-10:J 倒退中(mpv 其实是暂停 + 逐帧后退):走带按钮要显示「暂停」,按它 = 停下倒退。 */
+  rewinding?: boolean;
   looping?: boolean;
   /** R11 §1.2:时刻热力与建议段;不传 = 不画(旧调用点不变)。 */
   suggestions?: ClipSuggestionsState;
   onPlayPause(): void;
   onNudge(seconds: -5 | -1 | 1 | 5): void;
   onToggleMute(): void;
+  /** 没传 `onSelectSpeed` 时点「×1」等于按 L(旧调用点);传了就弹速度菜单(R12 §5)。 */
   onCycleSpeed?(): void;
+  onSelectSpeed?(rate: PlaybackRate): void;
   onMarkIn(): void;
   onMarkOut(): void;
   onSaveSegment(): void;
   onStepSuggestion?(direction: 1 | -1): void;
   onRequestImmersive(): void;
   onSeek(seconds: number): void;
+  /** R12 §5:「连播」(播完自动下一条)的显式开关;不传 = 不画(旧调用点不变)。 */
+  autoAdvance?: boolean;
+  onToggleAutoAdvance?(): void;
 }
 
 /**
@@ -70,22 +79,40 @@ export function MonitorControls({
   saving,
   muted,
   speedLabel = "×1",
+  rewinding = false,
   looping = false,
   suggestions,
   onPlayPause,
   onNudge,
   onToggleMute,
   onCycleSpeed,
+  onSelectSpeed,
   onMarkIn,
   onMarkOut,
   onSaveSegment,
   onStepSuggestion,
   onRequestImmersive,
   onSeek,
+  autoAdvance,
+  onToggleAutoAdvance,
 }: MonitorControlsProps): JSX.Element {
   const fps = clipFps(clip);
+  const inKey = useActionKey("mark-in");
+  const outKey = useActionKey("mark-out");
+  const fullscreenKey = useActionKey("fullscreen");
+  const speedButton = useRef<HTMLButtonElement | null>(null);
+  const [speedMenu, setSpeedMenu] = useState<{ x: number; y: number } | null>(null);
+  const openSpeedMenu = () => {
+    if (!onSelectSpeed) {
+      onCycleSpeed?.();
+      return;
+    }
+    const rect = speedButton.current?.getBoundingClientRect();
+    setSpeedMenu({ x: rect?.left ?? 0, y: rect?.bottom ?? 0 });
+  };
   const ready = status?.phase === "ready";
-  const playing = status?.paused === false;
+  // 倒退也算「在走」:按钮翻成暂停,标题说明是倒退中(真机 Y-10:J 后按钮仍写「播放」看不出在倒放)。
+  const playing = status?.paused === false || rewinding;
   const marked = inPoint !== null && outPoint !== null && outPoint > inPoint
     ? outPoint - inPoint
     : null;
@@ -143,7 +170,7 @@ export function MonitorControls({
           icon={playing ? "pause" : "play"}
           className="monitor-play"
           aria-label={playing ? "暂停" : "播放"}
-          title={playing ? "暂停 空格" : "播放 空格"}
+          title={rewinding ? "暂停 空格 · 倒退中" : playing ? "暂停 空格" : "播放 空格"}
           disabled={!ready}
           onClick={onPlayPause}
         />
@@ -155,18 +182,31 @@ export function MonitorControls({
           disabled={!ready}
           onClick={() => onNudge(1)}
         />
-        {/* R11 §3:L 一次 ×2、再一次 ×4(J 反向、K 停);播放器通道没有变速命令,靠定时 seek 假走带。 */}
+        {/* R12 §5:真变速(mpv speed)。L ×1 → ×2 → ×4 循环、J 倒退、K 停;点标签弹速度菜单。 */}
         <Button
+          ref={speedButton}
           variant="ghost"
           size="sm"
           className="monitor-speed"
           aria-label="播放速度"
-          title="加快 L · 倒放 J · 停 K"
+          aria-haspopup={onSelectSpeed ? "menu" : undefined}
+          aria-expanded={onSelectSpeed ? speedMenu !== null : undefined}
+          title="播放速度 · 加快 L · 倒退 J · 停 K"
           disabled={!ready}
-          onClick={onCycleSpeed}
+          onClick={openSpeedMenu}
         >
           {speedLabel}
         </Button>
+        {speedMenu && onSelectSpeed ? (
+          <Menu
+            x={speedMenu.x}
+            y={speedMenu.y}
+            ariaLabel="播放速度"
+            items={PLAYBACK_RATES.map((rate) => ({ id: String(rate), label: `×${rate}`, ariaLabel: `速度 ×${rate}` }))}
+            onSelect={(id) => onSelectSpeed(Number(id) as PlaybackRate)}
+            onClose={() => setSpeedMenu(null)}
+          />
+        ) : null}
         <Button
           variant="icon"
           icon={muted ? "volume-off" : "volume"}
@@ -186,11 +226,11 @@ export function MonitorControls({
           className={`monitor-mark${inPoint !== null ? " marked" : ""}`}
           aria-label="入点"
           aria-pressed={inPoint !== null}
-          title={inPoint === null ? "入点 I" : `入点 ${formatTimecode(inPoint, fps)}`}
+          title={inPoint === null ? `入点 ${inKey}` : `入点 ${formatTimecode(inPoint, fps)}`}
           disabled={!ready}
           onClick={onMarkIn}
         >
-          <Kbd>I</Kbd>
+          <ActionKbd action="mark-in" />
           {inPoint !== null ? <span className="monitor-mark-value">{formatShortTimecode(inPoint)}</span> : null}
         </Button>
         <Button
@@ -200,11 +240,11 @@ export function MonitorControls({
           className={`monitor-mark${outPoint !== null ? " marked" : ""}`}
           aria-label="出点"
           aria-pressed={outPoint !== null}
-          title={outPoint === null ? "出点 O" : `出点 ${formatTimecode(outPoint, fps)}`}
+          title={outPoint === null ? `出点 ${outKey}` : `出点 ${formatTimecode(outPoint, fps)}`}
           disabled={!ready}
           onClick={onMarkOut}
         >
-          <Kbd>O</Kbd>
+          <ActionKbd action="mark-out" />
           {outPoint !== null ? <span className="monitor-mark-value">{formatShortTimecode(outPoint)}</span> : null}
         </Button>
         <Button
@@ -221,10 +261,20 @@ export function MonitorControls({
         </Button>
 
         <span className="monitor-marked" aria-live="polite">
-          {`${notice ?? (marked === null ? "待打点" : `片段 ${formatShortTimecode(marked)}`)}${looping ? " · 循环中" : ""}`}
+          {`${notice ?? (marked === null ? "待打点" : `片段 ${formatShortTimecode(marked)}`)}${looping ? " · 循环中" : ""}${
+            speedLabel !== "×1" ? ` · ${speedLabel}` : ""
+          }`}
         </span>
 
         <Toolbar.Spacer />
+
+        {/* R12 §5:点卡片只预览;「连播」开了才播完自动下一条(默认关,与设置页同一个键)。 */}
+        {onToggleAutoAdvance ? (
+          <span className="monitor-auto-advance" title="播完自动播下一条">
+            <span className="monitor-auto-advance-text" aria-hidden="true">连播</span>
+            <Toggle label="连播" checked={autoAdvance === true} onChange={onToggleAutoAdvance} />
+          </span>
+        ) : null}
 
         <Button
           variant="secondary"
@@ -232,10 +282,10 @@ export function MonitorControls({
           icon="fullscreen"
           className="monitor-fullscreen"
           aria-label="全屏沉浸"
-          title="全屏沉浸 ⌘⏎"
+          title={`全屏沉浸 ${fullscreenKey}`}
           onClick={onRequestImmersive}
         >
-          全屏 <Kbd>⌘⏎</Kbd>
+          全屏 <ActionKbd action="fullscreen" />
         </Button>
       </Toolbar>
     </div>

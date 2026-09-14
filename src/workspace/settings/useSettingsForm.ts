@@ -277,14 +277,14 @@ export function useSettingsForm(): SettingsForm {
 
   const runSelfCheck = useCallback(async () => {
     setBusy(true);
-    setNotice("正在启动 Chinese-CLIP 并执行 ping…");
+    setNotice("正在启动画面识别组件并自检…");
     try {
       const message = await runClipSelfCheck();
       setNotice(message);
       await refreshStatus();
     } catch (error) {
-      console.error("Chinese-CLIP self-check failed", error);
-      setNotice("本地智能分析服务尚未就绪。正式版不在线安装运行环境，请等待签名组件包。");
+      console.error("clip self-check failed", error);
+      setNotice("画面识别组件还没就绪。正式版不在线安装，请等待带签名的组件包。");
     } finally {
       setBusy(false);
     }

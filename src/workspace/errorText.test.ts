@@ -3,6 +3,29 @@ import { describe, expect, it } from "vitest";
 import { describeError, failureText } from "./errorText";
 
 describe("errorText(R11 简化专项 #5:错误一句话,不带内部代码)", () => {
+  it("R12 术语 v2(B-列表 27):后端 CoreError 的英文前缀「export failed:」也剥掉", () => {
+    expect(describeError(new Error("export failed: 精选段与源片时间对不上"))).toBe("精选段与源片时间对不上");
+    expect(failureText("导出", "Error: export failed: 磁盘已满", "清出空间后再试")).toBe("导出没成功:磁盘已满。清出空间后再试");
+  });
+
+  it("X-02:任何「<词> failed:」「<词> error:」前缀都剥,多词前缀与嵌套的 Error: 也剥", () => {
+    expect(describeError(new Error("rating failed: 这个范围里没有可挑的素材"))).toBe("这个范围里没有可挑的素材");
+    expect(describeError("Error: media source verification failed: 源片被移走了")).toBe("源片被移走了");
+    expect(describeError("Jianying draft generation failed: 草稿目录不存在")).toBe("草稿目录不存在");
+    expect(describeError("player error: 没响应")).toBe("没响应");
+    expect(describeError("素材 failed 了")).toBe("素材 failed 了");
+  });
+
+  it("X-02:后端已经给了下一步(冒号后的「先…/请…/或…/再试」)就不再追加兜底话", () => {
+    expect(failureText("自动挑选", "rating failed: 这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」", "先让画面分析跑完,再试一次")).toBe(
+      "自动挑选没成功:这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」",
+    );
+    expect(failureText("排入", "没有进行中的集;先新建一集再试")).toBe("排入没成功:没有进行中的集;先新建一集再试");
+    expect(failureText("重新定位", "素材已清理,请重新选择文件夹", "确认新位置里有同名文件后再试")).toBe("重新定位没成功:素材已清理,请重新选择文件夹");
+    // 只是陈述原因、没说怎么办的,照旧补一句。
+    expect(failureText("撤销", "这批已经被改过")).toBe("撤销没成功:这批已经被改过。再试一次");
+  });
+
   it("剥掉 Error: 前缀、Rust Os {…}、常量名、code=、堆栈与指针", () => {
     expect(describeError(new Error("磁盘只读"))).toBe("磁盘只读");
     expect(describeError("Error: 文件夹不存在 Os { code: 2, kind: NotFound, message: \"No such file\" }")).toBe("文件夹不存在");

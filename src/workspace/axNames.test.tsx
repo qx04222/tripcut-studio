@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
 }));
 
+import { DELIVER_DRAWER_TITLE, DELIVER_ORIENTATION_LABEL, DIMENSION_FILTER_LABEL, IMPORT_PROGRESS_LABEL, INSPECTOR_TITLES, OPTIONAL_TRANSCRIBE_TITLE, OPTIONAL_VISION_TITLE, ORIENTATION_LABEL, stackCountLabel, stackGroupLabel, takeLabel } from "./copy";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { dispatchWorkspace, __resetWorkspaceForTests } from "./WorkspaceStore";
 
@@ -25,7 +26,9 @@ import { dispatchWorkspace, __resetWorkspaceForTests } from "./WorkspaceStore";
  * 冻结串。冒烟脚本(Task 8)按这些名字找元素 —— 改一个字这里就红,
  * 提醒你连带把冒烟脚本改掉,而不是让脚本在某个深夜自己找不到按钮。
  */
-const FROZEN_BUTTONS = ["导入素材", "生成交付包", "设置", "切换集"];
+// R12 车道 A:顶栏主按钮「生成交付包」解冻,迁移为固定 AX 名「流水线下一步」(可见文案随步变化);
+// X-05:抽屉标题「生成交付包」解冻改名「导出」(常量 DELIVER_DRAWER_TITLE),断言已迁移。
+const FROZEN_BUTTONS = ["导入素材", "流水线下一步", "设置", "切换集"];
 const FROZEN_REGIONS = ["媒体池", "预览监视器", "镜头带", "检查器"];
 const FROZEN_TABS = ["故事", "音乐", "旅程", "地点卡", "模板"];
 const FROZEN_STATUS = "后台状态";
@@ -115,11 +118,13 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
       dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
       await Promise.resolve();
     });
-    const deliver = await screen.findByRole("dialog", { name: "生成交付包" });
+    const deliver = await screen.findByRole("dialog", { name: DELIVER_DRAWER_TITLE });
+    expect(DELIVER_DRAWER_TITLE).toBe("导出");
     // R11 车道 E:抽屉默认「快速导出」(新 AX 名:快速导出 / 完整交付包 / 导出到上次文件夹 / 更改文件夹);
     // 完整交付包那套冻结的名字在切过去之后照旧。
-    expect(within(deliver).getByRole("button", { name: "快速导出" }).getAttribute("aria-pressed")).toBe("true");
-    expect(within(deliver).getByRole("button", { name: "导出到上次文件夹" })).toBeTruthy();
+    // Y-08(R13 真机):还没记过文件夹时主按钮叫「导出…」;记过才是「导出到上次文件夹」。
+    expect(within(deliver).getByRole("button", { name: "导出片段" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(deliver).getByRole("button", { name: "导出…" })).toBeTruthy();
     expect(within(deliver).getByRole("button", { name: "更改文件夹" })).toBeTruthy();
     await act(async () => {
       within(deliver).getByRole("button", { name: "完整交付包" }).click();
@@ -127,8 +132,8 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     });
     expect(within(deliver).getByText("本次交付平台")).toBeTruthy();
     expect(within(deliver).getByRole("switch", { name: "联系表.pdf" })).toBeTruthy();
-    // R10 U-20:抽屉里的主按钮叫「开始生成」(新 AX 名,冻结);顶栏那颗仍是「生成交付包」,
-    // 两颗不再同名——冒烟脚本按「生成交付包」开抽屉,按「开始生成」动手。
+    // R10 U-20:抽屉里的主按钮叫「开始生成」(新 AX 名,冻结);R12 起顶栏没有「生成交付包」按钮了
+    // (主按钮是「流水线下一步」),冒烟脚本按导航条「第 4 步 导出」开抽屉,按「开始生成」动手。
     expect(within(deliver).getByRole("button", { name: "开始生成" })).toBeTruthy();
     expect(within(deliver).queryByRole("button", { name: "生成交付包" })).toBeNull();
 
@@ -161,6 +166,31 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     // 三个及以上连续大写字母就是 kicker 的形状;LUT/AI 这类两字母缩写不在此列。
     const hits = text.match(/[A-Z]{3,}/g) ?? [];
     expect(hits).toEqual([]);
+  });
+});
+
+describe("R12 车道 C 改名后的冻结 AX 名(design-system.md §11 的对照表)", () => {
+  it("旧名 → 新名一字不差;旧名不再出现在常量里", () => {
+    // 旧「Take n · 文件名」→「第 n 条 · 文件名」;旧「{scene} 的候选」→「同一镜头 · {scene}」;旧「n 条候选」→「同一镜头 n 条」。
+    expect(takeLabel(3, "clip-3.mov")).toBe("第 3 条 · clip-3.mov");
+    expect(stackGroupLabel("登机口")).toBe("同一镜头 · 登机口");
+    expect(stackCountLabel(8)).toBe("同一镜头 8 条");
+    // 旧「八维评分」→「画面评分」;旧「音轨与 LUT」→「声音与调色」;旧「八维筛选」→「画面筛选」。
+    expect(INSPECTOR_TITLES).toEqual({ techcheck: "技术检查", dimensions: "画面评分", ai: "AI 描述", audio: "声音与调色", similar: "相似镜头" });
+    expect(DIMENSION_FILTER_LABEL).toBe("画面筛选");
+    // 旧「画布方向」「本次交付画布方向」→「画面方向」「本次交付画面方向」;旧「索引进度」→「导入进度」。
+    expect(ORIENTATION_LABEL).toBe("画面方向");
+    expect(DELIVER_ORIENTATION_LABEL).toBe("本次交付画面方向");
+    expect(IMPORT_PROGRESS_LABEL).toBe("导入进度");
+    // 规格 §4:首启 / 安装检查卡的两项可选组件。
+    expect(OPTIONAL_TRANSCRIBE_TITLE).toBe("转写(可选)");
+    expect(OPTIONAL_VISION_TITLE).toBe("画面识别(可选)");
+  });
+
+  it("主屏渲染出来的文本里没有一个旧名", () => {
+    render(<WorkspaceShell />);
+    const text = document.body.textContent ?? "";
+    for (const old of ["八维", "音轨与 LUT", "Take ", "Stack", "画布", "索引"]) expect(text).not.toContain(old);
   });
 });
 

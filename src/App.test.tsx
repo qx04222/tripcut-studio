@@ -160,6 +160,14 @@ describe("TripCut application shell", () => {
 
 /** 点设置页外观分区里那一行界面开关(名字随当前壳变,所以按两种文案找)。 */
 async function clickShellToggle(label: "切回旧界面" | "切换到新界面"): Promise<void> {
+  // R13 §2:界面开关住在设置 → 性能分区(新壳的 sheet 才有 tab;旧壳的 SettingsPage 没有,直接找按钮)。
+  const performanceTab = screen.queryByRole("tab", { name: "性能" });
+  if (performanceTab) {
+    await act(async () => {
+      performanceTab.click();
+      await Promise.resolve();
+    });
+  }
   const button = await screen.findByRole("button", { name: label });
   // settingsLoaded 落地前 settings-grid 是 inert 的,按钮可见但点不动 —— 多 flush
   // 几拍 Promise.allSettled 的 .then,等它落地再点。
@@ -212,7 +220,7 @@ describe("ui.workspace_v2 旗分流", () => {
     vi.mocked(getSettings).mockResolvedValue({ "ui.workspace_v2": "true" });
     const { default: App } = await import("./App");
     render(<App />);
-    expect(await screen.findByRole("dialog", { name: "生成交付包" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "导出" })).toBeTruthy();
     const { getWorkspaceSnapshot } = await import("./workspace/WorkspaceStore");
     expect(getWorkspaceSnapshot().openDrawer).toBe("deliver");
   });
@@ -244,6 +252,11 @@ describe("ui.workspace_v2 旗分流", () => {
     const settingsButton = screen.getByRole("button", { name: "设置" });
     settingsButton.click();
     await screen.findByRole("dialog", { name: "设置" });
+    // R13 §2:界面开关住在「性能」分区。
+    await act(async () => {
+      (await screen.findByRole("tab", { name: "性能" })).click();
+      await Promise.resolve();
+    });
 
     const flipBack = await screen.findByRole("button", { name: "切回旧界面" });
     // 「切回旧界面」的按钮在 settingsLoaded 落地前是可见但 inert 的
@@ -276,7 +289,7 @@ describe("ui.workspace_v2 旗分流", () => {
     expect(items).toEqual(
       expect.arrayContaining([
         "打开导入素材",
-        "打开生成交付包",
+        "打开导出",
         "打开设置",
         "打开帮助",
         "切到音乐附属带",
@@ -309,7 +322,8 @@ describe("ui.workspace_v2 旗分流", () => {
     await screen.findByRole("link", { name: /INGEST/ });
 
     window.dispatchEvent(new CustomEvent("tripcut:open-command-palette"));
-    const entry = await screen.findByText("02 · 筛片工作台");
+    // 命令面板是懒加载 chunk,并行全量跑时曾 1032 ms 才出来;findByText 自己的 1 s 默认超时也要放宽。
+    const entry = await screen.findByText("02 · 筛片工作台", {}, { timeout: 4_000 });
     await act(async () => {
       entry.click();
       await Promise.resolve();
@@ -351,7 +365,9 @@ describe("ui.workspace_v2 旗分流", () => {
       for (let tick = 0; tick < 6; tick += 1) await Promise.resolve();
     });
 
-    expect(await screen.findByRole("status", { name: "正在载入工作台" })).toBeTruthy();
+    const skeleton = await screen.findByRole("status", { name: "正在载入工作台" });
+    // X-06:骨架不是一屏纯白,要有一句「正在准备工作台…」。
+    expect(skeleton.textContent).toContain("正在准备工作台");
     expect(screen.queryByRole("region", { name: "媒体池" })).toBeNull();
     expect(screen.queryByRole("link", { name: /INGEST/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "导入素材" })).toBeNull();

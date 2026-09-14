@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
-use super::analysis::{DARK_YAVG_THRESHOLD, OVEREXPOSED_RATIO_THRESHOLD, SOFT_FOCUS_THRESHOLD};
+use super::analysis::{OVEREXPOSED_RATIO_THRESHOLD, SOFT_FOCUS_THRESHOLD};
 use super::error::{CoreError, Result};
 use super::ratings::SelectSegment;
 use super::settings;
@@ -51,6 +51,7 @@ struct Candidate {
     safety_flag: String,
     exposure_yavg: Option<f64>,
     overexposed_ratio: Option<f64>,
+    underexposed_ratio: Option<f64>,
     focus_scores_json: Option<String>,
     audio_peak_db: Option<f64>,
     audio_clipped: Option<bool>,
@@ -284,7 +285,8 @@ fn load_candidates(connection: &Connection) -> Result<Vec<Candidate>> {
                           WHERE segment.clip_id = clip.id), ''),
                 EXISTS(SELECT 1 FROM narrative_beats beat
                        JOIN narrative_chapters chapter ON chapter.id = beat.chapter_id
-                       WHERE beat.clip_id = clip.id AND chapter.kind = 'unexpected')
+                       WHERE beat.clip_id = clip.id AND chapter.kind = 'unexpected'),
+                analysis.underexposed_ratio
          FROM clips clip
          LEFT JOIN clip_analysis analysis ON analysis.clip_id = clip.id
          LEFT JOIN clip_motion motion ON motion.clip_id = clip.id
@@ -315,6 +317,7 @@ fn load_candidates(connection: &Connection) -> Result<Vec<Candidate>> {
             transcript_text: row.get(16)?,
             tag_text: row.get(17)?,
             unexpected_chapter: row.get::<_, i64>(18)? == 1,
+            underexposed_ratio: row.get(19)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -368,10 +371,12 @@ fn image_score(candidate: &Candidate) -> Option<f64> {
         / focus_scores.len() as f64
         / (SOFT_FOCUS_THRESHOLD * 2.0))
         .clamp(0.0, 1.0);
-    let exposure = (candidate.exposure_yavg? / DARK_YAVG_THRESHOLD).clamp(0.0, 1.0);
-    let highlights = (1.0
-        - candidate.overexposed_ratio? / OVEREXPOSED_RATIO_THRESHOLD.max(f64::EPSILON))
-        .clamp(0.0, 1.0);
+    let ratio = OVEREXPOSED_RATIO_THRESHOLD.max(f64::EPSILON);
+    // R14:曝光分看后端联合判定的欠曝占比(暗部贴黑 + 整帧偏暗 + 无高光),不再看平均亮度——
+    // 正确曝光的夜景平均亮度也只有 35–48,按平均亮度算会把整晚素材都拉成"技术低分"。
+    candidate.exposure_yavg?;
+    let exposure = (1.0 - candidate.underexposed_ratio? / ratio).clamp(0.0, 1.0);
+    let highlights = (1.0 - candidate.overexposed_ratio? / ratio).clamp(0.0, 1.0);
     Some((focus + exposure + highlights) / 3.0)
 }
 
@@ -402,6 +407,13 @@ fn rescue_suggestions(candidate: &Candidate, assessment: &Assessment) -> Vec<Str
     let mut suggestions = Vec::new();
     if assessment.motion_score.is_some_and(|score| score <= LOW_TECHNICAL_SCORE) {
         suggestions.extend(["稳定".to_owned(), "裁切".to_owned()]);
+    }
+    // R14:画面建议跟触发它的角标一一对应——欠曝→提亮、过曝→压高光;虚焦没有可救手段,不给建议。
+    if candidate.underexposed_ratio.is_some_and(|value| value > OVEREXPOSED_RATIO_THRESHOLD) {
+        suggestions.push("提亮".to_owned());
+    }
+    if candidate.overexposed_ratio.is_some_and(|value| value > OVEREXPOSED_RATIO_THRESHOLD) {
+        suggestions.push("压高光".to_owned());
     }
     if assessment.audio_score.is_some_and(|score| score <= LOW_TECHNICAL_SCORE) {
         if contains_any(&format!("{} {}", candidate.tag_text, candidate.transcript_text), &["风噪", "大风", "wind"])
@@ -504,6 +516,7 @@ mod tests {
             safety_flag: "normal".to_owned(),
             exposure_yavg: Some(8.0),
             overexposed_ratio: Some(0.30),
+            underexposed_ratio: Some(0.40),
             focus_scores_json: Some("[5.0,6.0,4.0]".to_owned()),
             audio_peak_db: Some(-50.0),
             audio_clipped: Some(false),
@@ -536,9 +549,9 @@ mod tests {
         ).unwrap();
         connection.execute(
             "INSERT INTO clip_analysis(
-               clip_id, exposure_yavg, overexposed_ratio, audio_peak_db, audio_clipped,
-               has_audio, focus_scores, scene_count, analyzed_at, tool_versions
-             ) VALUES (1, 8, 0.30, -50, 0, 1, '[5,6,4]', 1, 'now', '{}')",
+               clip_id, exposure_yavg, overexposed_ratio, underexposed_ratio, audio_peak_db,
+               audio_clipped, has_audio, focus_scores, scene_count, analyzed_at, tool_versions
+             ) VALUES (1, 8, 0.30, 0.40, -50, 0, 1, '[5,6,4]', 1, 'now', '{}')",
             [],
         ).unwrap();
         connection.execute(
@@ -668,6 +681,28 @@ mod tests {
         assert!(suggestions.contains(&"稳定".to_owned()));
         assert!(suggestions.contains(&"裁切".to_owned()));
         assert!(suggestions.contains(&"VO 覆盖建议".to_owned()));
+        // R14:画面建议对应触发角标(欠曝 0.40 → 提亮;过曝 0.30 → 压高光)。
+        assert!(suggestions.contains(&"提亮".to_owned()));
+        assert!(suggestions.contains(&"压高光".to_owned()));
+    }
+
+    #[test]
+    fn correct_night_clip_is_not_technically_low_on_exposure() {
+        // R14:夜景平均亮度 41 但欠曝占比 0(有高光)——曝光分应满分,不能把整晚素材拉成废片候选。
+        let night = Candidate {
+            exposure_yavg: Some(41.0),
+            overexposed_ratio: Some(0.0),
+            underexposed_ratio: Some(0.0),
+            focus_scores_json: Some("[1400.0,1200.0,1500.0]".to_owned()),
+            ..candidate()
+        };
+        assert!(image_score(&night).unwrap() > 0.9);
+        let candidate = Candidate { overexposed_ratio: Some(0.0), ..candidate() };
+        let assessment = assess(&Candidate { transcript_text: "天啊".to_owned(), ..candidate.clone() }, 0.6);
+        assert_eq!(assessment.flag, "rescue_candidate");
+        let suggestions = rescue_suggestions(&candidate, &assessment);
+        assert!(suggestions.contains(&"提亮".to_owned()));
+        assert!(!suggestions.contains(&"压高光".to_owned()));
     }
 
     #[test]

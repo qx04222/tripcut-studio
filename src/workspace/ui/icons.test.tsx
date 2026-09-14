@@ -11,12 +11,15 @@ describe("icons", () => {
   it("任务书的 24 个图标名都在(volume-off 是 volume 的配对态,算一对)", () => {
     for (const name of REQUIRED) expect(ICON_NAMES).toContain(name);
   });
-  it("设置九分区各有一个图标", () => {
-    for (const s of ["appearance", "performance", "timeline", "tools", "analysis", "generation", "privacy", "about", "cache"]) {
+  it("设置九分区 + R13「快捷键」各有一个图标", () => {
+    for (const s of ["appearance", "performance", "timeline", "tools", "analysis", "generation", "privacy", "about", "cache", "keymap"]) {
       expect(ICON_NAMES).toContain(`settings-${s}`);
     }
-    // 任务书数 33 = 24(volume/volume-off 算一对)+ 9;按名字数是 25 + 9 = 34,R9 加 film(封面/空章占位)= 35。
-    expect(ICON_NAMES.length).toBe(35);
+    // 任务书数 33 = 24(volume/volume-off 算一对)+ 9;按名字数是 25 + 9 = 34,R9 加 film = 35,R13 加 settings-keymap = 36,
+    // X-03 加 arrow-left / arrow-right(镜块「往前 / 往后」)= 38。
+    expect(ICON_NAMES).toContain("arrow-left");
+    expect(ICON_NAMES).toContain("arrow-right");
+    expect(ICON_NAMES.length).toBe(38);
   });
   it("每个图标 16px 视窗、1.5 描边、currentColor、aria-hidden", () => {
     for (const name of ICON_NAMES) {

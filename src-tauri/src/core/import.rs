@@ -54,6 +54,17 @@ pub struct ImportProgress {
     pub waiting_for_permit: u64,
     /// 是否因内存压力暂停了解码与大模型任务(由 Tauri 层填充,默认 false)。
     pub paused_for_memory: bool,
+    /// Z-01:当前集已登记的素材数(分析进度的分母;登记未完成的文件不在里面)。
+    #[serde(default)]
+    pub analysis_total: u64,
+    /// Z-01:其中画质 / 运镜分析都已落终态(done / failed / blocked)或从未排过分析的素材数。
+    /// 状态条按 `analysis_done + failed` / `total` 显示「正在分析 n/N」,而不是只盯登记任务。
+    #[serde(default)]
+    pub analysis_done: u64,
+    /// Z-01:登记完成但判定为重复(已属于其它集 / 已入库)的文件数——它们不会有素材行,
+    /// 状态条要把它们算作「已处理」,否则分母永远追不平。
+    #[serde(default)]
+    pub duplicate: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -111,6 +122,10 @@ pub struct ClipListItem {
     /// R11 §1.2 / V-01:该素材已有 ≥1 个时刻分窗口(`clip_moments`),媒体池据此画
     /// 闪电角标。EXISTS 子查询,不另开一列。
     pub has_suggestions: bool,
+    /// Z-07:原片此刻不在原位(`clips.missing_since`,由 `media_source::refresh_missing_flags` 维护);
+    /// 媒体池据此画「缺失」角标。失败 / 重复占位项恒为 `None`。
+    #[serde(default)]
+    pub missing_since: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +212,14 @@ pub(crate) struct VolumeIdentity {
 pub enum ImportProbeOutcome {
     Imported,
     Duplicate(PathBuf),
+    /// Z-13:同一路径的文件已属于另一集(同路径只能有一行 clips);`note` 是给用户看的一句话
+    /// 「这个文件已在「EP01」里,可在那一集里找到」,落在任务的 blocked_summary 供占位卡显示。
+    OwnedElsewhere { path: PathBuf, note: String },
+}
+
+/// Z-13:「这个文件已在「EP01」里,可在那一集里找到」。
+pub fn owned_elsewhere_note(episode_title: &str) -> String {
+    format!("这个文件已在「{episode_title}」里,可在那一集里找到")
 }
 
 struct CommandOutput {
@@ -698,9 +721,11 @@ fn fingerprint_gate(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
 
 // Quick hashes cover the entire contents only at <= 8 MiB. Larger matches
 // require full-file verification; an unavailable old path is not proof of equality.
-fn confirmed_duplicate(connection: &Connection, path: &Path, quick: &str, size: u64, volume: &str, relative: &str) -> Result<Option<i64>> {
-    let mut statement = connection.prepare("SELECT c.id,c.full_hash,c.rel_path FROM clips c WHERE c.quick_hash=?1 AND c.byte_size=?2 AND NOT(c.volume_uuid=?3 AND c.rel_path=?4)")?;
-    let rows = statement.query_map(params![quick, size as i64, volume, relative], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Option<String>>(1)?, r.get::<_,String>(2)?)))?;
+/// Z-13:重复只在**同一集**里判(`episode_id` 为空的旧数据算当前集)。旅行者把同一段拷进第二集的
+/// 素材夹时,它在第二集里是一条新素材;此前跨集也判重复,那 3 条在新集里永远用不了。
+fn confirmed_duplicate(connection: &Connection, path: &Path, quick: &str, size: u64, volume: &str, relative: &str, episode_id: i64) -> Result<Option<i64>> {
+    let mut statement = connection.prepare("SELECT c.id,c.full_hash,c.rel_path FROM clips c WHERE c.quick_hash=?1 AND c.byte_size=?2 AND NOT(c.volume_uuid=?3 AND c.rel_path=?4) AND (c.episode_id=?5 OR c.episode_id IS NULL)")?;
+    let rows = statement.query_map(params![quick, size as i64, volume, relative, episode_id], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Option<String>>(1)?, r.get::<_,String>(2)?)))?;
     let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut full = None;
     for (id, stored, candidate) in candidates {
@@ -789,7 +814,7 @@ fn run_import_probe_with(
     let volume = volume_identity(&path);
     let rel_path = relative_path(&path, volume.mount_point.as_deref());
 
-    let duplicate_id = confirmed_duplicate(connection, &path, &quick_hash, byte_size, &volume.uuid, &rel_path)?;
+    let duplicate_id = confirmed_duplicate(connection, &path, &quick_hash, byte_size, &volume.uuid, &rel_path, payload.episode_id)?;
     if let Some(existing_id) = duplicate_id {
         // 同指纹不一定是重复:用户在子文件夹间整理素材(NAS 常见工作流)时,
         // 旧路径已不存在,这是「移动」而非「复制」——应更新归属而不是丢弃。
@@ -868,10 +893,14 @@ fn run_import_probe_with(
         )
         .optional()?
         .flatten();
-    if existing_owner.is_some_and(|owner| owner != payload.episode_id) {
-        return Err(CoreError::Import(
-            "该路径中的素材已属于另一个 Episode，不能由延迟导入任务改写".to_owned(),
-        ));
+    if let Some(owner) = existing_owner.filter(|owner| *owner != payload.episode_id) {
+        // Z-13:同路径只能有一行 clips,这个文件已经属于另一集 —— 不改写,但要告诉用户它在哪一集。
+        let title: String = transaction
+            .query_row("SELECT title FROM episodes WHERE id = ?1", [owner], |row| row.get(0))
+            .optional()?
+            .unwrap_or_else(|| format!("第 {owner} 集"));
+        drop(transaction);
+        return Ok(ImportProbeOutcome::OwnedElsewhere { path, note: owned_elsewhere_note(&title) });
     }
     let previous_quick_hash = transaction
         .query_row(
@@ -1341,13 +1370,34 @@ pub(crate) fn mark_batch_analysis_notified(db_key: &str, batch_id: i64) {
 }
 
 pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
+    // Z-01:登记(import_probe)几分钟内就全部完成,之后的七分钟画质 / 运镜分析状态条一直「后台空闲」;
+    // 这里另数一份「素材还有分析任务在排队 / 进行中」的进度,前端与登记进度合成一条短语。
+    let (analysis_total, analysis_busy): (i64, i64) = connection.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM clips c
+              WHERE c.episode_id = (SELECT id FROM episodes WHERE status = 'active')),
+            (SELECT COUNT(DISTINCT CAST(json_extract(j.payload, '$.clip_id') AS INTEGER))
+               FROM jobs j
+              WHERE j.kind IN ('analyze_l1', 'analyze_motion')
+                AND j.status IN ('pending', 'running')
+                AND j.cancel_requested = 0
+                AND json_valid(j.payload)
+                AND CAST(json_extract(j.payload, '$.clip_id') AS INTEGER) IN (
+                    SELECT id FROM clips
+                     WHERE episode_id = (SELECT id FROM episodes WHERE status = 'active')))",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let analysis_total = analysis_total.max(0) as u64;
+    let analysis_done = analysis_total.saturating_sub(analysis_busy.max(0) as u64);
     connection
         .query_row(
             "SELECT
                 COUNT(*),
                 COALESCE(SUM(status = 'done'), 0),
                 COALESCE(SUM(status IN ('failed', 'blocked')), 0),
-                COALESCE(SUM(status = 'running'), 0)
+                COALESCE(SUM(status = 'running'), 0),
+                COALESCE(SUM(status = 'done' AND result_path IS NOT NULL), 0)
              FROM jobs
              WHERE kind = 'import_probe' AND import_dismissed=0
                AND json_valid(payload)
@@ -1363,6 +1413,9 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
                     running: row.get::<_, i64>(3)?.max(0) as u64,
                     waiting_for_permit: 0,
                     paused_for_memory: false,
+                    analysis_total,
+                    analysis_done,
+                    duplicate: row.get::<_, i64>(4)?.max(0) as u64,
                 })
             },
         )
@@ -1537,7 +1590,8 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
                 c.iso_value, c.shutter_speed, c.aperture,
                 c.display_lut_path, c.selected_transcribe_track, c.selected_monitor_track,
                 c.generated_source,
-                EXISTS (SELECT 1 FROM clip_moments moment WHERE moment.clip_id = c.id)
+                EXISTS (SELECT 1 FROM clip_moments moment WHERE moment.clip_id = c.id),
+                c.missing_since
          FROM clips c
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
          LEFT JOIN clip_motion m ON m.clip_id = c.id
@@ -1667,6 +1721,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             selected_monitor_track: row.get(61)?,
             generated_source: row.get(62)?,
             has_suggestions: row.get::<_, i64>(63)? == 1,
+            missing_since: row.get(64)?,
         })
     })?;
     for clip in clips {
@@ -1731,8 +1786,9 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             journey_offset_ms: 0,
             cover_url: None,
             status: if duplicate { "duplicate" } else { "unreadable" }.to_owned(),
+            // Z-13:属于另一集的同路径文件,blocked_summary 里是「这个文件已在「EP01」里」。
             error: if duplicate {
-                Some("已存在相同素材，未重复导入".to_owned())
+                Some(summary.unwrap_or_else(|| "已存在相同素材，未重复导入".to_owned()))
             } else {
                 summary
             },
@@ -1753,6 +1809,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             selected_monitor_track: None,
             generated_source: None,
             has_suggestions: false,
+            missing_since: None,
         });
     }
     Ok(items)
@@ -2335,9 +2392,11 @@ mod tests {
         let (quick,size)=quick_fingerprint(&a).unwrap(); assert_eq!(quick_fingerprint(&b).unwrap().0,quick);
         c.execute("INSERT INTO volumes(uuid) VALUES ('fixture')",[]).unwrap();
         c.execute("INSERT INTO clips(id,volume_uuid,rel_path,quick_hash,byte_size,episode_id) VALUES (1,'fixture',?1,?2,?3,1)",params![a.to_string_lossy(),quick,size as i64]).unwrap();
-        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy()).unwrap(),None);
+        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy(),1).unwrap(),None);
         fs::copy(&a,&b).unwrap();
-        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy()).unwrap(),Some(1));
+        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy(),1).unwrap(),Some(1));
+        // Z-13:另一集里同内容的文件不算重复(那一集要自己的一条)。
+        assert_eq!(confirmed_duplicate(&c,&b,&quick,size,"fixture",&b.to_string_lossy(),2).unwrap(),None);
     }
 
     #[test]
@@ -2738,8 +2797,66 @@ mod tests {
                 running: 1,
                 waiting_for_permit: 0,
                 paused_for_memory: false,
+                analysis_total: 0,
+                analysis_done: 0,
+                duplicate: 0,
             }
         );
+    }
+
+    /// Z-01:登记全完成后素材还在画质 / 运镜分析 → analysis_done < analysis_total;
+    /// 分析落终态(done / failed)后 analysis_done 追平;历史集的素材与任务不算。
+    #[test]
+    fn progress_counts_clip_analysis_separately_from_import_probes() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        for id in [1_i64, 2, 3] {
+            connection
+                .execute(
+                    "INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id)
+                     VALUES (?1, 'clip.mp4', 'hash', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO episodes(id, title, theme, created_at, status, archived_at)
+                 VALUES (9, 'old', '', '2026-01-01T00:00:00Z', 'archived', '2026-01-02T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id)
+                 VALUES (9, 'old.mp4', 'hash', 1, 9)",
+                [],
+            )
+            .unwrap();
+        for id in [1_i64, 2, 3] {
+            let payload = format!(r#"{{"episode_id":1,"path":"clip-{id}.mp4"}}"#);
+            let probe = jobs::enqueue(&mut connection, "import_probe", &payload, &format!("probe-{id}")).unwrap();
+            connection.execute("UPDATE jobs SET status = 'done' WHERE id = ?1", [probe]).unwrap();
+        }
+        let l1_running = jobs::enqueue(&mut connection, "analyze_l1", r#"{"clip_id":1}"#, "l1-1").unwrap();
+        let l1_pending = jobs::enqueue(&mut connection, "analyze_l1", r#"{"clip_id":2}"#, "l1-2").unwrap();
+        let motion_pending = jobs::enqueue(&mut connection, "analyze_motion", r#"{"clip_id":2}"#, "m-2").unwrap();
+        let l1_failed = jobs::enqueue(&mut connection, "analyze_l1", r#"{"clip_id":3}"#, "l1-3").unwrap();
+        let old_pending = jobs::enqueue(&mut connection, "analyze_l1", r#"{"clip_id":9}"#, "l1-9").unwrap();
+        connection.execute("UPDATE jobs SET status = 'running' WHERE id = ?1", [l1_running]).unwrap();
+        connection.execute("UPDATE jobs SET status = 'failed' WHERE id = ?1", [l1_failed]).unwrap();
+        let _ = (l1_pending, motion_pending, old_pending);
+
+        let duplicate = jobs::enqueue(&mut connection, "import_probe", r#"{"episode_id":1,"path":"dup.mp4"}"#, "probe-dup").unwrap();
+        connection.execute("UPDATE jobs SET status = 'done', result_path = 'clip:1' WHERE id = ?1", [duplicate]).unwrap();
+        let progress = get_import_progress(&connection).unwrap();
+        assert_eq!((progress.total, progress.done, progress.failed, progress.duplicate), (4, 4, 0, 1));
+        assert_eq!(progress.analysis_total, 3, "历史集的素材不算");
+        assert_eq!(progress.analysis_done, 1, "只有分析失败的那条算落了终态;同一条素材两种分析只算一次");
+
+        connection.execute("UPDATE jobs SET status = 'done' WHERE id IN (?1, ?2, ?3)", [l1_running, l1_pending, motion_pending]).unwrap();
+        let progress = get_import_progress(&connection).unwrap();
+        assert_eq!(progress.analysis_done, 3);
     }
 
     #[test]
@@ -3571,6 +3688,79 @@ printf '%s\n' '{"streams":[{"codec_type":"video","codec_name":"h264","width":192
             .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1, "移动不应产生重复条目");
+    }
+
+    /// Z-13:同一段内容拷进第二集的素材夹 → 第二集里是一条新素材(重复只在同一集里判);
+    /// 同一个路径再导进第二集 → 不改写归属,但占位卡要说清「这个文件已在「EP01」里」。
+    #[cfg(unix)]
+    #[test]
+    fn same_content_in_another_episode_imports_and_same_path_explains_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDirectory::new();
+        let ep1_dir = directory.path().join("ep1");
+        let ep2_dir = directory.path().join("ep2");
+        fs::create_dir_all(&ep1_dir).unwrap();
+        fs::create_dir_all(&ep2_dir).unwrap();
+        let original = ep1_dir.join("IMG_0830.mov");
+        fs::write(&original, b"same content bytes").unwrap();
+        let copied = ep2_dir.join("IMG_0830.mov");
+        fs::copy(&original, &copied).unwrap();
+        let fake_ffprobe = directory.path().join("fake-ffprobe");
+        fs::write(
+            &fake_ffprobe,
+            r#"#!/bin/sh
+printf '%s\n' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"time_base":"1/90000","duration_ts":"270000","r_frame_rate":"30/1","avg_frame_rate":"30/1"}],"format":{"format_name":"mov,mp4","duration":"3.0"}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_ffprobe).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_ffprobe, permissions).unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let ep1: i64 = connection.query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0)).unwrap();
+        connection.execute("UPDATE episodes SET title = 'EP01 东京' WHERE id = ?1", [ep1]).unwrap();
+
+        let probe = |connection: &mut Connection, path: &Path, episode_id: i64, key: &str| {
+            let payload = serde_json::to_string(&ImportPayload {
+                path: path.to_string_lossy().into_owned(),
+                episode_id,
+                folder_label: None,
+                pinned_episode: false,
+            })
+            .unwrap();
+            jobs::enqueue(connection, "import_probe", &payload, key).unwrap();
+            let job = jobs::claim_next(connection).unwrap().unwrap();
+            let outcome = run_import_probe_with(connection, &job, fake_ffprobe.as_os_str(), Duration::from_secs(5)).unwrap();
+            // 封存前导入任务必须落终态(worker 里由 jobs.rs 收尾,这里手工收)。
+            connection.execute("UPDATE jobs SET status = 'done' WHERE id = ?1", [job.id]).unwrap();
+            outcome
+        };
+        assert!(matches!(probe(&mut connection, &original, ep1, "ep1-a"), ImportProbeOutcome::Imported));
+        // 同一集里的拷贝仍然是重复。
+        assert!(matches!(probe(&mut connection, &copied, ep1, "ep1-copy"), ImportProbeOutcome::Duplicate(_)));
+
+        crate::core::episode::archive_current(&mut connection, Some("EP02 京都")).unwrap();
+        let ep2: i64 = connection.query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0)).unwrap();
+        assert_ne!(ep1, ep2);
+        // 同一个路径再导进第二集:不改写,说清在哪一集。
+        match probe(&mut connection, &original, ep2, "ep2-same-path") {
+            ImportProbeOutcome::OwnedElsewhere { note, .. } => {
+                assert_eq!(note, "这个文件已在「EP01 东京」里,可在那一集里找到");
+            }
+            other => panic!("expected OwnedElsewhere, got {other:?}"),
+        }
+        let still: i64 = connection.query_row("SELECT episode_id FROM clips WHERE id = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(still, ep1, "归属不能被改写");
+        // 第二集里的拷贝:导入成新素材。
+        assert!(matches!(probe(&mut connection, &copied, ep2, "ep2-copy"), ImportProbeOutcome::Imported));
+        let owners: Vec<i64> = connection
+            .prepare("SELECT episode_id FROM clips ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(owners, vec![ep1, ep2]);
     }
 
     /// R5 把 `ocr_scan` 加进了 `ALL_KINDS` 和全局搜索,但 R6 Task 4 写

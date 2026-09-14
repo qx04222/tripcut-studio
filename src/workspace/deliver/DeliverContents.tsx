@@ -26,14 +26,14 @@ interface ContentRow {
 /** 「内容」节:一行汇总 + 将要产出的每一类及其数量(规格 §4.2 第 2 条)。 */
 export function DeliverContents({ status, includeContactSheet, useJianyingDraft, targetSeconds, canvas }: DeliverContentsProps): JSX.Element {
   const rows: ContentRow[] = [
-    { icon: "mark-in", name: "精选片段", count: `${status.selected_segment_count} 段 · 帧精确重编码` },
-    { icon: "heart", name: "整条收藏", count: `${status.selected_whole_count} 条 · ${wholeFavoritesNote(status) ?? "整条原画质导出"}` },
+    { icon: "mark-in", name: "精选片段", count: `${status.selected_segment_count} 段 · 原画质导出` },
+    { icon: "heart", name: "收藏的整条视频", count: `${status.selected_whole_count} 条 · ${wholeFavoritesNote(status) ?? "整条原画质导出"}` },
     {
       icon: "play",
       name: "参考粗剪",
       count: `1 条 · ${ROUGH_CUT_TARGET_LABELS[roughCutTargetKey(targetSeconds)]} · ${roughCutSpec(canvas)}`,
     },
-    { icon: "grip", name: "镜头表 CSV", count: "1 份 · UTF-8 BOM" },
+    { icon: "grip", name: "镜头表(表格)", count: "1 份 · Excel 可直接打开" },
     includeContactSheet
       ? { icon: "info", name: "联系表.pdf", count: "1 份 · A4 网格" }
       : { icon: "info", name: "联系表.pdf", count: "未勾选 · 本次不放入", skipped: true },
@@ -64,9 +64,9 @@ export function DeliverContents({ status, includeContactSheet, useJianyingDraft,
 
 function parts(canvas: CanvasSize | null | undefined): ReadonlyArray<{ title: string; body: string }> {
   return [
-    { title: "精选片段", body: "打点的片段按帧精确重新编码;没有打点的收藏素材整条原画质导出。" },
+    { title: "精选片段", body: "打点的片段按打点位置精确截出;没有打点的收藏素材整条原画质导出。" },
     { title: "参考粗剪", body: `按拍摄时间顺序,统一生成一条 ${roughCutSpec(canvas)} 文件,手机和电脑都能直接播。` },
-    { title: "镜头表 CSV", body: "可用 Excel 直接打开,含章节、故事顺序、画面参数、星级、基础分析角标和失败备注。" },
+    { title: "镜头表(表格)", body: "可用 Excel 直接打开,含章节、故事顺序、画面参数、星级、基础分析角标和失败备注。" },
     { title: "交付说明", body: "一屏中文说明,告诉你如何把稳定包带入剪映。" },
   ];
 }

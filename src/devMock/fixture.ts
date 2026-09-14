@@ -34,6 +34,7 @@ import type {
   ImportBatch,
   ImportProgress,
   JianyingAvailability,
+  JianyingDraftResult,
   JourneyEntry,
   LibraryRegistry,
   LlmStatus,
@@ -137,6 +138,8 @@ interface MockState {
   episodes: EpisodeSummary[];
   undoStack: number;
   playerTimer: ReturnType<typeof setInterval> | null;
+  /** R12 §5:最后一次 set_speed 的值(假播放器不按它走,只记录)。 */
+  playerSpeed: number;
 }
 
 export class MockCommandMissing extends Error {
@@ -764,7 +767,7 @@ const DEFAULT_SETTINGS: SettingsMap = {
   "tools.ffprobe_path": "",
   "tools.whisper_path": "",
   "tools.whisper_model_tier": "large-v3-turbo",
-  "analysis.scene_threshold": "0.35",
+  "analysis.scene_threshold": "0.25",
   "analysis.similarity_threshold": "0.88",
   "analysis.jitter_threshold": "0.6",
   "best_take.weight.technical": "0.25",
@@ -976,6 +979,7 @@ function createState(): MockState {
     episodes: [EPISODE, ARCHIVED_EPISODE],
     undoStack: 0,
     playerTimer: null,
+    playerSpeed: 1,
   };
 }
 
@@ -1063,6 +1067,10 @@ function playerCommand(cmd: Record<string, unknown>): void {
       player.pos = Math.min(player.duration, Math.max(0, num(cmd.seconds, "seconds")));
       player.seek_samples += 1;
       player.last_seek_ms = 38;
+      break;
+    // R12 §5:真变速只影响真 mpv 的走速;假播放器记下来就够(80ms 表按 1× 走)。
+    case "set_speed":
+      state.playerSpeed = Math.min(4, Math.max(0.25, num(cmd.speed, "speed")));
       break;
     default:
       break;
@@ -1417,6 +1425,7 @@ const HANDLERS: Record<string, Handler> = {
     state.player = { ...state.player, phase: "closed", clip_id: null, paused: true };
   },
   player_command: ({ cmd }) => playerCommand(cmd as Record<string, unknown>),
+  player_set_speed: ({ speed }) => playerCommand({ type: "set_speed", speed }),
   player_status: () => ({ ...state.player }),
 
   // --- 集 / 平台 ---
@@ -1742,17 +1751,27 @@ function momentHandlers(): Record<string, Handler> {
     suggestionsFor(num(clipId, "clipId"), typeof targetSecs === "number" && targetSecs > 0 ? targetSecs : 5),
   auto_select_episode: ({ budgetSecs, scope }) => {
     const budget = typeof budgetSecs === "number" && budgetSecs > 0 ? budgetSecs : 60;
-    const range = typeof scope === "string" ? scope : "favorites_or_rated3";
-    const eligible = state.clips.filter((clip) => {
-      if (clip.id === null || clip.generated_source) return false;
-      if (state.segments.some((segment) => segment.clip_id === clip.id)) return false;
-      if (range === "all") return true;
-      if (range === "favorites") return clip.binary_rating === 1;
-      if (range === "rated3") return (clip.star_rating ?? 0) >= 3;
-      return clip.binary_rating === 1 || (clip.star_rating ?? 0) >= 3;
-    });
+    const requested = typeof scope === "string" ? scope : "favorites_or_rated3";
+    const inScope = (range: string) =>
+      state.clips.filter((clip) => {
+        if (clip.id === null || clip.generated_source) return false;
+        if (state.segments.some((segment) => segment.clip_id === clip.id)) return false;
+        if (range === "all") return true;
+        if (range === "favorites") return clip.binary_rating === 1;
+        if (range === "rated3") return (clip.star_rating ?? 0) >= 3;
+        return clip.binary_rating === 1 || (clip.star_rating ?? 0) >= 3;
+      });
+    let eligible = inScope(requested);
+    let range = requested;
+    // X-01(与 Rust 同步):默认范围空 → 自动按「全部」挑,fell_back 说出来。
+    if (eligible.length === 0 && requested === "favorites_or_rated3") {
+      eligible = inScope("all");
+      range = "all";
+    }
     if (eligible.length === 0) {
-      throw new Error("这个范围里没有可挑的素材:先收藏几条或给素材打星,等分析跑完再试;或把范围改成「全部」");
+      throw new Error(
+        range === "all" ? "素材都已经挑过了:想重挑就先撤销上一批,或在第 2 步手动挑几条" : "这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」",
+      );
     }
     const byChapter = new Map<number | null, ClipListItem[]>();
     for (const clip of eligible) {
@@ -1794,12 +1813,25 @@ function momentHandlers(): Record<string, Handler> {
     }
     autoBatches.set(batchId, created);
     bump(state);
-    const outcome: AutoSelectOutcome = { created, total_secs: total, chapters_covered: chapters.size, batch_id: batchId };
+    // R12 车道 B:挑完默认排进镜头带(与 Rust 同步:append,只补新段)。
+    const arranged = handleMockCommand("arrange_selected_segments", { mode: "append" }) as { placed: number; batch_id: string };
+    const outcome: AutoSelectOutcome = {
+      created,
+      total_secs: total,
+      chapters_covered: chapters.size,
+      batch_id: batchId,
+      placed: arranged.placed,
+      arrange_batch_id: arranged.placed > 0 ? arranged.batch_id : null,
+      scope_used: range as AutoSelectOutcome["scope_used"],
+      fell_back: range !== requested,
+    };
     return outcome;
   },
   undo_auto_select: ({ batchId }) => {
     const ids = autoBatches.get(str(batchId, "batchId")) ?? [];
     const before = state.segments.length;
+    // 段没了,带上引用它的镜块也跟着没了(Rust 侧是外键级联)。
+    storyboard.items = storyboard.items.filter((item) => item.segment_id === null || !ids.includes(item.segment_id));
     for (const segment of state.segments.filter((segment) => ids.includes(segment.id))) {
       clipById(segment.clip_id).select_count = Math.max(0, clipById(segment.clip_id).select_count - 1);
     }
@@ -1826,3 +1858,227 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).has(
   HANDLERS.list_story_gaps = () => [];
   HANDLERS.list_clip_dimensions = () => [];
 }
+
+// ---------------------------------------------------------------------------
+// R12 车道 A(壳)追加:「一键排入」的假实现 —— 把每条有精选段的候选素材放进各章末尾。
+// 合并时以车道 B 的 mock 为准(同名键后者覆盖前者即可)。
+// ---------------------------------------------------------------------------
+HANDLERS.arrange_selected_segments = () => {
+  const board = HANDLERS.get_storyboard({}) as Storyboard;
+  const withSegments = state.clips.filter((clip) => clip.id !== null && clip.select_count > 0);
+  const placedIds = new Set(board.items.map((item) => item.clip_id));
+  const placed = withSegments.filter((clip) => !placedIds.has(clip.id as number)).length;
+  bump(state);
+  return { placed, chapters: board.chapters.length };
+};
+// MOCK_COMMANDS 在上面按 HANDLERS 的键算过一次;追加块只能事后补登记(fixture.test 按它对账 api.ts)。
+(MOCK_COMMANDS as string[]).push("arrange_selected_segments");
+
+// R12 车道 A 截图开关:`?analyzed=1` 让所有素材都分析完(流水线走到第 ②/③ 步,导航条截图用)。
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("analyzed")) {
+  const listClipsBefore = HANDLERS.list_clips;
+  HANDLERS.list_clips = (args) =>
+    (listClipsBefore(args) as ClipListItem[]).map((clip) => (clip.analysis_status === "pending" || clip.analysis_status === "running" ? { ...clip, analysis_status: "done" } : clip));
+}
+// R12 车道 B:挑选 → 排列联动(一键排入 / 只撤本批 / 这章够了)。只追加不改上面的表。
+// 精选段成为镜块:排入时按「章 → 素材拍摄时间 → 入点」追加到故事板 items 尾部(append)
+// 或先清空再排(replace);批号记住本批新加的段,undo 只拿掉这一批。
+// ---------------------------------------------------------------------------
+const arrangeBatches = new Map<string, number[]>();
+
+function arrangeMockSegments(mode: unknown): { placed: number; chapters: number; batch_id: string } {
+  const replace = mode === "replace";
+  if (replace) storyboard.items = [];
+  const onBand = new Set(storyboard.items.map((item) => item.segment_id).filter((id): id is number => id !== null));
+  const chapterRank = (clip: ClipListItem): number => {
+    const chapterId = chapterOfClip(clip);
+    const index = CHAPTERS.findIndex((chapter) => chapter.id === chapterId);
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  const pending = state.segments
+    .filter((segment) => !onBand.has(segment.id))
+    .map((segment) => ({ segment, clip: clipById(segment.clip_id) }))
+    .sort(
+      (left, right) =>
+        chapterRank(left.clip) - chapterRank(right.clip) ||
+        (left.clip.captured_at ?? "").localeCompare(right.clip.captured_at ?? "") ||
+        left.segment.in_ticks - right.segment.in_ticks,
+    );
+  let position = storyboard.items.reduce((max, item) => Math.max(max, (item.position ?? -1) + 1), 0);
+  const chapters = new Set<number | null>();
+  for (const { segment, clip } of pending) {
+    storyboard.items.push({
+      key: `segment:${segment.id}`,
+      item_kind: "segment",
+      clip_id: clip.id as number,
+      segment_id: segment.id,
+      chapter_id: chapterOfClip(clip),
+      file_name: clip.file_name,
+      in_ticks: segment.in_ticks,
+      out_ticks: segment.out_ticks,
+      tb_num: segment.tb_num,
+      tb_den: segment.tb_den,
+      position,
+      long_term_memory: EMPTY_MEMORY,
+    });
+    chapters.add(chapterOfClip(clip));
+    position += 1;
+  }
+  const batchId = `arr-mock-${arrangeBatches.size + 1}`;
+  arrangeBatches.set(batchId, pending.map(({ segment }) => segment.id));
+  if (pending.length > 0 || replace) state.undoStack += 1;
+  bump(state);
+  return { placed: pending.length, chapters: chapters.size, batch_id: batchId };
+}
+
+HANDLERS.arrange_selected_segments = ({ mode }) => arrangeMockSegments(mode);
+HANDLERS.undo_arrange = ({ batchId }) => {
+  const ids = arrangeBatches.get(str(batchId, "batchId")) ?? [];
+  const before = storyboard.items.length;
+  storyboard.items = storyboard.items.filter((item) => item.segment_id === null || !ids.includes(item.segment_id));
+  arrangeBatches.delete(str(batchId, "batchId"));
+  bump(state);
+  return before - storyboard.items.length;
+};
+HANDLERS.skip_chapter = ({ chapterId, skipped }) => {
+  state.settings[`story.chapter_skipped.${num(chapterId, "chapterId")}`] = skipped ? "true" : "false";
+  bump(state);
+};
+// `MOCK_COMMANDS` 在上面按 HANDLERS 当时的键算好;车道只许追加,所以在这里把三条新命令补进名单
+// (fixture.test 的「api 每条命令都有桩」靠它)。
+(MOCK_COMMANDS as string[]).push("arrange_selected_segments", "undo_arrange", "skip_chapter");
+
+// ---------------------------------------------------------------------------
+// R13 车道 B(剪映式引导 + 首页)截图开关。只追加不改上面的表。
+// 功能气泡默认「都看过」—— 否则截图剧本每一步都会被一只气泡挡住;`?guides=1` 让七个按真实顺序出。
+// ---------------------------------------------------------------------------
+if (typeof location !== "undefined" && !new URLSearchParams(location.search).has("guides")) {
+  for (const id of ["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay"]) state.settings[`guide.${id}.viewed`] = "true";
+}
+// R13 车道 C:「打开剪映」(open_app 白名单只放行剪映 bundle id)与拖边裁剪的顺序表重写。只追加不改上面的表。
+HANDLERS.open_app = ({ bundleId }) => {
+  if (bundleId !== "com.lemon.lvpro") throw new Error(`mock backend: 不允许打开 ${String(bundleId)}`);
+};
+// 拖边裁剪走「建新段 → set_story_order 原位换引用 → 删旧段」:顺序表里出现不在 storyboard.items 里的新段时,
+// 按 state.segments 把它物化成镜块(替换同位置的旧引用),否则假后端上裁完镜块不会变。
+const setStoryOrderBefore = HANDLERS.set_story_order;
+HANDLERS.set_story_order = (args) => {
+  const refs = args.order as { item_kind: string; clip_id: number; segment_id: number | null }[];
+  const known = new Set(storyboard.items.map((item) => `${item.clip_id}:${item.segment_id ?? "whole"}`));
+  const fresh = refs.filter((ref) => ref.segment_id !== null && !known.has(`${ref.clip_id}:${ref.segment_id}`));
+  for (const ref of fresh) {
+    const segment = state.segments.find((candidate) => candidate.id === ref.segment_id);
+    if (!segment) continue;
+    const clip = clipById(ref.clip_id);
+    const sibling = storyboard.items.find((item) => item.clip_id === ref.clip_id && item.segment_id !== null && !refs.some((r) => r.segment_id === item.segment_id));
+    const next = {
+      key: `segment:${segment.id}`,
+      item_kind: "segment" as const,
+      clip_id: ref.clip_id,
+      segment_id: segment.id,
+      chapter_id: sibling?.chapter_id ?? chapterOfClip(clip),
+      file_name: clip.file_name,
+      in_ticks: segment.in_ticks,
+      out_ticks: segment.out_ticks,
+      tb_num: segment.tb_num,
+      tb_den: segment.tb_den,
+      position: sibling?.position ?? storyboard.items.length,
+      long_term_memory: EMPTY_MEMORY,
+    };
+    if (sibling) storyboard.items.splice(storyboard.items.indexOf(sibling), 1, next);
+    else storyboard.items.push(next);
+  }
+  return setStoryOrderBefore(args);
+};
+(MOCK_COMMANDS as string[]).push("open_app");
+// ---------------------------------------------------------------------------
+// R14 车道 A(§9 A):剪映草稿试验开关。只追加不改上面的表。
+// 默认仍按上面 JIANYING 那份(11.4.0 已验证)画;`?jianying=pending` 让假后端模拟业主真机
+// (11.4.13189 在待验证名单里:supported=false、force_allowed=true),截图 / 冒烟看「仍然试着生成」
+// 与三步结果卡;「可以用 / 打不开」写进 state.settings 后可用性随之翻转。
+// ---------------------------------------------------------------------------
+const JIANYING_PENDING_VERSION = "11.4.13189";
+const jianyingPendingMode = typeof location !== "undefined" && new URLSearchParams(location.search).get("jianying") === "pending";
+function mockJianyingAvailability(): JianyingAvailability {
+  if (!jianyingPendingMode) return { ...JIANYING, whitelisted: true, human_check: "none", usable: true, force_allowed: false };
+  const check = state.settings[`jianying.human_check.${JIANYING_PENDING_VERSION}`];
+  const human_check = check === "ok" || check === "fail" ? check : "none";
+  const usable = human_check === "ok";
+  return {
+    installed_version: JIANYING_PENDING_VERSION,
+    supported: usable,
+    usable,
+    whitelisted: false,
+    human_check,
+    force_allowed: true,
+    reason: usable
+      ? `剪映 ${JIANYING_PENDING_VERSION} 已确认可用(你在剪映里打开过试验草稿)`
+      : human_check === "fail"
+        ? `上次生成的试验草稿在剪映 ${JIANYING_PENDING_VERSION} 里打不开;可以再试一次,或改用「导出片段」`
+        : `这个剪映版本(${JIANYING_PENDING_VERSION})还没核对过;可以试着生成一份草稿,再到剪映里看能不能打开`,
+  };
+}
+HANDLERS.get_jianying_availability = () => mockJianyingAvailability();
+HANDLERS.generate_jianying_draft = ({ force }) => {
+  const availability = mockJianyingAvailability();
+  if (!availability.usable && !(force === true && availability.force_allowed)) throw new Error(`${availability.reason}；已停止原生草稿路径`);
+  const experimental = !availability.usable;
+  const name = experimental ? `旅剪项目_剪映草稿_试验_${Math.floor(Date.now() / 1000)}_MOCK1234` : "旅剪项目_剪映草稿_MOCK1234";
+  const path = `/Users/me/Movies/JianyingPro/User Data/Projects/com.lveditor.draft/${name}`;
+  return {
+    status: "created",
+    output_path: path,
+    draft_path: path,
+    draft_name: name,
+    jianying_version: availability.installed_version ?? "",
+    selected_count: 6,
+    subtitle_count: 0,
+    message: experimental ? "试验草稿已写出;打开剪映,在「本地草稿」里找它,能打开就回来点「可以用」" : "草稿已生成(mock)",
+    experimental,
+    chapter_marks: 0,
+    has_music: false,
+  } satisfies JianyingDraftResult;
+};
+HANDLERS.set_jianying_human_check = ({ version, verdict }) => {
+  if (verdict !== "ok" && verdict !== "fail") throw new Error(`验证结果只能是 ok 或 fail,收到 ${String(verdict)}`);
+  if (str(version, "version") !== JIANYING_PENDING_VERSION) throw new Error(`剪映 ${String(version)} 不在待验证名单里,不能记录人工验证结果`);
+  state.settings[`jianying.human_check.${JIANYING_PENDING_VERSION}`] = verdict;
+  bump(state);
+  return mockJianyingAvailability();
+};
+(MOCK_COMMANDS as string[]).push("set_jianying_human_check");
+// R14 车道 B:剪映素材包。清单按镜头带(storyboard.items 的 position)顺序编号为
+// `NN_<章名>_<素材名>.mp4`,导出在 mock 里直接报「完成」(mode=kit)。只追加不改上面的表。
+// ---------------------------------------------------------------------------
+import type { KitExportOutcome } from "../api";
+
+function jianyingKitPlan(destDir: unknown): KitExportOutcome {
+  const ordered = [...storyboard.items].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const files = ordered.map((item, index) => {
+    const chapter = storyboard.chapters.find((candidate) => candidate.id === item.chapter_id)?.title ?? "未分章";
+    const stem = item.file_name.replace(/\.[^.]+$/, "");
+    return `${String(index + 1).padStart(2, "0")}_${chapter.replace(/[/\\:*?"<>|]/g, "")}_${stem}.mp4`;
+  });
+  if (files.length === 0) throw new Error("镜头带上还没有镜头；先到第 3 步排一排");
+  const folder = "EP03_剪映素材包_2026-09-13";
+  return { job_id: null, dir: destDir ? `${str(destDir, "destDir")}/${folder}` : folder, files, order_file: "顺序.txt" };
+}
+HANDLERS.plan_jianying_kit = ({ destDir }) => jianyingKitPlan(destDir);
+HANDLERS.export_jianying_kit = ({ destDir }) => {
+  const plan = jianyingKitPlan(destDir ?? "/Users/mock/Desktop");
+  state.exportStatus = {
+    ...IDLE_EXPORT,
+    job_id: 3,
+    status: "done",
+    stage: "complete",
+    mode: "kit",
+    selected_count: plan.files.length,
+    selected_segment_count: 0,
+    selected_whole_count: plan.files.length,
+    completed_items: plan.files.length,
+    output_path: plan.dir,
+    items: plan.files.map((name, index) => ({ clip_id: index, file_name: name, output_name: name, status: "done", note: null, warning: false })),
+  };
+  return { ...plan, job_id: 3 };
+};
+(MOCK_COMMANDS as string[]).push("plan_jianying_kit", "export_jianying_kit");

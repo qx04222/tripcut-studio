@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { pictureSummary } from "./workspace/copy";
+
 import {
   clearDisplayLut,
   importLut,
@@ -52,10 +54,10 @@ function colorBadges(clip: ClipListItem): Array<"D-Log" | "HDR"> {
 }
 
 function actualFrameRateLabel(clip: ClipListItem): string {
-  if (!clip.fps_num || !clip.fps_den) return "—";
+  if (!clip.fps_num || !clip.fps_den) return "";
   const fps = clip.fps_num / clip.fps_den;
   const formatted = Number.isInteger(fps) ? fps.toFixed(0) : fps.toFixed(2);
-  return `${formatted} fps${clip.is_vfr ? "(帧率不稳)" : ""}`;
+  return `${formatted} 帧/秒${clip.is_vfr ? "(帧率不稳)" : ""}`;
 }
 
 /** 「添加 LUT…」下拉项的哨兵值(R10 U-28)。 */
@@ -135,7 +137,7 @@ export function TechCheckPanel({
       })
       .catch((loadError) => {
         if (!mounted.current) return;
-        setError(`LUT 列表未载入：${String(loadError)}`);
+        setError(`调色文件列表没载入：${String(loadError)}`);
       });
   }, []);
 
@@ -203,7 +205,7 @@ export function TechCheckPanel({
       })
       .catch((lutError) => {
         if (!mounted.current) return;
-        setError(`添加 LUT 失败：${String(lutError)}`);
+        setError(`添加调色文件没成功：${String(lutError)}`);
         setLutHelpOpen(true);
       })
       .finally(() => {
@@ -222,7 +224,7 @@ export function TechCheckPanel({
     action
       .catch((lutError) => {
         if (!mounted.current) return;
-        setError(`设置显示 LUT 失败：${String(lutError)}`);
+        setError(`切换预览调色没成功：${String(lutError)}`);
       })
       .finally(() => {
         if (mounted.current) setLutBusy(false);
@@ -234,24 +236,16 @@ export function TechCheckPanel({
   return (
     <div className="inspector-section inspector-tech-check">
       {hideTitle ? null : <span>技术检查</span>}
-      {readOnly ? <p className="read-only-notice">历史集为只读档案；回到当前集才能修改音轨与 LUT</p> : null}
+      {readOnly ? <p className="read-only-notice">历史集为只读档案；回到当前集才能修改声音与调色</p> : null}
       {error ? <p className="inspector-error">{error}</p> : null}
       <dl className="tech-check-basics">
         <div>
-          <dt>分辨率</dt>
-          <dd>{clip.width && clip.height ? `${clip.width} × ${clip.height}` : "—"}</dd>
+          <dt>画面</dt>
+          <dd>{pictureSummary({ size: clip.width && clip.height ? `${clip.width}×${clip.height}` : null, fps: actualFrameRateLabel(clip), orientation: orientationLabel(clip) }) || "—"}</dd>
         </div>
         <div>
-          <dt>实际帧率</dt>
-          <dd>{actualFrameRateLabel(clip)}</dd>
-        </div>
-        <div>
-          <dt>编码·位深</dt>
+          <dt>编码</dt>
           <dd>{clip.codec ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>方向</dt>
-          <dd>{orientationLabel(clip)}</dd>
         </div>
         <div>
           <dt>色彩</dt>
@@ -264,18 +258,23 @@ export function TechCheckPanel({
             ))}
           </dd>
         </div>
-        <div>
-          <dt>ISO</dt>
-          <dd>{clip.iso_value != null ? clip.iso_value : "设备未提供"}</dd>
-        </div>
-        <div>
-          <dt>快门</dt>
-          <dd>{clip.shutter_speed ?? "设备未提供"}</dd>
-        </div>
-        <div>
-          <dt>光圈</dt>
-          <dd>{clip.aperture ?? "设备未提供"}</dd>
-        </div>
+        {/* R12 术语 v2:相机参数(ISO / 快门 / 光圈)设备没写就整段不显示,不再排三行占位。 */}
+        {clip.iso_value != null || clip.shutter_speed || clip.aperture ? (
+          <>
+            <div>
+              <dt>ISO</dt>
+              <dd>{clip.iso_value != null ? clip.iso_value : "—"}</dd>
+            </div>
+            <div>
+              <dt>快门</dt>
+              <dd>{clip.shutter_speed ?? "—"}</dd>
+            </div>
+            <div>
+              <dt>光圈</dt>
+              <dd>{clip.aperture ?? "—"}</dd>
+            </div>
+          </>
+        ) : null}
       </dl>
       <div className="tech-check-audio">
         <div className="tech-check-audio-header">
@@ -327,9 +326,9 @@ export function TechCheckPanel({
         )}
       </div>
       <div className="tech-check-lut">
-        <span>显示 LUT</span>
+        <span>预览调色</span>
         <select
-          aria-label="选择显示 LUT"
+          aria-label="选择预览调色"
           value={clip.display_lut_path ?? ""}
           disabled={readOnly || clipId === null || lutBusy}
           onChange={(event) => onLutChange(event.currentTarget.value)}
@@ -340,7 +339,7 @@ export function TechCheckPanel({
               {path.split("/").pop()}
             </option>
           ))}
-          <option value={ADD_LUT_OPTION}>添加 LUT…</option>
+          <option value={ADD_LUT_OPTION}>添加调色文件…</option>
         </select>
         <small>仅用于预览，不影响导出</small>
         {lutHelpOpen ? (

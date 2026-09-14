@@ -1,0 +1,11 @@
+/*
+ * R13 真机验收修复车道(fix/r13-acceptance)的样式。@import 只能放在 workspace.css 头部
+ * (尾部会被 postcss-import 静默丢掉);选择器都以栏根 class 起头。
+ */
+
+/* Y-07:整块镜块都是拖动手柄 —— 按住缩略图 / 文件名拖不能变成页面选字。 */
+.workspace-shell .shot-band .band-segment--draggable,
+.workspace-shell .shot-band .band-segment--draggable * {
+  -webkit-user-select: none;
+  user-select: none;
+}

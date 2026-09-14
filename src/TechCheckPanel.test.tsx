@@ -122,9 +122,20 @@ describe("TechCheckPanel", () => {
     expect(apiMock.setTranscribeTrack).toHaveBeenCalledWith(40, 1);
   });
 
-  it("shows 设备未提供 when ISO is missing", async () => {
-    await act(async () => root.render(<TechCheckPanel clip={makeClip({ iso_value: null })} readOnly={false} />));
-    expect(container.textContent).toContain("设备未提供");
+  it("R12 术语 v2:相机参数三项都没有就整段不显示;有任一项才排 ISO / 快门 / 光圈", async () => {
+    await act(async () => root.render(<TechCheckPanel clip={makeClip({ iso_value: null, shutter_speed: null, aperture: null })} readOnly={false} />));
+    expect(container.textContent).not.toContain("设备未提供");
+    expect(container.textContent).not.toContain("ISO");
+    await act(async () => root.render(<TechCheckPanel clip={makeClip({ iso_value: 400, shutter_speed: null, aperture: null })} readOnly={false} />));
+    expect(container.textContent).toContain("ISO");
+    expect(container.textContent).toContain("快门");
+  });
+
+  it("R12 术语 v2:第一行是「画面 1920×1080 · 29.97 帧/秒 · 横屏」,不再出现 fps / 位深", async () => {
+    await act(async () => root.render(<TechCheckPanel clip={makeClip({})} readOnly={false} />));
+    expect(container.textContent).toContain("3840×2160 · 29.97 帧/秒 · 横屏 · 0°");
+    expect(container.textContent).not.toContain("fps");
+    expect(container.textContent).not.toContain("位深");
   });
 
   it("R10 U-13: 方向读 clip.orientation(rotation=0 的竖拍手机片显示竖屏), 缺失时回落 rotation", async () => {
@@ -151,7 +162,7 @@ describe("TechCheckPanel", () => {
 
   it("calls setDisplayLut when a LUT is selected", async () => {
     await act(async () => root.render(<TechCheckPanel clip={makeClip()} readOnly={false} />));
-    const select = container.querySelector("select[aria-label='选择显示 LUT']") as HTMLSelectElement;
+    const select = container.querySelector("select[aria-label='选择预览调色']") as HTMLSelectElement;
     await act(async () => {
       select.value = "/luts/rec709.cube";
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -165,7 +176,7 @@ describe("TechCheckPanel", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     expect(buttons.length).toBeGreaterThan(0);
     expect(buttons.every((button) => button.disabled)).toBe(true);
-    const select = container.querySelector("select[aria-label='选择显示 LUT']") as HTMLSelectElement;
+    const select = container.querySelector("select[aria-label='选择预览调色']") as HTMLSelectElement;
     expect(select.disabled).toBe(true);
   });
 

@@ -44,14 +44,18 @@ const SCALE_DATA: Record<string, string> = {
   "1.3": "130",
 };
 
+/** 设置里可选的固定主题(`html[data-theme]` 的值);R13 §5 加「剪映风格深色」。system = 不写属性。 */
+export const FIXED_THEMES = ["light", "dark", "jianying-dark"] as const;
+export type FixedTheme = (typeof FIXED_THEMES)[number];
+
 export function appearanceAttributes(settings: SettingsMap): {
-  theme: "light" | "dark" | null;
+  theme: FixedTheme | null;
   uiScale: string;
 } {
   const theme = settings["appearance.theme"] ?? DEFAULT_SETTINGS["appearance.theme"];
   const scale = settings["appearance.ui_scale"] ?? DEFAULT_SETTINGS["appearance.ui_scale"];
   return {
-    theme: theme === "light" || theme === "dark" ? theme : null,
+    theme: (FIXED_THEMES as readonly string[]).includes(theme) ? (theme as FixedTheme) : null,
     uiScale: SCALE_DATA[scale] ?? "100",
   };
 }

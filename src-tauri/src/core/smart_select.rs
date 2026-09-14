@@ -32,6 +32,14 @@ pub struct AutoSelectOutcome {
     pub total_secs: f64,
     pub chapters_covered: usize,
     pub batch_id: String,
+    /// R12 车道 B:挑完默认已「一键排入」镜头带,这是本次排进去的段数;排入失败不影响挑选(0)。
+    pub placed: usize,
+    /// 排入那一批的批号(给「撤销」只撤排入用);没排进任何段时为 None。
+    pub arrange_batch_id: Option<String>,
+    /// X-01:实际用的范围(`favorites_or_rated3` / `favorites` / `rated3` / `all`)。
+    pub scope_used: String,
+    /// X-01:默认范围「收藏 + 3 星以上」一条候选都没有时自动改按「全部」挑了——前端 toast 要说出来。
+    pub fell_back: bool,
 }
 
 /// 目标时长:按平台时长预算分档——≤15 s 的短平台 4 s,≤60 s 5 s,≤90 s 6 s,更长或不限 8 s。
@@ -175,6 +183,15 @@ impl AutoSelectScope {
         }
     }
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FavoritesOrRated3 => "favorites_or_rated3",
+            Self::Favorites => "favorites",
+            Self::Rated3 => "rated3",
+            Self::All => "all",
+        }
+    }
+
     fn sql_predicate(self) -> &'static str {
         const FAVORITE: &str = "COALESCE((SELECT r.value FROM ratings r JOIN segments rs ON rs.id = r.segment_id
                                 WHERE rs.clip_id = c.id AND rs.tombstone = 0 AND r.rating_type = 'binary'
@@ -277,6 +294,29 @@ fn rotate_by_chapter(mut candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Ca
     chosen
 }
 
+/// X-02:范围里没得挑时,按真实原因说「现在怎么办」——只在分析真没跑完时才提「等分析」。
+fn empty_scope_reason(connection: &Connection, scope: AutoSelectScope) -> Result<String> {
+    let progress = super::moments::progress(connection)?;
+    if progress.pending + progress.running > 0 {
+        return Ok("画面分析还没跑完:等状态条显示「分析完成」再试一次".to_owned());
+    }
+    if scope != AutoSelectScope::All {
+        return Ok("这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」".to_owned());
+    }
+    let analysed: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM clips c
+          WHERE c.episode_id = ?1 AND c.missing_since IS NULL
+            AND EXISTS (SELECT 1 FROM clip_moments m WHERE m.clip_id = c.id)",
+        [active_episode_id(connection)?],
+        |row| row.get(0),
+    )?;
+    Ok(if analysed == 0 {
+        "还没有可挑的素材:先在第 1 步导入视频".to_owned()
+    } else {
+        "素材都已经挑过了:想重挑就先撤销上一批,或在第 2 步手动挑几条".to_owned()
+    })
+}
+
 pub fn auto_select_episode(
     connection: &mut Connection,
     budget_secs: Option<f64>,
@@ -291,11 +331,17 @@ pub fn auto_select_episode(
         None => DEFAULT_BUDGET_SECS,
     };
     let target = target_secs_for_budget(platform_budget);
-    let candidates = load_candidates(connection, scope, target)?;
+    let mut candidates = load_candidates(connection, scope, target)?;
+    // X-01:新手默认范围在全新库(0 收藏、0 打星)里是空的——自动改按「全部」挑,不让流水线停在第 ② 步。
+    let mut scope_used = scope;
+    let mut fell_back = false;
+    if candidates.is_empty() && scope == AutoSelectScope::FavoritesOrRated3 {
+        candidates = load_candidates(connection, AutoSelectScope::All, target)?;
+        scope_used = AutoSelectScope::All;
+        fell_back = !candidates.is_empty();
+    }
     if candidates.is_empty() {
-        return Err(CoreError::Rating(
-            "这个范围里没有可挑的素材:先收藏几条或给素材打星,等分析跑完再试;或把范围改成「全部」".to_owned(),
-        ));
+        return Err(CoreError::Rating(empty_scope_reason(connection, scope_used)?));
     }
     let chosen = rotate_by_chapter(candidates, budget);
     let batch_id = format!("auto-{}", uuid::Uuid::new_v4().simple());
@@ -323,7 +369,26 @@ pub fn auto_select_episode(
         }
     }
     transaction.commit()?;
-    Ok(AutoSelectOutcome { created, total_secs, chapters_covered: chapters.len(), batch_id })
+    // R12 §2:挑完就排进镜头带(append,只补新段)。排入失败不能吞掉已经成功的挑选,
+    // 只把 placed 记 0,前端会给「排入」按钮让用户再点一次。
+    let (placed, arrange_batch_id) = match super::arrange::arrange_selected_segments(connection, super::arrange::ArrangeMode::Append) {
+        Ok(outcome) if outcome.placed > 0 => (outcome.placed, Some(outcome.batch_id)),
+        Ok(_) => (0, None),
+        Err(error) => {
+            tracing::warn!(%error, "自动挑选后排入镜头带失败");
+            (0, None)
+        }
+    };
+    Ok(AutoSelectOutcome {
+        created,
+        total_secs,
+        chapters_covered: chapters.len(),
+        batch_id,
+        placed,
+        arrange_batch_id,
+        scope_used: scope_used.as_str().to_owned(),
+        fell_back,
+    })
 }
 
 /// 只删该批 `source='auto'` 的段(物理删除,评级行级联);手打的段一条不碰。
@@ -485,6 +550,13 @@ mod tests {
         assert_eq!(outcome.chapters_covered, 2);
         assert!((outcome.total_secs - 24.0).abs() < 1e-9);
         assert!(outcome.batch_id.starts_with("auto-"));
+        // R12 §2:挑完默认已排进镜头带 —— 手打那 1 段 + 自动 3 段 = 4 行 story_order,按章成组。
+        assert_eq!(outcome.placed, 4, "{outcome:?}");
+        assert!(outcome.arrange_batch_id.as_deref().is_some_and(|id| id.starts_with("arr-")));
+        let on_band: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE tombstone = 0 AND item_kind = 'segment'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(on_band, 4);
         let auto_clips: Vec<i64> = {
             let mut statement = connection.prepare("SELECT clip_id FROM segments WHERE source = 'auto' ORDER BY id").unwrap();
             statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
@@ -497,6 +569,7 @@ mod tests {
         let again = auto_select_episode(&mut connection, Some(30.0), None).unwrap();
         assert_eq!(again.created.len(), 2);
         assert_eq!(again.chapters_covered, 1);
+        assert_eq!(again.placed, 2, "第二批只排新挑的 2 段");
         assert!(auto_select_episode(&mut connection, Some(30.0), None).is_err());
 
         let removed = undo_auto_select(&mut connection, &outcome.batch_id).unwrap();
@@ -508,6 +581,11 @@ mod tests {
         assert_eq!(remaining[0], (manual.id, "manual".to_owned(), None), "手打段原样保留");
         assert_eq!(remaining.len(), 3);
         assert!(remaining[1..].iter().all(|row| row.2.as_deref() == Some(again.batch_id.as_str())));
+        // 撤销挑选连带把那批段从镜头带上拿掉(段行物理删除,story_order 级联):带上只剩手打 1 + 第二批 2。
+        let on_band_after: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE tombstone = 0 AND item_kind = 'segment'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(on_band_after, 3);
         assert_eq!(undo_auto_select(&mut connection, &outcome.batch_id).unwrap(), 0, "撤销幂等");
     }
 
@@ -532,6 +610,66 @@ mod tests {
         let all = auto_select_episode(&mut connection, Some(600.0), Some("all")).unwrap();
         assert_eq!(all.created.len(), 4);
         assert!(AutoSelectScope::parse(Some("hero")).is_err());
+    }
+
+    /// X-01(R12 验收 P1):全新库(0 收藏、0 打星)按默认范围「收藏 + 3 星以上」必须也能出结果——
+    /// 0 候选时自动降级到「全部」,并在结果里说明(`scope_used` / `fell_back`);显式窄范围不降级。
+    #[test]
+    fn default_scope_falls_back_to_all_on_a_fresh_library_and_says_so() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "一章", "2026-09-13T08:00:00Z");
+        let a = add_clip(&mut connection, chapter, 0.9, false, 0);
+        let b = add_clip(&mut connection, chapter, 0.8, false, 0);
+        let outcome = auto_select_episode(&mut connection, Some(600.0), Some("favorites_or_rated3")).unwrap();
+        let mut picked: Vec<i64> = {
+            let mut statement = connection.prepare("SELECT clip_id FROM segments WHERE batch_id = ?1").unwrap();
+            statement.query_map([&outcome.batch_id], |row| row.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        picked.sort_unstable();
+        assert_eq!(picked, vec![a, b]);
+        assert!(outcome.fell_back, "{outcome:?}");
+        assert_eq!(outcome.scope_used, "all");
+        undo_auto_select(&mut connection, &outcome.batch_id).unwrap();
+
+        // 不传 scope 同样是默认 → 同样降级;有收藏时不降级,scope_used 如实。
+        let implicit = auto_select_episode(&mut connection, Some(600.0), None).unwrap();
+        assert!(implicit.fell_back);
+        undo_auto_select(&mut connection, &implicit.batch_id).unwrap();
+        crate::core::ratings::rate_clip(&mut connection, a, "binary", 1).unwrap();
+        let honest = auto_select_episode(&mut connection, Some(600.0), None).unwrap();
+        assert!(!honest.fell_back);
+        assert_eq!(honest.scope_used, "favorites_or_rated3");
+        assert_eq!(honest.created.len(), 1);
+        undo_auto_select(&mut connection, &honest.batch_id).unwrap();
+
+        // 显式「只看收藏」在没收藏的库里不偷偷改范围:报错,且文案是人话、不提「等分析跑完」(分析已完成)。
+        crate::core::ratings::clear_clip_rating(&mut connection, a).unwrap();
+        let error = auto_select_episode(&mut connection, Some(600.0), Some("favorites")).unwrap_err().to_string();
+        assert!(error.contains("把范围改成「全部」"), "{error}");
+        assert!(!error.contains("分析"), "{error}");
+    }
+
+    /// X-02:「全部」也没得挑时,按真实原因给下一步——没分析好的素材 → 去导入;
+    /// 有分析任务在跑 → 等分析;素材都挑过了 → 撤销上一批。
+    #[test]
+    fn empty_all_scope_explains_the_real_reason() {
+        let (_directory, mut connection) = library();
+        let empty = auto_select_episode(&mut connection, Some(600.0), None).unwrap_err().to_string();
+        assert!(empty.contains("导入"), "{empty}");
+        assert!(!empty.contains("分析"), "{empty}");
+
+        connection
+            .execute("INSERT INTO jobs(kind, payload, payload_hash, status, attempt, created_at, updated_at) VALUES ('moments', '{}', 'h', 'pending', 0, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')", [])
+            .unwrap();
+        let analysing = auto_select_episode(&mut connection, Some(600.0), None).unwrap_err().to_string();
+        assert!(analysing.contains("分析"), "{analysing}");
+        connection.execute("DELETE FROM jobs WHERE kind = 'moments'", []).unwrap();
+
+        let chapter = add_chapter(&connection, "一章", "2026-09-13T08:00:00Z");
+        add_clip(&mut connection, chapter, 0.9, false, 0);
+        auto_select_episode(&mut connection, Some(600.0), None).unwrap();
+        let exhausted = auto_select_episode(&mut connection, Some(600.0), None).unwrap_err().to_string();
+        assert!(exhausted.contains("挑过"), "{exhausted}");
     }
 
     /// V-03 排查结论:自动段与手打段写的是**同一套** tick(秒 → 源 time_base 四舍五入),

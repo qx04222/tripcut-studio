@@ -262,7 +262,16 @@ pub fn detect(connection: &mut Connection) -> Result<usize> {
 
 /// 当前活跃集的所有缺口（不限状态），按章节顺序、槽位排序。
 pub fn list(connection: &Connection) -> Result<Vec<StoryGap>> {
-    let Some(episode_id) = active_episode_id(connection)? else {
+    list_for(connection, None)
+}
+
+/// Z-14:按指定集列缺口(只读查看已封存集时前端传被查看的 `episode_id`);`None` = 当前活跃集。
+pub fn list_for(connection: &Connection, episode_id: Option<i64>) -> Result<Vec<StoryGap>> {
+    let episode_id = match episode_id {
+        Some(id) => Some(id),
+        None => active_episode_id(connection)?,
+    };
+    let Some(episode_id) = episode_id else {
         return Ok(Vec::new());
     };
     let Some(revision_id) = active_revision_id(connection, episode_id)? else {

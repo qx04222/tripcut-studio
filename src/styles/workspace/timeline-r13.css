@@ -1,0 +1,338 @@
+/*
+ * R13 车道 C(镜头带时间线化 + 交接感)。只在这里写;`@import` 挂在 workspace.css 头部。
+ *   1. 时间刻度轨(视口上方)与播放头(红线,贯穿刻度与镜块)
+ *   2. 章节轨头:贴左 sticky 的章名 + 折叠按钮;折叠后的一格
+ *   3. 精选段镜块的拖边把手与「新时长」预览
+ *   4. 右上「导入剪映继续剪」
+ * 颜色一律 token(播放头用 tokens.css 新加的 --playhead);字号只用 --text-*,间距只用六档。
+ */
+
+/* ---------- 1. 时间刻度轨 + 播放头 ---------- */
+
+/* 视口是横向滚动容器,红线画在它外面(stage 上),所以 stage 裁掉 gutter 之外的红线。 */
+.workspace-shell .shot-band .band-timeline-stage {
+  --band-gutter: var(--space-3); /* 与 .band-viewport 的左 padding 同一个数,刻度才落在镜块上 */
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 刻度行:刻度铺满,右端常驻「导入剪映继续剪」(与刻度同一行,不挤栏标题条)。 */
+.workspace-shell .shot-band .band-stage-top {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .shot-band .band-stage-top > .band-time-ruler,
+.workspace-shell .shot-band .band-stage-top > .band-ruler {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+}
+
+.workspace-shell .shot-band .band-stage-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-left: auto;
+  padding: 2px var(--space-2) 2px var(--space-3);
+  border-left: 1px solid var(--border-hair);
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .shot-band .band-time-ruler {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-hair);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 7px, var(--sheen-line) 7px 8px),
+    var(--surface-chrome);
+  user-select: none;
+}
+
+.workspace-shell .shot-band .band-time-ruler-track {
+  position: absolute;
+  top: 0;
+  left: var(--band-gutter);
+  height: 100%;
+  min-width: 100%;
+  will-change: transform;
+}
+
+.workspace-shell .shot-band .band-time-ruler-ticks {
+  position: absolute;
+  inset: 0;
+}
+
+.workspace-shell .shot-band .band-time-mark {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 5px;
+  background: var(--text-faint);
+}
+
+.workspace-shell .shot-band .band-time-mark--label {
+  height: 9px;
+  background: var(--text-muted);
+}
+
+.workspace-shell .shot-band .band-time-mark-label {
+  position: absolute;
+  bottom: 9px;
+  left: 3px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* 定位点击:一颗铺满刻度轨的透明按钮;焦点环沿用套件双圈。 */
+.workspace-shell .shot-band .band-time-ruler-hit {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: crosshair;
+  appearance: none;
+}
+
+.workspace-shell .shot-band .band-time-ruler-hit:focus-visible {
+  outline: none;
+  box-shadow: inset var(--ring);
+}
+
+/* 刻度上的播放头三角(红线本体在 stage 上)。 */
+.workspace-shell .shot-band .band-time-playhead {
+  position: absolute;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 7px solid var(--playhead);
+  border-right: 5px solid transparent;
+  border-left: 5px solid transparent;
+  transform: translateX(-5px);
+  pointer-events: none;
+}
+
+/* 红线:从刻度底部贯穿整个视口;横向位置 = 节距轴像素 − scrollLeft(stage 的 CSS 变量)。 */
+.workspace-shell .shot-band .band-playhead {
+  position: absolute;
+  top: 0;
+  bottom: var(--space-2);
+  left: calc(var(--band-gutter) + var(--band-playhead-px, 0) * 1px);
+  z-index: 3;
+  width: 2px;
+  background: var(--playhead);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--playhead) 35%, transparent);
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
+.workspace-shell .shot-band .band-timeline-stage.is-playing .band-playhead {
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--playhead) 55%, transparent);
+}
+
+/* ---------- 2. 章节轨头 ---------- */
+
+.workspace-shell .shot-band .band-chapter-head {
+  padding-left: 0;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-6) var(--radius-6) 0;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-panel));
+}
+
+.workspace-shell .shot-band .band-chapter.skipped .band-chapter-head {
+  border-left-color: var(--text-faint);
+  background: transparent;
+}
+
+.workspace-shell .shot-band .band-chapter-fold {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0 0 0 var(--space-1);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  appearance: none;
+}
+
+.workspace-shell .shot-band .band-chapter-fold:hover {
+  background: var(--accent-tint);
+  color: var(--text-primary);
+}
+
+.workspace-shell .shot-band .band-chapter-fold:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* 折叠箭头是一段描边画的 chevron:展开时朝下,折叠时朝右。 */
+.workspace-shell .shot-band .band-chapter-fold-icon {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentcolor;
+  border-bottom: 1.5px solid currentcolor;
+  transform: translateY(-1px) rotate(45deg);
+  transition: transform var(--motion-fast);
+}
+
+.workspace-shell .shot-band .band-chapter-fold[aria-expanded="false"] .band-chapter-fold-icon {
+  transform: translateX(-1px) rotate(-45deg);
+}
+
+/* 折叠后的那一格:与空章占位同尺寸的虚线卡,点它也能展开。 */
+.workspace-shell .shot-band .band-chapter-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 160px;
+  height: 130px;
+  margin: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-6);
+  background:
+    repeating-linear-gradient(135deg, transparent 0 6px, var(--sheen) 6px 12px),
+    var(--surface-card);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  cursor: pointer;
+  appearance: none;
+}
+
+.workspace-shell .shot-band .band-chapter-collapsed:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.workspace-shell .shot-band .band-chapter-collapsed:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ---------- 3. 拖边把手 ---------- */
+
+.workspace-shell .shot-band .band-trim {
+  position: absolute;
+  inset: var(--space-1) var(--space-1) auto;
+  height: 84px; /* 与 .band-tile-thumb 同高 */
+  pointer-events: none;
+}
+
+.workspace-shell .shot-band .band-trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  opacity: 0;
+  cursor: ew-resize;
+  transition: opacity var(--motion-fast);
+  pointer-events: auto;
+  appearance: none;
+}
+
+.workspace-shell .shot-band .band-trim-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: currentcolor;
+  opacity: 0.85;
+  transform: translate(-50%, -50%);
+}
+
+.workspace-shell .shot-band .band-trim-handle--in {
+  left: 0;
+  border-radius: var(--radius-6) 0 0 var(--radius-6);
+}
+
+.workspace-shell .shot-band .band-trim-handle--out {
+  right: 0;
+  border-radius: 0 var(--radius-6) var(--radius-6) 0;
+}
+
+.workspace-shell .shot-band .band-segment:hover .band-trim-handle,
+.workspace-shell .shot-band .band-segment.ui-card--selected .band-trim-handle,
+.workspace-shell .shot-band .band-trim-handle:focus-visible,
+.workspace-shell .shot-band .band-trim.is-dragging .band-trim-handle {
+  opacity: 0.92;
+}
+
+.workspace-shell .shot-band .band-trim-handle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.workspace-shell .shot-band .band-trim-handle:disabled {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+/* 拖动中:缩略图描一圈强调色,上方浮出「新时长」。 */
+.workspace-shell .shot-band .band-trim.is-dragging {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: var(--radius-6);
+}
+
+.workspace-shell .shot-band .band-trim-preview {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  z-index: 2;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-6);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  font-weight: 600;
+  line-height: var(--lh-11);
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+  box-shadow: var(--shadow-raised);
+}
+
+/* ---------- 4. 「导入剪映继续剪」 ---------- */
+
+.workspace-shell .shot-band .band-jianying.ui-button {
+  flex: 0 0 auto;
+  height: 22px;
+  min-height: 0;
+  padding: 0 var(--space-2);
+  white-space: nowrap;
+}
+
+.workspace-shell .shot-band .band-jianying-pending {
+  margin-left: 2px;
+  opacity: 0.7;
+  font-size: var(--text-11);
+  font-weight: 400;
+}

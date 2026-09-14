@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod arrange;
 pub mod asset_safety;
 pub mod artifacts;
 pub mod audio_tracks;
@@ -41,6 +42,7 @@ pub mod ratings;
 pub mod secret;
 pub mod settings;
 pub mod shot_stack;
+pub mod shutdown;
 pub mod sidecar;
 pub mod similar;
 pub mod smart_select;

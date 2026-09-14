@@ -4,6 +4,7 @@ import type { ClipListItem, ShotStack, ShotStackMember } from "../api";
 import { bandDurationLabel } from "./BandSegment";
 import { orderedTakes } from "./shotBandModel";
 import { Badge, Card, CoverImage } from "./ui";
+import { stackGroupLabel } from "./copy";
 
 /**
  * Tab 展开的同镜头 Take 条(规格 §3.2):带下方一排缩略图卡,↑↓ 移动、Enter 提为首选。
@@ -22,7 +23,7 @@ export function TakeStrip({
 }): JSX.Element {
   const takes = orderedTakes(stack, clipsById);
   return (
-    <div className="band-take-strip" role="group" aria-label={`${stack.scene_name} 的候选`}>
+    <div className="band-take-strip" role="group" aria-label={stackGroupLabel(stack.scene_name)}>
       {takes.map((member, index) => {
         const clip = clipsById.get(member.clip_id);
         const active = index === activeIndex;

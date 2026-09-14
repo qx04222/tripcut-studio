@@ -122,7 +122,8 @@
   color-scheme: light;
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="dark"],
+:root[data-theme="jianying-dark"] {
   color-scheme: dark;
 }
 

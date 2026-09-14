@@ -33,7 +33,7 @@ function formatDate(value: string): string {
 export function episodeErrorMessage(error: unknown): string {
   const message = String(error).replace(/^Error:\s*/i, "");
   if (message.includes("当前集还没有任何素材") || message.includes("空集不允许封存")) {
-    return "当前集还没有素材，无需封存；可以继续使用本集并先导入素材。";
+    return "这一集还没有素材，不用结束；继续用这一集，先导入素材。";
   }
   return message
     .replace(/^storyboard failed:\s*/i, "")
@@ -66,9 +66,9 @@ export function EpisodeList({
             <small>
               {episode.status === "active"
                 ? "进行中"
-                : `已封存 ${episode.archived_at ? formatDate(episode.archived_at) : ""}`}
+                : `已结束 ${episode.archived_at ? formatDate(episode.archived_at) : ""}`}
               {" · "}
-              {episode.clip_count} 素材 · 交付 {episode.export_count}
+              {episode.clip_count} 条素材 · 已导出 {episode.export_count} 次
             </small>
           </button>
         </li>
@@ -135,7 +135,7 @@ export function EpisodeRenameForm({
         </select>
       </label>
       <fieldset className="episode-orientation-field">
-        <legend>画布方向</legend>
+        <legend>画面方向</legend>
         {(Object.keys(ORIENTATION_LABELS) as CanvasOrientation[]).map((orientation) => (
           <label key={orientation}>
             <input
@@ -169,7 +169,7 @@ export interface EpisodeArchiveControlsProps {
   onCancelArchive: () => void;
 }
 
-/** 封存本集 + 下一集平台/方向选择——EpisodePanel 与 EpisodeSwitcher 共用。 */
+/** 结束本集(封存)+ 下一集平台/方向选择——EpisodePanel 与 EpisodeSwitcher 共用。Y-11:用户面前叫「结束本集」,代码里仍是 archive。 */
 export function EpisodeArchiveControls({
   busy,
   archiveArmed,
@@ -184,7 +184,7 @@ export function EpisodeArchiveControls({
   return (
     <>
       {archiveArmed ? (
-        <div className="episode-archive-dialog" aria-label="封存并开启下一集">
+        <div className="episode-archive-dialog" aria-label="结束本集并开始下一集">
           <label className="episode-platform-field">
             下一集目标平台
             <select
@@ -201,7 +201,7 @@ export function EpisodeArchiveControls({
             </select>
           </label>
           <fieldset className="episode-orientation-field">
-            <legend>下一集画布方向</legend>
+            <legend>下一集画面方向</legend>
             {(Object.keys(ORIENTATION_LABELS) as CanvasOrientation[]).map((orientation) => (
               <label key={orientation}>
                 <input
@@ -222,14 +222,14 @@ export function EpisodeArchiveControls({
         type="button"
         className={archiveArmed ? "danger armed" : "danger"}
         disabled={busy || archiveUnavailable}
-        title={archiveUnavailable ? "当前集没有素材，无需封存" : undefined}
+        title={archiveUnavailable ? "这一集还没有素材，不用结束" : undefined}
         onClick={onArchive}
       >
-        {archiveUnavailable ? "空集无需封存" : archiveArmed ? "确认封存并开启下一集" : "封存本集"}
+        {archiveUnavailable ? "这一集还没有素材" : archiveArmed ? "确认结束，开始下一集" : "结束本集"}
       </button>
       {archiveArmed ? (
         <button type="button" disabled={busy} onClick={onCancelArchive}>
-          取消封存
+          先不结束
         </button>
       ) : null}
     </>

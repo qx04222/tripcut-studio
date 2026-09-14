@@ -97,7 +97,7 @@ function readCssWithImports(file: string): string {
   );
 }
 const POOL_MONITOR_CSS = readCssWithImports(resolve(process.cwd(), "src/styles/workspace/pool-monitor.css"));
-import { __resetModalStackForTests, popModal, pushModal } from "./modalStack";
+import { __resetModalStackForTests, popModal, popOccluder, pushModal, pushOccluder } from "./modalStack";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 beforeEach(() => {
@@ -196,6 +196,8 @@ describe("Monitor", () => {
     render(<Monitor />);
     await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
     await flush();
+    // R12 §5:素材一就绪监视器先发一条 pause(点卡片 = 预览),不算这次点击的输出。
+    apiMocks.playerCommand.mockClear();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "播放" }));
     });
@@ -470,6 +472,25 @@ describe("Monitor", () => {
     expect(apiMocks.playerSetOccluded).toHaveBeenLastCalledWith(false);
     // 解除遮挡后区域矩形重提交一次,原生视图与 DOM 井重新对齐。
     await waitFor(() => expect(apiMocks.playerSetViewport).toHaveBeenCalled());
+  });
+
+  it("Y-01/Y-02:首页 / 引导气泡这类非模态遮挡者也让原生视频视图让位,撤掉后恢复", async () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
+    render(<Monitor />);
+    await waitFor(() => expect(apiMocks.playerSetOccluded).toHaveBeenLastCalledWith(false));
+    apiMocks.playerSetOccluded.mockClear();
+    const home = {};
+    await act(async () => {
+      pushOccluder(home);
+      await Promise.resolve();
+    });
+    expect(apiMocks.playerSetOccluded).toHaveBeenCalledTimes(1);
+    expect(apiMocks.playerSetOccluded).toHaveBeenCalledWith(true);
+    await act(async () => {
+      popOccluder(home);
+      await Promise.resolve();
+    });
+    expect(apiMocks.playerSetOccluded).toHaveBeenLastCalledWith(false);
   });
 
   it("沉浸态不进模态栈,帮助层压上来时同样遮挡(不破坏沉浸)", async () => {

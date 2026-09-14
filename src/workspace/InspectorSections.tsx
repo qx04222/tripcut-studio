@@ -33,7 +33,7 @@ export function DimensionsGrid({
   dimensions: readonly ClipDimension[];
   onTimeStageChange: (label: string) => void;
 }): JSX.Element {
-  if (dimensions.length === 0) return <p>等待代表帧与八维分类任务。</p>;
+  if (dimensions.length === 0) return <p>画面评分还在分析中。</p>;
   return (
     <dl className="inspector-dimensions-grid">
       {DIMENSION_KEYS.map((dimension) => {

@@ -99,14 +99,24 @@ struct ClipMoment {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StorySnapshot {
-    chapters: Vec<ChapterSnapshot>,
-    clip_chapters: Vec<ClipChapterSnapshot>,
-    order: Vec<StoryOrderSnapshot>,
+pub(crate) struct StorySnapshot {
+    pub(crate) chapters: Vec<ChapterSnapshot>,
+    pub(crate) clip_chapters: Vec<ClipChapterSnapshot>,
+    pub(crate) order: Vec<StoryOrderSnapshot>,
+    /// R12 车道 B:「一键排入」那一批的元数据(批号 + 本批写下的行),旧快照没有这个字段。
+    /// `undo_arrange` 按它只撤本批;`undo_latest` 照旧整份恢复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arrange: Option<ArrangeMeta>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ChapterSnapshot {
+pub(crate) struct ArrangeMeta {
+    pub(crate) batch_id: String,
+    pub(crate) placed: Vec<StoryOrderSnapshot>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChapterSnapshot {
     id: i64,
     title: String,
     start_at: String,
@@ -116,17 +126,17 @@ struct ChapterSnapshot {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ClipChapterSnapshot {
+pub(crate) struct ClipChapterSnapshot {
     clip_id: i64,
     chapter_id: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct StoryOrderSnapshot {
-    item_kind: String,
-    clip_id: i64,
-    segment_id: Option<i64>,
-    position: i64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoryOrderSnapshot {
+    pub(crate) item_kind: String,
+    pub(crate) clip_id: i64,
+    pub(crate) segment_id: Option<i64>,
+    pub(crate) position: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -292,7 +302,7 @@ fn chapterize_episode(
             .last()
             .ok_or_else(|| CoreError::Story("自动章节没有可分配素材".to_owned()))?;
         let title = format!(
-            "第{}段·{}-{}",
+            "第 {} 章 · {}-{}",
             cluster_index + 1,
             first.hhmm,
             last.hhmm
@@ -441,7 +451,16 @@ fn distance_km(left: &ClipMoment, right: &ClipMoment) -> Option<f64> {
 }
 
 pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
-    let episode_id = active_episode_id(connection)?;
+    get_storyboard_for(connection, None)
+}
+
+/// Z-14:按指定集取镜头带(只读查看已封存集时前端传被查看的 `episode_id`);
+/// `None` = 当前活跃集。章、交付项、排序、撤销、叙事概览全部按同一个集取。
+pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> Result<Storyboard> {
+    let episode_id = match episode_id {
+        Some(id) => id,
+        None => active_episode_id(connection)?,
+    };
     let mut chapter_statement = connection.prepare(
         "SELECT chapter.id, chapter.title, chapter.start_at, chapter.end_at,
                 (SELECT COUNT(*) FROM clips WHERE chapter_id = chapter.id
@@ -569,7 +588,7 @@ pub fn get_storyboard(connection: &Connection) -> Result<Storyboard> {
     let l3_enabled = settings::string_value(connection, LLM_ENABLED_KEY, "false")? == "true";
     // 有 revision 就展示它——LLM 关闭时那份 revision 是同步跑的确定性兜底，
     // 不该被藏起来假装故事板一片空白（R4 Task 5 之前的行为）。
-    let narrative = narrative::load_overview(connection)?;
+    let narrative = narrative::load_overview_for_episode(connection, episode_id)?;
     let current_template = narrative
         .as_ref()
         .and_then(|overview| overview.episode.template.clone());
@@ -794,7 +813,7 @@ fn ensure_selected(
     }
 }
 
-fn upsert_story_order(
+pub(crate) fn upsert_story_order(
     connection: &Connection,
     item: &StoryOrderRef,
     episode_id: i64,
@@ -859,7 +878,7 @@ fn active_chapter_bounds(
         .ok_or_else(|| CoreError::Story(format!("章节 {chapter_id} 不存在")))
 }
 
-fn story_key(item_kind: &str, clip_id: i64, segment_id: Option<i64>) -> String {
+pub(crate) fn story_key(item_kind: &str, clip_id: i64, segment_id: Option<i64>) -> String {
     if item_kind == "segment" {
         format!("segment:{}", segment_id.unwrap_or_default())
     } else {
@@ -883,7 +902,7 @@ fn record_snapshot(
     Ok(())
 }
 
-fn capture_snapshot(connection: &Connection, episode_id: i64) -> Result<StorySnapshot> {
+pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Result<StorySnapshot> {
     let mut chapter_statement = connection.prepare(
         "SELECT id, title, start_at, end_at, manual, tombstone
          FROM chapters WHERE episode_id = ?1 ORDER BY id",
@@ -931,6 +950,7 @@ fn capture_snapshot(connection: &Connection, episode_id: i64) -> Result<StorySna
         chapters,
         clip_chapters,
         order,
+        arrange: None,
     })
 }
 
@@ -994,7 +1014,55 @@ fn restore_snapshot(
     Ok(())
 }
 
-fn active_episode_id(connection: &Connection) -> Result<i64> {
+/// 镜头带上的一个镜(V14-01 的「唯一顺序真相」):键与 [`StoryItem::key`] 同一份。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BandItemRef {
+    pub key: String,
+    pub item_kind: String,
+    pub clip_id: i64,
+    pub segment_id: Option<i64>,
+    pub chapter_id: Option<i64>,
+}
+
+/// V14-01:镜头带「按章节」视图的顺序 —— **导出的唯一顺序真相**。章按拍摄时间
+/// (`chapters.start_at, id`,与 [`get_storyboard`] 同一条 ORDER BY),未分章/章已删的排最后,
+/// 章内按 `story_order.position`。素材包、原生草稿、导出片段三条路都从这里取顺序
+/// (经 `deliver::selected_clips` 重排),不再各自按挑选先后(`position` 的全局序)走 ——
+/// 两次自动挑选、后一批拍得更早时,`position` 全局序与镜头带画的顺序会对不上。
+/// 只含已排进镜头带的镜(`position` 非空);候选不在带上,不在这里。
+pub(crate) fn ordered_band_items(connection: &Connection) -> Result<Vec<BandItemRef>> {
+    let episode_id = active_episode_id(connection)?;
+    let mut statement = connection.prepare(
+        "SELECT story.item_kind, story.clip_id, story.segment_id, chapter.id
+         FROM story_order story
+         JOIN clips c ON c.id = story.clip_id
+         LEFT JOIN chapters chapter
+           ON chapter.id = c.chapter_id
+          AND chapter.tombstone = 0
+          AND chapter.episode_id = ?1
+         WHERE story.tombstone = 0
+           AND story.episode_id = ?1
+           AND c.missing_since IS NULL
+         ORDER BY chapter.id IS NULL, chapter.start_at, chapter.id,
+                  story.position, story.id",
+    )?;
+    let rows = statement.query_map([episode_id], |row| {
+        let item_kind: String = row.get(0)?;
+        let clip_id: i64 = row.get(1)?;
+        let segment_id: Option<i64> = row.get(2)?;
+        Ok(BandItemRef {
+            key: story_key(&item_kind, clip_id, segment_id),
+            item_kind,
+            clip_id,
+            segment_id,
+            chapter_id: row.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CoreError::from)
+}
+
+pub(crate) fn active_episode_id(connection: &Connection) -> Result<i64> {
     connection
         .query_row(
             "SELECT id FROM episodes WHERE status = 'active'",
@@ -1083,7 +1151,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(titles, vec!["第1段·10:00-10:00", "第2段·10:45-10:45"]);
+        assert_eq!(titles, vec!["第 1 章 · 10:00-10:00", "第 2 章 · 10:45-10:45"]);
     }
 
     #[test]
@@ -1144,6 +1212,36 @@ mod tests {
         let storyboard = get_storyboard(&connection).unwrap();
         assert_eq!(storyboard.items[0].clip_id, second);
         assert_eq!(storyboard.candidates[0].clip_id, first);
+    }
+
+    /// V14-01:两章、挑选顺序与章节顺序相反 —— 带上的顺序是「早章在前、章内按 position」,
+    /// 与 `story_order.position` 的全局序不同;三条导出都必须走这一份。
+    #[test]
+    fn ordered_band_items_follow_chapter_time_then_position_not_pick_order() {
+        let (_directory, mut connection) = setup();
+        let late_a = insert_clip(&connection, "late_a.mov", "2026-08-31T14:00:00Z", None, true);
+        let late_b = insert_clip(&connection, "late_b.mov", "2026-08-31T14:10:00Z", None, true);
+        let early = insert_clip(&connection, "early.mov", "2026-08-31T09:00:00Z", None, true);
+        let candidate = insert_clip(&connection, "candidate.mov", "2026-08-31T09:30:00Z", None, true);
+        chapterize(&mut connection).unwrap();
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert_eq!(storyboard.chapters.len(), 2, "{:?}", storyboard.chapters);
+        // 挑选先后:先挑了晚章的两条,再挑早章的一条(position 0/1/2)。
+        let whole = |clip_id| StoryOrderRef { item_kind: "whole".to_owned(), clip_id, segment_id: None };
+        set_story_order(&mut connection, &[whole(late_b), whole(late_a), whole(early)]).unwrap();
+
+        let ordered = ordered_band_items(&connection).unwrap();
+        assert_eq!(
+            ordered.iter().map(|item| item.clip_id).collect::<Vec<_>>(),
+            vec![early, late_b, late_a],
+            "早章在前;晚章内按 position(late_b 先于 late_a)"
+        );
+        assert_eq!(ordered[0].key, format!("whole:{early}"));
+        assert_eq!(ordered[0].chapter_id, Some(storyboard.chapters[0].id));
+        assert!(
+            !ordered.iter().any(|item| item.clip_id == candidate),
+            "没排进镜头带的候选不在带序里"
+        );
     }
 
     fn star_rate(connection: &Connection, clip_id: i64, stars: i64, at: &str) {
@@ -1257,6 +1355,16 @@ mod tests {
         assert!(storyboard.candidates.is_empty());
         assert_eq!(storyboard.chapters.len(), 1);
         assert!(storyboard.chapters.iter().all(|chapter| chapter.id != archived_chapter));
+        // Z-14:只读查看已封存集时按被查看的集取镜头带——章与镜都是那一集的,不是当前集的。
+        let viewed = get_storyboard_for(&connection, Some(first_episode)).unwrap();
+        assert_eq!(viewed.items.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![archived_clip]);
+        assert_eq!(viewed.chapters.iter().map(|chapter| chapter.id).collect::<Vec<_>>(), vec![archived_chapter]);
+        assert_eq!(
+            get_storyboard_for(&connection, None).unwrap().items.iter().map(|item| item.clip_id).collect::<Vec<_>>(),
+            vec![active_clip],
+            "不传集 id 仍是当前集"
+        );
+        assert!(crate::core::story_gap::list_for(&connection, Some(first_episode)).unwrap().is_empty());
         assert!(rename_chapter(&mut connection, archived_chapter, "越权改名").is_err());
         assert!(set_story_order(
             &mut connection,
@@ -1324,7 +1432,7 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(captured_at, "2026-08-31T13:31:00Z");
-        assert_eq!(title, "第1段·14:31-14:31");
+        assert_eq!(title, "第 1 章 · 14:31-14:31");
     }
 
     #[test]

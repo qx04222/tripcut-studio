@@ -106,6 +106,21 @@ pub enum PlayerCommand {
     /// pass the merged `clips.rotation` value here — that would add this
     /// rotation on top of mpv's own, doubling it for the common case.
     SetRotation { degrees: Option<i64> },
+    /// R12 §5 真变速:mpv 的 `speed` 属性,夹紧到 `PLAYBACK_SPEED_MIN..=PLAYBACK_SPEED_MAX`。
+    /// mpv 不支持负速,反向由前端用 `StepBack` 定时回退实现,不经这里。
+    SetSpeed { speed: f64 },
+}
+
+/// 真变速的夹紧范围(R12 §5:0.25–4×)。
+pub const PLAYBACK_SPEED_MIN: f64 = 0.25;
+pub const PLAYBACK_SPEED_MAX: f64 = 4.0;
+
+/// NaN / ±∞ 返回 None(不能交给 mpv);其余夹紧到支持范围。
+pub fn clamp_playback_speed(speed: f64) -> Option<f64> {
+    if !speed.is_finite() {
+        return None;
+    }
+    Some(speed.clamp(PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_MAX))
 }
 
 /// mpv's `vf` label for the preview LUT filter — `vf remove @tripcut-lut`
@@ -121,6 +136,7 @@ enum MpvCall {
     Command(&'static str, Vec<String>),
     SetPropertyInt(&'static str, i64),
     SetPropertyBool(&'static str, bool),
+    SetPropertyF64(&'static str, f64),
 }
 
 fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
@@ -146,6 +162,11 @@ fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
             vec![MpvCall::SetPropertyInt("aid", stream_index + 1)]
         }
         PlayerCommand::SetMute { muted } => vec![MpvCall::SetPropertyBool("mute", muted)],
+        PlayerCommand::SetSpeed { speed } => {
+            let clamped = clamp_playback_speed(speed)
+                .ok_or_else(|| format!("播放速度不是有限数：{speed}"))?;
+            vec![MpvCall::SetPropertyF64("speed", clamped)]
+        }
         PlayerCommand::SetRotation { degrees } => match degrees {
             Some(90) | Some(180) | Some(270) => {
                 vec![MpvCall::SetPropertyInt("video-rotate", degrees.expect("matched Some above"))]
@@ -177,6 +198,9 @@ fn apply_mpv_call(mpv: &Mpv, call: MpvCall) -> Result<(), String> {
             .set_property(name, value)
             .map_err(|error| format!("设置 {name} 失败：{error}")),
         MpvCall::SetPropertyBool(name, value) => mpv
+            .set_property(name, value)
+            .map_err(|error| format!("设置 {name} 失败：{error}")),
+        MpvCall::SetPropertyF64(name, value) => mpv
             .set_property(name, value)
             .map_err(|error| format!("设置 {name} 失败：{error}")),
     }
@@ -1179,6 +1203,7 @@ fn execute_command(
         | PlayerCommand::ClearDisplayLut
         | PlayerCommand::SelectAudioTrack { .. }
         | PlayerCommand::SetMute { .. }
+        | PlayerCommand::SetSpeed { .. }
         | PlayerCommand::SetRotation { .. }) => {
             for call in mpv_calls_for(command)? {
                 apply_mpv_call(mpv, call)?;
@@ -1566,6 +1591,53 @@ mod tests {
         // side_data case, so an unconditional call here would double it.
         assert!(mpv_calls_for(PlayerCommand::SetRotation { degrees: None }).unwrap().is_empty());
         assert!(mpv_calls_for(PlayerCommand::SetRotation { degrees: Some(0) }).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_speed_command_contract_is_tagged_and_snake_case() {
+        let command: PlayerCommand =
+            serde_json::from_str(r#"{"type":"set_speed","speed":2.0}"#).unwrap();
+        assert_eq!(command, PlayerCommand::SetSpeed { speed: 2.0 });
+    }
+
+    #[test]
+    fn mpv_calls_for_set_speed_sets_the_speed_property_and_clamps_to_the_supported_range() {
+        // R12 §5:真变速走 mpv 的 `speed` 属性;前端的 L 循环只会发 1/2/4,但菜单和
+        // 未来的调用方可能发别的值 —— 0.25–4.0 之外一律夹紧,不让 mpv 收到 0 或负数。
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetSpeed { speed: 2.0 }).unwrap(),
+            vec![MpvCall::SetPropertyF64("speed", 2.0)]
+        );
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetSpeed { speed: 0.5 }).unwrap(),
+            vec![MpvCall::SetPropertyF64("speed", 0.5)]
+        );
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetSpeed { speed: 16.0 }).unwrap(),
+            vec![MpvCall::SetPropertyF64("speed", PLAYBACK_SPEED_MAX)]
+        );
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetSpeed { speed: 0.0 }).unwrap(),
+            vec![MpvCall::SetPropertyF64("speed", PLAYBACK_SPEED_MIN)]
+        );
+        assert_eq!(
+            mpv_calls_for(PlayerCommand::SetSpeed { speed: -2.0 }).unwrap(),
+            vec![MpvCall::SetPropertyF64("speed", PLAYBACK_SPEED_MIN)]
+        );
+    }
+
+    #[test]
+    fn mpv_calls_for_set_speed_rejects_nan_and_infinite() {
+        assert!(mpv_calls_for(PlayerCommand::SetSpeed { speed: f64::NAN }).is_err());
+        assert!(mpv_calls_for(PlayerCommand::SetSpeed { speed: f64::INFINITY }).is_err());
+    }
+
+    #[test]
+    fn clamp_playback_speed_bounds() {
+        assert_eq!(clamp_playback_speed(1.0), Some(1.0));
+        assert_eq!(clamp_playback_speed(0.1), Some(PLAYBACK_SPEED_MIN));
+        assert_eq!(clamp_playback_speed(8.0), Some(PLAYBACK_SPEED_MAX));
+        assert_eq!(clamp_playback_speed(f64::NAN), None);
     }
 
     #[test]

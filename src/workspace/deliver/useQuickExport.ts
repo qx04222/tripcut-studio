@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelExport,
   getSettings,
-  pickExportFolder,
+  pickQuickExportFolder,
   planQuickExport,
   quickExport,
   revealExport,
@@ -10,8 +10,9 @@ import {
   type QuickExportOutcome,
   type QuickExportSelection,
 } from "../../api";
+import { showToast } from "../ui/Toast";
 import { readUiSetting } from "../uiSettings";
-import { isDestUnavailable, isQuickDone, takePendingQuickSelection } from "./quickExportModel";
+import { exportDoneToast, failedClipIds, isDestUnavailable, isQuickDone, takePendingQuickSelection } from "./quickExportModel";
 import type { ExportProgress } from "./useExportProgress";
 
 export const LAST_DIR_KEY = "ui.export.last_dir";
@@ -36,6 +37,8 @@ export interface QuickExport {
   /** 本次导出已完成(toast 用);job 是本次启动的那一个。 */
   done: boolean;
   reveal(): Promise<void>;
+  /** R12 §6:只把上一次没导出来的那几条再导一遍(同一文件夹)。没有失败项时是 no-op。 */
+  retryFailed(): Promise<void>;
 }
 
 /**
@@ -100,18 +103,50 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     void setSetting(LAST_DIR_KEY, dir).catch(() => undefined);
   }, []);
 
-  const start = useCallback(
-    async (dir: string) => {
-      const outcome = await quickExport(dir, selection);
+  const startWith = useCallback(
+    async (dir: string, picked: QuickExportSelection | null) => {
+      const outcome = await quickExport(dir, picked);
       remember(dir);
       setStartedJobId(outcome.job_id);
       setJobId(outcome.job_id);
       await refresh().catch(() => undefined);
     },
-    [refresh, remember, selection, setJobId],
+    [refresh, remember, setJobId],
   );
+  const start = useCallback((dir: string) => startWith(dir, selection), [selection, startWith]);
 
-  const canExport = !busy && !active && status.selected_count > 0 && planError === null;
+  // R12 §3:本次导出结束时给一条全局 toast(每个 job 只报一次)——全成功「n 个导好了 · 在 Finder 中显示」,
+  // 部分失败「n 个导好了,m 个没导出来 · 只重试这 m 个」(重试 = 用失败项的素材 id 再跑一次 quick_export),
+  // 整体失败「导出没成功:原因。再试一次」。抽屉里的结果卡照旧,toast 是给关了抽屉的人看的。
+  const announcedJob = useRef<number | null>(null);
+  useEffect(() => {
+    if (startedJobId === null || status.job_id !== startedJobId || announcedJob.current === startedJobId) return;
+    if (status.status === "done") {
+      announcedJob.current = startedJobId;
+      const failed = failedClipIds(status);
+      const jobId = startedJobId;
+      showToast(exportDoneToast(status), {
+        tone: failed.length > 0 ? "neutral" : "success",
+        action:
+          failed.length > 0
+            ? {
+                label: `只重试这 ${status.failed_items} 个`,
+                onClick: () => {
+                  if (!lastDir) return;
+                  void startWith(lastDir, { clip_ids: failed }).catch((failure) => showToast(`重试没成功:${String(failure)}。再试一次`, { tone: "danger" }));
+                },
+              }
+            : { label: "在 Finder 中显示", onClick: () => void revealExport(jobId).catch(() => undefined) },
+      });
+    } else if (status.status === "failed" || status.status === "blocked") {
+      announcedJob.current = startedJobId;
+      showToast(`导出没成功:${status.error ?? "没有写出任何文件"}。再试一次`, { tone: "danger" });
+    }
+  }, [lastDir, startWith, startedJobId, status]);
+
+  // Z-07:清单里有原片不在原位的素材就不放行(后端也会拒绝;这里先把按钮关掉并给出路)。
+  const hasMissing = (plan?.missing?.length ?? 0) > 0;
+  const canExport = !busy && !active && status.selected_count > 0 && planError === null && !hasMissing;
 
   const exportNow = useCallback(async () => {
     if (!canExport) return;
@@ -120,7 +155,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     try {
       let dir = lastDir;
       if (!dir) {
-        dir = await pickExportFolder();
+        dir = await pickQuickExportFolder();
         if (!dir) return;
       }
       try {
@@ -128,7 +163,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
       } catch (startError) {
         if (!isDestUnavailable(startError)) throw startError;
         // 上次的文件夹不见了 / 不可写:回落到保存面板,选了就用新的并记住。
-        const picked = await pickExportFolder();
+        const picked = await pickQuickExportFolder();
         if (!picked) {
           setError("上次的文件夹现在用不了。点「更改文件夹…」换一个再导出。");
           return;
@@ -145,7 +180,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
   const changeFolder = useCallback(async () => {
     setError(null);
     try {
-      const picked = await pickExportFolder();
+      const picked = await pickQuickExportFolder();
       if (picked) remember(picked);
     } catch (failure) {
       setError(String(failure));
@@ -162,6 +197,28 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
       setError(String(failure));
     }
   }, [refresh, status.job_id]);
+
+  const retryFailed = useCallback(async () => {
+    const clipIds = failedClipIds(status);
+    if (clipIds.length === 0 || busy || active) return;
+    const dir = lastDir ?? status.output_path;
+    if (!dir) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Z-11:带上上一次作业 id,后端写回同一个文件夹、沿用原编号(不再另开 -2 从 001 重排)。
+      const retrySelection = status.job_id === null ? { clip_ids: clipIds } : { clip_ids: clipIds, retry_of_job_id: status.job_id };
+      setSelection(retrySelection);
+      const outcome = await quickExport(dir, retrySelection);
+      setStartedJobId(outcome.job_id);
+      setJobId(outcome.job_id);
+      await refresh().catch(() => undefined);
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }, [active, busy, lastDir, refresh, setJobId, status]);
 
   const reveal = useCallback(async () => {
     if (status.job_id === null) return;
@@ -203,5 +260,6 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     cancel,
     done: isQuickDone(status, startedJobId),
     reveal,
+    retryFailed,
   };
 }

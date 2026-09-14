@@ -429,7 +429,7 @@ fn find_on_path(name: &str) -> Option<OsString> {
 fn missing_model_message(tier: &str) -> String {
     let model_file = super::settings::model_file_for_tier(tier);
     format!(
-        "缺少 Whisper 模型；请从 huggingface 的 ggerganov/whisper.cpp 下载 {model_file}，放到 ~/Library/Application Support/TripCutStudio/models/，或设置 WHISPER_MODEL。"
+        "缺少转写模型；请到 设置 → 工具与模型 按提示下载 {model_file} 并导入，或放到 ~/Library/Application Support/TripCutStudio/models/。"
     )
 }
 
@@ -1023,11 +1023,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_model_blocked_copy_names_huggingface_and_default_model() {
+    fn missing_model_blocked_copy_points_to_settings_and_names_default_model() {
+        // R12 术语 v2:文案指向 设置 → 工具与模型(那里有下载地址与导入按钮),不再让用户自己去 huggingface。
         let message = missing_model_message(DEFAULT_MODEL_TIER);
-        assert!(message.contains("huggingface"));
+        assert!(message.contains("工具与模型"));
         assert!(message.contains("ggml-large-v3-turbo.bin"));
-        assert!(message.contains("WHISPER_MODEL"));
+        assert!(!message.contains("huggingface") && !message.contains("WHISPER_MODEL"), "{message}");
     }
 
     #[test]

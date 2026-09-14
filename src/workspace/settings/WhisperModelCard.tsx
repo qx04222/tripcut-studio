@@ -61,7 +61,7 @@ export function WhisperModelCard({ component, busy, onImported }: WhisperModelCa
   };
 
   return (
-    <div className="settings-sheet-readout settings-whisper-model" role="group" aria-label="Whisper 模型文件">
+    <div className="settings-sheet-readout settings-whisper-model" role="group" aria-label="转写模型文件">
       <dl className="settings-whisper-model-facts">
         <div>
           <dt>官方下载地址</dt>
@@ -89,7 +89,7 @@ export function WhisperModelCard({ component, busy, onImported }: WhisperModelCa
         <Button size="sm" disabled={busy} busy={importing} onClick={() => void onImport()}>
           {importing ? "正在校验并导入…" : "导入模型文件…"}
         </Button>
-        <small>浏览器下载后在这里选中文件即可；应用会核对 SHA-256 再复制进 models 目录，源文件不动（大文件算摘要要几秒）。</small>
+        <small>浏览器下载后在这里选中文件即可；应用会核对校验码再复制进模型目录，源文件不动（大文件算摘要要几秒）。</small>
       </div>
       {error ? (
         <p className="settings-sheet-inline-notice is-error" role="alert">

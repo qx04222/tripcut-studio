@@ -33,6 +33,7 @@ const apiMocks = vi.hoisted(() => ({
   listStoryTemplates: vi.fn().mockResolvedValue([]),
   autoSelectEpisode: vi.fn(),
   undoAutoSelect: vi.fn(),
+  getMomentsProgress: vi.fn(),
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -40,8 +41,11 @@ vi.mock("../api", async (importOriginal) => ({
 }));
 
 import type { ClipListItem, Storyboard, StoryItem } from "../api";
-import { AUTO_SELECT_FALLBACK_BUDGET_SECS, autoSelectToast, platformBudgetSecs } from "./BandAutoSelect";
+import { AUTO_SELECT_FALLBACK_BUDGET_SECS, autoSelectToast, defaultScopeFor, platformBudgetSecs } from "./BandAutoSelect";
 import { ShotBand } from "./ShotBand";
+// R12 §3:提示改走全局 Toast(壳里挂一次的 ToastHost);单独渲染镜头带时得自己带上宿主。
+import { ToastHost } from "./ui/Toast";
+import { __resetToastsForTests } from "./ui/toastStore";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 
@@ -108,6 +112,7 @@ const board: Storyboard = {
 };
 
 beforeEach(() => {
+  __resetToastsForTests();
   __resetClipsFeedForTests();
   __resetWorkspaceForTests();
   for (const mock of Object.values(apiMocks)) mock.mockClear();
@@ -123,13 +128,14 @@ beforeEach(() => {
     { platform: "douyin", display_name: "抖音", portrait: [1080, 1920], landscape: [1920, 1080], duration_budget_ticks: 45_000, tb_num: 1, tb_den: 1_000, subtitle_style: {} },
   ]);
   apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-  apiMocks.autoSelectEpisode.mockResolvedValue({ created: [1, 2, 3, 4, 5], total_secs: 31.4, chapters_covered: 3, batch_id: "auto-42" });
+  apiMocks.autoSelectEpisode.mockResolvedValue({ created: [1, 2, 3, 4, 5], total_secs: 31.4, chapters_covered: 3, batch_id: "auto-42", placed: 5, arrange_batch_id: "arr-42" });
   apiMocks.undoAutoSelect.mockResolvedValue(5);
+  apiMocks.getMomentsProgress.mockResolvedValue({ total: 1, done: 1, failed: 0, running: 0, pending: 0 });
 });
 afterEach(cleanup);
 
 async function renderBand(): Promise<void> {
-  render(<ShotBand />);
+  render(<><ShotBand /><ToastHost /></>);
   await screen.findByRole("gridcell", { name: "镜头 1：A.MP4" });
 }
 
@@ -162,10 +168,13 @@ describe("R11 §1.2:镜头带工具条「自动挑选精选段」", () => {
     expect(apiMocks.autoSelectEpisode).toHaveBeenCalledWith({ scope: "favorites_or_rated3", budgetSecs: 45 });
     const toast = await screen.findByRole("status");
     expect(toast.textContent).toContain("已挑选 5 段 · 共 31 s · 覆盖 3 章");
+    // R12 §2:挑完默认已排进镜头带,toast 里说出来;旧后端没有 placed 时提示去点「一键排入」。
+    expect(toast.textContent).toContain("已排进镜头带");
     expect(screen.queryByRole("group", { name: "自动挑选精选段" })).toBeNull();
     fireEvent.click(within(toast).getByRole("button", { name: "撤销" }));
     await waitFor(() => expect(apiMocks.undoAutoSelect).toHaveBeenCalledWith("auto-42"));
-    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    // 撤销成功后换成一条「已撤销这批挑选」。
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已撤销这批挑选"));
   });
 
   it("改范围与预算后按原样传给后端;出错时 toast 说清楚且没有「撤销」", async () => {
@@ -177,6 +186,8 @@ describe("R11 §1.2:镜头带工具条「自动挑选精选段」", () => {
     await waitFor(() => expect(budget.value).toBe("45"));
     fireEvent.change(budget, { target: { value: "60" } });
     apiMocks.autoSelectEpisode.mockRejectedValue(new Error("没有时刻分"));
+    // X-02:「等分析跑完」只在分析真没跑完时才说(问 get_moments_progress)。
+    apiMocks.getMomentsProgress.mockResolvedValue({ total: 3, done: 1, failed: 0, running: 1, pending: 1 });
     await act(async () => {
       fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
       await Promise.resolve();
@@ -186,5 +197,88 @@ describe("R11 §1.2:镜头带工具条「自动挑选精选段」", () => {
     // R11 简化专项 #5:「动作没成功:原因。下一步」。
     expect(toast.textContent).toContain("自动挑选没成功:没有时刻分。先让画面分析跑完,再试一次");
     expect(within(toast).queryByRole("button", { name: "撤销" })).toBeNull();
+  });
+
+  it("X-02:分析已完成时不再劝「等分析跑完」;后端已给下一步(rating failed: 前缀剥掉)就不再追加兜底话", async () => {
+    await renderBand();
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const panel = screen.getByRole("group", { name: "自动挑选精选段" });
+    apiMocks.autoSelectEpisode.mockRejectedValue(new Error("rating failed: 这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」"));
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
+      await Promise.resolve();
+    });
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("自动挑选没成功:这个范围里没有可挑的素材:先收藏几条或给素材打星,或把范围改成「全部」");
+    expect(toast.textContent).not.toContain("failed");
+    expect(toast.textContent).not.toContain("分析");
+    expect(toast.textContent).not.toContain("再试一次");
+  });
+});
+
+describe("X-01(R12 验收 P1):全新库也要一键出结果", () => {
+  it("默认 chip 按库状态推导:0 收藏且 0 打星 → 「全部素材」预选,发给后端的就是 all", async () => {
+    expect(defaultScopeFor([clip])).toBe("favorites_or_rated3");
+    expect(defaultScopeFor([{ ...clip, binary_rating: null, star_rating: 2 }])).toBe("all");
+    expect(defaultScopeFor([{ ...clip, binary_rating: null, star_rating: 3 }])).toBe("favorites_or_rated3");
+    expect(defaultScopeFor([])).toBe("all");
+
+    apiMocks.listClips.mockResolvedValue([{ ...clip, binary_rating: null, star_rating: null }]);
+    await renderBand();
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const panel = screen.getByRole("group", { name: "自动挑选精选段" });
+    const scopes = within(panel).getByRole("group", { name: "挑选范围" });
+    expect(within(scopes).getByRole("button", { name: "全部素材" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(scopes).getByRole("button", { name: "收藏 + 3 星以上" }).getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
+      await Promise.resolve();
+    });
+    expect(apiMocks.autoSelectEpisode).toHaveBeenCalledWith(expect.objectContaining({ scope: "all" }));
+  });
+
+  it("Y-03:前端预选「全部素材」而后端没降级时,toast 同样说清「你还没收藏或打星,已按全部素材挑了 n 段」并带「撤销」", async () => {
+    apiMocks.listClips.mockResolvedValue([{ ...clip, binary_rating: null, star_rating: null }]);
+    apiMocks.autoSelectEpisode.mockResolvedValue({ created: [1, 2, 3, 4], total_secs: 28, chapters_covered: 1, batch_id: "auto-44", placed: 4, arrange_batch_id: "arr-44", scope_used: "all", fell_back: false });
+    await renderBand();
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const panel = screen.getByRole("group", { name: "自动挑选精选段" });
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
+      await Promise.resolve();
+    });
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("你还没收藏或打星,已按全部素材挑了 4 段 · 共 28 s · 覆盖 1 章 · 已排进镜头带");
+    expect(within(toast).getByRole("button", { name: "撤销" })).toBeTruthy();
+  });
+
+  it("Y-03:库里有收藏时用户自己点「全部素材」,不说「你还没收藏或打星」", async () => {
+    apiMocks.autoSelectEpisode.mockResolvedValue({ created: [1, 2], total_secs: 10, chapters_covered: 1, batch_id: "auto-45", placed: 2, arrange_batch_id: "arr-45", scope_used: "all", fell_back: false });
+    await renderBand();
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const panel = screen.getByRole("group", { name: "自动挑选精选段" });
+    fireEvent.click(within(panel).getByRole("button", { name: "全部素材" }));
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
+      await Promise.resolve();
+    });
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("已挑选 2 段");
+    expect(toast.textContent).not.toContain("你还没收藏或打星");
+  });
+
+  it("后端自动降级到「全部」时 toast 说清:「你还没收藏或打星,已按全部素材挑了 n 段 · 撤销」", async () => {
+    apiMocks.autoSelectEpisode.mockResolvedValue({ created: [1, 2, 3, 4], total_secs: 28, chapters_covered: 1, batch_id: "auto-43", placed: 4, arrange_batch_id: "arr-43", scope_used: "all", fell_back: true });
+    await renderBand();
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const panel = screen.getByRole("group", { name: "自动挑选精选段" });
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
+      await Promise.resolve();
+    });
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("你还没收藏或打星,已按全部素材挑了 4 段");
+    expect(toast.textContent).toContain("已排进镜头带");
+    expect(within(toast).getByRole("button", { name: "撤销" })).toBeTruthy();
   });
 });

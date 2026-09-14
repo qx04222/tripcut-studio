@@ -3,9 +3,13 @@ import { useEffect, useRef, type MouseEvent } from "react";
 import {
   HELP_FAQS,
   KEYBOARD_SHORTCUT_GROUPS,
+  PIPELINE_MANUAL,
   SETTINGS_HELP_TOPICS,
   WORKFLOW_STEPS,
+  shortcutKeys,
+  shortcutsById,
 } from "./helpContent";
+import { useKeymap } from "./workspace/keymapStore";
 import { isTopModal, popModal, pushModal } from "./workspace/modalStack";
 
 interface HelpOverlayProps {
@@ -19,6 +23,8 @@ const FOCUSABLE_SELECTOR =
 export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  // R13 §1:键帽随当前键位预设 / 自定义变化。
+  const keymap = useKeymap();
 
   // 帮助层之上还能开命令面板(Cmd+K)。两层的 Esc 监听都挂在 document 上,
   // `stopPropagation()` 管不到同一节点上的兄弟监听,于是一次 Esc 会把两层一起
@@ -87,8 +93,8 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
         <header className="help-dialog-header">
           <div>
             <span>中文帮助</span>
-            <h2 id="help-dialog-title">从一堆旅途素材，到可继续精剪的故事</h2>
-            <p>所有说明都对应本机工作流；快捷键列表直接由界面共用常量生成。</p>
+            <h2 id="help-dialog-title">流水线手册</h2>
+            <p>四步走完就是一集:导入 → 挑选 → 排列 → 导出。顶栏右上角永远有「下一步」。</p>
           </div>
           <button
             className="help-close"
@@ -103,6 +109,41 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
         </header>
 
         <div className="help-dialog-scroll">
+          <section className="help-section pipeline-manual" aria-labelledby="pipeline-manual-title">
+            <div className="help-section-heading">
+              <span>00 · 四步</span>
+              <div>
+                <h3 id="pipeline-manual-title">每一步怎么做</h3>
+                <p>每步三句话,后面跟着这一步用得上的键。</p>
+              </div>
+            </div>
+            <ol className="pipeline-manual-steps">
+              {PIPELINE_MANUAL.map((entry) => (
+                <li className="pipeline-manual-step" key={entry.step} data-pipeline-step={entry.step}>
+                  <div className="pipeline-manual-head">
+                    <span className="pipeline-manual-index" aria-hidden="true">{entry.step}</span>
+                    <strong>{`第 ${entry.step} 步 · ${entry.title}`}</strong>
+                  </div>
+                  <ol className="pipeline-manual-howto">
+                    {entry.howTo.map((line, index) => (
+                      <li key={index}>{line}</li>
+                    ))}
+                  </ol>
+                  <div className="pipeline-manual-keys" aria-label={`第 ${entry.step} 步快捷键`}>
+                    {shortcutsById(entry.shortcutIds).map((shortcut) => (
+                      <span className="pipeline-manual-key" key={shortcut.id}>
+                        <span className="shortcut-keys">
+                          {shortcutKeys(shortcut, keymap.table).map((key) => <kbd key={key}>{key}</kbd>)}
+                        </span>
+                        <small>{shortcut.action}</small>
+                      </span>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+
           <section className="help-section workflow-help" aria-labelledby="workflow-help-title">
             <div className="help-section-heading">
               <span>01 · 界面导览</span>
@@ -148,7 +189,7 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
                     {group.shortcuts.map((shortcut) => (
                       <div className="shortcut-row" key={shortcut.id}>
                         <span className="shortcut-keys">
-                          {shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}
+                          {shortcutKeys(shortcut, keymap.table).map((key) => <kbd key={key}>{key}</kbd>)}
                         </span>
                         <strong>{shortcut.action}</strong>
                         <small>{shortcut.detail}</small>

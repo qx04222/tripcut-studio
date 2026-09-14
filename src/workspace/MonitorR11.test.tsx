@@ -101,7 +101,7 @@ vi.mock("../api", async () => ({ ...(await createTestApiMock()), ...apiMocks }))
 import { Monitor } from "./Monitor";
 import { __resetPlayerPrefsForTests } from "./playerPrefs";
 import { __resetPoolOrderForTests, setPoolOrder } from "./poolOrder";
-import { SHUTTLE_TICK_MS } from "./useMonitorTransport";
+import { REWIND_TICK_MS } from "./useMonitorTransport";
 import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 let liveStatus: PlayerStatus;
@@ -213,7 +213,7 @@ describe("R11 §1.2:热力条与建议段", () => {
     expect(await screen.findByText("已采用建议 1 · 精选段已保存")).toBeTruthy();
   });
 
-  it("选中素材默认从最高分时刻开播(ui.player.start_at_best 默认开);关掉就不跳", async () => {
+  it("选中素材默认停在最高分时刻(ui.player.start_at_best 默认开;R12 起只预览不开播);关掉就不跳", async () => {
     await renderInPane();
     await waitFor(() => expect(commands()).toContainEqual({ type: "seek_abs", seconds: 20 }));
     cleanup();
@@ -242,27 +242,27 @@ describe("R11 §3:播放器更聪明一点", () => {
   // 这一组不看热力:时刻分给空,免得「从最高分开播」把播放头先挪到 20 s。
   beforeEach(() => apiMocks.getClipMoments.mockResolvedValue([]));
 
-  it(", / . 逐帧按素材帧率(25p = 0.04 s),⌥←/→ ±5 s,S 保存当前入出点", async () => {
+  it(", / . 逐帧走原生 step_fwd / step_back(R12 §5;mpv 按素材帧率走),⌥←/→ ±5 s,S 保存当前入出点", async () => {
     apiMocks.suggestSegments.mockResolvedValue([]);
     const region = await renderInPane();
     region.focus();
     apiMocks.playerCommand.mockClear();
     fireEvent.keyDown(region, { key: ".", code: "Period" });
     await flush();
-    expect(commands()).toEqual([{ type: "pause" }, { type: "seek_abs", seconds: 12.54 }]);
+    expect(commands()).toEqual([{ type: "step_fwd" }]);
     apiMocks.playerCommand.mockClear();
     fireEvent.keyDown(region, { key: ",", code: "Comma" });
     await flush();
-    expect(commands().at(-1)).toEqual({ type: "seek_abs", seconds: 12.5 });
+    expect(commands().at(-1)).toEqual({ type: "step_back" });
     apiMocks.playerCommand.mockClear();
-    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true });
+    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", shiftKey: true }); // R13 剪映键位:±5 s 是 ⇧←/→
     await flush();
     expect(commands()).toEqual([{ type: "seek_abs", seconds: 17.5 }]);
-    fireEvent.keyDown(region, { key: "ArrowLeft", code: "ArrowLeft", altKey: true });
+    fireEvent.keyDown(region, { key: "ArrowLeft", code: "ArrowLeft", shiftKey: true });
     await flush();
     expect(commands().at(-1)).toEqual({ type: "seek_abs", seconds: 12.5 });
     fireEvent.keyDown(region, { key: "i", code: "KeyI" });
-    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight" });
+    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true }); // ⌥→ +1 s(裸 → 已是逐帧)
     await flush();
     fireEvent.keyDown(region, { key: "o", code: "KeyO" });
     fireEvent.keyDown(region, { key: "s", code: "KeyS" });
@@ -275,11 +275,13 @@ describe("R11 §3:播放器更聪明一点", () => {
    * 读数就停在旧值直到下一条命令(真机 ⌥→ 后 3 s 不动、按 K 才刷)。逐帧再拿这个旧 pos 算
    * ±1 帧,就在 3.1 ↔ 8.1 之间来回跳。这里的假 mpv 让 seek 迟两次读才落地。
    */
-  it("暂停态 seek:读数等 seek 落地再更新;紧接着的逐帧按真实位置算,不按旧位置", async () => {
+  it("暂停态 seek:读数等 seek 落地再更新;紧接着的逐帧(原生 step)也等位置变了再读", async () => {
     apiMocks.suggestSegments.mockResolvedValue([]);
     let landing: { pos: number; reads: number } | null = null;
     apiMocks.playerCommand.mockImplementation(async (cmd: { type: string; seconds?: number }) => {
       if (cmd.type === "seek_abs") landing = { pos: cmd.seconds ?? 0, reads: 2 };
+      // R12 §5:原生逐帧同样异步落地 —— 从「最后要去的位置」起算一帧,迟两次读才见。
+      if (cmd.type === "step_fwd") landing = { pos: Math.round(((landing?.pos ?? liveStatus.pos) + 0.04) * 1000) / 1000, reads: 2 };
       if (cmd.type === "play") liveStatus = { ...liveStatus, paused: false };
       if (cmd.type === "pause") liveStatus = { ...liveStatus, paused: true };
     });
@@ -297,20 +299,21 @@ describe("R11 §3:播放器更聪明一点", () => {
     region.focus();
     const readout = () => screen.getByLabelText("当前时间码").getAttribute("title");
     expect(readout()).toBe("00:00:12.500");
-    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true });
+    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", shiftKey: true }); // R13 剪映键位:±5 s 是 ⇧←/→
     await waitFor(() => expect(readout()).toBe("00:00:17.500"));
-    // seek 还在路上(旧 pos 12.5)时就按 . :逐帧要从 17.5 起算,不是 12.5。
+    // seek 还在路上(旧 pos 12.5)时就按 . :逐帧交给 mpv 从它真实的位置(22.5)走一帧,前端不算。
     apiMocks.playerCommand.mockClear();
-    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true });
+    fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", shiftKey: true }); // R13 剪映键位:±5 s 是 ⇧←/→
     fireEvent.keyDown(region, { key: ".", code: "Period" });
-    await waitFor(() => expect(commands().filter((cmd) => cmd.type === "seek_abs").map((cmd) => cmd.seconds)).toEqual([22.5, 22.54]));
+    await waitFor(() => expect(commands().map((cmd) => cmd.type)).toEqual(["seek_abs", "step_fwd"]));
+    expect(commands()[0]?.seconds).toBe(22.5);
     await waitFor(() => expect(readout()).toBe("00:00:22.540"));
     // 入点也按落地位置打,不按旧读数。
     fireEvent.keyDown(region, { key: "i", code: "KeyI" });
     expect(screen.getByRole("button", { name: "入点" }).getAttribute("title")).toBe("入点 00:00:22.540");
   });
 
-  it("L 再按 ×2 → ×4(定时 seek 假走带),K 停;J 反向", async () => {
+  it("L 再按 ×2 → ×4(R12 §5:原生 set_speed,不再定时 seek),K 停;J 倒退(定时原生 step_back)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     apiMocks.suggestSegments.mockResolvedValue([]);
     const region = await renderInPane();
@@ -326,20 +329,25 @@ describe("R11 §3:播放器更聪明一点", () => {
     fireEvent.keyDown(region, { key: "l", code: "KeyL" });
     await flush();
     expect(speed.textContent).toBe("×4");
+    expect(commands().at(-1)).toEqual({ type: "set_speed", speed: 4 });
     apiMocks.playerCommand.mockClear();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SHUTTLE_TICK_MS + 5);
+      await vi.advanceTimersByTimeAsync(REWIND_TICK_MS * 3);
     });
-    const tick = commands().find((cmd) => cmd.type === "seek_abs");
-    expect(tick?.seconds).toBeCloseTo(12.5 + 4 * (SHUTTLE_TICK_MS / 1000), 5);
+    expect(commands().filter((cmd) => cmd.type === "seek_abs")).toEqual([]);
     fireEvent.keyDown(region, { key: "k", code: "KeyK" });
     await flush();
     expect(speed.textContent).toBe("×1");
-    expect(commands().at(-1)).toEqual({ type: "pause" });
-    fireEvent.keyDown(region, { key: "j", code: "KeyJ" });
+    expect(commands().at(-1)).toEqual({ type: "set_speed", speed: 1 });
+    expect(commands().at(-2)).toEqual({ type: "pause" });
+    apiMocks.playerCommand.mockClear();
     fireEvent.keyDown(region, { key: "j", code: "KeyJ" });
     await flush();
-    expect(speed.textContent).toBe("◀×2");
+    expect(speed.textContent).toBe("倒退");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REWIND_TICK_MS + 5);
+    });
+    expect(commands()).toEqual([{ type: "pause" }, { type: "step_back" }]);
   });
 
   it("⇧L 循环入出区间:播过出点回入点;保存后循环自动关", async () => {
@@ -364,7 +372,8 @@ describe("R11 §3:播放器更聪明一点", () => {
     expect(screen.queryByText(/循环中/)).toBeNull();
   });
 
-  it("播完自动下一条:顺媒体池可见顺序选下一条;末尾停下;设置关掉不跳", async () => {
+  it("播完自动下一条(R12 起「连播」默认关,这里显式打开):顺媒体池可见顺序选下一条;末尾停下;设置关掉不跳", async () => {
+    apiMocks.getSettings.mockResolvedValue({ "ui.player.auto_advance": "true" });
     apiMocks.suggestSegments.mockResolvedValue([]);
     setPoolOrder([9, 10]);
     await renderInPane();
@@ -396,8 +405,9 @@ describe("R11 §3:播放器更聪明一点", () => {
    * (播放器换源、状态回写有先后),自动下一条不能拿它当「这条播完了」——否则选中一路跑走。
    * 只有先看见这条素材在片中播过、且离手动换素材 ≥ 1 s,片尾才算数。
    */
-  it("手动点卡后 1 s 内、或还没见它播过,片尾都不触发自动下一条;之后正常接力", async () => {
+  it("手动点卡后 1 s 内、或还没见它播过,片尾都不触发自动下一条;之后正常接力(「连播」显式打开)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    apiMocks.getSettings.mockResolvedValue({ "ui.player.auto_advance": "true" });
     apiMocks.suggestSegments.mockResolvedValue([]);
     const clip11: ClipListItem = { ...clip, id: 11, file_name: "clip-11.mov" };
     apiMocks.listClips.mockResolvedValue([clip, clip10, clip11]);

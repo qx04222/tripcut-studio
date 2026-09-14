@@ -394,11 +394,11 @@ fn rollback_with_selfcheck(destination: &Path, self_check: impl Fn(&Path) -> Res
 
 fn component_title(component: &str) -> String {
     match component {
-        "ffmpeg" => "FFmpeg(视频解码与转码)",
-        "ffprobe" => "FFprobe(素材信息探测)",
-        "whisper-cli" => "Whisper(对白转写引擎)",
+        "ffmpeg" => "视频处理组件(FFmpeg)",
+        "ffprobe" => "媒体信息组件(FFprobe)",
+        "whisper-cli" => "转写组件(Whisper)",
         "whisper-model" => "转写模型",
-        "clip-sidecar" => "画面语义搜索(Chinese-CLIP)",
+        "clip-sidecar" => "画面识别组件",
         other => return other.to_owned(),
     }
     .to_owned()
@@ -533,7 +533,7 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
     let (ffmpeg_prev, ffmpeg_prev_version) = previous_of("ffmpeg");
     list.push(ComponentStatus {
         id: "ffmpeg".into(),
-        title: "FFmpeg(视频解码与转码)".into(),
+        title: "视频处理组件(FFmpeg)".into(),
         installed: settings.ffmpeg.available,
         detail: if settings.ffmpeg.available {
             settings.ffmpeg.resolved_path.clone()
@@ -552,7 +552,7 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
     let (ffprobe_prev, ffprobe_prev_version) = previous_of("ffprobe");
     list.push(ComponentStatus {
         id: "ffprobe".into(),
-        title: "FFprobe(素材信息探测)".into(),
+        title: "媒体信息组件(FFprobe)".into(),
         installed: settings.ffprobe.available,
         detail: if settings.ffprobe.available {
             settings.ffprobe.resolved_path.clone()
@@ -571,7 +571,7 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
     let (whisper_cli_prev, whisper_cli_prev_version) = previous_of("whisper-cli");
     list.push(ComponentStatus {
         id: "whisper-cli".into(),
-        title: "Whisper(对白转写引擎)".into(),
+        title: "转写组件(Whisper)".into(),
         installed: settings.whisper.binary.available,
         detail: if settings.whisper.binary.available {
             settings.whisper.binary.resolved_path.clone()
@@ -614,12 +614,12 @@ pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus
     });
     list.push(ComponentStatus {
         id: "clip-sidecar".into(),
-        title: "画面语义搜索(Chinese-CLIP)".into(),
+        title: "画面识别组件".into(),
         installed: settings.clip_sidecar.available && settings.clip_sidecar.service_available,
         detail: if settings.clip_sidecar.available && settings.clip_sidecar.service_available {
             settings.clip_sidecar.note.clone()
         } else {
-            "正式版禁止在线安装 Python 运行环境；等待签名组件包".into()
+            "正式版不在线安装；等待带签名的组件包".into()
         },
         installable: false,
         approx_size_mb: 0,

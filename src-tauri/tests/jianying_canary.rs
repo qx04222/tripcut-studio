@@ -108,6 +108,82 @@ fn key_set(object: &serde_json::Map<String, Value>) -> std::collections::BTreeSe
     object.keys().cloned().collect()
 }
 
+/// 往临时库播一条已收藏的素材,返回连接(生成器读它做草稿输入)。
+fn seed_selected_clip(staging: &TestDirectory) -> rusqlite::Connection {
+    let source = staging.path.join("selected.mov");
+    fs::write(&source, b"jianying canary source bytes").unwrap();
+    let (quick_hash, byte_size) = import::quick_fingerprint(&source).unwrap();
+    let mut connection = db::open_project(&staging.db_path()).unwrap();
+    connection
+        .execute("INSERT INTO volumes(uuid) VALUES ('canary-volume')", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO clips(
+                volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
+                duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                imported_at, episode_id
+             ) VALUES (
+                'canary-volume', ?1, ?2, ?3, 1, 1000, 1000, 30, 1, 0,
+                'h264', 1920, 1080, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                (SELECT id FROM episodes WHERE status='active')
+             )",
+            params![source.to_string_lossy(), byte_size as i64, quick_hash],
+        )
+        .unwrap();
+    let clip_id = connection.last_insert_rowid();
+    ratings::rate_clip(&mut connection, clip_id, "binary", 1).unwrap();
+    connection
+}
+
+/// R14 §9 A 真机烟测:装的是「待人眼验证」版本时,走试验开关 —— 真读 Info.plist 的版本、
+/// 真跑 `availability` + `generate_native_draft(force = true)`,草稿落到临时
+/// `TRIPCUT_JIANYING_DRAFT_ROOT`(绝不写业主的 `~/Movies/JianyingPro/`),断言:
+/// 不 force 被拒、force 成功且 `experimental`、目录名带「试验」+ 时间戳、`draft_info.json`
+/// 顶层 / materials 键集与 11.3.0 金样逐键相等、连生成两次不撞名不覆盖。
+fn force_smoke_for_pending_version(installed_version: &str) {
+    let staging = TestDirectory::new("force");
+    let draft_root = staging.path.join("drafts");
+    fs::create_dir_all(&draft_root).unwrap();
+    let mut connection = seed_selected_clip(&staging);
+
+    // SAFETY(测试专用):本 crate 的这个测试文件只有一个 #[test],没有并发写环境变量。
+    unsafe {
+        std::env::set_var("TRIPCUT_JIANYING_DRAFT_ROOT", &draft_root);
+    }
+    let availability = jianying::availability(&connection);
+    let refused = jianying::generate_native_draft(&mut connection, false);
+    let first = jianying::generate_native_draft(&mut connection, true);
+    let second = jianying::generate_native_draft(&mut connection, true);
+    unsafe {
+        std::env::remove_var("TRIPCUT_JIANYING_DRAFT_ROOT");
+    }
+
+    assert_eq!(availability.installed_version.as_deref(), Some(installed_version));
+    assert!(!availability.usable && availability.force_allowed, "待验证版本应 usable=false、force_allowed=true:{availability:?}");
+    assert!(refused.is_err(), "不 force 时待验证版本必须被拒");
+    let first = first.unwrap_or_else(|error| panic!("force 生成失败：{error}"));
+    let second = second.unwrap_or_else(|error| panic!("第二次 force 生成失败：{error}"));
+    assert!(first.experimental && second.experimental);
+    assert_eq!(first.jianying_version, installed_version);
+    assert!(first.draft_name.contains("试验"), "目录名应带「试验」：{}", first.draft_name);
+    assert_ne!(first.draft_path, second.draft_path, "两次 force 必须是两个新目录");
+    assert!(Path::new(&first.draft_path).is_dir() && Path::new(&second.draft_path).is_dir());
+    assert!(Path::new(&first.draft_path).starts_with(&draft_root), "草稿必须落在临时根下：{}", first.draft_path);
+
+    let written: Value = serde_json::from_slice(&fs::read(Path::new(&first.draft_path).join("draft_info.json")).unwrap()).unwrap();
+    let (golden_top, golden_materials) = jianying::golden_key_sets();
+    assert_eq!(key_set(written.as_object().unwrap()), golden_top, "顶层键集与 11.3.0 金样不一致");
+    assert_eq!(key_set(written["materials"].as_object().unwrap()), golden_materials, "materials 键集与 11.3.0 金样不一致");
+    println!(
+        "R14 force 烟测通过:剪映 {installed_version} · 草稿 {} 与 {} · 顶层 {} 键 / materials {} 键均与金样一致",
+        first.draft_name,
+        second.draft_name,
+        golden_top.len(),
+        golden_materials.len()
+    );
+}
+
 #[test]
 fn jianying_canary_against_live_environment() {
     // (a) 安装版本必须在白名单里。
@@ -117,8 +193,9 @@ fn jianying_canary_against_live_environment() {
     };
     if jianying::JIANYING_VERSIONS_PENDING_HUMAN_CHECK.contains(&installed_version.as_str()) {
         println!(
-            "WARN: 已安装剪映 {installed_version} 在待人眼验证名单中(草稿文件已加密,键集比对不可行)——业主需在剪映里打开一次 TripCut 草稿确认;跳过金丝雀"
+            "WARN: 已安装剪映 {installed_version} 在待人眼验证名单中(草稿文件已加密,键集比对不可行)——业主需在剪映里打开一次 TripCut 草稿确认;金丝雀改跑 R14 试验开关(force)烟测"
         );
+        force_smoke_for_pending_version(&installed_version);
         return;
     }
     assert!(
@@ -190,30 +267,7 @@ fn jianying_canary_against_live_environment() {
     let draft_root = staging.path.join("drafts");
     fs::create_dir_all(&draft_root).unwrap();
 
-    let source = staging.path.join("selected.mov");
-    fs::write(&source, b"jianying canary source bytes").unwrap();
-    let (quick_hash, byte_size) = import::quick_fingerprint(&source).unwrap();
-
-    let mut connection = db::open_project(&staging.db_path()).unwrap();
-    connection
-        .execute("INSERT INTO volumes(uuid) VALUES ('canary-volume')", [])
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO clips(
-                volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
-                duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
-                imported_at, episode_id
-             ) VALUES (
-                'canary-volume', ?1, ?2, ?3, 1, 1000, 1000, 30, 1, 0,
-                'h264', 1920, 1080, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                (SELECT id FROM episodes WHERE status='active')
-             )",
-            params![source.to_string_lossy(), byte_size as i64, quick_hash],
-        )
-        .unwrap();
-    let clip_id = connection.last_insert_rowid();
-    ratings::rate_clip(&mut connection, clip_id, "binary", 1).unwrap();
+    let mut connection = seed_selected_clip(&staging);
 
     // SAFETY(测试专用): std::env::set_var 在多线程测试里通常不安全，但这个
     // crate 里 jianying_canary.rs 只含这一个 #[test] 函数，不存在并发写同一个
@@ -221,7 +275,7 @@ fn jianying_canary_against_live_environment() {
     unsafe {
         std::env::set_var("TRIPCUT_JIANYING_DRAFT_ROOT", &draft_root);
     }
-    let result = jianying::generate_native_draft(&mut connection);
+    let result = jianying::generate_native_draft(&mut connection, false);
     unsafe {
         std::env::remove_var("TRIPCUT_JIANYING_DRAFT_ROOT");
     }

@@ -9,6 +9,7 @@ import { AiDescriptionSection } from "./inspectorFields";
 import { CollapsibleSection, DimensionsGrid } from "./InspectorSections";
 import { openSettings } from "./openSettings";
 import { Icon, type IconName } from "./ui";
+import { INSPECTOR_TITLES } from "./copy";
 
 function sectionIcon(id: InspectorSectionId): IconName {
   return INSPECTOR_SECTIONS.find((section) => section.id === id)?.icon ?? "info";
@@ -53,9 +54,9 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
     },
     {
       id: "dimensions",
-      title: "八维评分",
+      title: INSPECTOR_TITLES.dimensions,
       node: (
-        <CollapsibleSection key="dimensions" id="dimensions" icon={sectionIcon("dimensions")} title="八维评分" status={sectionStatusText("dimensions", ctx)}>
+        <CollapsibleSection key="dimensions" id="dimensions" icon={sectionIcon("dimensions")} title={INSPECTOR_TITLES.dimensions} status={sectionStatusText("dimensions", ctx)}>
           <DimensionsGrid dimensions={clipDimensions} onTimeStageChange={props.onTimeStageChange} />
         </CollapsibleSection>
       ),
@@ -78,9 +79,9 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
     },
     {
       id: "audio",
-      title: "音轨与 LUT",
+      title: INSPECTOR_TITLES.audio,
       node: (
-        <CollapsibleSection key="audio" id="audio" icon={sectionIcon("audio")} title="音轨与 LUT" status={sectionStatusText("audio", ctx)}>
+        <CollapsibleSection key="audio" id="audio" icon={sectionIcon("audio")} title={INSPECTOR_TITLES.audio} status={sectionStatusText("audio", ctx)}>
           <div className="inspector-audio-scope">
             <TechCheckPanel clip={clip} readOnly={false} hideTitle onCountChange={props.onAudioCount} />
           </div>

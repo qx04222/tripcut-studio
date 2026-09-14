@@ -1,5 +1,8 @@
 import { useEffect } from "react";
 
+import { KEYMAP_ACTION_BY_ID, lookupAction, type KeymapIndex } from "./keymap";
+import { getKeymap } from "./keymapStore";
+import { isHomeOpen } from "./homeStore";
 import { isAnyModalOpen } from "./modalStack";
 import {
   dispatchWorkspace,
@@ -10,7 +13,7 @@ import {
 } from "./WorkspaceStore";
 
 /**
- * 规格 §3.2 的全局键位表。判定与副作用分开:`globalHotkeyIntent` 是纯函数
+ * 规格 §3.2 的全局键位。判定与副作用分开:`globalHotkeyIntent` 是纯函数
  * (一次按键该做什么),`useGlobalHotkeys` 只负责把 intent 翻成 dispatch。
  */
 export type GlobalHotkeyIntent =
@@ -20,6 +23,8 @@ export type GlobalHotkeyIntent =
   | { kind: "toggle-pane"; pane: "pool" | "inspector" }
   | { kind: "immersive" }
   | { kind: "help" }
+  | { kind: "export" }
+  | { kind: "switch-episode" }
   | { kind: "cycle-pane"; direction: 1 | -1 }
   | { kind: "escape"; target: "drawer" | "sheet" | "immersive" | "query" | null };
 
@@ -38,6 +43,16 @@ export function isTextFieldTarget(target: EventTarget | null): boolean {
   return target.isContentEditable === true || attribute === "" || attribute === "true";
 }
 
+/**
+ * 焦点「不在任何控件上」(body / html / null)。R13 真机 Y-09:原生 mpv 视图压在 WKWebView 之上,
+ * 点视频画面本身 DOM 收不到点击、焦点落回 body,此后空格没人接 —— 剪映用户的肌肉记忆是
+ * 「空格随时播/停」。这种孤儿焦点下的空格由壳兜底(见 useGlobalHotkeys)。
+ */
+export function isOrphanFocusTarget(target: EventTarget | null): boolean {
+  if (target === null || target === window || target === document) return true;
+  return target === document.body || target === document.documentElement;
+}
+
 /** Esc 的四级优先级(规格 §3.2):抽屉 → 设置 sheet → 沉浸 → 清搜索。 */
 function escapeTarget(state: GlobalHotkeyState): GlobalHotkeyIntent {
   if (state.openDrawer === "import" || state.openDrawer === "deliver") {
@@ -49,38 +64,50 @@ function escapeTarget(state: GlobalHotkeyState): GlobalHotkeyIntent {
   return { kind: "escape", target: null };
 }
 
-/** 纯函数:这一次 keydown 对应哪条全局键位;不认识的一律 null(交给栏内自己的键位)。 */
+/**
+ * 纯函数:这一次 keydown 对应哪条全局键位;不认识的一律 null(交给栏内自己的键位)。
+ * R13 §1:改为查键位表(`keymap.ts`,默认剪映预设),键本身不再写死在这里。
+ */
 export function globalHotkeyIntent(
-  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey">,
+  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey"> & Partial<Pick<KeyboardEvent, "altKey">>,
   state: GlobalHotkeyState,
   inTextField: boolean,
+  index: KeymapIndex = getKeymap().index,
 ): GlobalHotkeyIntent | null {
-  // Esc 和 F6 在输入框里照样要响应:一个是「退出当前层」,一个是「换栏」,
-  // 两者都不是在打字。其余裸键在输入框里一律让位。
-  if (event.key === "Escape") return escapeTarget(state);
-  if (event.key === "F6") return { kind: "cycle-pane", direction: event.shiftKey ? -1 : 1 };
-
-  const mod = event.metaKey || event.ctrlKey;
-  if (mod) {
-    // ⌘/Ctrl 组合在输入框里也要能用 —— ⌘, 开设置不该因为光标在搜索框就失灵。
-    const digit = event.code === "Digit1" ? "1" : event.code === "Digit2" ? "2" : event.key;
-    if (digit === "1") return { kind: "toggle-pane", pane: "pool" };
-    if (digit === "2") return { kind: "toggle-pane", pane: "inspector" };
-    if (event.key === "Enter") return { kind: "immersive" };
-    if (event.key === ",") return { kind: "settings" };
-    // ⌘I 开导入抽屉(顶栏「导入素材」上的键帽提示)。输入框里让位 —— ⌘I 在文本框里
-    // 是斜体 / 输入法的键,不该被壳抢走;⌘, 不受这条限制。
-    if (!inTextField && (event.key.toLowerCase() === "i" || event.code === "KeyI")) return { kind: "import" };
-    if (event.key.toLowerCase() === "k" || event.code === "KeyK") return { kind: "command-palette" };
-    // ⌘\ 是旧壳的侧栏折叠键。新壳没有侧栏,这里显式什么都不做 —— 不写这一条,
-    // 它会顺着掉进下面的裸键分支,将来某天被误认成别的键位。
-    return null;
+  const action = lookupAction(index, "global", event);
+  if (action === null) return null;
+  // Esc、F6、⌘ 组合在输入框里照样要响(退层 / 换栏 / 开设置都不是在打字);
+  // 裸键(? 帮助)与 ⌘I(文本框里是斜体 / 输入法的键)在输入框里让位。
+  if (inTextField && !KEYMAP_ACTION_BY_ID.get(action)?.inTextField) return null;
+  switch (action) {
+    case "escape":
+      return escapeTarget(state);
+    case "cycle-pane":
+      return { kind: "cycle-pane", direction: 1 };
+    case "cycle-pane-back":
+      return { kind: "cycle-pane", direction: -1 };
+    case "toggle-pool":
+      return { kind: "toggle-pane", pane: "pool" };
+    case "toggle-inspector":
+      return { kind: "toggle-pane", pane: "inspector" };
+    case "fullscreen":
+      return { kind: "immersive" };
+    case "settings":
+      return { kind: "settings" };
+    case "import":
+      return { kind: "import" };
+    case "command-palette":
+      return { kind: "command-palette" };
+    case "help":
+      return { kind: "help" };
+    case "export":
+      return { kind: "export" };
+    case "switch-episode":
+      return { kind: "switch-episode" };
+    default:
+      // undo / redo 只登记键(还没有全局撤销栈),按了什么都不做、也不吞事件。
+      return null;
   }
-
-  if (inTextField) return null;
-  if (event.key === "?") return { kind: "help" };
-  // 空格归镜头带/监视器自己管(useRatingHotkeys),壳不劫持。
-  return null;
 }
 
 /** F6 之后把真正的 DOM 焦点送进那一栏的 landmark。 */
@@ -101,6 +128,21 @@ export function useGlobalHotkeys(): void {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // Y-09:焦点在 body(点过原生视频画面)时,监视器 / 媒体池的「播放 / 暂停」键由壳兜底:
+      // 把焦点交给监视器栏(之后 I/O/JKL 都有人接),这一下直接广播播放/暂停。
+      // 模态开着、首页盖着(三栏 inert)、沉浸态(播放器自己接键)、焦点在控件上时都不抢。
+      if (
+        !isAnyModalOpen() &&
+        !isHomeOpen() &&
+        !immersive &&
+        isOrphanFocusTarget(event.target) &&
+        lookupAction(getKeymap().index, "monitor", event) === "play-pause"
+      ) {
+        event.preventDefault();
+        focusPaneRegion("monitor");
+        window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
+        return;
+      }
       const intent = globalHotkeyIntent(
         event,
         { openDrawer, immersive, query },
@@ -145,6 +187,14 @@ export function useGlobalHotkeys(): void {
         case "help":
           event.preventDefault();
           window.dispatchEvent(new CustomEvent("tripcut:open-help"));
+          return;
+        case "export":
+          event.preventDefault();
+          dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
+          return;
+        case "switch-episode":
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent("tripcut:open-episode-switcher"));
           return;
         case "command-palette":
           // ⌘K 由 CommandPalette 自己听(它要 toggle 自己的本地 open 状态)。

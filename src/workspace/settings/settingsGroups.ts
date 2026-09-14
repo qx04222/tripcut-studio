@@ -2,62 +2,84 @@ import type { SettingsSectionId } from "../../settingsSections";
 import type { IconName } from "../ui/icons";
 
 /**
- * R11 简化专项 #2:设置页收成 3 个分区 + 每区一个「高级…」折叠。九个旧分区(`SettingsSectionId`,
- * 旧壳与帮助主题仍按它索引)一个都不少,只是分到三个组里:常用的直接摆出来,其余收进「高级…」。
+ * R13 §2:设置分区改成剪映式的六块 ——「项目与缓存 / 快捷键 / 播放与导出 / 性能 / 工具与模型 / 关于」。
+ * 每块顶部一句「这里管什么」;所有项一行一控件,**没有「高级…」折叠**(R12 原则:不藏)。
+ * 九个旧分区(`SettingsSectionId`,旧壳与帮助主题仍按它索引)一个都不少,只是各自搬进一块。
  */
-export type SettingsGroupId = "general" | "tools" | "about";
+export type SettingsGroupId = "project" | "keymap" | "playback" | "performance" | "tools" | "about";
 
 export interface SettingsGroup {
   id: SettingsGroupId;
   label: string;
+  /** 左轨 tab 下的小字。 */
   description: string;
+  /** 分区顶部那一句「这里管什么」。 */
+  intro: string;
   icon: IconName;
-  /** 打开分区就看到的那几段。 */
-  primary: readonly SettingsSectionId[];
-  /** 收在「高级…」里的那几段(默认折叠;`openSettings(section)` 直落时自动展开)。 */
-  advanced: readonly SettingsSectionId[];
+  /** 打开分区就看到的全部段(按这个顺序排)。 */
+  sections: readonly SettingsSectionId[];
 }
 
 export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
-    id: "general",
-    label: "常用",
-    description: "外观、播放与导出文件夹",
+    id: "project",
+    label: "项目与缓存",
+    description: "缓存占用、清理与多设备时间",
+    intro: "这里管素材相关的本机数据:缓存占了多大、要不要清掉重建,以及多台设备拍的素材怎么对齐时间。原片永远只读。",
+    icon: "settings-cache",
+    sections: ["cache", "timeline"],
+  },
+  {
+    id: "keymap",
+    label: "快捷键",
+    description: "键位预设与逐个修改",
+    intro: "这里管键盘怎么用:选一套你熟悉的软件的键位(默认剪映),或者逐个改。",
+    icon: "settings-keymap",
+    sections: ["keymap"],
+  },
+  {
+    id: "playback",
+    label: "播放与导出",
+    description: "主题、开播位置、连播、导出文件夹",
+    intro: "这里管看片与出片的习惯:界面明暗与缩放、选中素材从哪开始播、播完接不接着播、导出存到哪。",
     icon: "settings-appearance",
-    primary: ["appearance"],
-    advanced: ["performance", "timeline"],
+    sections: ["appearance"],
+  },
+  {
+    id: "performance",
+    label: "性能",
+    description: "后台并发、预览小文件、内存档位",
+    intro: "这里管后台跑多快、占多少:同时处理几条素材、要不要用预览小文件、内存档位。",
+    icon: "settings-performance",
+    sections: ["performance"],
   },
   {
     id: "tools",
     label: "工具与模型",
-    description: "工具链、Whisper、Chinese-CLIP、云端补镜",
+    description: "视频处理、转写、画面识别、云端补镜",
+    intro: "这里管旅剪用到的组件与模型:视频处理、语音转写、画面分析与 AI、云端补镜。装好就不用再来。",
     icon: "settings-tools",
-    primary: ["tools", "generation"],
-    advanced: ["analysis"],
+    sections: ["tools", "generation", "analysis"],
   },
   {
     id: "about",
     label: "关于",
-    description: "版本、更新、日志与缓存",
+    description: "版本、更新、日志、隐私",
+    intro: "版本与更新、日志,以及哪些内容永远留在本机。",
     icon: "settings-about",
-    primary: ["about", "cache"],
-    advanced: ["privacy"],
+    sections: ["about", "privacy"],
   },
 ] as const;
 
-/** 旧分区 → 新组(`openSettings("analysis")` 落到「工具与模型」并展开高级)。 */
+/** 旧分区 → 六块之一(`openSettings("analysis")` 落到「工具与模型」)。 */
 export function groupForSection(section: SettingsSectionId): SettingsGroupId {
-  const group = SETTINGS_GROUPS.find((candidate) => candidate.primary.includes(section) || candidate.advanced.includes(section));
-  return group?.id ?? "general";
-}
-
-export function isAdvancedSection(section: SettingsSectionId): boolean {
-  return SETTINGS_GROUPS.some((group) => group.advanced.includes(section));
+  const group = SETTINGS_GROUPS.find((candidate) => candidate.sections.includes(section));
+  return group?.id ?? "playback";
 }
 
 /**
- * 冒烟锚点(design-system §6 冻结:设置 sheet 左轨常驻「隐私与诊断」「云端补镜」)。三分区之后
- * 它们不再是 tab,以左轨底部的快捷入口常驻 —— 点一下直落对应分区(高级项会自动展开)。
+ * 冒烟锚点(design-system §6 冻结:设置 sheet 左轨常驻「隐私与诊断」「云端补镜」)。六分区之后
+ * 它们仍不是 tab,以左轨底部的快捷入口常驻 —— 点一下直落对应分区并滚到那一段。
  */
 export const SETTINGS_QUICK_LINKS: readonly { label: string; section: SettingsSectionId }[] = [
   { label: "云端补镜", section: "generation" },

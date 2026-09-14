@@ -79,6 +79,9 @@
 
   /* 等宽:时码、文件名、kbd。 */
   --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* R13 §4:镜头带播放头。不是语义色(--danger 是「出错」),是剪辑软件里约定俗成的那根红线。 */
+  --playhead: #e0312b;
 }
 
 /* 深色:只改浅色时写死了字面量的那几个。不做走查,只保证不刺眼、不反色。 */
@@ -92,6 +95,7 @@
     --shadow-card: 0 0 0 1px var(--border);
     --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
     --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
+    --playhead: #ff5f56;
   }
 }
 
@@ -104,4 +108,50 @@ html[data-theme="dark"] {
   --shadow-card: 0 0 0 1px var(--border);
   --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
   --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
+  --playhead: #ff5f56;
+}
+
+/* R13 §5「剪映风格深色」(设置 → 外观第四档,不默认)。自己配的一套:近黑的冷炭灰分四级、青绿强调、
+   红播放头 —— 只借剪映的「深灰工作台 + 一种亮色强调」心智,不抄它的资源与色值。
+   既有深色只改 tokens 这层,这一档连 styles.css 顶部的调色板一起换,所以令牌比上面两块多。 */
+html[data-theme="jianying-dark"] {
+  /* 调色板(styles.css :root 那一层) */
+  --bg: #121316;
+  --bg-elevated: rgb(27 29 32 / 97%);
+  --bg-solid: #121316;
+  --border: #2a2d32;
+  --border-strong: #3a3e45;
+  --text-primary: #e9ebee;
+  --text-secondary: #9aa0a8;
+  --text-muted: #aab0b8;
+  --text-faint: #5f656d;
+  --accent: #2fd6c4;
+  --accent-contrast: #0b1413;
+  --accent-tint: rgb(47 214 196 / 11%);
+  --accent-glow: rgb(47 214 196 / 45%);
+  --sheen: rgb(255 255 255 / 2.5%);
+  --sheen-line: rgb(255 255 255 / 2%);
+  --frame: #4c525a;
+  --index-ghost: #23262b;
+  --warning: #f2b544;
+  --warning-tint: rgb(242 181 68 / 12%);
+  --danger: #ff6b66;
+  --danger-tint: rgb(255 107 102 / 11%);
+  --media-well: #0a0b0d;
+  --skeleton-highlight: rgb(255 255 255 / 8%);
+  --waveform-midline: rgb(233 235 238 / 14%);
+  --media-overlay: rgb(6 7 9 / 78%);
+  --media-ink: #f4f6f8;
+  --card-shadow: rgb(0 0 0 / 52%);
+  --focus-ring: rgb(47 214 196 / 50%);
+  /* tokens 这一层 */
+  --surface-card: #1b1d20;
+  --surface-raised: #202329;
+  --surface-chrome: #0e0f11;
+  --surface-chrome-2: #0a0b0d;
+  --well-bg: #0a0b0d;
+  --shadow-card: 0 0 0 1px var(--border);
+  --shadow-raised: 0 0 0 1px var(--border-strong), 0 14px 36px rgb(0 0 0 / 60%);
+  --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 70%), inset 0 0 0 1px rgb(255 255 255 / 5%);
+  --playhead: #ff4d4a;
 }

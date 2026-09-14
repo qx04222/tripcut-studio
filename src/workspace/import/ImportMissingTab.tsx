@@ -17,7 +17,7 @@ export function ImportMissingTab(): JSX.Element {
         <SectionHeader
           title="缺失素材"
           meta={missing.clips.length > 0 ? `${missing.clips.length} 个文件` : undefined}
-          description="原片所在的卷不在了(拔卡、换盘、改名)。指向它的新位置,索引与评分都会保留。"
+          description="原片所在的卷不在了(拔卡、换盘、改名)。指向它的新位置,分析结果与评分都会保留。"
         />
         {groups.length === 0 ? (
           <Card className="import-missing-empty">

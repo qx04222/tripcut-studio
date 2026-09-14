@@ -119,7 +119,15 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
-    void getCurrentWebview()
+    // 非 Tauri 环境(vitest / 浏览器预览)里 getCurrentWebview() 会同步抛错(没有 __TAURI_INTERNALS__),
+    // 拖放监听只在真应用里挂;别让首页/导入抽屉的测试因此炸成 Unhandled Exception。
+    let webview: ReturnType<typeof getCurrentWebview>;
+    try {
+      webview = getCurrentWebview();
+    } catch {
+      return undefined;
+    }
+    void webview
       .onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "enter" || payload.type === "over") {

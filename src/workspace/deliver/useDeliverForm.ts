@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   cancelExport,
   generateJianyingDraft,
+  generateJianyingDraftForced,
   getCurrentEpisode,
   getJianyingAvailability,
   getSettings,
@@ -24,6 +25,7 @@ import {
   roughCutTargetKey,
   type TargetSecondsOption,
 } from "./deliverModel";
+import { onJianyingAvailabilityChanged } from "./jianyingHumanCheck";
 import { useExportCanvas, type ExportOrientation } from "./useExportCanvas";
 import type { ExportProgress } from "./useExportProgress";
 
@@ -39,6 +41,8 @@ export interface DeliverForm {
   setIncludeContactSheet(v: boolean): void;
   /** 剪映草稿开关(打开时主按钮走 generateNative);R10 U-20 起也记住。 */
   useJianyingDraft: boolean;
+  /** R12:集 / 预设 / 记住的选择已经读回来(此前的默认值会被覆盖一次,想在之后改值的人等这个)。 */
+  loaded: boolean;
   setUseJianyingDraft(v: boolean): void;
   /** 本集平台的预设(画布尺寸等);读不到为 null。 */
   preset: PlatformPreset | null;
@@ -59,6 +63,8 @@ export interface DeliverForm {
   canGenerateNative: boolean;
   generate(): Promise<void>;
   generateNative(): Promise<void>;
+  /** R14 §9 A:「我知道风险,仍然试着生成(试验)」—— 待验证版本走 force;失败不降级稳定包,只报错。 */
+  generateExperimental(): Promise<void>;
   cancel(): Promise<void>;
   reveal(): Promise<void>;
 }
@@ -89,6 +95,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
   const [overridePlatform, setOverridePlatformState] = useState<TargetPlatform>("general");
   const [includeContactSheet, setIncludeContactSheetState] = useState(true);
   const [useJianyingDraft, setUseJianyingDraftState] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [targetSeconds, setTargetSecondsState] = useState<TargetSecondsOption>(null);
   const [preset, setPreset] = useState<PlatformPreset | null>(null);
   const [overrideOrientation, setOverrideOrientation] = useState<ExportOrientation | null>(null);
@@ -136,6 +143,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
           );
           setIncludeContactSheetState(remembered.includeContactSheet);
           setUseJianyingDraftState(remembered.useJianyingDraft);
+          setLoaded(true);
         })
         .catch(() => undefined);
     };
@@ -169,8 +177,13 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
           });
         }
       });
+    // R14 §9 A:结果卡上的「可以用 / 打不开」写完会广播新可用性,这里直接换,不再拉一次。
+    const stop = onJianyingAvailabilityChanged((next) => {
+      if (alive) setJianying(next);
+    });
     return () => {
       alive = false;
+      stop();
     };
   }, []);
 
@@ -234,6 +247,21 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     }
   }, [startStablePackage]);
 
+  const generateExperimental = useCallback(async () => {
+    if (nativeBusy || active) return;
+    setNativeBusy(true);
+    setNativeResult(null);
+    setNativeNotice(null);
+    setFormError(null);
+    try {
+      setNativeResult(await generateJianyingDraftForced());
+    } catch (error) {
+      setFormError(`试验草稿没写出来:${String(error)}`);
+    } finally {
+      setNativeBusy(false);
+    }
+  }, [active, nativeBusy]);
+
   const cancel = useCallback(async () => {
     if (status.job_id === null) return;
     setFormError(null);
@@ -281,6 +309,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     includeContactSheet,
     setIncludeContactSheet,
     useJianyingDraft,
+    loaded,
     setUseJianyingDraft,
     preset,
     canvas,
@@ -297,6 +326,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     canGenerateNative,
     generate,
     generateNative,
+    generateExperimental,
     cancel,
     reveal,
   };

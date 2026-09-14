@@ -1,10 +1,29 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const apiMocks = vi.hoisted(() => ({
+  arrangeSelectedSegments: vi.fn(async () => ({ placed: 2, chapters: 1 })),
+  setSetting: vi.fn(async () => undefined),
+  getSettings: vi.fn(async () => ({})),
+}));
+vi.mock("../api", () => apiMocks);
+vi.mock("./useClipsFeed", () => ({ refreshClipsFeed: vi.fn(async () => undefined) }));
+// 镜头带空态按流水线当前步说话:直接喂 usePipeline 的输出。
+const pipelineMock = vi.hoisted(() => ({ state: null as unknown }));
+vi.mock("./usePipeline", () => ({ usePipeline: () => pipelineMock.state }));
+
 import { BandEmpty, EMPTY_COPY, InspectorEmpty, MonitorEmpty, PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
+import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
+import { derivePipeline, type PipelineInput } from "./pipelineModel";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
 
-beforeEach(() => __resetWorkspaceForTests());
+const base: PipelineInput = { clipCount: 0, analysisPending: 0, segmentCount: 0, chapters: [], exportCount: 0 };
+
+beforeEach(() => {
+  __resetWorkspaceForTests();
+  pipelineMock.state = derivePipeline(base);
+});
 afterEach(cleanup);
 
 /*
@@ -13,9 +32,10 @@ afterEach(cleanup);
  * 栏本体接线后各自的测试文件再按「渲染栏 → 找同一句文案」追加。
  */
 describe("四栏空状态(EmptyState)", () => {
-  it("空池:还没有素材 + 「导入素材」按钮打开导入抽屉的来源分页", () => {
+  it("空池:「第 ① 步:先导入」+ 「导入素材」按钮打开导入抽屉的来源分页", () => {
     render(<PoolEmpty />);
-    expect(screen.getByText("还没有素材").tagName).toBe("P");
+    expect(screen.getByText("第 ① 步:先导入").tagName).toBe("P");
+    expect(screen.getByText(/还没有素材/)).toBeTruthy();
     expect(document.querySelector(".ui-empty svg[data-icon=\"import\"]")).not.toBeNull();
     // R10 U-06:AX 名改为「导入第一批素材」(「导入素材」是顶栏冻结名,空池时不能撞名);可见文字仍是「导入素材」。
     const button = screen.getByRole("button", { name: "导入第一批素材" });
@@ -39,19 +59,45 @@ describe("四栏空状态(EmptyState)", () => {
     expect(screen.getByText("从左侧媒体池选一条素材").tagName).toBe("P");
     expect(document.querySelector(".ui-empty.ui-empty--dark svg[data-icon=\"play\"]")).not.toBeNull();
   });
-  it("镜头带:还没有章节(grip)", () => {
+  it("镜头带 · 第 ① 步:「先导入」+ 「打开导入」(grip)", () => {
     render(<BandEmpty />);
-    expect(screen.getByText("还没有章节")).toBeTruthy();
+    expect(screen.getByText("第 ① 步:先导入")).toBeTruthy();
     expect(document.querySelector(".ui-empty svg[data-icon=\"grip\"]")).not.toBeNull();
+    screen.getByRole("button", { name: "打开导入" }).click();
+    expect(getWorkspaceSnapshot().openDrawer).toBe("import");
+  });
+  it("镜头带 · 第 ② 步:「按 F 收藏或点自动挑选」+ 「去自动挑选」广播打开自动挑选面板", () => {
+    pipelineMock.state = derivePipeline({ ...base, clipCount: 8 });
+    const heard = vi.fn();
+    window.addEventListener(OPEN_AUTO_SELECT_EVENT, heard);
+    render(<BandEmpty />);
+    expect(screen.getByText("第 ② 步:按 F 收藏或点自动挑选")).toBeTruthy();
+    const button = screen.getByRole("button", { name: "去自动挑选" });
+    expect(button.className).toContain("ui-button--primary");
+    button.click();
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_AUTO_SELECT_EVENT, heard);
+  });
+  it("镜头带 · 第 ③ 步:「把挑好的片段排进来」+ 「一键排入」调 arrangeSelectedSegments", async () => {
+    pipelineMock.state = derivePipeline({ ...base, clipCount: 8, segmentCount: 3 });
+    render(<BandEmpty />);
+    expect(screen.getByText("第 ③ 步:把挑好的片段排进来")).toBeTruthy();
+    await act(async () => {
+      screen.getByRole("button", { name: "一键排入" }).click();
+      await Promise.resolve();
+    });
+    expect(apiMocks.arrangeSelectedSegments).toHaveBeenCalledTimes(1);
   });
   it("检查器:选一条素材查看详情(info)", () => {
     render(<InspectorEmpty />);
     expect(screen.getByText("选一条素材查看详情")).toBeTruthy();
     expect(document.querySelector(".ui-empty svg[data-icon=\"info\"]")).not.toBeNull();
   });
-  it("文案表与规格 §3.4 一字不差,且没有 heading", () => {
+  it("文案表与规格 R12 §1 第三条一字不差,且没有 heading", () => {
     expect(Object.values(EMPTY_COPY).map((copy) => copy.title)).toEqual([
-      "还没有素材", "没有匹配的素材", "从左侧媒体池选一条素材", "还没有章节", "选一条素材查看详情",
+      "第 ① 步:先导入", "没有匹配的素材", "从左侧媒体池选一条素材",
+      "第 ① 步:先导入", "第 ② 步:按 F 收藏或点自动挑选", "第 ③ 步:把挑好的片段排进来",
+      "选一条素材查看详情",
     ]);
     render(<InspectorEmpty />);
     expect(screen.queryByRole("heading")).toBeNull();
@@ -59,9 +105,9 @@ describe("四栏空状态(EmptyState)", () => {
 });
 
 describe("R11 简化专项 #5:空态一句话 + 一个按钮", () => {
-  it("镜头带无章节:「打开导入」打开导入抽屉的来源分页", () => {
+  it("镜头带无章节(第 ① 步):「打开导入」打开导入抽屉的来源分页", () => {
     render(<BandEmpty />);
-    expect(screen.getByText("还没有章节")).toBeTruthy();
+    expect(screen.getByText("第 ① 步:先导入")).toBeTruthy();
     const open = screen.getByRole("button", { name: "打开导入" });
     open.click();
     expect(getWorkspaceSnapshot().openDrawer).toBe("import");

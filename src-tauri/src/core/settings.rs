@@ -36,9 +36,36 @@ pub const MINIMAX_MONTHLY_BUDGET_KEY: &str = "minimax_monthly_budget_usd";
 /// R10 U-22:首启引导「已跳过 / 已完成」。真值 = 不再弹「FIRST RUN」全屏引导;
 /// 弹不弹只看这一位,不再靠「工具链是否齐」推断(切换新旧界面、恢复页之后都不重放)。
 pub const FIRST_RUN_DONE_KEY: &str = "onboarding.first_run_done";
+/// R11 首启引导卡「看过了」+ R12 流水线四步的「首次进入提示已看过」(`pipeline.hint_seen.n`)。
+/// 前端只写 "true" / "false";没写过 = false。R11 那把键此前没进白名单,`set_setting` 一直被
+/// 静默拒绝(前端 `.catch(() => undefined)`),引导卡每次启动都会再出现 —— 这里一并补上。
+pub const ONBOARDING_FLAG_KEYS: &[&str] = &[
+    "onboarding.steps_seen",
+    "pipeline.hint_seen.1",
+    "pipeline.hint_seen.2",
+    "pipeline.hint_seen.3",
+    "pipeline.hint_seen.4",
+];
+/// R13 §3(车道 B):功能气泡「看过了」键的前缀;完整键形如 `guide.nav.viewed`。
+pub const GUIDE_VIEWED_PREFIX: &str = "guide.";
+const GUIDE_VIEWED_SUFFIX: &str = ".viewed";
+
+/// `guide.<id>.viewed` → `Some(id)`;id 非空且只含 `[a-z0-9_-]`,否则 `None`。
+pub fn guide_viewed_id(key: &str) -> Option<&str> {
+    let id = key.strip_prefix(GUIDE_VIEWED_PREFIX)?.strip_suffix(GUIDE_VIEWED_SUFFIX)?;
+    let well_formed = !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-');
+    well_formed.then_some(id)
+}
+
 /// R11 车道 B:时刻分五项权重(JSON 对象,键白名单见 `core::moments::WEIGHT_KEYS`)。
 /// 缺省值在 `core::moments::MomentWeights::default` 里,新手不用调。
 pub const MOMENT_WEIGHTS_KEY: &str = "moments.weights";
+/// R13 §1 键位预设:`jianying`(默认)| `premiere` | `fcp` | `custom`。
+pub const KEYMAP_PRESET_KEY: &str = "keymap.preset";
+/// R13 §1 自定义键位(JSON `{base, overrides}`,前端解析、这里只限长度)。
+pub const KEYMAP_CUSTOM_KEY: &str = "keymap.custom";
 
 const WINDOW_WIDTH_KEY: &str = "window.width";
 const WINDOW_HEIGHT_KEY: &str = "window.height";
@@ -46,7 +73,10 @@ const WINDOW_X_KEY: &str = "window.x";
 const WINDOW_Y_KEY: &str = "window.y";
 
 pub const DEFAULT_WORKER_COUNT: usize = 4;
-pub const DEFAULT_SCENE_THRESHOLD: f64 = 0.35;
+/// 单一来源在 `analysis::SCENE_THRESHOLD`(R14 随 10 fps 采样从 0.35 改为 0.25)。
+pub const DEFAULT_SCENE_THRESHOLD: f64 = super::analysis::SCENE_THRESHOLD;
+/// v4 及更早的库里种下的旧默认值;它从未在界面上暴露过,所以读到这个值就当"没改过"。
+pub const LEGACY_SCENE_THRESHOLD: f64 = 0.35;
 pub const DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.25;
 /// 抖动分现为"运动轨迹高频能量占比"（见 `core::motion::high_freq_energy_ratio`），
 /// 范围 [0,1]，与旧的绝对帧间差分 RMS 不是同一量纲。2026-09-02 用真实素材重新标定：
@@ -263,12 +293,19 @@ pub fn set_setting(connection: &Connection, key: &str, value: &str) -> Result<()
 
 fn validate_setting(key: &str, value: &str) -> Result<()> {
     let valid = match key {
-        THEME_KEY => matches!(value, "system" | "light" | "dark"),
+        // R13 §5:第四档「剪映风格深色」(前端 html[data-theme="jianying-dark"])。
+        THEME_KEY => matches!(value, "system" | "light" | "dark" | "jianying-dark"),
         UI_SCALE_KEY => matches!(value, "0.9" | "1.0" | "1.15" | "1.3"),
         WORKER_COUNT_KEY => value.parse::<usize>().is_ok_and(|count| (1..=8).contains(&count)),
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
         MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
         FIRST_RUN_DONE_KEY => matches!(value, "true" | "false"),
+        key if ONBOARDING_FLAG_KEYS.contains(&key) => matches!(value, "true" | "false"),
+        // R13 §3(车道 B):剪映式功能气泡「看过了」—— `guide.<id>.viewed` = "true" | "false"。
+        // 按前缀放行而不是精确表:首批七个之后每加一个 guide 不必再改 Rust;id 只许 [a-z0-9_-]。
+        key if key.starts_with(GUIDE_VIEWED_PREFIX) => {
+            guide_viewed_id(key).is_some() && matches!(value, "true" | "false")
+        }
         FFMPEG_PATH_KEY | FFPROBE_PATH_KEY | WHISPER_PATH_KEY => value.len() <= 4_096,
         WHISPER_MODEL_TIER_KEY => matches!(value, "large-v3-turbo" | "small"),
         SCENE_THRESHOLD_KEY | SIMILARITY_THRESHOLD_KEY => value
@@ -286,6 +323,8 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
             .parse::<f64>()
             .is_ok_and(|number| number.is_finite() && (0.0..=1.0).contains(&number)),
         MOMENT_WEIGHTS_KEY => super::moments::MomentWeights::parse(value).is_ok(),
+        KEYMAP_PRESET_KEY => matches!(value, "jianying" | "premiere" | "fcp" | "custom"),
+        KEYMAP_CUSTOM_KEY => value.len() <= 4_096,
         LLM_ENABLED_KEY => matches!(value, "true" | "false"),
         LLM_PROVIDER_KEY => matches!(value, "none" | "auto" | "claude" | "codex" | "kimi"),
         LLM_MONTHLY_BUDGET_KEY => value
@@ -305,6 +344,19 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         // 不透明字符串(有的是 JSON 数组),只限长度,不限内容——限内容就等于把前端的
         // UI 结构复制一份进 Rust,那是 R8 明确不做的事(规格 §0「不重写 Rust 核心」)。
         key if key.starts_with("ui.") => value.len() <= 4_096,
+        // R14 §9 A:剪映试验草稿的人眼裁定 `jianying.human_check.<version>` = "ok" | "fail"。
+        // 版本号只许 [0-9.];是否在待验证名单由 `jianying::set_human_check` 把关。
+        key if key.starts_with(super::jianying::HUMAN_CHECK_PREFIX) => {
+            let version = &key[super::jianying::HUMAN_CHECK_PREFIX.len()..];
+            !version.is_empty()
+                && version.len() <= 32
+                && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+                && matches!(value, "ok" | "fail")
+        }
+        // R12 车道 B:「这章够了」—— `story.chapter_skipped.<章 id>` = "true" | "false"(不加迁移)。
+        key if key.starts_with(super::arrange::CHAPTER_SKIPPED_PREFIX) => {
+            key[super::arrange::CHAPTER_SKIPPED_PREFIX.len()..].parse::<i64>().is_ok() && matches!(value, "true" | "false")
+        }
         _ => false,
     };
     if valid {
@@ -488,11 +540,11 @@ pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStat
             service_path: sidecar.service.to_string_lossy().into_owned(),
             setup_script: sidecar.setup_script.to_string_lossy().into_owned(),
             note: if !sidecar_service_available {
-                "应用资源缺少 Chinese-CLIP 服务脚本；请重新安装完整应用。".to_owned()
+                "应用资源缺少画面识别组件；请重新安装完整应用。".to_owned()
             } else if !sidecar_python_available {
-                "服务脚本已就绪；正式版不在线安装 Python，等待带签名的本地组件包。".to_owned()
+                "画面识别组件已就位；正式版不在线安装，等待带签名的本地组件包。".to_owned()
             } else {
-                "自检会启动本地 Chinese-CLIP 服务并执行 ping，不会上传素材。".to_owned()
+                "自检会在本机启动画面识别组件试跑一次，不会上传素材。".to_owned()
             },
         },
         cache: cache_stats(connection, cache_root)?,
@@ -840,6 +892,11 @@ mod tests {
 
         let values = get_settings(&connection).unwrap();
         assert_eq!(values[THEME_KEY], "dark");
+        // R13 §5:第四档主题进白名单;别的字符串仍拒绝。
+        set_setting(&connection, THEME_KEY, "jianying-dark").unwrap();
+        assert_eq!(get_settings(&connection).unwrap()[THEME_KEY], "jianying-dark");
+        assert!(set_setting(&connection, THEME_KEY, "neon").is_err());
+        set_setting(&connection, THEME_KEY, "dark").unwrap();
         assert_eq!(worker_count(&connection).unwrap(), 8);
         assert!(set_setting(&connection, WORKER_COUNT_KEY, "9").is_err());
         assert!(set_setting(&connection, BEST_TAKE_MOTION_WEIGHT_KEY, "0.35").is_ok());
@@ -1148,6 +1205,38 @@ mod tests {
 
     /// R10 U-22:首启标记默认 false、只接受 true/false、写过之后 get_settings 也能看到。
     #[test]
+    fn onboarding_flag_keys_accept_only_booleans() {
+        let (_directory, connection) = connection_with_settings();
+        for key in ONBOARDING_FLAG_KEYS {
+            assert_eq!(setting_value(&connection, key).unwrap(), None);
+            set_setting(&connection, key, "true").unwrap();
+            assert_eq!(setting_value(&connection, key).unwrap().as_deref(), Some("true"));
+            assert!(set_setting(&connection, key, "yes").is_err());
+        }
+        assert!(set_setting(&connection, "pipeline.hint_seen.5", "true").is_err());
+    }
+
+    /// R13 §3:`guide.<id>.viewed` 按前缀放行(只接受 true/false、id 只含小写字母数字 _ -);
+    /// 前缀对但形状不对的键照旧拒绝。
+    #[test]
+    fn guide_viewed_keys_are_accepted_by_prefix() {
+        let (_directory, connection) = connection_with_settings();
+        for id in ["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay", "future-guide_2"] {
+            let key = format!("guide.{id}.viewed");
+            assert_eq!(setting_value(&connection, &key).unwrap(), None);
+            set_setting(&connection, &key, "true").unwrap();
+            assert_eq!(setting_value(&connection, &key).unwrap().as_deref(), Some("true"));
+            set_setting(&connection, &key, "false").unwrap();
+            assert!(set_setting(&connection, &key, "yes").is_err(), "{key} 只接受 true/false");
+        }
+        for bad in ["guide..viewed", "guide.nav", "guide.nav.seen", "guide.Nav.viewed", "guide.a b.viewed", "guides.nav.viewed"] {
+            assert!(set_setting(&connection, bad, "true").is_err(), "{bad} 应被拒绝");
+        }
+        assert_eq!(guide_viewed_id("guide.nav.viewed"), Some("nav"));
+        assert_eq!(guide_viewed_id("guide.nav.viewed.viewed"), None);
+    }
+
+    #[test]
     fn first_run_done_defaults_false_and_round_trips() {
         let (_dir, connection) = connection_with_settings();
         assert!(!first_run_done(&connection).unwrap());
@@ -1180,6 +1269,20 @@ mod tests {
             values.get("ui.inspector.sections_open").map(String::as_str),
             Some("[\"techcheck\",\"similar\"]")
         );
+    }
+
+    #[test]
+    fn keymap_keys_accept_presets_and_capped_json() {
+        let (_dir, connection) = connection_with_settings();
+        for preset in ["jianying", "premiere", "fcp", "custom"] {
+            set_setting(&connection, KEYMAP_PRESET_KEY, preset).expect("预设应被接受");
+        }
+        assert!(set_setting(&connection, KEYMAP_PRESET_KEY, "davinci").is_err());
+        set_setting(&connection, KEYMAP_CUSTOM_KEY, "{\"base\":\"jianying\",\"overrides\":{\"favorite\":[\"Shift+f\"]}}")
+            .expect("自定义 JSON 应被接受");
+        assert!(set_setting(&connection, KEYMAP_CUSTOM_KEY, &"x".repeat(4_097)).is_err());
+        let values = get_settings(&connection).expect("读设置");
+        assert_eq!(values.get(KEYMAP_PRESET_KEY).map(String::as_str), Some("custom"));
     }
 
     #[test]

@@ -100,6 +100,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
 function SettingsIcon({ name }: { name: SettingsIconName }) {
   const paths: Record<SettingsIconName, ReactNode> = {
     appearance: <><circle cx="12" cy="12" r="7" /><path d="M12 5a7 7 0 0 0 0 14Z" /></>,
+    keymap: <><rect x="3" y="7" width="18" height="10" rx="2" /><path d="M7 11h.01M11 11h.01M15 11h.01M8 14h8" /></>,
     performance: <><path d="M5 16a8 8 0 1 1 14 0" /><path d="m12 12 4-4" /><path d="M8 17h8" /></>,
     timeline: <><circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" /><path d="M5 4v4H1" /></>,
     tools: <><path d="m14.5 6.5 3-3 3 3-3 3" /><path d="m16.5 8.5-9 9" /><path d="m8.5 15.5-2 5-3-3 5-2" /></>,

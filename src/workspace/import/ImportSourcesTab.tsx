@@ -38,7 +38,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
       <section className="import-section" aria-label="素材来源">
         <SectionHeader
           title="素材来源"
-          description="只建立索引，不复制或改写原片"
+          description="只登记素材位置,不复制或改写原片"
           actions={
             <Button variant="primary" icon="plus" busy={busy} onClick={() => void sources.chooseFolder()}>
               {addFolderLabel(choosing, scanning)}
@@ -67,7 +67,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
         <SectionHeader
           title="已关注的文件夹"
           meta={watched.length > 0 ? `${watched.length} 个` : undefined}
-          description="子文件夹名会自动成为素材分类;开启自动同步后每 5 分钟增量检查新素材(适合 NAS/云盘)"
+          description="子文件夹名会自动成为素材分类;开启自动同步后每 5 分钟增量检查新素材(适合网络硬盘 / 云盘)"
           actions={
             <Button size="sm" onClick={() => void sources.rescan()}>
               立即扫描
@@ -122,7 +122,7 @@ export function ImportSourcesTab({ sources }: { sources: ImportSources }): JSX.E
           <Icon name="import" size={32} className="import-dropzone-icon" />
           <div className="import-dropzone-copy">
             <strong>把文件夹拖到这里</strong>
-            <span>或点击选择相机卡 / 移动硬盘 / 本地文件夹;只建立索引,原片不动</span>
+            <span>或点击选择相机卡 / 移动硬盘 / 本地文件夹;只登记位置,原片不动</span>
           </div>
           <Button icon="plus" busy={busy} onClick={() => void sources.chooseFolder()}>
             选择文件夹

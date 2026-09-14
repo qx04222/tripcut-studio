@@ -3,6 +3,7 @@ import { useState, type JSX } from "react";
 import type { CanvasOrientation, TargetPlatform } from "../api";
 import { ORIENTATION_LABELS, PLATFORM_LABELS } from "../EpisodePanel";
 import { Button, Chip, Field, Select } from "./ui";
+import { ORIENTATION_LABEL } from "./copy";
 
 /**
  * 「重命名本集」表单的新壳版(R10 U-32):套件 Field / Select / Chip / Button,不再是系统默认
@@ -81,8 +82,8 @@ export function WorkspaceEpisodeRenameForm({
           ))}
         </Select>
       </Field>
-      <Field label="画布方向">
-        <div className="workspace-episode-orientation" role="group" aria-label="画布方向">
+      <Field label={ORIENTATION_LABEL}>
+        <div className="workspace-episode-orientation" role="group" aria-label={ORIENTATION_LABEL}>
           {(Object.keys(ORIENTATION_LABELS) as CanvasOrientation[]).map((orientation) => (
             <Chip
               key={orientation}
@@ -143,7 +144,7 @@ export function WorkspaceEpisodeCreateForm({
           onChange={(event) => setTitle(event.currentTarget.value)}
         />
       </Field>
-      <p className="workspace-episode-edit-help">当前集有素材时会先封存它再开新集(平台与画布方向沿用);当前集还是空的就直接改名。</p>
+      <p className="workspace-episode-edit-help">当前集有素材时会先封存它再开新集(平台与画面方向沿用);当前集还是空的就直接改名。</p>
       <div className="workspace-episode-edit-actions">
         <Button variant="primary" size="sm" type="submit" disabled={busy || trimmed.length === 0} busy={busy}>
           创建

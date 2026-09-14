@@ -4,7 +4,9 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { WorkspaceShell } from "./WorkspaceShell";
-import { globalHotkeyIntent, isTextFieldTarget } from "./useGlobalHotkeys";
+import { indexKeymap, resolveKeymap } from "./keymap";
+import { globalHotkeyIntent, isOrphanFocusTarget, isTextFieldTarget } from "./useGlobalHotkeys";
+import { __resetHomeForTests, pinHome, reportLibraryState } from "./homeStore";
 import { __resetModalStackForTests, pushModal } from "./modalStack";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot, type WorkspaceState } from "./WorkspaceStore";
 
@@ -37,6 +39,7 @@ beforeEach(() => {
   widescreen();
   __resetWorkspaceForTests();
   __resetModalStackForTests();
+  __resetHomeForTests();
 });
 afterEach(cleanup);
 
@@ -79,8 +82,8 @@ describe("globalHotkeyIntent —— 纯判定", () => {
   it("⌘I 打开导入抽屉(顶栏「导入素材」的键帽提示);在输入框里不响 —— 那是斜体/自动补全的地盘", () => {
     expect(globalHotkeyIntent(key({ key: "i", code: "KeyI", metaKey: true }), IDLE, false))
       .toEqual({ kind: "import" });
-    expect(globalHotkeyIntent(key({ key: "I", code: "KeyI", metaKey: true, shiftKey: true }), IDLE, false))
-      .toEqual({ kind: "import" });
+    // R13 键位表按整把键匹配:⌘⇧I 是另一把键(可另绑),不再顺手当成 ⌘I。
+    expect(globalHotkeyIntent(key({ key: "I", code: "KeyI", metaKey: true, shiftKey: true }), IDLE, false)).toBeNull();
     expect(globalHotkeyIntent(key({ key: "i", code: "KeyI", ctrlKey: true }), IDLE, false))
       .toEqual({ kind: "import" });
     expect(globalHotkeyIntent(key({ key: "i", code: "KeyI", metaKey: true }), IDLE, true)).toBeNull();
@@ -208,6 +211,50 @@ describe("useGlobalHotkeys —— 装进壳里的行为", () => {
     expect(getWorkspaceSnapshot().query).toBe("");
   });
 
+  it("Y-09:焦点落在 body(点过原生视频画面后)时按空格 = 播放/暂停,并把焦点交给监视器栏;焦点在按钮上时不抢", () => {
+    render(<WorkspaceShell />);
+    // 空库时首页会自动盖上来(三栏 inert);这条测的是有素材的工作区。
+    act(() => reportLibraryState({ loading: false, clipCount: 3 }));
+    const heard: Event[] = [];
+    const listener = (event: Event) => heard.push(event);
+    window.addEventListener("tripcut:toggle-playback", listener);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    const space = new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true });
+    act(() => {
+      document.body.dispatchEvent(space);
+    });
+    expect(heard).toHaveLength(1);
+    expect(space.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "预览监视器" }));
+    // 按钮上的空格是按钮自己的(点击),不抢。
+    const button = screen.getAllByRole("button")[0]!;
+    button.focus();
+    act(() => {
+      button.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true }));
+    });
+    expect(heard).toHaveLength(1);
+    // 模态开着时也不抢(抽屉里的空格归抽屉)。
+    button.blur();
+    pushModal({});
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true }));
+    });
+    expect(heard).toHaveLength(1);
+    // 首页盖着(三栏 inert)时也不抢 —— 视频藏着,不能在首页上把声音放出来。
+    __resetModalStackForTests();
+    act(() => pinHome(true));
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true }));
+    });
+    expect(heard).toHaveLength(1);
+    act(() => pinHome(false));
+    window.removeEventListener("tripcut:toggle-playback", listener);
+    expect(isOrphanFocusTarget(document.body)).toBe(true);
+    expect(isOrphanFocusTarget(document.documentElement)).toBe(true);
+    expect(isOrphanFocusTarget(button)).toBe(false);
+  });
+
   it("有模态开着时 Esc 归模态自己处理,壳一律不抢(否则一次 Esc 退两层)", () => {
     __resetWorkspaceForTests({ immersive: true, query: "湖" });
     render(<WorkspaceShell />);
@@ -222,5 +269,34 @@ describe("useGlobalHotkeys —— 装进壳里的行为", () => {
     expect(screen.queryByRole("button", { name: "关闭帮助" })).toBeNull();
     press({ key: "?", code: "Slash", shiftKey: true });
     expect(await screen.findByRole("button", { name: "关闭帮助" })).toBeTruthy();
+  });
+});
+
+describe("R13 §1:全局键位查表", () => {
+  it("⌘E 导出、⇧⌘E 切换集;⌘Z/⇧⌘Z 只登记不执行(还没有全局撤销栈)", () => {
+    expect(globalHotkeyIntent(key({ key: "e", code: "KeyE", metaKey: true }), IDLE, false)).toEqual({ kind: "export" });
+    expect(globalHotkeyIntent(key({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }), IDLE, false)).toEqual({ kind: "switch-episode" });
+    expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true }), IDLE, false)).toBeNull();
+    expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true, shiftKey: true }), IDLE, false)).toBeNull();
+  });
+
+  it("换成 Premiere 预设后 ⌘M 变成导出、⌘E 不再是;自定义覆盖能把帮助改到 F1", () => {
+    const premiere = indexKeymap(resolveKeymap("premiere", undefined));
+    expect(globalHotkeyIntent(key({ key: "m", code: "KeyM", metaKey: true }), IDLE, false, premiere)).toEqual({ kind: "export" });
+    expect(globalHotkeyIntent(key({ key: "e", code: "KeyE", metaKey: true }), IDLE, false, premiere)).toBeNull();
+    const custom = indexKeymap(resolveKeymap("custom", JSON.stringify({ base: "jianying", overrides: { help: ["f1"] } })));
+    expect(globalHotkeyIntent(key({ key: "F1", code: "F1" }), IDLE, false, custom)).toEqual({ kind: "help" });
+    expect(globalHotkeyIntent(key({ key: "?", code: "Slash", shiftKey: true }), IDLE, false, custom)).toBeNull();
+  });
+
+  it("壳上按 ⌘E 打开导出抽屉,按 ⇧⌘E 发 tripcut:open-episode-switcher", () => {
+    render(<WorkspaceShell />);
+    press({ key: "e", code: "KeyE", metaKey: true });
+    expect(getWorkspaceSnapshot().openDrawer).toBe("deliver");
+    __resetWorkspaceForTests();
+    const seen: string[] = [];
+    window.addEventListener("tripcut:open-episode-switcher", () => seen.push("switch"), { once: true });
+    press({ key: "E", code: "KeyE", metaKey: true, shiftKey: true });
+    expect(seen).toEqual(["switch"]);
   });
 });

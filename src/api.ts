@@ -136,6 +136,11 @@ export interface ImportProgress {
   running: number;
   waiting_for_permit: number;
   paused_for_memory: boolean;
+  /** Z-01(R14 stress):当前集已登记的素材数 / 其中画质 + 运镜分析已落终态的数;旧后端缺省。 */
+  analysis_total?: number;
+  analysis_done?: number;
+  /** Z-01(R14 stress):登记完成但判定重复的文件数(没有素材行,状态条算作已处理)。 */
+  duplicate?: number;
 }
 
 export interface ClipAnalysis {
@@ -230,6 +235,8 @@ export interface ClipListItem {
   select_count: number;
   /** R11 §1.2:后端算出过建议段(车道 B 提供;缺省 undefined = 不显示角标)。 */
   has_suggestions?: boolean;
+  /** Z-07(R14 stress):原片此刻不在原位的时间戳(`clips.missing_since`);媒体池画「缺失」角标。旧后端缺省。 */
+  missing_since?: string | null;
 }
 
 export interface DeviceClockSetting {
@@ -303,7 +310,9 @@ export type PlayerCommand =
   // Applied automatically by the backend on `player_open` (see
   // `apply_stored_display_prefs` in src-tauri/src/lib.rs) — the frontend
   // does not issue this itself.
-  | { type: "set_rotation"; degrees: number | null };
+  | { type: "set_rotation"; degrees: number | null }
+  // R12 §5 真变速:mpv `speed` 属性,原生层夹紧到 0.25–4。
+  | { type: "set_speed"; speed: number };
 
 export interface PlayerStatus {
   phase: "closed" | "loading" | "ready" | "error";
@@ -657,13 +666,21 @@ export interface ExportStatus {
   /** R10 U-05:本次交付(idle 时 = 将要)用的画布;idle 且解析失败时 `null`。 */
   canvas?: ExportCanvas | null;
   /** R11 车道 E:任务模式(`quick` = 快速导出,`full` = 完整交付包);idle 或旧后端为 null / 缺省。 */
-  mode?: "quick" | "full" | null;
+  mode?: "quick" | "full" | "kit" | null;
 }
 
 export interface JianyingAvailability {
   installed_version: string | null;
   supported: boolean;
   reason: string;
+  /** R14 §9 A(以下四个字段旧后端 / 假后端可能没有,按缺省处理):版本在白名单里。 */
+  whitelisted?: boolean;
+  /** settings `jianying.human_check.<version>` 的裁定;没记过 = "none"。 */
+  human_check?: JianyingHumanCheck;
+  /** 白名单 ∪ human_check ok(且草稿根目录在);与 `supported` 同值。 */
+  usable?: boolean;
+  /** 版本在「待人眼验证」名单里:允许「仍然试着生成(试验)」。未知版本永远 false。 */
+  force_allowed?: boolean;
 }
 
 export interface JianyingDraftResult {
@@ -673,7 +690,15 @@ export interface JianyingDraftResult {
   jianying_version: string;
   selected_count: number;
   subtitle_count: number;
+  /** R14 C-2:写进草稿的章节标记数(每章首镜素材名前缀「【第 n 章·章名】」);0 = 没有章。 */
+  chapter_marks: number;
+  /** R14 C-3:草稿是否带了配乐轨(本集最近导入的那首音乐)。 */
+  has_music: boolean;
   message: string;
+  /** R14 §9 A:对「待验证」版本 force 出来的试验草稿,剪映能不能开还要人眼确认。 */
+  experimental?: boolean;
+  /** 与 `output_path` 同值。 */
+  draft_path?: string;
 }
 
 export function getMediaServerInfo(): Promise<MediaServerInfo> {
@@ -1130,6 +1155,11 @@ export function playerCommand(cmd: PlayerCommand): Promise<void> {
 
 export function playerStatus(): Promise<PlayerStatus> {
   return invoke<PlayerStatus>("player_status");
+}
+
+/** R12 §5:`player_command` 的 `set_speed` 直呼版本;监视器走通道发命令,这条留给别的调用方。 */
+export function playerSetSpeed(speed: number): Promise<void> {
+  return invoke<void>("player_set_speed", { speed });
 }
 
 export type TargetPlatform = "douyin" | "xiaohongshu" | "bilibili" | "moments" | "family" | "general";
@@ -1641,6 +1671,30 @@ export async function bridgeMusicAnalyzedEvents(): Promise<() => void> {
   }
 }
 
+/** X-04:每条 import_probe 落到终态时后端发的事件名(Rust `core::jobs::IMPORT_PROBE_DONE_EVENT`)。 */
+export const IMPORT_PROBE_DONE_EVENT = "tripcut:import-probe-done";
+
+export interface ImportProbeDoneEvent {
+  job_id: number;
+  status: "done" | "failed" | "blocked";
+}
+
+/**
+ * X-04:把 `tripcut:import-probe-done` Tauri 事件转发成同名 window CustomEvent,状态条按单条完成
+ * 即时刷新计数(剩余时间估算要连续样本,3 秒一次的轮询在短片段上只看到整批跳变)。
+ * 与 `bridgeMusicAnalyzedEvents` 同一套约定;非 Tauri 环境静默退化为 no-op。
+ */
+export async function bridgeImportProbeEvents(): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<ImportProbeDoneEvent>(IMPORT_PROBE_DONE_EVENT, (event) => {
+      window.dispatchEvent(new CustomEvent<ImportProbeDoneEvent>(IMPORT_PROBE_DONE_EVENT, { detail: event.payload }));
+    });
+  } catch {
+    return () => undefined;
+  }
+}
+
 /** R10 U-22:首启引导「已跳过 / 已完成」持久化(settings `onboarding.first_run_done`,默认 false)。 */
 export function getFirstRunDone(): Promise<boolean> {
   return invoke<boolean>("get_first_run_done");
@@ -1731,6 +1785,14 @@ export interface AutoSelectOutcome {
   chapters_covered: number;
   /** 传给 `undoAutoSelect` 一键撤销整批。 */
   batch_id: string;
+  /** R12:挑完默认已排进镜头带的段数;旧后端没有这个字段。 */
+  placed?: number;
+  /** 排入那一批的批号(`undoArrange` 用);没排进任何段时为 null。 */
+  arrange_batch_id?: string | null;
+  /** X-01:实际用的范围;旧后端没有这个字段。 */
+  scope_used?: AutoSelectScope;
+  /** X-01:默认范围「收藏 + 3 星以上」一条候选都没有、后端自动改按「全部」挑了 —— toast 要说出来。 */
+  fell_back?: boolean;
 }
 
 /** 状态条「补齐时刻分 n/m」:当前集已分析素材里有/没有时刻分的数量与任务状态。 */
@@ -1781,6 +1843,8 @@ export type ClipMoment = Moment;
 export interface QuickExportSelection {
   segment_ids?: number[];
   clip_ids?: number[];
+  /** Z-11(R14 stress):「只重试失败的」时上一次作业的 id —— 后端写回同一个文件夹、沿用原编号、跳过已导好的。 */
+  retry_of_job_id?: number;
 }
 
 /** `quickExport` / `planQuickExport` 的结果:`job_id` 只在真的排了任务时有值;`dir` 是将写的文件夹(给了目标目录是全路径,否则只有文件夹名)。 */
@@ -1789,6 +1853,8 @@ export interface QuickExportOutcome {
   dir: string;
   files: string[];
   skipped: { reason: string }[];
+  /** Z-07(R14 stress):原片此刻不在原位的文件名;非空时后端会拒绝导出,抽屉给「去缺失素材页重新定位」。旧后端缺省。 */
+  missing?: string[];
 }
 
 /** `quickExport` 的错误文本含这个词 = 目标目录不存在 / 不可写,前端回落到保存面板;别的失败不带它。 */
@@ -1802,4 +1868,97 @@ export function quickExport(destDir: string, selection?: QuickExportSelection | 
 /** 只算不排:快速导出将写的文件夹与文件清单(交付抽屉快速模式的清单读它)。 */
 export function planQuickExport(destDir: string | null, selection?: QuickExportSelection | null): Promise<QuickExportOutcome> {
   return invoke<QuickExportOutcome>("plan_quick_export", { destDir, selection: selection ?? null });
+}
+
+// ---------- R12 车道 B:挑选 → 排列联动 ----------
+
+/** `arrangeSelectedSegments` 的结果:`placed` 是这次真正新排进镜头带的段数(已在带上的不算)。 */
+export interface ArrangeOutcome {
+  placed: number;
+  /** 本批覆盖的章数(未分章的段算一桶)。 */
+  chapters: number;
+  /** 传给 `undoArrange` 只撤这一批。 */
+  batch_id: string;
+}
+
+/**
+ * 「一键排入」:本集全部精选段(手打 + 自动挑选)按章节写进镜头带(素材有章按章、没章按拍摄时间)。
+ * `append`(默认)只补没在带上的段;`replace` 先清掉带上所有镜头再全量排入。
+ */
+export function arrangeSelectedSegments(mode: "append" | "replace" = "append"): Promise<ArrangeOutcome> {
+  return invoke<ArrangeOutcome>("arrange_selected_segments", { mode });
+}
+
+/** 只撤一批排入(本批新写的镜头拿掉,之前就在带上的回原位),返回撤掉的条数。 */
+export function undoArrange(batchId: string): Promise<number> {
+  return invoke<number>("undo_arrange", { batchId });
+}
+
+/** 「这章够了」:把一章标成跳过(不算缺口)/ 取消跳过。持久化在 settings 键 `story.chapter_skipped.<id>`。 */
+export function skipChapter(chapterId: number, skipped: boolean): Promise<void> {
+  return invoke<void>("skip_chapter", { chapterId, skipped });
+}
+
+/** settings 里「这章够了」的键前缀;值 "true" = 跳过。 */
+export const CHAPTER_SKIPPED_PREFIX = "story.chapter_skipped.";
+
+/** R13 §5:剪映专业版(macOS)的 bundle id;`open_app` 只认这一个。 */
+export const JIANYING_BUNDLE_ID = "com.lemon.lvpro";
+
+/** 打开一个本机应用(按 bundle id;后端白名单只放行剪映)。装没装由 `open` 说了算,没装会 reject。 */
+export function openApp(bundleId: string): Promise<void> {
+  return invoke<void>("open_app", { bundleId });
+}
+
+/** R14 §9 A:业主在剪映里开过试验草稿之后的裁定。 */
+export type JianyingHumanCheck = "none" | "ok" | "fail";
+
+/** 「我知道风险,仍然试着生成(试验)」:后端只对待验证名单里的版本放行,未知版本仍 reject。 */
+export function generateJianyingDraftForced(): Promise<JianyingDraftResult> {
+  return invoke<JianyingDraftResult>("generate_jianying_draft", { force: true });
+}
+
+/** 「可以用」/「打不开」落到 settings `jianying.human_check.<version>`;回新的可用性。 */
+export function setJianyingHumanCheck(version: string, verdict: "ok" | "fail"): Promise<JianyingAvailability> {
+  return invoke<JianyingAvailability>("set_jianying_human_check", { version, verdict });
+}
+
+/**
+ * R13 真机 Y-08:快速导出(导出片段)自己的文件夹面板 —— 标题「选择导出文件夹」,
+ * 交付包的 `pickExportFolder`(「选择交付包保存位置」)不动。同一条 Rust 命令,只是换标题。
+ */
+export function pickQuickExportFolder(): Promise<string | null> {
+  return invoke<string | null>("pick_export_folder", { title: "选择导出文件夹" });
+}
+
+// ---------- R14 车道 B:剪映素材包 ----------
+
+/** `exportJianyingKit` / `planJianyingKit` 的结果:`files` 按镜头带顺序编号(`NN_<章名>_<素材名>.mp4`),`order_file` 是顺序清单的文件名(「顺序.txt」)。 */
+export interface KitExportOutcome {
+  job_id: number | null;
+  dir: string;
+  files: string[];
+  order_file: string;
+  /** Z-07(R14 stress):同 `QuickExportOutcome.missing`。 */
+  missing?: string[];
+}
+
+/** 剪映素材包:按镜头带顺序把每个镜导出到 `destDir/<集名>_剪映素材包_<日期>`(同名 `-2`)+ 顺序.txt。`destDir` 缺省用记住的文件夹;没记过 / 用不了时错误文本含 `dest_unavailable`。进度走 `getExportStatus`(`mode = "kit"`)。 */
+export function exportJianyingKit(destDir?: string | null): Promise<KitExportOutcome> {
+  return invoke<KitExportOutcome>("export_jianying_kit", { destDir: destDir ?? null });
+}
+
+/** 只算不排:素材包将写的文件夹与编号清单。 */
+export function planJianyingKit(destDir?: string | null): Promise<KitExportOutcome> {
+  return invoke<KitExportOutcome>("plan_jianying_kit", { destDir: destDir ?? null });
+}
+
+/** Z-14(R14 stress):只读查看已封存集时按被查看的集取镜头带;`null` = 当前集(与 `getStoryboard()` 同义)。 */
+export function getStoryboardOf(episodeId: number | null): Promise<Storyboard> {
+  return invoke<Storyboard>("get_storyboard", { episodeId });
+}
+
+/** Z-14(R14 stress):只读查看已封存集时按被查看的集列缺口;`null` = 当前集。 */
+export function listStoryGapsOf(episodeId: number | null): Promise<StoryGap[]> {
+  return invoke<StoryGap[]>("list_story_gaps", { episodeId });
 }

@@ -243,11 +243,21 @@ describe("镜头带数据模型", () => {
     expect(slotLabelZh(gap(1, 1, "REAL/DETAIL", "细节镜头"))).toBe("细节镜头");
   });
 
-  it("拖动期间当前章 ±1 全渲染(虚拟化关掉,否则拖动目标会消失)", () => {
+  it("拖动期间所有章全渲染(V14-02:虚拟化关掉,源章与每个目标章都得在,当前章 ±1 不够)", () => {
     const idle = renderableChapterRange(offsets, 900, 4, false);
     const dragging = renderableChapterRange(offsets, 900, 4, true);
-    expect(dragging.fullyRendered).toEqual([3, 4, 5]);
+    expect(dragging.fullyRendered).toEqual(offsets.map((_, index) => index));
+    expect(dragging).toMatchObject({ from: 0, to: offsets.length - 1 });
     expect(idle.fullyRendered.length).toBeLessThanOrEqual(dragging.fullyRendered.length);
+  });
+
+  it("7 章、视口停在第 1 章、从第 7 章拖起:第 7 章(源)与第 1 章(目标)都全渲染", () => {
+    const seven = [0, 336, 672, 1008, 1344, 1680, 2016];
+    const idle = renderableChapterRange(seven, 1_200, 0, false, 0);
+    expect(idle.fullyRendered).not.toContain(6);
+    const dragging = renderableChapterRange(seven, 1_200, 0, true, 0);
+    expect(dragging.fullyRendered).toContain(6);
+    expect(dragging.fullyRendered).toContain(0);
   });
 
   it("视口外的章节只出带头", () => {
@@ -255,8 +265,9 @@ describe("镜头带数据模型", () => {
     expect(r.to).toBeLessThan(offsets.length - 1);
   });
 
-  it("第一章拖动时也不越界", () => {
-    expect(renderableChapterRange(offsets, 900, 0, true).fullyRendered).toEqual([0, 1]);
+  it("第一章拖动时也不越界(全渲染,越不了界)", () => {
+    expect(renderableChapterRange(offsets, 900, 0, true).fullyRendered).toEqual(offsets.map((_, index) => index));
+    expect(renderableChapterRange([], 900, 0, true)).toEqual({ from: 0, to: -1, fullyRendered: [] });
   });
 });
 

@@ -1,28 +1,59 @@
 import type { JSX } from "react";
+import { returnToActiveEpisode } from "../historyView";
 import { EpisodeSwitcher } from "./EpisodeSwitcher";
-import { Button, Icon, Kbd } from "./ui";
+import { pinHome, useHomeOpen } from "./homeStore";
+import { PipelineRail } from "./PipelineRail";
+import { focusPipelineStep, runPipelineNext } from "./pipelineActions";
+import { pipelineGapLabel, pipelineNextLabel } from "./pipelineModel";
+import { ActionKbd } from "./KeymapKbd";
+import { Button, Icon } from "./ui";
+import { usePipeline } from "./usePipeline";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
 /**
- * 顶栏(高 44px,规格 §3.1)。左起品牌记号 + 字标 + 「导入素材」,居中「切换集」胶囊,
- * 右侧「命令面板 ⌘K」提示、「生成交付包」(唯一的强调色主按钮)与齿轮「设置」。
- * **没有四步导航,没有英文 kicker** —— 旧壳那四条「01 导入 INGEST」式导航在新壳里
- * 一条都不许出现,冒烟脚本按这个断言。四个按钮的 AX 名(导入素材 / 切换集 /
- * 生成交付包 / 设置)冻结;键帽提示(⌘I / ⌘⏎ / ⌘K)是 `aria-hidden` 的视觉引导,
- * 不进 AX 名。
+ * 顶栏(高 44px,规格 §3.1)。左起品牌记号 + 字标 + 「导入素材」,居中「切换集」胶囊 +
+ * 四步流水线导航(R12 §1),右侧「命令面板 ⌘K」提示、「下一步:…」(唯一的强调色主按钮)
+ * 与齿轮「设置」。
+ *
+ * R12:原「生成交付包」主按钮并入导出抽屉的「完整交付包」模式;顶栏这颗的 AX 名固定为
+ * 「流水线下一步」,可见文案随流水线走(下一步:导入素材 / 自动挑选 / 排到镜头带 / 导出;
+ * 四步全完成 → 再导出一次)。**没有英文 kicker** —— 冒烟脚本按这个断言。
+ * 冻结的 AX 名:导入素材 / 切换集 / 流水线下一步 / 设置;键帽提示(⌘I / ⌘K)是
+ * `aria-hidden` 的视觉引导,不进 AX 名。
  */
+/** Z-14:只读查看已封存集时顶栏主按钮的文案 —— 导出只能对当前集做,按钮变成回到当前集。 */
+export const RETURN_TO_EXPORT_LABEL = "回到当前集再导出";
+
 export function TopBar(): JSX.Element {
   const openDrawer = useWorkspace((state) => state.openDrawer);
+  const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
+  const pipeline = usePipeline();
+  const homeOpen = useHomeOpen();
+  const nextLabel = viewingEpisode ? RETURN_TO_EXPORT_LABEL : pipelineNextLabel(pipeline);
+  // Z-03:段都排进去了但还有章没镜 → 主按钮已是「导出」,旁边给一颗 ghost「补缺口 n 章」(聚焦镜头带)。
+  const gapLabel = viewingEpisode ? null : pipelineGapLabel(pipeline);
+  const nextIcon = pipeline.complete || pipeline.step === 4 ? "deliver" : pipeline.step === 1 ? "import" : pipeline.step === 2 ? "star" : "grip";
+  // 下一步落在抽屉上(① / ④)时按钮是抽屉的开关,带 haspopup / expanded;②③ 落在栏里,不带。
+  const opensDrawer = !viewingEpisode && (pipeline.complete || pipeline.step === 1 || pipeline.step === 4);
+  const nextDrawer = pipeline.complete || pipeline.step === 4 ? "deliver" : "import";
 
   return (
     <header className="workspace-topbar">
       <div className="workspace-topbar-left">
-        <span className="workspace-brand">
+        {/* R13 §3:logo 是首页的开关(剪映的心智:点左上角回首页);有素材时首页只从这里进。 */}
+        <button
+          type="button"
+          className="workspace-brand workspace-brand-button"
+          aria-label="首页"
+          aria-pressed={homeOpen}
+          title={homeOpen ? "回到工作区" : "首页"}
+          onClick={() => pinHome(!homeOpen)}
+        >
           <span className="workspace-brand-mark" aria-hidden="true">
             <Icon name="play" size={12} />
           </span>
           <span className="workspace-wordmark">旅剪工作台</span>
-        </span>
+        </button>
         <Button
           variant="secondary"
           icon="import"
@@ -32,29 +63,37 @@ export function TopBar(): JSX.Element {
           onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" })}
         >
           导入素材
-          <Kbd>⌘I</Kbd>
+          <ActionKbd action="import" />
         </Button>
       </div>
 
       <div className="workspace-topbar-center">
         <EpisodeSwitcher />
+        <PipelineRail state={pipeline} />
       </div>
 
       <div className="workspace-topbar-right">
         <span className="workspace-topbar-hint" aria-hidden="true">
           命令面板
-          <Kbd>⌘K</Kbd>
+          <ActionKbd action="command-palette" />
         </span>
+        {gapLabel ? (
+          <Button variant="ghost" icon="grip" className="pipeline-gap" aria-label="补缺口" title="镜头带里还有章没镜:补一条,或点「这章够了」" onClick={() => focusPipelineStep(3)}>
+            {gapLabel}
+          </Button>
+        ) : null}
         <Button
           variant="primary"
-          icon="deliver"
-          aria-haspopup="dialog"
-          aria-expanded={openDrawer === "deliver"}
-          aria-label="生成交付包"
-          onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "deliver" })}
+          icon={nextIcon}
+          className="pipeline-next"
+          aria-haspopup={opensDrawer ? "dialog" : undefined}
+          aria-expanded={opensDrawer ? openDrawer === nextDrawer : undefined}
+          aria-label="流水线下一步"
+          title={nextLabel}
+          data-step={pipeline.step}
+          onClick={() => (viewingEpisode ? returnToActiveEpisode() : runPipelineNext(pipeline))}
         >
-          生成交付包
-          <Kbd>⌘⏎</Kbd>
+          {nextLabel}
         </Button>
         <Button
           variant="icon"
