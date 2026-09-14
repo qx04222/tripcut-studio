@@ -19,7 +19,7 @@ beforeEach(() => {
   __resetUpdateStoreForTests();
   apiMocks.setSetting.mockResolvedValue(undefined);
   apiMocks.checkForUpdate.mockResolvedValue({ available: false, version: "0.7.0", notes: "", pub_date: "", current_version: "0.8.0", offline: false, skipped: false });
-  apiMocks.downloadAndInstallUpdate.mockResolvedValue(undefined);
+  apiMocks.downloadUpdate.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -65,7 +65,7 @@ describe("AboutUpdate", () => {
   it("有新版本 → 内联「有新版本 0.8.0」+「现在更新」+「查看更新说明」;下载走同一套流程到「重启完成更新」", async () => {
     apiMocks.checkForUpdate.mockResolvedValue(NEW_VERSION);
     let finish: () => void = () => undefined;
-    apiMocks.downloadAndInstallUpdate.mockImplementation(
+    apiMocks.downloadUpdate.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;
@@ -82,7 +82,7 @@ describe("AboutUpdate", () => {
     expect(screen.getByText(/• 自动发现新版本/)).toBeTruthy();
     expect(screen.queryByText(/##/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "现在更新" }));
-    await waitFor(() => expect(apiMocks.downloadAndInstallUpdate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.downloadUpdate).toHaveBeenCalledTimes(1));
     act(() => {
       window.dispatchEvent(new CustomEvent(UPDATE_PROGRESS_EVENT, { detail: { downloaded: 42, total: 100 } }));
     });
@@ -107,7 +107,7 @@ describe("AboutUpdate", () => {
     expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
 
     apiMocks.checkForUpdate.mockResolvedValue(NEW_VERSION);
-    apiMocks.downloadAndInstallUpdate.mockRejectedValueOnce(new Error("The signature verification failed"));
+    apiMocks.downloadUpdate.mockRejectedValueOnce(new Error("The signature verification failed"));
     fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
     fireEvent.click(await screen.findByRole("button", { name: "现在更新" }));
     await screen.findByText(/更新没成功:更新包没通过安全校验/);

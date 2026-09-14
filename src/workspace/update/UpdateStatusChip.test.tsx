@@ -26,7 +26,7 @@ describe("UpdateStatusChip", () => {
     const { container } = render(<UpdateStatusChip />);
     expect(container.textContent).toBe("");
     let finish: () => void = () => undefined;
-    apiMocks.downloadAndInstallUpdate.mockImplementation(
+    apiMocks.downloadUpdate.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;

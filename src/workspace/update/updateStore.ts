@@ -14,7 +14,7 @@ import {
   UPDATER_LAST_CHECK_KEY,
   UPDATER_SKIPPED_VERSION_KEY,
   checkForUpdate,
-  downloadAndInstallUpdate,
+  downloadUpdate,
   getSettings,
   openExternalUrl,
   restartToUpdate,
@@ -152,7 +152,7 @@ export async function runUpdateDownload(): Promise<UpdateState> {
   };
   window.addEventListener(UPDATE_PROGRESS_EVENT, onProgress);
   try {
-    await downloadAndInstallUpdate();
+    await downloadUpdate();
     set({ phase: "ready", downloaded: state.total ?? state.downloaded, total: state.total });
   } catch (error) {
     set({ phase: "error", failedAt: "download", failure: describeUpdateFailure(error) });

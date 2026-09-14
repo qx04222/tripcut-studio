@@ -2164,9 +2164,13 @@ export function checkForUpdate(): Promise<UpdateCheckResult> {
   return invoke<UpdateCheckResult>("check_for_update");
 }
 
-/** R17:下载并安装刚查到的那个版本;进度走 `tripcut:update-progress` 事件,失败 reject。 */
-export function downloadAndInstallUpdate(): Promise<void> {
-  return invoke<void>("download_and_install");
+/**
+ * R17:后台下载并暂存刚查到的那个版本(签名校验过才暂存);进度走 `tripcut:update-progress` 事件,失败 reject。
+ * **不在运行中替换 bundle**:2026-09-14 真机实测,运行中原地替换 .app 会让 WebKit 失去有效签名、界面整个冻住
+ * (点什么都没反应,AX 树消失);替换只在「重启完成更新」(`restart_to_update`)或退出钩子里做。
+ */
+export function downloadUpdate(): Promise<void> {
+  return invoke<void>("download_update");
 }
 
 /** R17:装好之后重启到新版本。 */

@@ -2303,7 +2303,7 @@ HANDLERS.check_for_update = () => {
   if (mockUpdateMode === null) return { available: false, version: APP_INFO.version, notes: "", pub_date: "", current_version: "0.8.0", offline: false, skipped: false };
   return { available: true, version: MOCK_UPDATE_VERSION, notes: MOCK_UPDATE_NOTES, pub_date: "2026-09-14T08:00:00Z", current_version: "0.8.0", offline: false, skipped: false };
 };
-HANDLERS.download_and_install = async () => {
+HANDLERS.download_update = async () => {
   const total = 48_000_000;
   const steps = 10;
   for (let step = 1; step <= steps; step += 1) {
@@ -2314,7 +2314,7 @@ HANDLERS.download_and_install = async () => {
 };
 HANDLERS.restart_to_update = noop;
 HANDLERS.open_url = noop;
-(MOCK_COMMANDS as string[]).push("check_for_update", "download_and_install", "restart_to_update", "open_url");
+(MOCK_COMMANDS as string[]).push("check_for_update", "download_update", "restart_to_update", "open_url");
 // ---------------------------------------------------------------------------
 // R17 车道 epmove:素材跨集移动。假后端改 `episode_id`、把它从镜头带 / 章里拿掉、集卡计数跟着动;
 // 回旧归属供撤销反向再调。不存在的素材计入 skipped_missing;已在目标集的不算移动。

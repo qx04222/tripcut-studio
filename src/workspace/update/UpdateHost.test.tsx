@@ -22,7 +22,7 @@ beforeEach(() => {
   apiMocks.getSettings.mockResolvedValue({});
   apiMocks.checkForUpdate.mockResolvedValue(NEW_VERSION);
   apiMocks.setSetting.mockResolvedValue(undefined);
-  apiMocks.downloadAndInstallUpdate.mockResolvedValue(undefined);
+  apiMocks.downloadUpdate.mockResolvedValue(undefined);
   apiMocks.bridgeUpdateProgressEvents.mockResolvedValue(() => undefined);
 });
 afterEach(() => {
@@ -70,7 +70,7 @@ describe("UpdateHost", () => {
     mount();
     const toast = await screen.findByRole("status");
     expect(toast.textContent).toContain("有新版本 0.8.0");
-    expect(apiMocks.downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.downloadUpdate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "跳过这个版本" }));
     await waitFor(() => expect(apiMocks.setSetting).toHaveBeenCalledWith("updater.skipped_version", "0.8.0"));
     expect(screen.queryByRole("status")).toBeNull();
@@ -79,13 +79,13 @@ describe("UpdateHost", () => {
 
   it("「现在更新」走同一套下载;下载失败出「更新没成功:网络连不上更新服务器 · 打开下载页」", async () => {
     apiMocks.getSettings.mockResolvedValue({ "updater.ask_before_download": "true" });
-    apiMocks.downloadAndInstallUpdate.mockRejectedValue(new Error("connection reset by peer"));
+    apiMocks.downloadUpdate.mockRejectedValue(new Error("connection reset by peer"));
     apiMocks.openExternalUrl.mockRejectedValue(new Error("no such command"));
     const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     mount();
     await screen.findByRole("status");
     fireEvent.click(screen.getByRole("button", { name: "现在更新" }));
-    await waitFor(() => expect(apiMocks.downloadAndInstallUpdate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.downloadUpdate).toHaveBeenCalledTimes(1));
     const failed = await screen.findByText(/更新没成功:网络连不上更新服务器/);
     expect(failed.closest('[role="status"]')?.className).toContain("ui-toast--danger");
     fireEvent.click(screen.getByRole("button", { name: "打开下载页" }));

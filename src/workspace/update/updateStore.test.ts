@@ -27,7 +27,7 @@ beforeEach(() => {
   apiMocks.getSettings.mockResolvedValue({});
   apiMocks.checkForUpdate.mockResolvedValue({ available: false, version: "0.7.0", notes: "", pub_date: "", current_version: "0.8.0", offline: false, skipped: false });
   apiMocks.setSetting.mockResolvedValue(undefined);
-  apiMocks.downloadAndInstallUpdate.mockResolvedValue(undefined);
+  apiMocks.downloadUpdate.mockResolvedValue(undefined);
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -43,7 +43,7 @@ describe("runAutoUpdate", () => {
     expect(snapshot.version).toBe("0.8.0");
     expect(snapshot.awaitingConsent).toBe(false);
     expect(apiMocks.setSetting).toHaveBeenCalledWith("updater.last_check", expect.stringMatching(/^\d{4}-\d\d-\d\dT/));
-    expect(apiMocks.downloadAndInstallUpdate).toHaveBeenCalledTimes(1);
+    expect(apiMocks.downloadUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("自动更新关掉 / 24 小时内查过 / 离线:不打网络", async () => {
@@ -62,13 +62,13 @@ describe("runAutoUpdate", () => {
     apiMocks.getSettings.mockResolvedValue({ "updater.ask_before_download": "true" });
     expect(await runAutoUpdate(NOW, true)).toBe("asked");
     expect(getUpdateSnapshot()).toMatchObject({ phase: "available", awaitingConsent: true, version: "0.8.0" });
-    expect(apiMocks.downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.downloadUpdate).not.toHaveBeenCalled();
 
     __resetUpdateStoreForTests();
     apiMocks.getSettings.mockResolvedValue({ "updater.skipped_version": "0.8.0" });
     expect(await runAutoUpdate(NOW, true)).toBe("skipped");
     expect(getUpdateSnapshot().phase).toBe("idle");
-    expect(apiMocks.downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.downloadUpdate).not.toHaveBeenCalled();
   });
 
   it("自动检查失败静默回 idle;手动检查失败露出白话原因", async () => {
@@ -85,7 +85,7 @@ describe("runUpdateDownload", () => {
     apiMocks.checkForUpdate.mockResolvedValue(NEW_VERSION);
     await runUpdateCheck("manual");
     let rejectDownload: (error: Error) => void = () => undefined;
-    apiMocks.downloadAndInstallUpdate.mockImplementation(
+    apiMocks.downloadUpdate.mockImplementation(
       () =>
         new Promise<void>((_, reject) => {
           rejectDownload = reject;
@@ -102,14 +102,14 @@ describe("runUpdateDownload", () => {
     window.dispatchEvent(new CustomEvent(UPDATE_PROGRESS_EVENT, { detail: { downloaded: 99, total: 100 } }));
     expect(getUpdateSnapshot().downloaded).toBe(42);
     // 可重试:第二次成功 → ready。
-    apiMocks.downloadAndInstallUpdate.mockResolvedValue(undefined);
+    apiMocks.downloadUpdate.mockResolvedValue(undefined);
     await runUpdateDownload();
     expect(getUpdateSnapshot().phase).toBe("ready");
   });
 
   it("不在 available 时不下载", async () => {
     await runUpdateDownload();
-    expect(apiMocks.downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.downloadUpdate).not.toHaveBeenCalled();
   });
 });
 

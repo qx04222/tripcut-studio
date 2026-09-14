@@ -32,7 +32,7 @@ describe("UpdateTopChip", () => {
     const available = screen.getByRole("button", { name: "新版本 0.8.2" });
 
     let finish: () => void = () => undefined;
-    apiMocks.downloadAndInstallUpdate.mockImplementation(
+    apiMocks.downloadUpdate.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;
@@ -43,7 +43,7 @@ describe("UpdateTopChip", () => {
       fireEvent.click(available);
       downloading = runUpdateDownload();
     });
-    expect(apiMocks.downloadAndInstallUpdate).toHaveBeenCalled();
+    expect(apiMocks.downloadUpdate).toHaveBeenCalled();
     act(() => {
       window.dispatchEvent(new CustomEvent(UPDATE_PROGRESS_EVENT, { detail: { downloaded: 42, total: 100 } }));
     });
