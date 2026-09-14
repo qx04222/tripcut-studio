@@ -18,6 +18,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$ROOT/sidecar-ocr/main.swift"
 [ -s "$SOURCE" ] || { echo "ERROR: 缺少源码：$SOURCE"; exit 1; }
 
+# 最低系统版本(R16 车道 D):swiftc 不认 MACOSX_DEPLOYMENT_TARGET,要显式 -target。
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 OUTPUT_ROOT="${TRIPCUT_SIDECAR_OCR_OUT:-$HOME/Library/Caches/tripcut-build/sidecar-ocr/out}"
 mkdir -p "$OUTPUT_ROOT"
 BINARY="$OUTPUT_ROOT/sidecar-ocr"
@@ -25,6 +27,7 @@ rm -f "$BINARY"
 
 echo "==> swiftc -O $SOURCE"
 swiftc -O \
+  -target "arm64-apple-macos$MACOSX_DEPLOYMENT_TARGET" \
   -framework Vision \
   -framework AppKit \
   -framework CoreImage \
@@ -36,14 +39,16 @@ file -b "$BINARY" | grep -q 'arm64' || { echo "ERROR: sidecar-ocr is not arm64";
 if otool -L "$BINARY" | grep -qE '/opt/homebrew|/usr/local'; then
   echo "ERROR: sidecar-ocr 链接了构建机路径依赖，拒绝产出"; otool -L "$BINARY"; exit 1
 fi
+MINOS="$(otool -l "$BINARY" | grep -A3 LC_BUILD_VERSION | awk '/minos/ {print $2; exit}')"
+[ "$MINOS" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "ERROR: sidecar-ocr minos=$MINOS，期望 $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
 
 SWIFTC_VERSION="$(swiftc --version 2>&1 | head -1)"
 BINARY_SHA256="$(shasum -a 256 "$BINARY" | awk '{print $1}')"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-python3 - "$OUTPUT_ROOT/build-manifest.json" "$SWIFTC_VERSION" "$BINARY_SHA256" "$BUILD_DATE" <<'PY'
+python3 - "$OUTPUT_ROOT/build-manifest.json" "$SWIFTC_VERSION" "$BINARY_SHA256" "$BUILD_DATE" "$MACOSX_DEPLOYMENT_TARGET" <<'PY'
 import json, pathlib, sys
-output, swiftc_version, binary_sha256, build_date = sys.argv[1:]
+output, swiftc_version, binary_sha256, build_date, minimum_macos = sys.argv[1:]
 payload = {
     "schemaVersion": 1,
     "component": "sidecar-ocr",
@@ -52,6 +57,7 @@ payload = {
     "binarySha256": binary_sha256,
     "builtAt": build_date,
     "architecture": "arm64",
+    "minimumMacOS": minimum_macos,
     "sourcePath": "sidecar-ocr/main.swift",
 }
 pathlib.Path(output).write_text(json.dumps(payload, indent=2) + "\n")

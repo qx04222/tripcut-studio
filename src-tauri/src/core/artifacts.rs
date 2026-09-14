@@ -84,6 +84,11 @@ struct ClipSource {
     tb_num: i64,
     tb_den: i64,
     height: i64,
+    /// R16 预览策略要看的四项:宽(竖拍 4K 只有 width 超 1920)、编码、HDR、VFR。
+    width: i64,
+    codec: Option<String>,
+    hdr: bool,
+    is_vfr: bool,
     /// See `core::import::ProbeMetadata::manual_rotation` — only set for the
     /// tag-only rotation ffmpeg's own autorotate does not already apply.
     /// `cover_args`/`strip_args` must be called with THIS, never with
@@ -301,6 +306,10 @@ fn run_strip_with(
         cleanup_temporary_files([&strip_temporary]);
         return Err(error);
     }
+    // R16 低配档不起 CLIP 侧车:胶片条照生成(封面 / 跳看要用),嵌入任务不排。
+    if !super::memory_profile::sidecars_enabled(connection) {
+        return Ok(());
+    }
     if let Err(error) = super::clip_search::enqueue_for_clip(
         connection,
         payload.clip_id,
@@ -514,7 +523,7 @@ pub fn run_proxy(connection: &mut Connection, job: &Job, cache_root: &Path) -> R
         "ffmpeg",
     )?;
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
-    let low_memory = super::memory_profile::resolve(connection)? == super::memory_profile::MemoryProfile::Low;
+    let low_memory = super::memory_profile::resolve(connection)?.low_memory_proxy();
     run_proxy_with(
         connection,
         job,
@@ -524,6 +533,149 @@ pub fn run_proxy(connection: &mut Connection, job: &Job, cache_root: &Path) -> R
         PROXY_TIMEOUT,
         low_memory,
     )
+}
+
+/// R16 预览策略:≤1080p 的 H.264 8-bit、恒定帧率、码率 ≤ 50 Mbps 的源片**不做**预览小文件——
+/// libmpv 的 VideoToolbox 硬解直接播这类文件毫无压力,而 R13 压测里 720p / 1.5 Mbps 的源
+/// 转成 540p 代理反而比原片还大(缓存 1.2 GB ≈ 素材 1.3 GB)。只给 4K、HEVC / 10-bit / HDR、
+/// 高码率或 VFR 的素材做代理。`clips` 表没有像素格式列,「8-bit」按 `codec = h264 且非 HDR`
+/// 判(手机与相机的 H.264 实际上都是 8-bit;High 10 极罕见)。
+pub(crate) const DIRECT_PLAY_MAX_EDGE: i64 = 1920;
+pub(crate) const DIRECT_PLAY_MAX_BITRATE_BPS: f64 = 50_000_000.0;
+
+fn plays_source_directly(source: &ClipSource) -> bool {
+    direct_play_policy(
+        source.codec.as_deref(),
+        source.width,
+        source.height,
+        source.hdr,
+        source.is_vfr,
+        source_bitrate_bps(source.byte_size, source.duration_seconds),
+    )
+}
+
+/// 纯函数版本,供单测:`codec` 为空(老库没探到)时不敢直接播,照旧做代理。
+pub(crate) fn direct_play_policy(
+    codec: Option<&str>,
+    width: i64,
+    height: i64,
+    hdr: bool,
+    is_vfr: bool,
+    bitrate_bps: Option<f64>,
+) -> bool {
+    codec.is_some_and(|codec| codec.eq_ignore_ascii_case("h264"))
+        && !hdr
+        && !is_vfr
+        && width.max(height) <= DIRECT_PLAY_MAX_EDGE
+        && bitrate_bps.is_none_or(|bps| bps <= DIRECT_PLAY_MAX_BITRATE_BPS)
+}
+
+/// R16 预览小文件目录上限(字节):设置 `performance.proxy_cache_limit_gb`,默认 10 GiB。
+pub fn proxy_cache_limit_bytes(connection: &Connection) -> Result<u64> {
+    let gb = super::settings::number_value(
+        connection,
+        super::settings::PROXY_CACHE_LIMIT_GB_KEY,
+        super::settings::DEFAULT_PROXY_CACHE_LIMIT_GB,
+    )?;
+    Ok((gb.max(1.0) * (1u64 << 30) as f64) as u64)
+}
+
+/// 当前预览小文件(`cache_artifacts.kind = 'proxy'`)合计字节数。
+pub fn proxy_cache_bytes(connection: &Connection) -> Result<u64> {
+    let bytes: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(bytes), 0) FROM cache_artifacts WHERE kind = 'proxy'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(bytes.max(0) as u64)
+}
+
+/// 播放器打开一条素材的预览小文件时调:把文件 mtime 顶到现在。LRU 淘汰按这个时间排,
+/// 不加表列、不动迁移;文件不在 / 不是代理路径都静默(不影响播放)。
+pub fn touch_proxy_played(connection: &Connection, cache_root: &Path, clip_id: i64) {
+    let rel_path: Option<String> = connection
+        .query_row(
+            "SELECT rel_path FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy'",
+            [clip_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let Some(rel_path) = rel_path else {
+        return;
+    };
+    let path = cache_root.join(rel_path);
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+        if let Err(error) = file.set_modified(std::time::SystemTime::now()) {
+            tracing::debug!(%error, path = %path.display(), "touch proxy mtime failed");
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProxyEviction {
+    pub removed: usize,
+    pub bytes: u64,
+}
+
+/// R16 LRU 淘汰:预览小文件合计超过上限时,按「最近播放」(文件 mtime,见
+/// `touch_proxy_played`;老库没被 touch 过的就是生成时间)从最久的删起,删到不超限为止。
+/// `keep_clip_id` 是刚生成的那条,不参与本轮淘汰。只删代理(封面 / 胶片条 / 波形每条
+/// < 200 KB,永不删);删文件 + 删 `cache_artifacts` 行,播放器随即退回直接播原片;
+/// **不**回删老库、不重排代理任务——只在超限时动手。
+pub fn enforce_proxy_cache_limit(
+    connection: &Connection,
+    cache_root: &Path,
+    keep_clip_id: Option<i64>,
+) -> Result<ProxyEviction> {
+    let limit = proxy_cache_limit_bytes(connection)?;
+    let mut total = proxy_cache_bytes(connection)?;
+    let mut report = ProxyEviction::default();
+    if total <= limit {
+        return Ok(report);
+    }
+    let mut candidates: Vec<(i64, String, u64, std::time::SystemTime)> = {
+        let mut statement = connection.prepare(
+            "SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind = 'proxy'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u64))
+        })?;
+        rows.filter_map(|row| row.ok())
+            .filter(|(clip_id, _, _)| Some(*clip_id) != keep_clip_id)
+            .map(|(clip_id, rel_path, bytes)| {
+                let played_at = std::fs::metadata(cache_root.join(&rel_path))
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (clip_id, rel_path, bytes, played_at)
+            })
+            .collect()
+    };
+    candidates.sort_by_key(|(clip_id, _, _, played_at)| (*played_at, *clip_id));
+    for (clip_id, rel_path, bytes, _) in candidates {
+        if total <= limit {
+            break;
+        }
+        let path = cache_root.join(&rel_path);
+        remove_if_exists(&path)?;
+        connection.execute(
+            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy'",
+            [clip_id],
+        )?;
+        total = total.saturating_sub(bytes);
+        report.removed += 1;
+        report.bytes += bytes;
+    }
+    if report.removed > 0 {
+        tracing::info!(
+            removed = report.removed,
+            bytes = report.bytes,
+            limit_bytes = limit,
+            "预览小文件超过上限,已按最久未播淘汰"
+        );
+    }
+    Ok(report)
 }
 
 /// 代理生成前的磁盘水位线:至少 2 GiB,或按源时长 500 KB/s 估算,取更大者。
@@ -542,7 +694,7 @@ fn run_proxy_with(
 ) -> Result<()> {
     let payload = parse_payload(job)?;
     let source = validate_source(connection, &payload)?;
-    if source.height <= 540 {
+    if source.height <= 540 || plays_source_directly(&source) {
         return complete_direct(connection, job, &payload);
     }
 
@@ -609,6 +761,10 @@ fn run_proxy_with(
     ) {
         cleanup_temporary_files([&temporary_path]);
         return Err(error);
+    }
+    // R16:新代理落地后看一眼目录上限,超了就按最久未播淘汰(刚生成的这条不动)。
+    if let Err(error) = enforce_proxy_cache_limit(connection, cache_root, Some(payload.clip_id)) {
+        tracing::warn!(%error, "预览小文件淘汰失败,本次跳过");
     }
     Ok(())
 }
@@ -738,12 +894,17 @@ fn strip_args(
         // 最近的那个关键帧(`-noaccurate_seek` 保留 seek 落点的关键帧,与 fps 滤镜「取
         // 格点前最后一帧」语义一致),再 hstack 拼条:0.8 s。故意用软解——单个 I 帧软解
         // 几十毫秒,而 N 个输入各开一个 VideoToolbox 会话是 N 份 4K 解码器内存。
+        // R16 车道 E:每个输入 `-threads 1`——软解默认按核数开帧线程,12 个输入 × 10 线程
+        // 各持一套 4K 10-bit 参考帧,本机实测 3 分钟 4K HEVC10 峰值 RSS 2.17 GB;单线程解
+        // 一个 I 帧不需要帧线程,峰值 0.87 GB 且更快(0.52 s → 0.44 s)。所有档位都这么做。
         let _ = hardware_decode;
         let mut filter = String::new();
         let mut labels = String::new();
         for index in 0..frame_count.max(1) {
             let seek = index as f64 * duration_seconds / frame_count.max(1) as f64;
             args.extend([
+                OsString::from("-threads"),
+                OsString::from("1"),
                 OsString::from("-noaccurate_seek"),
                 OsString::from("-ss"),
                 OsString::from(format!("{seek:.6}")),
@@ -974,7 +1135,8 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
 
     let source = connection
         .query_row(
-            "SELECT duration_ticks, tb_num, tb_den, height, manual_rotation, byte_size
+            "SELECT duration_ticks, tb_num, tb_den, height, manual_rotation, byte_size,
+                    COALESCE(width, 0), codec, COALESCE(hdr_flag, 0), COALESCE(is_vfr, 0)
              FROM clips WHERE id = ?1 AND quick_hash = ?2",
             params![payload.clip_id, payload.source_hash],
             |row| {
@@ -985,6 +1147,10 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             },
         )
@@ -1009,6 +1175,10 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
         tb_num: source.1,
         tb_den: source.2,
         height: source.3,
+        width: source.6,
+        codec: source.7,
+        hdr: source.8 != 0,
+        is_vfr: source.9 != 0,
         manual_rotation: source.4,
     })
 }
@@ -1870,6 +2040,137 @@ mod tests {
         assert_eq!(count, 3);
     }
 
+    /// R16 预览策略:≤1080p H.264 8-bit CFR、码率 ≤ 50 Mbps 直接播原片;4K / HEVC / HDR / VFR /
+    /// 高码率 / 编码未知都照旧做代理。竖拍 1080×1920 算 1080p,竖拍 4K(2160×3840)算 4K。
+    #[test]
+    fn direct_play_policy_skips_proxy_only_for_plain_h264_up_to_1080p() {
+        let mbps = |value: f64| Some(value * 1_000_000.0);
+        assert!(direct_play_policy(Some("h264"), 1920, 1080, false, false, mbps(12.0)));
+        assert!(direct_play_policy(Some("H264"), 1080, 1920, false, false, mbps(12.0)));
+        assert!(direct_play_policy(Some("h264"), 1280, 720, false, false, None));
+        assert!(!direct_play_policy(Some("h264"), 3840, 2160, false, false, mbps(12.0)));
+        assert!(!direct_play_policy(Some("h264"), 2160, 3840, false, false, mbps(12.0)));
+        assert!(!direct_play_policy(Some("hevc"), 1920, 1080, false, false, mbps(12.0)));
+        assert!(!direct_play_policy(Some("h264"), 1920, 1080, true, false, mbps(12.0)));
+        assert!(!direct_play_policy(Some("h264"), 1920, 1080, false, true, mbps(12.0)));
+        assert!(!direct_play_policy(Some("h264"), 1920, 1080, false, false, mbps(80.0)));
+        assert!(!direct_play_policy(None, 1920, 1080, false, false, mbps(12.0)));
+    }
+
+    /// R16:1080p H.264 源片的 proxy 任务不起 ffmpeg,直接以 `direct` 完成(时间映射为恒等)。
+    #[test]
+    fn plain_1080p_h264_source_completes_proxy_job_directly_without_ffmpeg() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source.mp4");
+        std::fs::write(&source, b"source bytes").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let (clip_id, source_hash) = insert_source(&connection, &source, 1080);
+        connection
+            .execute("UPDATE clips SET width = 1920, codec = 'h264' WHERE id = ?1", [clip_id])
+            .unwrap();
+        let payload = serde_json::to_string(&ArtifactJobPayload {
+            clip_id,
+            path: source.to_string_lossy().into_owned(),
+            source_hash,
+        })
+        .unwrap();
+        jobs::enqueue(&mut connection, "proxy", &payload, "direct-1080p").unwrap();
+        let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        // 指向一个不存在的 ffmpeg:真去转码就会报错。
+        let missing = directory.path().join("no-such-ffmpeg");
+        run_proxy_with(
+            &mut connection,
+            &job,
+            &directory.path().join("cache"),
+            missing.as_os_str(),
+            missing.as_os_str(),
+            Duration::from_secs(2),
+            false,
+        )
+        .unwrap();
+        assert_eq!(jobs::get(&connection, job.id).unwrap().result_path.as_deref(), Some("direct"));
+        let proxies: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cache_artifacts WHERE kind = 'proxy'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(proxies, 0);
+    }
+
+    fn insert_proxy_row(connection: &Connection, cache_root: &Path, clip_id: i64, bytes: usize, age_secs: u64) {
+        connection
+            .execute(
+                "INSERT INTO clips(id, rel_path, quick_hash) VALUES (?1, ?2, ?3)",
+                params![clip_id, format!("clip-{clip_id}.mov"), format!("hash-{clip_id}")],
+            )
+            .unwrap();
+        let rel_path = format!("{clip_id}/{PROXY_FILE}");
+        let path = cache_root.join(&rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![0_u8; bytes]).unwrap();
+        let played_at = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(played_at).unwrap();
+        connection
+            .execute(
+                "INSERT INTO cache_artifacts(clip_id, kind, rel_path, source_hash, bytes, created_at)
+                 VALUES (?1, 'proxy', ?2, ?3, ?4, 'now')",
+                params![clip_id, rel_path, format!("hash-{clip_id}"), bytes as i64],
+            )
+            .unwrap();
+    }
+
+    /// R16 LRU:上限 1 GB 时三条各 500 MB(登记字节数)的代理超限,删最久未播的那条(clip 2,
+    /// 3 小时前),刚生成的 keep 那条(clip 1,最老但被保护)不动,最近播过的(clip 3)也不动;
+    /// 不超限时什么都不删。
+    #[test]
+    fn proxy_cache_limit_evicts_least_recently_played_first_and_keeps_the_new_one() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let cache_root = directory.path().join("cache");
+        let half_gb = 512 * 1024 * 1024_usize;
+        // 文件本身只写 16 字节,登记字节数按 512 MB 算(淘汰只看登记数)。
+        insert_proxy_row(&connection, &cache_root, 1, 16, 4 * 3600);
+        insert_proxy_row(&connection, &cache_root, 2, 16, 3 * 3600);
+        insert_proxy_row(&connection, &cache_root, 3, 16, 60);
+        connection
+            .execute("UPDATE cache_artifacts SET bytes = ?1", [half_gb as i64])
+            .unwrap();
+        super::super::settings::set_setting(&connection, super::super::settings::PROXY_CACHE_LIMIT_GB_KEY, "1").unwrap();
+
+        let report = enforce_proxy_cache_limit(&connection, &cache_root, Some(1)).unwrap();
+        assert_eq!(report, ProxyEviction { removed: 1, bytes: half_gb as u64 });
+        let remaining: Vec<i64> = connection
+            .prepare("SELECT clip_id FROM cache_artifacts WHERE kind = 'proxy' ORDER BY clip_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, vec![1, 3]);
+        assert!(!cache_root.join(format!("2/{PROXY_FILE}")).exists());
+        assert!(cache_root.join(format!("1/{PROXY_FILE}")).exists());
+        assert_eq!(proxy_cache_bytes(&connection).unwrap(), 2 * half_gb as u64);
+
+        // 现在 1 GB = 上限,不超限:不再删。
+        let report = enforce_proxy_cache_limit(&connection, &cache_root, None).unwrap();
+        assert_eq!(report, ProxyEviction::default());
+
+        // 播放 clip 1 之后它成了最近播过的;上限降到 0.5 GB 再淘汰,删的是 clip 3。
+        touch_proxy_played(&connection, &cache_root, 1);
+        super::super::settings::set_setting(&connection, super::super::settings::PROXY_CACHE_LIMIT_GB_KEY, "1").unwrap();
+        connection
+            .execute("UPDATE cache_artifacts SET bytes = ?1", [(half_gb + 1) as i64])
+            .unwrap();
+        let report = enforce_proxy_cache_limit(&connection, &cache_root, None).unwrap();
+        assert_eq!(report.removed, 1);
+        let remaining: Vec<i64> = connection
+            .prepare("SELECT clip_id FROM cache_artifacts WHERE kind = 'proxy'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, vec![1]);
+    }
+
     #[test]
     fn disabled_proxy_encoding_still_enqueues_identity_mapping_job() {
         let directory = TestDirectory::new();
@@ -2231,9 +2532,11 @@ mod tests {
         assert!(j(&long).contains("-skip_frame nokey"));
         assert!(!j(&long).contains("-hwaccel"), "{}", j(&long));
         assert_eq!(long.iter().filter(|a| *a == "-i").count(), 12);
-        assert!(j(&long).contains("-noaccurate_seek -ss 0.000000 -skip_frame nokey -i /x.mp4"));
-        assert!(j(&long).contains("-noaccurate_seek -ss 25.000000 -skip_frame nokey -i /x.mp4"));
-        assert!(j(&long).contains("-noaccurate_seek -ss 275.000000 -skip_frame nokey -i /x.mp4"));
+        // R16:每个输入单线程软解(12 输入 × 默认帧线程曾把 4K HEVC10 的峰值 RSS 推到 2.17 GB)。
+        assert!(j(&long).contains("-threads 1 -noaccurate_seek -ss 0.000000 -skip_frame nokey -i /x.mp4"));
+        assert!(j(&long).contains("-threads 1 -noaccurate_seek -ss 25.000000 -skip_frame nokey -i /x.mp4"));
+        assert!(j(&long).contains("-threads 1 -noaccurate_seek -ss 275.000000 -skip_frame nokey -i /x.mp4"));
+        assert_eq!(long.iter().filter(|a| *a == "-threads").count(), 12);
         assert!(!j(&long).contains("-ss 300.000000"), "格点是 k×duration/N,不含片尾");
         assert!(j(&long).contains("[11:v:0]scale=160:-2[s11];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11]hstack=inputs=12[strip]"), "{}", j(&long));
         assert!(j(&long).contains("-map [strip] -frames:v 1 -c:v mjpeg -q:v 4 -f image2 -y /tmp/s.jpg"));

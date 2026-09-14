@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::Serialize;
 
 use super::db;
 use super::error::{CoreError, Result};
@@ -248,6 +249,9 @@ pub(crate) const DECODE_KINDS_SQL: &str =
     "('thumbnail','strip','analyze_l1','analyze_motion','proxy','music_analyze','moments')";
 /// SQL 字面量:与 `resource_class` 的 HeavyModel 分支必须逐字一致。
 pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcribe')";
+/// R16 P1-6:用户「全部暂停」期间仍放行的两类——导出是用户此刻点的,缓存清理是用户刚删过东西;
+/// 其它(分析 / 缩略图 / 转写 / 向量…)一律不再认领,正在跑的跑完。
+pub(crate) const USER_INITIATED_KINDS_SQL: &str = "('export_package','cache_gc')";
 
 /// 大模型类同时只允许一个任务在跑。
 const HEAVY_MODEL_LIMIT: usize = 1;
@@ -313,6 +317,25 @@ pub fn claim_next_for_owner_excluding(
     exclude_decode: bool,
     exclude_heavy: bool,
 ) -> Result<Option<Job>> {
+    claim_next_for_owner_filtered(connection, owner_id, exclude_decode, exclude_heavy, false, false)
+}
+
+/// R16 车道 E:一条素材算不算「4K」——任一边超过 1920(竖拍 4K 的 width 是 2160)。
+/// 与 `claim_next_for_owner_filtered` 里 SQL 的判定必须一致。
+pub(crate) const UHD_EDGE_PIXELS: i64 = 1920;
+
+/// `claim_next_for_owner_excluding` 加两条:
+/// - R16 P1-6:`only_user_initiated` = 用户按了「全部暂停」,只认领 `USER_INITIATED_KINDS_SQL`;
+/// - R16 车道 E:`exclude_uhd_decode` 为真时,4K 素材的解码类任务也不认领
+///   (低配档许可只剩 1 份、而 4K 要占 2 份时)。素材尺寸未知的按 ≤1080p 算。
+pub fn claim_next_for_owner_filtered(
+    connection: &mut Connection,
+    owner_id: &str,
+    exclude_decode: bool,
+    exclude_heavy: bool,
+    only_user_initiated: bool,
+    exclude_uhd_decode: bool,
+) -> Result<Option<Job>> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let select_sql = format!(
         "SELECT id FROM jobs
@@ -322,6 +345,12 @@ pub fn claim_next_for_owner_excluding(
                    <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                AND (?1 = 0 OR kind NOT IN {DECODE_KINDS_SQL})
                AND (?2 = 0 OR kind NOT IN {HEAVY_KINDS_SQL})
+               AND (?3 = 0 OR kind IN {USER_INITIATED_KINDS_SQL})
+               AND (?4 = 0 OR kind NOT IN {DECODE_KINDS_SQL} OR jobs.clip_id IS NULL
+                    OR NOT EXISTS (
+                      SELECT 1 FROM clips uhd
+                      WHERE uhd.id = jobs.clip_id
+                        AND MAX(COALESCE(uhd.width, 0), COALESCE(uhd.height, 0)) > {UHD_EDGE_PIXELS}))
                AND NOT (
                      kind IN {DECODE_KINDS_SQL}
                      AND jobs.clip_id IS NOT NULL
@@ -362,7 +391,12 @@ pub fn claim_next_for_owner_excluding(
     let id = transaction
         .query_row(
             &select_sql,
-            params![i64::from(exclude_decode), i64::from(exclude_heavy)],
+            params![
+                i64::from(exclude_decode),
+                i64::from(exclude_heavy),
+                i64::from(only_user_initiated),
+                i64::from(exclude_uhd_decode)
+            ],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
@@ -701,6 +735,44 @@ pub fn wait_until_no_running(
 }
 
 /// R15:重置项目库前把**所有**没跑完的任务取消:pending 一条 UPDATE,running 逐个设标志。
+/// R16 P1-6:导入抽屉「后台任务」页的一行:正在跑的任务 + 它属于哪条素材。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunningJob {
+    pub id: i64,
+    pub kind: String,
+    pub clip_id: Option<i64>,
+    pub file_name: Option<String>,
+    pub started_at: String,
+    pub cancel_requested: bool,
+}
+
+/// R16 P1-6:当前 `running` 的任务(按开始时间),每行可「取消」(`request_cancel`)。
+pub fn list_running_jobs(connection: &Connection) -> Result<Vec<RunningJob>> {
+    let mut statement = connection.prepare(
+        "SELECT j.id, j.kind, j.clip_id, c.rel_path, j.updated_at, j.cancel_requested
+         FROM jobs j LEFT JOIN clips c ON c.id = j.clip_id
+         WHERE j.status = 'running'
+         ORDER BY j.updated_at, j.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let rel_path: Option<String> = row.get(3)?;
+        Ok(RunningJob {
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            clip_id: row.get(2)?,
+            file_name: rel_path.map(|path| {
+                Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or(path)
+            }),
+            started_at: row.get(4)?,
+            cancel_requested: row.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn cancel_all_jobs(connection: &mut Connection) -> Result<usize> {
     connection.execute(
         "UPDATE jobs SET status='failed', cancel_requested=1, blocked_summary='用户已取消',
@@ -845,7 +917,11 @@ pub fn borrow_spare_decode_slots(max: usize) -> DecodeSlotLoan {
         return DecodeSlotLoan { coordinator: None, count: 0 };
     };
     let mut state = coordinator.state.lock().unwrap_or_else(|error| error.into_inner());
-    let spare = if state.paused_for_memory { 0 } else { state.decode_limit.saturating_sub(state.active_decode) };
+    let spare = if state.heavy_work_paused() || !state.borrow_spare_slots {
+        0
+    } else {
+        state.effective_decode_limit().saturating_sub(state.active_decode)
+    };
     let count = spare.min(max);
     state.active_decode += count;
     drop(state);
@@ -982,7 +1058,32 @@ struct WorkerPoolState {
     active_decode: usize,
     active_heavy: usize,
     decode_limit: usize,
+    /// R16:一条 4K 解码任务占几份许可(低配档 2,其它 1)。
+    uhd_decode_weight: usize,
+    /// R16:是否允许单条任务借走空闲许可分段并行(低配档关)。
+    borrow_spare_slots: bool,
     paused_for_memory: bool,
+    /// R16 P1-6:用户按了状态条「全部暂停」——只认领 `USER_INITIATED_KINDS_SQL`,
+    /// 优先于散热 / 空闲规则(用户此刻主动点的导出不能被「等你不用电脑」挡住)。
+    paused_by_user: bool,
+    /// R16 §3⑤:散热三档退避——有效解码上限 = `thermal.decode_limit(decode_limit)`。
+    thermal: super::thermal::ThermalState,
+    /// R16 §3⑤:「只在空闲时做后台工作」开关(用户 60 s 无输入才认领解码 / 大模型任务)。
+    idle_only: bool,
+    /// 开关开着且用户正在用电脑:不认领解码 / 大模型类(Light 类照常)。
+    paused_for_activity: bool,
+}
+
+impl WorkerPoolState {
+    /// 散热退避后的解码许可上限。
+    fn effective_decode_limit(&self) -> usize {
+        self.thermal.decode_limit(self.decode_limit)
+    }
+
+    /// 解码 / 大模型类此刻不该认领(内存压力或等待空闲)。
+    fn heavy_work_paused(&self) -> bool {
+        self.paused_for_memory || self.paused_for_activity
+    }
 }
 
 impl Default for WorkerPoolState {
@@ -995,7 +1096,13 @@ impl Default for WorkerPoolState {
             active_decode: 0,
             active_heavy: 0,
             decode_limit: DEFAULT_DECODE_LIMIT,
+            uhd_decode_weight: 1,
+            borrow_spare_slots: true,
             paused_for_memory: false,
+            paused_by_user: false,
+            thermal: super::thermal::ThermalState::Nominal,
+            idle_only: false,
+            paused_for_activity: false,
         }
     }
 }
@@ -1050,30 +1157,50 @@ impl WorkerPoolCoordinator {
         }
         // 内存压力暂停期间只挡解码与大模型两类;Light 类(export_package、waveform 等)
         // 照常认领——导出不吃解码器也不吃模型权重,把它一起挡住会让内存一紧就无声卡死。
-        let (exclude_decode, exclude_heavy) = if state.paused_for_memory {
-            (true, true)
+        let (exclude_decode, exclude_heavy, exclude_uhd_decode) = if state.heavy_work_paused() {
+            (true, true, true)
         } else {
+            let spare_decode = state.effective_decode_limit().saturating_sub(state.active_decode);
             (
-                state.active_decode >= state.decode_limit,
+                spare_decode == 0,
                 state.active_heavy >= HEAVY_MODEL_LIMIT,
+                // R16:4K 要占 `uhd_decode_weight` 份,剩得不够就先不认领 4K 的解码任务。
+                spare_decode < state.uhd_decode_weight,
             )
         };
+        // R16 P1-6:用户「全部暂停」优先——暂停期间只认领用户主动发起的类
+        // (`USER_INITIATED_KINDS_SQL`),散热 / 空闲 / 内存的解码类排除照样叠加,
+        // 但那几类本来就不在用户主动集合里,所以结果就是「只认领用户主动的」。
+        let only_user_initiated = state.paused_by_user;
+        let uhd_decode_weight = state.uhd_decode_weight;
         drop(state);
 
         let Some(job) = with_busy_retry(|| {
-            claim_next_for_owner_excluding(connection, owner_id, exclude_decode, exclude_heavy)
+            claim_next_for_owner_filtered(
+                connection,
+                owner_id,
+                exclude_decode,
+                exclude_heavy,
+                only_user_initiated,
+                exclude_uhd_decode,
+            )
         })?
         else {
             return Ok(None);
         };
 
+        let class = resource_class(&job.kind);
+        let decode_weight = if class == ResourceClass::Decode && uhd_decode_weight > 1 && job_is_uhd(connection, &job) {
+            uhd_decode_weight
+        } else {
+            1
+        };
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let class = resource_class(&job.kind);
         match class {
-            ResourceClass::Decode => state.active_decode += 1,
+            ResourceClass::Decode => state.active_decode += decode_weight,
             ResourceClass::HeavyModel => state.active_heavy += 1,
             ResourceClass::Light => {}
         }
@@ -1100,6 +1227,7 @@ impl WorkerPoolCoordinator {
                 coordinator: self.clone(),
                 kind: permit_kind,
                 class,
+                decode_weight,
             },
         }))
     }
@@ -1203,6 +1331,19 @@ impl WorkerControl {
         self.coordinator.state_changed.notify_all();
     }
 
+    /// R16:按内存档位接线「4K 占几份许可」与「是否借空闲许可」,启动接线时设置一次。
+    pub fn set_decode_policy(&self, uhd_decode_weight: usize, borrow_spare_slots: bool) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.uhd_decode_weight = uhd_decode_weight.max(1);
+        state.borrow_spare_slots = borrow_spare_slots;
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+    }
+
     /// 当前在跑的解码类任务数。
     pub fn active_decode(&self) -> usize {
         let state = self
@@ -1220,7 +1361,54 @@ impl WorkerControl {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        state.active_decode >= state.decode_limit
+        state.active_decode >= state.effective_decode_limit()
+    }
+
+    /// R16 §3⑤:「只在空闲时做后台工作」开关,启动接线时设置一次。
+    pub fn set_idle_only(&self, idle_only: bool) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.idle_only = idle_only;
+        if !idle_only {
+            state.paused_for_activity = false;
+        }
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+    }
+
+    /// 当前不认领重活的原因:`user`(用户按了「全部暂停」,与认领规则一样优先)/
+    /// `memory`(内存压力)/ `thermal`(电脑过热,并发降到 1)/ `idle_wait`(等用户空闲)。
+    /// 内存排在热与空闲前——它才是真的停;热与空闲只是慢。
+    pub fn pause_reason(&self) -> Option<&'static str> {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.paused_by_user {
+            Some("user")
+        } else if state.paused_for_memory {
+            Some("memory")
+        } else if state.paused_for_activity {
+            Some("idle_wait")
+        } else if state.thermal >= super::thermal::ThermalState::Serious {
+            Some("thermal")
+        } else {
+            None
+        }
+    }
+
+    /// 当前散热档(诊断 / 测试)。
+    pub fn thermal_state(&self) -> super::thermal::ThermalState {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.thermal
     }
 
     /// R6 Task 4:睡眠唤醒后叫醒还在 idle 轮询里睡觉的 worker,让它立刻重新
@@ -1237,6 +1425,32 @@ impl WorkerControl {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         state.paused_for_memory
+    }
+
+    /// R16 P1-6:用户「全部暂停 / 继续」。暂停只挡新的认领(导出 / 缓存清理除外),
+    /// 正在跑的任务跑完;继续时叫醒在 idle 里睡觉的 worker。
+    pub fn set_paused_by_user(&self, paused: bool) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.paused_by_user = paused;
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+        if !paused {
+            self.wake_worker();
+        }
+    }
+
+    /// R16 P1-6:当前是否被用户暂停。
+    pub fn paused_by_user(&self) -> bool {
+        let state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.paused_by_user
     }
 
     fn set_paused_for_memory(&self, paused: bool) {
@@ -1272,6 +1486,25 @@ struct ExecutionPermit {
     coordinator: Arc<WorkerPoolCoordinator>,
     kind: PermitKind,
     class: ResourceClass,
+    /// 解码类任务占的许可份数(R16:4K 在低配档占 2),释放时原样归还。
+    decode_weight: usize,
+}
+
+/// 认领到的解码任务是不是 4K 素材(任一边 > 1920)。查不到素材 / 没有 clip_id 都按不是算。
+fn job_is_uhd(connection: &Connection, job: &Job) -> bool {
+    let Some(clip_id) = serde_json::from_str::<serde_json::Value>(&job.payload)
+        .ok()
+        .and_then(|payload| payload.get("clip_id").and_then(serde_json::Value::as_i64))
+    else {
+        return false;
+    };
+    connection
+        .query_row(
+            "SELECT MAX(COALESCE(width, 0), COALESCE(height, 0)) > ?2 FROM clips WHERE id = ?1",
+            params![clip_id, UHD_EDGE_PIXELS],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
 }
 
 impl Drop for ExecutionPermit {
@@ -1290,8 +1523,8 @@ impl Drop for ExecutionPermit {
         }
         match self.class {
             ResourceClass::Decode => {
-                debug_assert!(state.active_decode > 0);
-                state.active_decode = state.active_decode.saturating_sub(1);
+                debug_assert!(state.active_decode >= self.decode_weight);
+                state.active_decode = state.active_decode.saturating_sub(self.decode_weight);
             }
             ResourceClass::HeavyModel => {
                 debug_assert!(state.active_heavy > 0);
@@ -1388,6 +1621,20 @@ impl JobRunner {
         self
     }
 
+    /// R16 §3⑤:接「只在空闲时做后台工作」开关。
+    pub fn with_idle_only(self, idle_only: bool) -> Self {
+        self.control().set_idle_only(idle_only);
+        self
+    }
+
+    /// R16:按内存档位接线整套解码策略(许可数、4K 权重、借槽)。
+    pub fn with_memory_profile(self, profile: super::memory_profile::MemoryProfile) -> Self {
+        self.control().set_decode_limit(profile.decode_permits());
+        self.control()
+            .set_decode_policy(profile.uhd_decode_weight(), profile.borrows_spare_decode_slots());
+        self
+    }
+
     /// R6 Task 4:接一个通知出口——交付完成、批量分析完成时,worker 会带着
     /// (标题, 正文) 调它。Tauri 层接的是绑定了 `AppHandle` 的
     /// `notify::post` 闭包;测试/`run_one` 一次性入口不接,`OnceLock` 保持
@@ -1436,6 +1683,7 @@ impl JobRunner {
     /// 只是由调用方自己决定节奏(perf 装置在自己的采样循环里敲拍)。
     pub fn poll_memory_pressure(&self) {
         poll_memory_pressure_once(&self.coordinator);
+        poll_backoff_once(&self.coordinator);
     }
 
     fn run_one_with_coordinator(
@@ -1781,7 +2029,9 @@ impl JobRunner {
                     // R6 Task 7d/F-R1-8:封面(thumbnail)先行,胶片条(strip)
                     // 随后单独跑。OCR 是在胶片条格子上裁切的,只有 strip 落
                     // 地之后才有东西可扫,所以触发点从 thumbnail 挪到 strip。
-                    Ok(()) if job.kind == "strip" => {
+                    // R16 低配档不起 OCR / CLIP 侧车:胶片条落地后不排 ocr_scan(CLIP 的
+                    // clip_embed 在 `artifacts::finalize_strip` 同样按档位跳过)。
+                    Ok(()) if job.kind == "strip" && super::memory_profile::sidecars_enabled(connection) => {
                         if let Err(error) = super::ocr::enqueue_after_strip(connection, job, &cache_root) {
                             tracing::warn!(clip_dependency = %job.kind, %error, "could not enqueue ocr scan");
                         }
@@ -1911,11 +2161,13 @@ impl JobRunner {
         }
     }
 
-    /// 每 5 秒探一次可用内存,按滞回(<15% 暂停,≥25% 恢复)切换认领开关。
+    /// 每 5 秒探一次可用内存,按滞回(<15% 暂停,≥25% 恢复)切换认领开关;
+    /// R16 §3⑤ 同一拍顺带探散热档与用户空闲。
     async fn watch_memory_pressure(coordinator: Arc<WorkerPoolCoordinator>) {
         loop {
             tokio::time::sleep(MEMORY_POLL_INTERVAL).await;
             poll_memory_pressure_once(&coordinator);
+            poll_backoff_once(&coordinator);
         }
     }
 
@@ -1984,6 +2236,37 @@ fn poll_memory_pressure_once(coordinator: &Arc<WorkerPoolCoordinator>) {
     } else {
         tracing::warn!(available_percent = percent, "内存已回落,恢复认领新任务");
     }
+}
+
+/// R16 §3⑤:用户多少秒没碰键鼠才算「空闲」。
+pub const IDLE_THRESHOLD_SECONDS: f64 = 60.0;
+
+/// 单次散热 / 空闲采样:读 `thermal::thermal_state()`,开关开着时再读
+/// `thermal::seconds_since_user_input()`;任一位变了就唤醒等待的认领。
+fn poll_backoff_once(coordinator: &Arc<WorkerPoolCoordinator>) {
+    let thermal = super::thermal::thermal_state();
+    let mut state = coordinator.state.lock().unwrap_or_else(|error| error.into_inner());
+    let paused_for_activity =
+        state.idle_only && super::thermal::seconds_since_user_input() < IDLE_THRESHOLD_SECONDS;
+    let changed = state.thermal != thermal || state.paused_for_activity != paused_for_activity;
+    if !changed {
+        return;
+    }
+    if state.thermal != thermal {
+        tracing::info!(from = state.thermal.as_str(), to = thermal.as_str(), decode_limit = thermal.decode_limit(state.decode_limit), "散热档变化,调整后台并发");
+    }
+    if state.paused_for_activity != paused_for_activity {
+        if paused_for_activity {
+            tracing::info!("用户正在使用电脑,后台重活等空闲再认领");
+        } else {
+            tracing::info!("用户已空闲 60 s,恢复认领后台重活");
+        }
+    }
+    state.thermal = thermal;
+    state.paused_for_activity = paused_for_activity;
+    drop(state);
+    coordinator.state_changed.notify_all();
+    coordinator.wake.notify_waiters();
 }
 
 /// 队列里是否还有待跑/在跑的嵌入或八维分类任务("keep"信号的来源)。
@@ -3234,6 +3517,137 @@ mod tests {
         assert_eq!(resumed.job.kind, "thumbnail");
     }
 
+    /// R16 P1-6:用户「全部暂停」只挡分析类新认领;导出 / 缓存清理照常;继续后恢复。
+    #[test]
+    fn user_pause_blocks_new_claims_except_user_initiated_kinds() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "user-d").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":1}"#, "user-l").unwrap();
+        let export_id = enqueue(&mut connection, "export_package", "{}", "user-x").unwrap();
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        assert!(!control.paused_by_user());
+        control.set_paused_by_user(true);
+        assert!(control.paused_by_user());
+
+        let claimed = coordinator
+            .claim_for_owner(&mut connection, "user-owner")
+            .unwrap()
+            .expect("导出是用户此刻点的,暂停期间也要跑");
+        assert_eq!(claimed.job.id, export_id);
+        mark_done(&mut connection, claimed.job.id, claimed.job.attempt).unwrap();
+        drop(claimed);
+        // 队列里只剩 thumbnail(解码类)与 waveform(Light 类):两者都不许认领——
+        // 与内存暂停不同,用户暂停连 Light 类也挡。
+        assert!(coordinator.claim_for_owner(&mut connection, "user-owner").unwrap().is_none());
+
+        control.set_paused_by_user(false);
+        let resumed = coordinator
+            .claim_for_owner(&mut connection, "user-owner")
+            .unwrap()
+            .expect("继续后应可认领");
+        assert_eq!(resumed.job.kind, "thumbnail");
+    }
+
+    /// R16 集成(车道 C × 车道 E):用户「全部暂停」与低配档 4K 权重叠加时,用户暂停优先——
+    /// 4K 素材的解码任务、1080p 解码任务、Light 类全都不认领,只有用户主动发起的
+    /// `export_package` / `cache_gc` 能被认领;继续后 4K 规则照常生效(2 份许可里 4K 占 2 份)。
+    #[test]
+    fn user_pause_takes_precedence_over_low_spec_uhd_rules() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO clips(id, rel_path, width, height) VALUES
+                   (1, 'uhd.mov', 3840, 2160),
+                   (2, 'hd.mov', 1920, 1080)",
+            )
+            .unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "combo-uhd").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":2}"#, "combo-hd").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":2}"#, "combo-light").unwrap();
+        let gc_id = enqueue(&mut connection, "cache_gc", "{}", "combo-gc").unwrap();
+        let export_id = enqueue(&mut connection, "export_package", "{}", "combo-export").unwrap();
+
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(2);
+        control.set_decode_policy(2, false);
+        control.set_paused_by_user(true);
+
+        // 只认领用户主动的两类(导出优先级更高先出),4K / 1080p 解码与 Light 类都不动。
+        let export = coordinator.claim_for_owner(&mut connection, "combo").unwrap().expect("暂停期间导出照跑");
+        assert_eq!(export.job.id, export_id);
+        assert_eq!(control.active_decode(), 0, "用户暂停期间不该占任何解码许可");
+        mark_done(&mut connection, export.job.id, export.job.attempt).unwrap();
+        drop(export);
+        let gc = coordinator.claim_for_owner(&mut connection, "combo").unwrap().expect("暂停期间缓存清理照跑");
+        assert_eq!(gc.job.id, gc_id);
+        mark_done(&mut connection, gc.job.id, gc.job.attempt).unwrap();
+        drop(gc);
+        assert!(
+            coordinator.claim_for_owner(&mut connection, "combo").unwrap().is_none(),
+            "队列里只剩 4K 解码、1080p 解码与 waveform:用户暂停期间一条都不许认领"
+        );
+
+        // 继续后回到车道 E 的规则:4K 先出并占满 2 份,其它解码任务要等它释放。
+        control.set_paused_by_user(false);
+        let uhd = coordinator.claim_for_owner(&mut connection, "combo").unwrap().expect("继续后 4K 解码任务应可认领");
+        assert_eq!(uhd.job.payload, r#"{"clip_id":1}"#);
+        assert_eq!(control.active_decode(), 2);
+        let next = coordinator.claim_for_owner(&mut connection, "combo").unwrap().expect("Light 类不受解码许可限制");
+        assert_eq!(next.job.kind, "waveform");
+        assert!(
+            coordinator.claim_for_owner(&mut connection, "combo").unwrap().is_none(),
+            "4K 占满 2 份时 1080p 解码任务也要等"
+        );
+        drop(uhd);
+        let hd = coordinator.claim_for_owner(&mut connection, "combo").unwrap().expect("4K 释放后 1080p 可认领");
+        assert_eq!(hd.job.payload, r#"{"clip_id":2}"#);
+    }
+
+    /// R16 P1-6:`list_running_jobs` 只列 running 行,带素材文件名与取消标记。
+    #[test]
+    fn list_running_jobs_reports_running_rows_with_file_names() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid) VALUES ('v'); ",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO clips(id, volume_uuid, rel_path) VALUES (7, 'v', 'DCIM/C0047.MP4')", [])
+            .unwrap();
+        let pending = enqueue(&mut connection, "thumbnail", r#"{"clip_id":7}"#, "lr-p").unwrap();
+        let running = enqueue(&mut connection, "analyze_l1", r#"{"clip_id":7}"#, "lr-r").unwrap();
+        let orphan = enqueue(&mut connection, "cache_gc", "{}", "lr-o").unwrap();
+        for id in [running, orphan] {
+            connection
+                .execute("UPDATE jobs SET status='running' WHERE id=?1", [id])
+                .unwrap();
+        }
+        assert!(list_running_jobs(&connection).unwrap().iter().all(|job| job.id != pending));
+        let listed = list_running_jobs(&connection).unwrap();
+        assert_eq!(listed.len(), 2);
+        let analysis = listed.iter().find(|job| job.id == running).unwrap();
+        assert_eq!(analysis.kind, "analyze_l1");
+        assert_eq!(analysis.clip_id, Some(7));
+        assert_eq!(analysis.file_name.as_deref(), Some("C0047.MP4"));
+        assert!(!analysis.cancel_requested);
+        let gc = listed.iter().find(|job| job.id == orphan).unwrap();
+        assert_eq!(gc.file_name, None);
+
+        request_cancel(&mut connection, running).unwrap();
+        let after = list_running_jobs(&connection).unwrap();
+        assert!(after.iter().find(|job| job.id == running).unwrap().cancel_requested);
+    }
+
     /// 4 个线程抢同一个 coordinator,假执行器睡 50ms 并在睡前采样 `active_decode`。
     /// 返回观察到的解码并发峰值。
     fn observed_decode_peak(decode_limit: usize, job_count: usize) -> usize {
@@ -3371,6 +3785,185 @@ mod tests {
         // 归还之后剩下那条解码任务能认领了(worker 按优先级先拿走的是 thumbnail)。
         let claimed_after = coordinator.claim_for_owner(&mut connection, "other").unwrap();
         assert_eq!(claimed_after.map(|claimed| claimed.job.kind), Some("analyze_l1".to_owned()));
+    }
+
+    /// R16 低配档:2 份许可里 4K 占 2 份——一条 4K 解码任务在跑时,另一条 4K 或 1080p 都
+    /// 认领不到;两条 1080p 可以并行;4K 任务释放后归还 2 份。尺寸判定看 clips 表任一边 > 1920。
+    #[test]
+    fn low_spec_uhd_decode_jobs_take_two_permits_and_return_them() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO clips(id, rel_path, width, height) VALUES
+                   (1, 'uhd.mov', 3840, 2160),
+                   (2, 'hd-a.mov', 1920, 1080),
+                   (3, 'hd-b.mov', 1080, 1920),
+                   (4, 'portrait-uhd.mov', 2160, 3840)",
+            )
+            .unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "uhd").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":2}"#, "hd-a").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":3}"#, "hd-b").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":4}"#, "portrait-uhd").unwrap();
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(2);
+        control.set_decode_policy(2, false);
+
+        // 第一条按 created_at 是 4K:占满 2 份。
+        let uhd = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(uhd.job.payload, r#"{"clip_id":1}"#);
+        assert_eq!(control.active_decode(), 2);
+        assert!(control.decode_saturated());
+        assert!(coordinator.claim_for_owner(&mut connection, "w").unwrap().is_none(), "4K 在跑时什么解码任务都不该再认领");
+        drop(uhd);
+        assert_eq!(control.active_decode(), 0, "4K 任务释放要归还 2 份");
+
+        // 两条 1080p 并行(竖拍 1080×1920 也算 1080p)。
+        let hd_a = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        let hd_b = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(
+            [hd_a.job.payload.clone(), hd_b.job.payload.clone()],
+            [r#"{"clip_id":2}"#.to_owned(), r#"{"clip_id":3}"#.to_owned()]
+        );
+        assert_eq!(control.active_decode(), 2);
+        drop(hd_a);
+        // 只剩 1 份:竖拍 4K(宽 2160)不够占,虽然是队列里唯一剩下的也不认领。
+        assert!(coordinator.claim_for_owner(&mut connection, "w").unwrap().is_none(), "只剩 1 份许可时 4K 不该被认领");
+        drop(hd_b);
+        let portrait = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(portrait.job.payload, r#"{"clip_id":4}"#);
+        assert_eq!(control.active_decode(), 2);
+    }
+
+    /// 写注入文件并反复采样,直到协调器看到期望值(`thermal` 模块自己的单测也动这把环境变量,
+    /// 并行时可能被抢一拍;每拍重新指名自己的文件、最多等 2 s)。
+    fn poll_until(coordinator: &Arc<WorkerPoolCoordinator>, apply: impl Fn(), satisfied: impl Fn() -> bool) {
+        for _ in 0..100 {
+            apply();
+            poll_backoff_once(coordinator);
+            if satisfied() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("协调器没有在 2 s 内看到注入的散热 / 空闲值");
+    }
+
+    /// R16 §3⑤ 散热三档退避:上限 4 时 fair 只放 3 条解码任务、serious 只放 1 条、回到 nominal
+    /// 又是 4;pause_reason 在 serious 起报 `thermal`。用 TRIPCUT_THERMAL_STATE_FILE 注入。
+    #[test]
+    fn thermal_state_reduces_effective_decode_limit_in_three_tiers() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        // 3 + 1 + 1 + 4 = 9 条会被依次认领并释放,多备几条。
+        for clip_id in 1..=12 {
+            enqueue(&mut connection, "thumbnail", &format!(r#"{{"clip_id":{clip_id}}}"#), &format!("thermal-{clip_id}")).unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(4);
+        let file = directory.path().join("thermal");
+        let claim_all = |connection: &mut Connection| {
+            let mut held = Vec::new();
+            while let Some(claimed) = coordinator.claim_for_owner(connection, "t").unwrap() {
+                held.push(claimed);
+            }
+            held
+        };
+
+        for (text, expected, reason) in [("fair", 3usize, None), ("serious", 1, Some("thermal")), ("critical", 1, Some("thermal")), ("nominal", 4, None)] {
+            poll_until(
+                &coordinator,
+                || {
+                    std::env::set_var("TRIPCUT_THERMAL_STATE_FILE", &file);
+                    std::fs::write(&file, text).unwrap();
+                },
+                || control.thermal_state() == super::super::thermal::ThermalState::parse(text).unwrap(),
+            );
+            let held = claim_all(&mut connection);
+            assert_eq!(held.len(), expected, "{text} 档应放 {expected} 条解码任务");
+            assert!(control.decode_saturated());
+            assert_eq!(control.pause_reason(), reason, "{text}");
+            drop(held);
+            assert_eq!(control.active_decode(), 0);
+        }
+        std::env::remove_var("TRIPCUT_THERMAL_STATE_FILE");
+    }
+
+    /// R16 §3⑤「只在空闲时做后台工作」:开关开着且用户 30 s 前还在动键鼠 → 解码 / 大模型都不认领,
+    /// Light 类(export_package 之外的 noop / waveform 等)照常;空闲满 60 s 恢复;开关关掉立刻恢复。
+    #[test]
+    fn idle_only_switch_holds_heavy_work_until_user_is_idle_for_60s() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":1}"#, "idle-decode").unwrap();
+        enqueue(&mut connection, "transcribe", r#"{"clip_id":1}"#, "idle-heavy").unwrap();
+        enqueue(&mut connection, "waveform", r#"{"clip_id":1}"#, "idle-light").unwrap();
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(4);
+        control.set_idle_only(true);
+        let file = directory.path().join("idle");
+        let thermal_file = directory.path().join("thermal");
+        std::fs::write(&thermal_file, "nominal").unwrap();
+        // 散热文件也钉住自己的(散热单测并行时会把 serious 写进同一把环境变量)。
+        let set_idle = |seconds: &str| {
+            std::env::set_var("TRIPCUT_THERMAL_STATE_FILE", &thermal_file);
+            std::env::set_var("TRIPCUT_IDLE_SECONDS_FILE", &file);
+            std::fs::write(&file, seconds).unwrap();
+        };
+
+        poll_until(&coordinator, || set_idle("30"), || control.pause_reason() == Some("idle_wait"));
+        let light = coordinator.claim_for_owner(&mut connection, "i").unwrap().expect("Light 类照常认领");
+        assert_eq!(light.job.kind, "waveform");
+        assert!(coordinator.claim_for_owner(&mut connection, "i").unwrap().is_none(), "用户在用电脑时不认领解码 / 大模型");
+        assert_eq!(borrow_spare_decode_slots(2).count(), 0);
+
+        poll_until(&coordinator, || set_idle("61"), || control.pause_reason().is_none());
+        let first = coordinator.claim_for_owner(&mut connection, "i").unwrap().expect("空闲后恢复");
+        assert_eq!(first.job.kind, "thumbnail");
+
+        poll_until(&coordinator, || set_idle("5"), || control.pause_reason() == Some("idle_wait"));
+        assert!(coordinator.claim_for_owner(&mut connection, "i").unwrap().is_none());
+        control.set_idle_only(false);
+        poll_until(&coordinator, || set_idle("5"), || control.pause_reason().is_none());
+        let second = coordinator.claim_for_owner(&mut connection, "i").unwrap().expect("开关关掉后认领");
+        assert_eq!(second.job.kind, "transcribe");
+        std::env::remove_var("TRIPCUT_IDLE_SECONDS_FILE");
+        std::env::remove_var("TRIPCUT_THERMAL_STATE_FILE");
+    }
+
+    /// R16 低配档不借空闲许可:`set_decode_policy(_, false)` 后 `borrow_spare_decode_slots`
+    /// 在 worker 线程里也借到 0;默认(借槽开)的行为由上一条测试守着。
+    #[test]
+    fn low_spec_disables_spare_decode_slot_loans() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            enqueue(&mut connection, "analyze_l1", r#"{"clip_id":1}"#, "no-loan").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(3);
+        control.set_decode_policy(1, false);
+        let borrowed = Arc::new(Mutex::new(None));
+        let thread_borrowed = borrowed.clone();
+        let ran = JobRunner::run_one_with_executor(&db_path, &coordinator, "no-loan-worker", |_db_path, connection, job| {
+            let loan = borrow_spare_decode_slots(4);
+            *thread_borrowed.lock().unwrap() = Some(loan.count());
+            drop(loan);
+            mark_done(connection, job.id, job.attempt)
+        })
+        .unwrap();
+        assert!(ran);
+        assert_eq!(*borrowed.lock().unwrap(), Some(0), "低配档不该借到任何空闲许可");
+        assert_eq!(control.active_decode(), 0);
     }
 
     #[test]
@@ -3931,6 +4524,9 @@ mod tests {
     /// 恰好一条 `tripcut:music-analyzed`;别的 kind 不发。
     #[test]
     fn event_sink_receives_music_analyzed_once_per_terminal_music_job() {
+        // 这条会真的跑 music_analyze(文件不在 → 失败态),decode_pcm 入口会给 DECODE_PCM_CALLS 计数;
+        // 按 music.rs 计数器的规则,可能增量它的测试必须先拿锁,否则和 music 的计数断言并行时互相污染(门禁假红)。
+        let _decode_guard = crate::core::music::DECODE_PCM_CALLS_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let directory = TestDirectory::new();
         let db_path = directory.db_path();
         {

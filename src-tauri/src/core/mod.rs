@@ -26,6 +26,7 @@ pub mod llm;
 pub mod media_server;
 pub mod media_source;
 pub mod memory_profile;
+pub mod thermal;
 pub mod migrations;
 pub mod minimax;
 pub mod moments;
@@ -49,6 +50,7 @@ pub mod similar;
 pub mod smart_select;
 pub mod story;
 pub mod story_gap;
+pub mod tags;
 pub mod transcribe;
 
 #[cfg(test)]

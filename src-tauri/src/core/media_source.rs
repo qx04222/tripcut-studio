@@ -186,6 +186,130 @@ pub(crate) fn relink_volume_with(
     Ok(outcome)
 }
 
+/// R16 P1-7:单条重新定位的结果(前端缺失页每条「找到它…」/ 检查器头)。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RelinkClipOutcome {
+    pub clip_id: i64,
+    pub file_name: String,
+    pub volume_uuid: String,
+}
+
+/// R16 P1-7:同名 + 时长 ±0.5 s 的宽容度。
+pub const RELINK_DURATION_TOLERANCE_SECONDS: f64 = 0.5;
+
+/// R16 P1-7:用户在文件面板里亲手指了一个文件 → 只校验**同名 + 时长 ±0.5 s**(卷级
+/// 重连要求哈希一致,这里不要求:移动硬盘只搬走一个文件夹时,用户指的就是那个文件)。
+/// 通过后:更新 `volume_uuid` / `rel_path`(按新位置所在卷)、清 `missing_since`,并把
+/// `byte_size` / `quick_hash` 换成新文件的、`full_hash` 置空——否则下一次播放会按旧哈希
+/// 拒绝这条素材。从不移动或修改磁盘上的文件。
+pub fn relink_clip(connection: &mut Connection, clip_id: i64, new_path: &Path) -> Result<RelinkClipOutcome> {
+    let ffprobe = super::settings::configured_executable(
+        connection,
+        super::settings::FFPROBE_PATH_KEY,
+        "FFPROBE_PATH",
+        "ffprobe",
+    )?;
+    relink_clip_with(
+        connection,
+        clip_id,
+        new_path,
+        |path| Ok(super::import::diskutil_volume_identity(path)),
+        |path| {
+            let metadata = super::import::probe_media_with(path, &ffprobe, super::import::FFPROBE_TIMEOUT)?;
+            Ok(Some(ticks_to_seconds(metadata.duration_ticks, metadata.tb_num, metadata.tb_den)))
+        },
+    )
+}
+
+fn ticks_to_seconds(ticks: i64, tb_num: i64, tb_den: i64) -> f64 {
+    if tb_den == 0 {
+        return 0.0;
+    }
+    ticks as f64 * tb_num as f64 / tb_den as f64
+}
+
+/// `relink_clip` 的可注入版本:`identity` 探新文件所在卷,`duration` 探新文件时长(秒;
+/// `None` = 探不到,只按同名校验)。
+pub(crate) fn relink_clip_with(
+    connection: &mut Connection,
+    clip_id: i64,
+    new_path: &Path,
+    identity: impl Fn(&Path) -> Result<Option<super::import::VolumeIdentity>>,
+    duration: impl Fn(&Path) -> Result<Option<f64>>,
+) -> Result<RelinkClipOutcome> {
+    struct Stored {
+        rel_path: String,
+        duration_ticks: Option<i64>,
+        tb_num: Option<i64>,
+        tb_den: Option<i64>,
+    }
+    let stored = connection
+        .query_row(
+            "SELECT rel_path, duration_ticks, tb_num, tb_den FROM clips WHERE id = ?1",
+            [clip_id],
+            |row| {
+                Ok(Stored {
+                    rel_path: row.get(0)?,
+                    duration_ticks: row.get(1)?,
+                    tb_num: row.get(2)?,
+                    tb_den: row.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| CoreError::MediaSource(format!("素材 {clip_id} 不存在")))?;
+    let file_name = file_name_of(&stored.rel_path);
+    if !new_path.is_file() {
+        return Err(CoreError::MediaSource(format!("选中的文件不存在:{}", new_path.display())));
+    }
+    let picked_name = new_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if picked_name != file_name {
+        return Err(CoreError::MediaSource(format!(
+            "文件名不一样:原片叫 {file_name},选中的是 {picked_name};请选同名的那个文件"
+        )));
+    }
+    if let (Some(ticks), Some(tb_num), Some(tb_den)) = (stored.duration_ticks, stored.tb_num, stored.tb_den) {
+        let expected = ticks_to_seconds(ticks, tb_num, tb_den);
+        if let Some(actual) = duration(new_path)? {
+            if (actual - expected).abs() > RELINK_DURATION_TOLERANCE_SECONDS {
+                return Err(CoreError::MediaSource(format!(
+                    "时长对不上:原片 {expected:.1} 秒,选中的文件 {actual:.1} 秒;这多半不是同一段视频"
+                )));
+            }
+        }
+    }
+    let canonical = new_path.canonicalize()?;
+    let (volume_uuid, volume_label, rel_path) = match identity(&canonical)? {
+        Some(volume) => {
+            let rel = match volume.mount_point.as_deref().and_then(|mount| canonical.strip_prefix(mount).ok()) {
+                Some(relative) => relative.to_string_lossy().trim_start_matches('/').to_owned(),
+                None => canonical.to_string_lossy().into_owned(),
+            };
+            (volume.uuid, volume.label, rel)
+        }
+        None => ("local".to_owned(), None, canonical.to_string_lossy().into_owned()),
+    };
+    let byte_size = canonical.metadata()?.len() as i64;
+    let (quick_hash, _) = super::import::quick_fingerprint(&canonical)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO volumes(uuid, label) VALUES (?1, ?2)
+         ON CONFLICT(uuid) DO UPDATE SET label = COALESCE(excluded.label, volumes.label)",
+        rusqlite::params![volume_uuid, volume_label],
+    )?;
+    transaction.execute(
+        "UPDATE clips SET volume_uuid = ?1, rel_path = ?2, missing_since = NULL,
+             byte_size = ?3, quick_hash = ?4, full_hash = NULL
+         WHERE id = ?5",
+        rusqlite::params![volume_uuid, rel_path, byte_size, quick_hash, clip_id],
+    )?;
+    transaction.commit()?;
+    Ok(RelinkClipOutcome { clip_id, file_name, volume_uuid })
+}
+
 /// Z-07:「原片不在原来的位置」的一句话原因(导出拒绝 / 任务失败 / 缺失页都用它,不出现内部词)。
 pub const MISSING_SOURCE_REASON: &str = "原片不在原来的位置(可能拔了卡或移了文件夹)";
 /// Z-07:跟在原因后面的下一步。
@@ -849,5 +973,95 @@ mod tests {
         assert_eq!(missing[0].clip_id, 1);
         assert_eq!(missing[0].file_name, "A.MOV");
         assert_eq!(missing[0].volume_label.as_deref(), Some("External Card"));
+    }
+
+    /// R16 P1-7:同名 + 时长在 ±0.5 s 内 → 重绑到新位置(卷 / 相对路径 / 哈希都换成新文件的)。
+    #[test]
+    fn relink_clip_accepts_same_name_within_duration_tolerance() {
+        let directory = TestDirectory::new();
+        let old = directory.path().join("old/DCIM/IMG_0900.MOV");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"original").unwrap();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('CARD')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, byte_size, quick_hash, full_hash, duration_ticks, tb_num, tb_den, missing_since)
+                 VALUES (1, 'CARD', 'DCIM/IMG_0900.MOV', 8, 'old-quick', 'old-full', 12_000, 1, 1000, '2026-09-14T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let found = directory.path().join("moved/IMG_0900.MOV");
+        std::fs::create_dir_all(found.parent().unwrap()).unwrap();
+        std::fs::write(&found, b"moved-content").unwrap();
+        let mount = directory.path().join("moved").canonicalize().unwrap();
+        let outcome = relink_clip_with(
+            &mut connection,
+            1,
+            &found,
+            |_| {
+                Ok(Some(import::VolumeIdentity {
+                    uuid: "NEWDISK".to_owned(),
+                    label: Some("旅行盘".to_owned()),
+                    fs_type: None,
+                    mount_point: Some(mount.clone()),
+                }))
+            },
+            |_| Ok(Some(12.3)),
+        )
+        .unwrap();
+        assert_eq!(outcome, RelinkClipOutcome { clip_id: 1, file_name: "IMG_0900.MOV".to_owned(), volume_uuid: "NEWDISK".to_owned() });
+        let (uuid, rel, missing, size, quick, full): (String, String, Option<String>, i64, String, Option<String>) = connection
+            .query_row(
+                "SELECT volume_uuid, rel_path, missing_since, byte_size, quick_hash, full_hash FROM clips WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(uuid, "NEWDISK");
+        assert_eq!(rel, "IMG_0900.MOV");
+        assert!(missing.is_none());
+        assert_eq!(size, "moved-content".len() as i64);
+        assert_ne!(quick, "old-quick", "哈希必须换成新文件的,否则下次播放按旧哈希拒绝");
+        assert!(full.is_none());
+        let label: Option<String> = connection
+            .query_row("SELECT label FROM volumes WHERE uuid = 'NEWDISK'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(label.as_deref(), Some("旅行盘"));
+        assert!(list_missing_clips(&connection).unwrap().is_empty());
+    }
+
+    /// R16 P1-7:名字不同 / 时长差超过 0.5 s 都拒绝,行一个字不动。
+    #[test]
+    fn relink_clip_rejects_different_name_or_duration() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('CARD')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, duration_ticks, tb_num, tb_den, missing_since)
+                 VALUES (1, 'CARD', 'DCIM/IMG_0900.MOV', 12_000, 1, 1000, '2026-09-14T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let other = directory.path().join("IMG_0901.MOV");
+        std::fs::write(&other, b"x").unwrap();
+        let error = relink_clip_with(&mut connection, 1, &other, |_| Ok(None), |_| Ok(Some(12.0))).unwrap_err();
+        assert!(error.to_string().contains("文件名不一样"), "{error}");
+
+        let same = directory.path().join("IMG_0900.MOV");
+        std::fs::write(&same, b"x").unwrap();
+        let error = relink_clip_with(&mut connection, 1, &same, |_| Ok(None), |_| Ok(Some(13.0))).unwrap_err();
+        assert!(error.to_string().contains("时长对不上"), "{error}");
+        assert!(missing_since(&connection, 1).is_some(), "拒绝时不能清缺失标记");
+
+        // 差 0.4 s 在宽容度内;探不到卷身份时退回 local + 绝对路径。
+        relink_clip_with(&mut connection, 1, &same, |_| Ok(None), |_| Ok(Some(12.4))).unwrap();
+        let (uuid, rel): (String, String) = connection
+            .query_row("SELECT volume_uuid, rel_path FROM clips WHERE id = 1", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(uuid, "local");
+        assert!(Path::new(&rel).is_absolute());
+        assert!(missing_since(&connection, 1).is_none());
     }
 }

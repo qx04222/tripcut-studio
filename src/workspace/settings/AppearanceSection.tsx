@@ -1,8 +1,11 @@
 import type { JSX } from "react";
 
 import { pickQuickExportFolder } from "../../api";
+import { SETTINGS_ACTIONS } from "../copy";
+import { failureText } from "../errorText";
+import { resetLayout } from "../layoutReset";
 import { notifyPlayerPref, type PlayerPrefKey } from "../playerPrefs";
-import { Button, SectionHeader, Toggle } from "../ui";
+import { Button, SectionHeader, Toggle, showToast } from "../ui";
 import { readUiBool, readUiSetting } from "../uiSettings";
 import { Segmented, SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
@@ -68,7 +71,27 @@ export function AppearanceSection(): JSX.Element {
           help={exportDir ? `快速导出会直接存到这里:${exportDir}` : "还没选过;第一次导出时会让你选一个文件夹,之后记住。"}
           align="end"
         >
-          <Button onClick={() => void changeExportDir()}>{exportDir ? "更改…" : "选择…"}</Button>
+          <div className="settings-sheet-actions">
+            <Button onClick={() => void changeExportDir()}>{exportDir ? "更改…" : "选择…"}</Button>
+            {/* R16 P2-8:忘掉这个文件夹,回到「每次导出先问一次」。 */}
+            {exportDir ? (
+              <Button variant="ghost" aria-label="清除导出文件夹" onClick={() => void form.save(EXPORT_DIR_KEY, "")}>
+                {SETTINGS_ACTIONS.clearExportDir}
+              </Button>
+            ) : null}
+          </div>
+        </SettingsRow>
+        {/* R16 P2-12:栏拖没了 / 折叠找不回来时一键回默认(ui.pane.* 五个键)。 */}
+        <SettingsRow title="界面布局" help="把媒体池、检查器的宽度和监视器的高度恢复成默认,折叠的栏也展开。" align="end">
+          <Button
+            onClick={() => {
+              void resetLayout()
+                .then(() => showToast("已恢复默认布局", { tone: "success" }))
+                .catch((error) => showToast(failureText(SETTINGS_ACTIONS.resetLayout, error), { tone: "danger" }));
+            }}
+          >
+            {SETTINGS_ACTIONS.resetLayout}
+          </Button>
         </SettingsRow>
       </div>
     </>

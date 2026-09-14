@@ -16,6 +16,9 @@
 # 本项目的播放走 libmpv + NSOpenGLView,完全不需要 SDL 输出。
 set -euo pipefail
 
+# 最低系统版本(R16 车道 D):不设的话继承本机 SDK(27.0),发布包在 macOS 14–26 上
+# dyld 直接拒绝加载。与 tauri.conf.json 的 minimumSystemVersion 保持一致。
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.5}"
 FFMPEG_SOURCE_SHA256="${FFMPEG_SOURCE_SHA256:-de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f}"
 WORK="${WORK:-/tmp/ffmpeg-lgpl}"
@@ -43,6 +46,8 @@ export PATH="/opt/homebrew/bin:$PATH"
   --enable-videotoolbox --enable-audiotoolbox \
   --disable-sdl2 \
   --disable-avdevice --disable-network --disable-xlib --disable-libxcb \
+  --extra-cflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
+  --extra-ldflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
   > "$WORK/configure.log" 2>&1
 
 LICENSE_LINE=$(grep -E "^License:" "$WORK/configure.log" || true)
@@ -68,8 +73,14 @@ fi
 if "$OUT/bin/ffmpeg" -version 2>/dev/null | grep -qE "\-\-enable-(gpl|version3|libx264|libx265)"; then
   echo "ERROR: 构建里仍含 GPL 组件"; MISSING=1
 fi
+for MACHO in "$OUT/bin/ffmpeg" "$OUT/bin/ffprobe" "$OUT"/lib/lib*.*.*.*.dylib; do
+  MINOS="$(otool -l "$MACHO" | grep -A3 LC_BUILD_VERSION | awk '/minos/ {print $2; exit}')"
+  if [ "$MINOS" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+    echo "ERROR: $MACHO minos=$MINOS,期望 $MACOSX_DEPLOYMENT_TARGET"; MISSING=1
+  fi
+done
 [ "$MISSING" -eq 0 ] || exit 1
 
-echo "==> 完成:$OUT"
+echo "==> 完成:$OUT(minos $MACOSX_DEPLOYMENT_TARGET)"
 "$OUT/bin/ffmpeg" -version 2>/dev/null | head -1
 echo "    滤镜与 videotoolbox 编码器齐全,零 GPL 组件"

@@ -2,6 +2,7 @@ import type { KeyboardEvent } from "react";
 
 import { clearClipRating, rateClip, setShotStackUserState, type ClipListItem, type ShotStack } from "../api";
 import type { RatingAction } from "../SelectPage";
+import { applyBatchRating } from "./batchRating";
 import { orderedTakes } from "./shotBandModel";
 import { ratingPatch } from "./useBandTakes";
 import { patchClipInFeed, refreshClipsFeed } from "./useClipsFeed";
@@ -13,6 +14,8 @@ export interface PoolHotkeyInput {
   /** 锚点所在的 Stack(没有就是 null)。 */
   anchorStack: ShotStack | null;
   clipsById: ReadonlyMap<number, ClipListItem>;
+  /** R16 P1-5:多选(⇧ 连选 / ⌘ 点选);多于 1 条时评级热键作用于整组。不传 = 只作用于锚点。 */
+  multiSelection?: readonly number[];
   /** 池内展开中的 Stack id(U-02)。 */
   expandedStackId: number | null;
   setExpandedStackId: (next: number | null) => void;
@@ -21,7 +24,7 @@ export interface PoolHotkeyInput {
 
 /**
  * 媒体池的单键键位(U-01,规格 §3.2):F/X/1–5/0 评级(与镜头带同一条 `patchClipInFeed`
- * 乐观补丁 + 后端写入),Tab 展开/收起锚点所在的 Stack,展开时 ↑↓ 在候选里移动、
+ * 乐观补丁 + 后端写入;R16 P1-5 多选多于 1 条时作用于整组),Tab 展开/收起锚点所在的 Stack,展开时 ↑↓ 在候选里移动、
  * Enter 提为首选,L/R 锁定/排除,空格发 `tripcut:toggle-playback`(监视器听它播放/暂停)。
  * ←→↑↓ 的网格漫游仍归 `MediaPool.onGridKeyDown`,这里只在 Stack 展开时接管 ↑↓。
  *
@@ -34,13 +37,18 @@ export function useMediaPoolHotkeys(input: PoolHotkeyInput): {
   onCompositionEnd: () => void;
   onFocus: () => void;
 } {
-  const { anchorId, anchorStack, clipsById, expandedStackId, setExpandedStackId, selectClip } = input;
+  const { anchorId, anchorStack, clipsById, multiSelection = [], expandedStackId, setExpandedStackId, selectClip } = input;
   const expanded = anchorStack !== null && anchorStack.id === expandedStackId ? anchorStack : null;
   const takes = expanded ? orderedTakes(expanded, clipsById) : [];
   const takeIndex = Math.max(0, takes.findIndex((member) => member.clip_id === anchorId));
 
   const hotkeys = useRatingHotkeys("pool", {
     onRating: async (action: RatingAction) => {
+      // R16 P1-5:多选多于 1 条 → 整组一次 rate_clips(toast + 撤销);单条照旧走 rate_clip。
+      if (multiSelection.length > 1) {
+        await applyBatchRating(multiSelection, action, clipsById);
+        return;
+      }
       if (anchorId === null) return;
       patchClipInFeed(anchorId, ratingPatch(action));
       if (action.kind === "clear") await clearClipRating(anchorId);

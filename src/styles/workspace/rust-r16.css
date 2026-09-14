@@ -1,0 +1,184 @@
+/*
+ * R16 车道 C(新 Rust 命令 + 各自 UI):缺失页每条「找到它…」、检查器头缺失行、
+ * 后台任务行「取消」/ 状态条「全部暂停」、检查器标签 chip 的 ×、设置里的 LUT / 模型删除。
+ * 只用 styles.css 已有 token;选择器都带自己面板的根类。
+ */
+
+/* P1-7:缺失页每条一行(文件名 + 找到它…)。 */
+.import-missing .import-missing-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.import-missing .import-missing-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-missing .import-missing-find {
+  flex: 0 0 auto;
+}
+
+/* P1-7:检查器头部下面的缺失行。 */
+.inspector .inspector-relink {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--warning-tint);
+  font-size: 12px;
+}
+.inspector .inspector-relink-text {
+  flex: 1 1 200px;
+}
+.inspector .inspector-relink .inspector-notice {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* P1-6:导入抽屉「正在处理」每行(任务名 + 文件名 + 取消 / 确认一次)。 */
+.import-jobs .import-running-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.import-jobs .import-running-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.import-jobs .import-running-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 12px;
+}
+.import-jobs .import-running-file {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.import-jobs .import-running-note {
+  color: var(--warning);
+}
+.import-jobs .import-running-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.import-jobs .import-running-confirm {
+  font-size: 12px;
+  color: var(--warning);
+}
+
+/* P1-6:状态条「全部暂停 / 继续」+「后台已暂停」。 */
+.workspace-status .workspace-status-pause[aria-pressed="true"] {
+  color: var(--warning);
+}
+.workspace-status .workspace-status-paused {
+  color: var(--warning);
+}
+
+/* P2-4:技术检查段「重新分析这条」。 */
+.inspector .inspector-retry-analysis {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 6px 0;
+}
+.inspector .inspector-retry-analysis .inspector-notice {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* P2-6:设置 › 工具与模型:调色文件列表 / 删模型(行内确认一次)。 */
+.settings-sheet .settings-lut-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.settings-sheet .settings-lut-row,
+.settings-sheet .settings-model-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-height: 28px;
+  font-size: 12px;
+}
+.settings-sheet .settings-lut-name {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-sheet .settings-lut-confirm {
+  color: var(--warning);
+}
+.settings-sheet .settings-model-delete .settings-sheet-inline-notice {
+  flex-basis: 100%;
+}
+
+/* P2-10:检查器标签段——用户标签 chip 带 ×,行内添加表单。 */
+.inspector .inspector-tags-r16 .inspector-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.inspector .inspector-tags-r16 .inspector-tag-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.inspector .inspector-tags-r16 .inspector-tag-remove:hover:not(:disabled) {
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+.inspector .inspector-tags-r16 .inspector-tag-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.inspector .inspector-tags-r16 .inspector-tag-input {
+  height: 24px;
+  min-width: 140px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--control-sm);
+  background: var(--surface-card);
+  font: inherit;
+  font-size: 12px;
+}
+.inspector .inspector-tags-r16 .inspector-notice {
+  flex-basis: 100%;
+  margin: 0;
+}

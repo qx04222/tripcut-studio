@@ -273,10 +273,11 @@ describe("useGlobalHotkeys —— 装进壳里的行为", () => {
 });
 
 describe("R13 §1:全局键位查表", () => {
-  it("⌘E 导出、⇧⌘E 切换集;⌘Z/⇧⌘Z 只登记不执行(还没有全局撤销栈)", () => {
+  it("⌘E 导出、⇧⌘E 切换集;R16 P2-2:⌘Z 是撤销(输入框里让给系统),⇧⌘Z 仍只登记不执行", () => {
     expect(globalHotkeyIntent(key({ key: "e", code: "KeyE", metaKey: true }), IDLE, false)).toEqual({ kind: "export" });
     expect(globalHotkeyIntent(key({ key: "E", code: "KeyE", metaKey: true, shiftKey: true }), IDLE, false)).toEqual({ kind: "switch-episode" });
-    expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true }), IDLE, false)).toBeNull();
+    expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true }), IDLE, false)).toEqual({ kind: "undo" });
+    expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true }), IDLE, true)).toBeNull();
     expect(globalHotkeyIntent(key({ key: "z", code: "KeyZ", metaKey: true, shiftKey: true }), IDLE, false)).toBeNull();
   });
 

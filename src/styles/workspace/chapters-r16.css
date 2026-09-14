@@ -1,0 +1,113 @@
+/*
+ * R16 车道 B:章节与批量(规格 §1 / §2 车道 B)。只挂在 `.shot-band` / 集菜单自己的根类下;
+ * 颜色一律用既有 token。@import 只能放在 workspace.css 头部(尾部会被 postcss 静默丢掉)。
+ */
+
+/* ---------- 1. 章头内联改名(P1-3) ---------- */
+
+.workspace-shell .shot-band .band-chapter-title-input {
+  box-sizing: border-box;
+  width: 160px;
+  max-width: 240px;
+  height: 22px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-6);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+  outline: none;
+}
+
+.workspace-shell .shot-band .band-chapter-title-input:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ---------- 2. 章头「···」(章操作菜单) ---------- */
+
+.workspace-shell .shot-band .band-chapter-more.ui-button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  opacity: 0.55;
+}
+
+.workspace-shell .shot-band .band-chapter-head:hover .band-chapter-more.ui-button,
+.workspace-shell .shot-band .band-chapter-more.ui-button:focus-visible {
+  opacity: 1;
+}
+
+/* ---------- 3. 「删除这一章…」确认卡(P2-1;与集删除确认同一种皮) ---------- */
+
+.workspace-shell .shot-band .band-chapter-delete-confirm {
+  position: absolute;
+  z-index: 6;
+  top: 44px;
+  left: 50%;
+  display: grid;
+  gap: var(--space-2);
+  width: min(360px, calc(100% - var(--space-4) * 2));
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+  transform: translateX(-50%);
+}
+
+.workspace-shell .shot-band .band-chapter-delete-confirm p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .shot-band .band-chapter-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* ---------- 4. 任意集内联改名(P2-3;切集弹层与首页共用) ---------- */
+
+.workspace-episode-popover .episode-rename-inline,
+.home-screen .episode-rename-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+}
+
+.home-screen .episode-rename-inline {
+  margin-top: var(--space-3);
+}
+
+.workspace-episode-popover .episode-rename-input,
+.home-screen .episode-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-13);
+}
+
+.workspace-episode-popover .episode-rename-input:focus-visible,
+.home-screen .episode-rename-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}

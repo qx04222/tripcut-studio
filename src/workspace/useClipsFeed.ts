@@ -170,6 +170,24 @@ function settledArray<T>(result: PromiseSettledResult<T[]>, fallback: readonly T
   return result.status === "fulfilled" && Array.isArray(result.value) ? result.value : fallback;
 }
 
+/**
+ * 结构相等就沿用旧引用(`JSON.stringify` 比对:五路元数据每轮合计几十 KB,毫秒级;
+ * 比每 2 s 全量重渲染便宜得多)。任一侧不可序列化时按「变了」处理。
+ */
+function stable<T>(previous: T, next: T): T {
+  if (previous === next) return previous;
+  try {
+    return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+  } catch {
+    return next;
+  }
+}
+
+/** 每个字段都是同一引用 / 同一原始值 → 这轮什么都没变。 */
+function feedUnchanged(previous: ClipsFeed, next: ClipsFeed): boolean {
+  return (Object.keys(next) as (keyof ClipsFeed)[]).every((key) => Object.is(previous[key], next[key]));
+}
+
 export function getClipsFeedSnapshot(): ClipsFeed {
   return feed;
 }
@@ -241,23 +259,31 @@ export async function refreshClipsFeed(force = false): Promise<void> {
       }
     }
 
-    const shotStacks = settledArray<ShotStack>(stacksResult, feed.shotStacks);
-    feed = {
-      clips: scopeClips(clips, episode),
+    // R16 车道 E(§3 ④):IPC 每轮都返回**新数组**,哪怕内容一字不差。`useSyncExternalStore`
+    // 按引用比,以前每 2 s 造一个新 feed 就把媒体池 / 镜头带 / 首页全量重渲染一次(M1 8 GB 上
+    // 这就是电池和风扇)。五路元数据逐一与上一轮做结构比对,没变的沿用旧引用;整份都没变
+    // 就连 feed 对象也不换、不 notify。
+    const shotStacks = stable(feed.shotStacks, settledArray<ShotStack>(stacksResult, feed.shotStacks));
+    const nextEpisode = stable(feed.episode, episode);
+    episode = nextEpisode;
+    const next: ClipsFeed = {
+      clips: clips === feed.allClips && nextEpisode === feed.episode ? feed.clips : scopeClips(clips, nextEpisode),
       allClips: clips,
       clipsById,
       shotStacks,
       shotStackByClipId:
         shotStacks === feed.shotStacks ? feed.shotStackByClipId : indexStacks(shotStacks),
-      storyboard: settled(storyboardResult, feed.storyboard),
-      gaps: settledArray<StoryGap>(gapsResult, feed.gaps),
-      dimensions: settledArray<ClipDimension>(dimensionsResult, feed.dimensions),
-      assetSafety: settledArray<AssetSafetyInfo>(safetyResult, feed.assetSafety),
+      storyboard: stable(feed.storyboard, settled(storyboardResult, feed.storyboard)),
+      gaps: stable(feed.gaps, settledArray<StoryGap>(gapsResult, feed.gaps)),
+      dimensions: stable(feed.dimensions, settledArray<ClipDimension>(dimensionsResult, feed.dimensions)),
+      assetSafety: stable(feed.assetSafety, settledArray<AssetSafetyInfo>(safetyResult, feed.assetSafety)),
       revision: lastRevision,
-      episode,
+      episode: nextEpisode,
       loading: false,
       error,
     };
+    if (feedUnchanged(feed, next)) return;
+    feed = next;
     notify();
   } finally {
     inFlight = false;

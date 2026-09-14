@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Button } from "../ui";
 import { Menu } from "../ui/Menu";
+import { poolRatingMenuItems, runPoolRatingMenuItem } from "../poolRatingMenu";
 import { requestQuickExport } from "./quickExportModel";
 
 /**
@@ -73,8 +74,15 @@ export function PoolExportContextMenu({ multiSelection }: { multiSelection: read
           x={menu.x}
           y={menu.y}
           ariaLabel="素材操作"
-          items={[{ id: "export", label: menu.clipIds.length > 1 ? `导出所选（${menu.clipIds.length} 条）…` : "导出所选…", ariaLabel: "导出所选" }]}
-          onSelect={() => requestQuickExport({ clip_ids: menu.clipIds })}
+          items={[
+            // R16 车道 B(P1-5):收藏 / 拒绝 / 清除评级(n 条)三项追加在前(规格 §1 素材卡菜单顺序)。
+            ...poolRatingMenuItems(menu.clipIds.length),
+            { id: "export", label: menu.clipIds.length > 1 ? `导出所选（${menu.clipIds.length} 条）…` : "导出所选…", ariaLabel: "导出所选" },
+          ]}
+          onSelect={(id) => {
+            if (runPoolRatingMenuItem(id, menu.clipIds)) return;
+            requestQuickExport({ clip_ids: menu.clipIds });
+          }}
           onClose={close}
         />
       ) : null}

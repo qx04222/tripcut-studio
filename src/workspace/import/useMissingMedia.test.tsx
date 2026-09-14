@@ -65,4 +65,27 @@ describe("useMissingMedia(迁自 MissingMediaPanel.test)", () => {
     await act(async () => { await result.current.relink("vol-1"); });
     expect(result.current.notice).toContain("卷不可写");
   });
+
+  // R16 P1-7:每条「找到它…」→ 文件面板(标题带文件名)→ relinkClip;成功后重拉清单、记一句提示;取消不调。
+  it("找到它:选中文件后调 relinkClip 并重新拉列表;取消不调;失败进 notice", async () => {
+    apiMock.listMissingClips
+      .mockResolvedValueOnce([clip(1, "A.MOV", "vol-1", "SD Card"), clip(2, "B.MOV", "vol-1", "SD Card")])
+      .mockResolvedValueOnce([clip(2, "B.MOV", "vol-1", "SD Card")]);
+    apiMock.pickRelinkFile.mockResolvedValueOnce(null).mockResolvedValueOnce("/Volumes/New/A.MOV");
+    apiMock.relinkClip.mockResolvedValue({ clip_id: 1, file_name: "A.MOV", volume_uuid: "NEW" });
+    const { result } = renderHook(() => useMissingMedia());
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await result.current.relinkOne(1, "A.MOV"); });
+    expect(apiMock.pickRelinkFile).toHaveBeenCalledWith("A.MOV");
+    expect(apiMock.relinkClip).not.toHaveBeenCalled();
+    await act(async () => { await result.current.relinkOne(1, "A.MOV"); });
+    expect(apiMock.relinkClip).toHaveBeenCalledWith(1, "/Volumes/New/A.MOV");
+    expect(result.current.clips.map((c) => c.clip_id)).toEqual([2]);
+    expect(result.current.notice).toContain("A.MOV");
+    expect(result.current.busyClip).toBeNull();
+    apiMock.relinkClip.mockRejectedValueOnce(new Error("时长对不上"));
+    apiMock.pickRelinkFile.mockResolvedValueOnce("/Volumes/New/B.MOV");
+    await act(async () => { await result.current.relinkOne(2, "B.MOV"); });
+    expect(result.current.notice).toContain("时长对不上");
+  });
 });

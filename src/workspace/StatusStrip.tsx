@@ -9,6 +9,8 @@ import {
   listMissingClips,
   type ImportProgress,
 } from "../api";
+import { UpdateStatusChip } from "./update/UpdateStatusChip";
+import { StatusPause } from "./StatusPause";
 import { useComposingIndicator } from "./useRatingHotkeys";
 import { Button, Icon } from "./ui";
 import { dispatchWorkspace } from "./WorkspaceStore";
@@ -33,6 +35,8 @@ export interface BackgroundSummary {
   cleanup?: number;
   /** R15:还没生成完的预览文件任务数;分析短语不在场时(清理缓存后重新生成)报出来。可选。 */
   regenerating?: number;
+  /** R16 §3⑤:后台不认领重活的原因;`user` 由 StatusPause 的「后台已暂停」负责,这里不再重复。可选。 */
+  pausedReason?: ImportProgress["paused_reason"];
 }
 
 const EMPTY_SUMMARY: BackgroundSummary = {
@@ -133,7 +137,26 @@ export function summaryPhrases(summary: BackgroundSummary, eta: string | null = 
   const analysing = summary.analyzeTotal > 0 && summary.analyzed < summary.analyzeTotal;
   if (!analysing && (summary.regenerating ?? 0) > 0) phrases.push(`正在重新生成预览 · 还剩 ${summary.regenerating} 个`);
   if ((summary.cleanup ?? 0) > 0) phrases.push("正在清理缓存文件");
+  // R16 §3⑤:还有活在排时说明为什么慢 / 停;后台本来就空闲时不说(没有东西被挡)。
+  if (phrases.length > 0) {
+    const reason = pauseReasonPhrase(summary.pausedReason);
+    if (reason) phrases.push(reason);
+  }
   return phrases.length > 0 ? phrases : ["后台空闲"];
+}
+
+/** R16 §3⑤:`paused_reason` 的人话;`user` 由 StatusPause 显示「后台已暂停」,这里返回 null。 */
+export function pauseReasonPhrase(reason: ImportProgress["paused_reason"] | undefined): string | null {
+  switch (reason) {
+    case "memory":
+      return "内存不足,后台先停一停";
+    case "thermal":
+      return "电脑有点热,后台先慢下来";
+    case "idle_wait":
+      return "等你不用电脑时继续";
+    default:
+      return null;
+  }
 }
 
 function useBackgroundSummary(): { summary: BackgroundSummary; eta: string | null; showAnalysis: boolean } {
@@ -211,6 +234,7 @@ function useBackgroundSummary(): { summary: BackgroundSummary; eta: string | nul
           progress.status === "fulfilled" && typeof progress.value.proxy_pending === "number" ? progress.value.proxy_pending : previous.proxyActive,
         cleanup: progress.status === "fulfilled" ? (progress.value.cleanup_pending ?? 0) : previous.cleanup,
         regenerating: progress.status === "fulfilled" ? (progress.value.derived_pending ?? 0) : previous.regenerating,
+        pausedReason: progress.status === "fulfilled" ? (progress.value.paused_reason ?? null) : previous.pausedReason,
       }));
     };
 
@@ -308,6 +332,8 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
       >
         查看后台任务详情
       </Button>
+      {/* R16 P1-6:主按钮旁「全部暂停 / 继续」。 */}
+      <StatusPause />
       <span className="workspace-status-phrases">
         {phrases
           .filter((phrase) => !phrase.startsWith("缺失素材"))
@@ -331,6 +357,8 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
             );
           })}
       </span>
+      {/* R17 车道 B:「正在下载更新 42%」/「更新已下载 · 重启完成更新」。 */}
+      <UpdateStatusChip />
       {summary.missing > 0 ? (
         <Button
           variant="ghost"

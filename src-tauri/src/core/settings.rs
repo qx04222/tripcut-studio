@@ -13,6 +13,13 @@ pub const UI_SCALE_KEY: &str = "appearance.ui_scale";
 pub const WORKER_COUNT_KEY: &str = "performance.worker_count";
 pub const PROXY_ENABLED_KEY: &str = "performance.proxy_enabled";
 pub const MEMORY_PROFILE_KEY: &str = "performance.memory_profile";
+/// R16 车道 E:「省电 / 低配模式」三态开关(`auto` | `on` | `off`),见 `memory_profile`。
+pub const LOW_SPEC_MODE_KEY: &str = "performance.low_spec_mode";
+/// R16 车道 E:预览小文件目录上限(GB,整数 1–500),超限按最久未播淘汰(`artifacts::enforce_proxy_cache_limit`)。
+pub const PROXY_CACHE_LIMIT_GB_KEY: &str = "performance.proxy_cache_limit_gb";
+pub const DEFAULT_PROXY_CACHE_LIMIT_GB: f64 = 10.0;
+/// R16 车道 E §3⑤:「只在我不用电脑时做后台工作」("true" | "false");没存过时低配档默认开、其它档默认关。
+pub const BACKGROUND_ONLY_WHEN_IDLE_KEY: &str = "performance.background_only_when_idle";
 pub const FFMPEG_PATH_KEY: &str = "tools.ffmpeg_path";
 pub const FFPROBE_PATH_KEY: &str = "tools.ffprobe_path";
 pub const WHISPER_PATH_KEY: &str = "tools.whisper_path";
@@ -66,6 +73,15 @@ pub const MOMENT_WEIGHTS_KEY: &str = "moments.weights";
 pub const KEYMAP_PRESET_KEY: &str = "keymap.preset";
 /// R13 §1 自定义键位(JSON `{base, overrides}`,前端解析、这里只限长度)。
 pub const KEYMAP_CUSTOM_KEY: &str = "keymap.custom";
+
+/// R17 车道 A:自动更新总开关("true" | "false",默认开:后台静默下载,退出/重启时替换)。
+pub const UPDATER_AUTO_UPDATE_KEY: &str = "updater.auto_update";
+/// R17 车道 A:下载前先问("true" | "false",默认不问——业主拍板静默下载)。
+pub const UPDATER_ASK_BEFORE_DOWNLOAD_KEY: &str = "updater.ask_before_download";
+/// R17 车道 A:上次检查更新的 unix 秒(前端 `check_for_update` 成功后写;`update_flow::should_auto_check` 读)。
+pub const UPDATER_LAST_CHECK_KEY: &str = "updater.last_check";
+/// R17 车道 A:用户点了「跳过这个版本」的版本号(空串 = 没跳过);只许 [0-9A-Za-z.+-]。
+pub const UPDATER_SKIPPED_VERSION_KEY: &str = "updater.skipped_version";
 
 const WINDOW_WIDTH_KEY: &str = "window.width";
 const WINDOW_HEIGHT_KEY: &str = "window.height";
@@ -133,6 +149,9 @@ pub struct ClipSidecarStatus {
 pub struct CacheStats {
     pub database_bytes: u64,
     pub disk_bytes: u64,
+    /// R16:预览小文件合计与上限(字节),设置页显示「占用 / 上限」。
+    pub proxy_bytes: u64,
+    pub proxy_limit_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -168,7 +187,13 @@ fn defaults() -> BTreeMap<String, String> {
         (WORKER_COUNT_KEY.to_owned(), DEFAULT_WORKER_COUNT.to_string()),
         (PROXY_ENABLED_KEY.to_owned(), "true".to_owned()),
         (MEMORY_PROFILE_KEY.to_owned(), "auto".to_owned()),
+        (LOW_SPEC_MODE_KEY.to_owned(), "auto".to_owned()),
+        (PROXY_CACHE_LIMIT_GB_KEY.to_owned(), "10".to_owned()),
         (FIRST_RUN_DONE_KEY.to_owned(), "false".to_owned()),
+        (UPDATER_AUTO_UPDATE_KEY.to_owned(), "true".to_owned()),
+        (UPDATER_ASK_BEFORE_DOWNLOAD_KEY.to_owned(), "false".to_owned()),
+        (UPDATER_LAST_CHECK_KEY.to_owned(), String::new()),
+        (UPDATER_SKIPPED_VERSION_KEY.to_owned(), String::new()),
         (FFMPEG_PATH_KEY.to_owned(), String::new()),
         (FFPROBE_PATH_KEY.to_owned(), String::new()),
         (WHISPER_PATH_KEY.to_owned(), String::new()),
@@ -262,6 +287,16 @@ pub fn get_settings(connection: &Connection) -> Result<BTreeMap<String, String>>
         let (key, value) = row?;
         values.insert(key, value);
     }
+    // R16:Whisper 模型档与「只在空闲时做后台工作」的默认值随内存档位走,设置页要显示真正生效的那个。
+    if setting_value(connection, WHISPER_MODEL_TIER_KEY)?.is_none() {
+        values.insert(WHISPER_MODEL_TIER_KEY.to_owned(), whisper_model_tier(connection)?);
+    }
+    if setting_value(connection, BACKGROUND_ONLY_WHEN_IDLE_KEY)?.is_none() {
+        values.insert(
+            BACKGROUND_ONLY_WHEN_IDLE_KEY.to_owned(),
+            background_only_when_idle(connection)?.to_string(),
+        );
+    }
     Ok(values)
 }
 
@@ -299,7 +334,18 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         WORKER_COUNT_KEY => value.parse::<usize>().is_ok_and(|count| (1..=8).contains(&count)),
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
         MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
+        LOW_SPEC_MODE_KEY => matches!(value, "auto" | "on" | "off"),
+        PROXY_CACHE_LIMIT_GB_KEY => value.parse::<u32>().is_ok_and(|gb| (1..=500).contains(&gb)),
+        BACKGROUND_ONLY_WHEN_IDLE_KEY => matches!(value, "true" | "false"),
         FIRST_RUN_DONE_KEY => matches!(value, "true" | "false"),
+        UPDATER_AUTO_UPDATE_KEY | UPDATER_ASK_BEFORE_DOWNLOAD_KEY => matches!(value, "true" | "false"),
+        UPDATER_LAST_CHECK_KEY => value.is_empty() || value.parse::<u64>().is_ok(),
+        UPDATER_SKIPPED_VERSION_KEY => {
+            value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+        }
         key if ONBOARDING_FLAG_KEYS.contains(&key) => matches!(value, "true" | "false"),
         // R13 §3(车道 B):剪映式功能气泡「看过了」—— `guide.<id>.viewed` = "true" | "false"。
         // 按前缀放行而不是精确表:首批七个之后每加一个 guide 不必再改 Rust;id 只许 [a-z0-9_-]。
@@ -408,6 +454,25 @@ pub fn worker_count(connection: &Connection) -> Result<usize> {
         .ok()
         .filter(|count| (1..=8).contains(count))
         .ok_or_else(|| CoreError::InvalidSchema("工作线程数设置已损坏".to_owned()))
+}
+
+/// R16:当前生效的 Whisper 模型档——用户选过就用用户的,没选过按内存档位取默认
+/// (低配档 `small`,其它 `large-v3-turbo`)。所有读这把键的地方都走这里,前端
+/// `get_settings` 看到的也是这个值。
+pub fn whisper_model_tier(connection: &Connection) -> Result<String> {
+    let default_tier = super::memory_profile::resolve(connection)?.default_whisper_tier();
+    string_value(connection, WHISPER_MODEL_TIER_KEY, default_tier)
+}
+
+/// R16 §3⑤:「只在空闲时做后台工作」是否生效——用户存过就用用户的;没存过按内存档位
+/// (低配档默认开,其它档默认关)。
+pub fn background_only_when_idle(connection: &Connection) -> Result<bool> {
+    match setting_value(connection, BACKGROUND_ONLY_WHEN_IDLE_KEY)?.as_deref() {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(CoreError::InvalidSchema("「只在空闲时做后台工作」设置已损坏".to_owned())),
+        None => Ok(super::memory_profile::resolve(connection)?.low_spec_player()),
+    }
 }
 
 pub fn proxy_enabled(connection: &Connection) -> Result<bool> {
@@ -685,6 +750,8 @@ pub fn cache_stats(connection: &Connection, cache_root: &Path) -> Result<CacheSt
     Ok(CacheStats {
         database_bytes,
         disk_bytes: directory_bytes(cache_root)?,
+        proxy_bytes: super::artifacts::proxy_cache_bytes(connection)?,
+        proxy_limit_bytes: super::artifacts::proxy_cache_limit_bytes(connection)?,
     })
 }
 
@@ -911,6 +978,31 @@ mod tests {
         (directory, connection)
     }
 
+    // R17 车道 A:四把 updater 键进白名单,默认「自动更新开、下载前不问」(业主拍板)。
+    #[test]
+    fn updater_keys_round_trip_with_silent_defaults() {
+        let (_directory, connection) = connection_with_settings();
+        let values = get_settings(&connection).unwrap();
+        assert_eq!(values[UPDATER_AUTO_UPDATE_KEY], "true");
+        assert_eq!(values[UPDATER_ASK_BEFORE_DOWNLOAD_KEY], "false");
+        assert_eq!(values[UPDATER_LAST_CHECK_KEY], "");
+        assert_eq!(values[UPDATER_SKIPPED_VERSION_KEY], "");
+
+        set_setting(&connection, UPDATER_AUTO_UPDATE_KEY, "false").unwrap();
+        set_setting(&connection, UPDATER_ASK_BEFORE_DOWNLOAD_KEY, "true").unwrap();
+        set_setting(&connection, UPDATER_LAST_CHECK_KEY, "1800000000").unwrap();
+        set_setting(&connection, UPDATER_SKIPPED_VERSION_KEY, "0.8.0").unwrap();
+        set_setting(&connection, UPDATER_SKIPPED_VERSION_KEY, "").unwrap();
+        let values = get_settings(&connection).unwrap();
+        assert_eq!(values[UPDATER_AUTO_UPDATE_KEY], "false");
+        assert_eq!(values[UPDATER_LAST_CHECK_KEY], "1800000000");
+        assert_eq!(values[UPDATER_SKIPPED_VERSION_KEY], "");
+
+        assert!(set_setting(&connection, UPDATER_AUTO_UPDATE_KEY, "yes").is_err());
+        assert!(set_setting(&connection, UPDATER_LAST_CHECK_KEY, "2026-09-14").is_err());
+        assert!(set_setting(&connection, UPDATER_SKIPPED_VERSION_KEY, "0.8.0; rm -rf").is_err());
+    }
+
     #[test]
     fn defaults_are_available_before_0008_is_wired() {
         let directory = TestDirectory::new();
@@ -1058,6 +1150,8 @@ mod tests {
             CacheStats {
                 database_bytes: 12,
                 disk_bytes: 4,
+                proxy_bytes: 0,
+                proxy_limit_bytes: 10 << 30,
             }
         );
     }

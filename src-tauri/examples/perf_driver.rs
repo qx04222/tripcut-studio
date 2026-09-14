@@ -61,8 +61,11 @@ fn main() {
     if db.exists() {
         std::fs::remove_file(&db).expect("清旧库");
     }
+    // R16:`--low-spec auto|on|off` 写 `performance.low_spec_mode`,与设置页同一把键。
+    let low_spec_mode = arg("--low-spec").unwrap_or_else(|| "auto".to_owned());
     let mut conn = core::db::open_project(&db).expect("open_project");
     core::settings::set_setting(&conn, core::settings::WORKER_COUNT_KEY, &workers.to_string()).unwrap();
+    core::settings::set_setting(&conn, core::settings::LOW_SPEC_MODE_KEY, &low_spec_mode).unwrap();
     let started = Instant::now();
     let started_at = chrono_now();
     let swap_before = swapouts();
@@ -77,9 +80,11 @@ fn main() {
     // 线程共享同一个 `Arc<JobRunner>`,因此共享同一份解码/大模型许可与内存
     // 暂停状态——这正是此前 `run_one()` 每次新建协调器所绕开的那部分。
     let budget = core::memory_profile::budget_bytes();
-    let profile = core::memory_profile::profile_for_budget(budget, "auto");
-    let decode_permits = profile.decode_permits();
-    let runner = Arc::new(core::jobs::JobRunner::new(db.clone(), workers).with_decode_limit(decode_permits));
+    let profile = core::memory_profile::profile_for_budget_and_mode(budget, "auto", &low_spec_mode);
+    // R16:worker 数按档位封顶(低配档 2),与 lib.rs 一致;整套解码策略走 `with_memory_profile`。
+    let workers = workers.min(profile.max_worker_count());
+    eprintln!("memory profile: {} (budget {} MiB, workers {workers})", profile.as_str(), budget >> 20);
+    let runner = Arc::new(core::jobs::JobRunner::new(db.clone(), workers).with_memory_profile(profile));
 
     let stop = Arc::new(AtomicBool::new(false));
     // R15-perf:每条任务记 (kind, 距开跑的起点 ms, 耗时 ms),result.json 里多一份 `timeline`,

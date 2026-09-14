@@ -30,7 +30,10 @@ import { BandAccessory, BandTabs, BandViewToggle, MusicRuler } from "./BandAcces
 import { BandAutoSelect } from "./BandAutoSelect";
 import { PaneHead } from "./PaneHead";
 import { BandChapterSection } from "./BandChapters";
+import { ChapterMenuOverlay } from "./BandChapterMenu";
+import { useChapterActions } from "./useChapterActions";
 import { DragGhost, generationDisabledHint } from "./BandSegment";
+import { BandSegmentActions } from "./BandSegmentMenu";
 import { ShotBandPicker } from "./ShotBandPicker";
 import { bandPickerCandidates } from "./bandTemplateModel";
 import { TakeStrip } from "./BandTakeStrip";
@@ -53,8 +56,7 @@ import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { BandEmpty } from "./emptyStates";
 import { failureText } from "./errorText";
-import { Button } from "./ui";
-import { showToast } from "./ui/Toast";
+import { Button, showToast } from "./ui";
 
 export { BAND_CHAPTER_HEADER_WIDTH, chapterOffsets } from "./bandGeometry";
 export { ratingPatch } from "./useBandTakes";
@@ -116,6 +118,8 @@ export function ShotBand(): JSX.Element {
         : buildBandChapters(effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById, skipped),
     [effectiveBoard, feed.gaps, feed.shotStacks, feed.clipsById, skipped],
   );
+  // R16 §1:章头改名 / 「···」菜单 / 并入 / 删除(状态与命令在 useChapterActions;菜单与确认卡画在栏根下)。
+  const chapterActions = useChapterActions({ chapters: allChapters, readOnly });
   // 按时间 / 仅缺口是纯函数视图;按章节原样返回,不多算一遍。
   const chapters = useMemo(() => applyBandView(allChapters, view, feed.clipsById), [allChapters, view, feed.clipsById]);
   const segments = useMemo(() => chapters.flatMap((chapter) => chapter.segments), [chapters]);
@@ -350,11 +354,13 @@ export function ShotBand(): JSX.Element {
                 collapsed={folded.has(foldKey(chapter))}
                 onToggleFold={timeline.toggleFold}
                 trim={trim}
+                actions={chapterActions.actions}
               />
             ))}
           </SortableContext>
           <DragOverlay>{draggingSegment ? <DragGhost segment={draggingSegment} /> : null}</DragOverlay>
         </DndContext>
+        <BandSegmentActions board={effectiveBoard} drag={drag} />
       </div>
       </BandTimelineStage>
       {/* 空态放在 grid 外面(WebKit 会把 role=grid 的非 row 子节点从 AX 树剔掉,按钮在里面按名字找不到);
@@ -380,6 +386,7 @@ export function ShotBand(): JSX.Element {
         <ShotBandPicker chapterTitle={picker.chapterId === null ? null : picker.title} candidates={pickerCandidates} busy={drag.busy} onPick={onPick} onClose={closePicker} />
       ) : null}
       <BandAccessory />
+      <ChapterMenuOverlay state={chapterActions} chapters={allChapters} onSkipChapter={onSkipChapter} />
       {generationGap ? (
         // `GenerationDialog` 本体一行不改,只是换了个宿主(R7 的参数预填照旧)。
         <GenerationDialog

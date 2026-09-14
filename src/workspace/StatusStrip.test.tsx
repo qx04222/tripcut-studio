@@ -39,6 +39,14 @@ describe("summaryPhrases", () => {
     expect(summaryPhrases({ analyzed: 500, analyzeTotal: 500, transcribing: 0, generating: 0, missing: 2 }))
       .toEqual(["分析完成 · 500 条", "缺失素材 2"]);
   });
+  it("R16 §3⑤:有活在排时按 paused_reason 说人话;user 交给「后台已暂停」不重复;后台空闲不说", () => {
+    const base = { analyzed: 12, analyzeTotal: 500, transcribing: 0, generating: 0, missing: 0 };
+    expect(summaryPhrases({ ...base, pausedReason: "thermal" })).toEqual(["正在分析 12/500", "电脑有点热,后台先慢下来"]);
+    expect(summaryPhrases({ ...base, pausedReason: "idle_wait" })).toEqual(["正在分析 12/500", "等你不用电脑时继续"]);
+    expect(summaryPhrases({ ...base, pausedReason: "memory" })).toEqual(["正在分析 12/500", "内存不足,后台先停一停"]);
+    expect(summaryPhrases({ ...base, pausedReason: "user" })).toEqual(["正在分析 12/500"]);
+    expect(summaryPhrases({ ...base, analyzeTotal: 0, pausedReason: "thermal" })).toEqual(["后台空闲"]);
+  });
   it("R15:后台还在清理缓存文件时有一句「正在清理缓存文件」", () => {
     expect(summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0, cleanup: 2 }))
       .toEqual(["正在清理缓存文件"]);

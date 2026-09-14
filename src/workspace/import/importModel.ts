@@ -143,6 +143,9 @@ export function pipelineHeadline(segments: readonly PipelineSegment[]): string {
  */
 export function decodeQueueHint(progress: ImportProgress, segments: readonly PipelineSegment[]): string | null {
   if (progress.paused_for_memory) return "内存不足，已暂停解码与模型任务；释放内存后会自动继续。";
+  // R16 §3⑤:热 / 空闲只是慢,不是停;用户「全部暂停」由状态条的「后台已暂停」说,这里不重复。
+  if (progress.paused_reason === "thermal") return "电脑有点热，后台先慢下来；凉下来会自动恢复。";
+  if (progress.paused_reason === "idle_wait") return "等你不用电脑时再继续分析；正在跑的会跑完。";
   const waiting = progress.waiting_for_permit;
   if (!waiting || waiting <= 0) return null;
   const busy = segments.some((segment) => segment.running > 0 || segment.waiting > 0);
@@ -164,4 +167,36 @@ export function ownedElsewhereLines(clips: readonly ClipListItem[]): string[] {
     counts.set(title, (counts.get(title) ?? 0) + 1);
   }
   return [...counts.entries()].map(([title, count]) => `这 ${count} 个文件已在「${title}」里,可在那一集里找到`);
+}
+
+/**
+ * R16 P1-6:后台任务行的中文名(不出现内部术语)。没见过的 kind 统称「后台处理」。
+ */
+const RUNNING_JOB_LABELS: Record<string, string> = {
+  import_probe: "登记素材",
+  metadata_backfill: "补齐拍摄信息",
+  full_hash: "核对文件",
+  thumbnail: "生成封面",
+  strip: "生成画面条",
+  waveform: "生成声音波形",
+  proxy: "生成预览小文件",
+  analyze_l1: "画质分析",
+  analyze_motion: "运镜分析",
+  moments: "时刻打分",
+  clip_embed: "画面识别",
+  classify_dims: "画面评分",
+  transcribe: "语音转写",
+  ocr_scan: "识别画面文字",
+  similar_cluster: "找相似镜头",
+  chapterize: "自动分章",
+  align_clocks: "对齐相机时钟",
+  narrate_episode: "生成叙事",
+  music_analyze: "音乐分析",
+  generation_poll: "云端补镜",
+  export_package: "导出",
+  cache_gc: "清理缓存文件",
+};
+
+export function runningJobLabel(kind: string): string {
+  return RUNNING_JOB_LABELS[kind] ?? "后台处理";
 }

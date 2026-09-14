@@ -190,6 +190,44 @@ pub fn remove_records(connection: &mut Connection, request: &RemovalRequest) -> 
     Ok(ids.len())
 }
 
+/// R16 P2-4:「重新分析这条」的结果——重排了几项(0 = 这条已经分析完,没有需要重跑的)。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RetryAnalysisOutcome { pub clip_id: i64, pub reset: usize, pub enqueued: usize }
+
+/// R16 P2-4:这条素材上会被「重新分析」触及的任务种类——画质 / 运镜 / 时刻分 / 封面等派生物。
+const RETRY_ANALYSIS_KINDS_SQL: &str = "('analyze_l1','analyze_motion','moments','thumbnail','strip','waveform','proxy')";
+
+/// R16 P2-4:单条重跑分析。先把这条素材上失败 / 受阻的任务行**原地复位成 pending**(清失败标记;
+/// `artifacts::enqueue_for_clip` 见到任何同哈希旧行都不再入队,所以失败的封面任务只能复位不能新建),
+/// 再按既有入队逻辑补 L1 / 运镜 / 时刻分 / 封面(从没排过的这里补上;已经 done 的不重排)。
+/// 原片不在原位时直接拒绝,给的是缺失页那句人话。
+pub fn retry_clip_analysis(connection: &mut Connection, clip_id: i64) -> Result<RetryAnalysisOutcome> {
+    let quick_hash: Option<String> = connection
+        .query_row("SELECT quick_hash FROM clips WHERE id=?1", [clip_id], |r| r.get(0))
+        .map_err(|_| CoreError::Import(format!("素材 {clip_id} 不存在")))?;
+    let Some(quick_hash) = quick_hash else {
+        return Err(CoreError::Import("这条素材还没登记成功;请重新导入它所在的文件夹".into()));
+    };
+    let path = super::media_source::verified_clip_path(connection, clip_id)
+        .map_err(|error| CoreError::Import(error.to_string()))?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let reset = transaction.execute(&format!(
+        "UPDATE jobs SET status='pending', attempt=0, cancel_requested=0, blocked_summary=NULL,
+             owner_id=NULL, lease_expires_at=NULL, finished_at=NULL,
+             next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE clip_id=?1 AND status IN ('failed','blocked') AND kind IN {RETRY_ANALYSIS_KINDS_SQL}"), [clip_id])?;
+    transaction.commit()?;
+    let mut enqueued = 0;
+    if super::analysis::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?.is_some() { enqueued += 1; }
+    if super::motion::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?.is_some() { enqueued += 1; }
+    if super::moments::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?.is_some() { enqueued += 1; }
+    let before: i64 = connection.query_row("SELECT count(*) FROM jobs WHERE clip_id=?1", [clip_id], |r| r.get(0))?;
+    super::artifacts::enqueue_for_clip(connection, clip_id, &path, &quick_hash)?;
+    let after: i64 = connection.query_row("SELECT count(*) FROM jobs WHERE clip_id=?1", [clip_id], |r| r.get(0))?;
+    enqueued += usize::try_from(after - before).unwrap_or(0);
+    Ok(RetryAnalysisOutcome { clip_id, reset, enqueued })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +316,35 @@ mod tests {
         let id=super::super::jobs::enqueue(&mut c,"export_package","{}","export").unwrap();
         assert!(prepare_removal(&mut c,&RemovalRequest{batch_id:None,clip_ids:vec![],all:true}).is_err());
         assert_eq!(super::super::jobs::get(&c,id).unwrap().status,super::super::jobs::JobStatus::Pending);
+    }
+
+    /// R16 P2-4:失败的任务行原地复位成 pending(封面类只能复位,入队函数见旧行就跳过);
+    /// 从没排过的 L1 补入队;已 done 的不重排;原片不在原位时拒绝。
+    #[test]
+    fn retry_clip_analysis_resets_failed_rows_and_enqueues_missing_ones() {
+        let directory=TestDirectory::new(); let mut c=db::open_project(&directory.db_path()).unwrap();
+        let file=directory.path().join("A.MOV"); std::fs::write(&file,b"video").unwrap();
+        c.execute("INSERT INTO volumes(uuid) VALUES ('fixture')",[]).unwrap();
+        let (quick,_)=super::super::import::quick_fingerprint(&file).unwrap();
+        c.execute("INSERT INTO clips(id,volume_uuid,rel_path,episode_id,quick_hash,byte_size) VALUES (1,'fixture',?1,1,?2,5)",params![file.to_string_lossy().as_ref(),quick]).unwrap();
+        // 一个失败的封面任务 + 一个已完成的运镜任务;L1 从没排过。
+        let thumb=super::super::jobs::enqueue(&mut c,"thumbnail",r#"{"clip_id":1}"#,"t1").unwrap();
+        c.execute("UPDATE jobs SET status='failed', blocked_summary='ffmpeg 退出 1', attempt=3 WHERE id=?1",[thumb]).unwrap();
+        let motion=super::super::jobs::enqueue(&mut c,"analyze_motion",r#"{"clip_id":1}"#,"m1").unwrap();
+        c.execute("UPDATE jobs SET status='done' WHERE id=?1",[motion]).unwrap();
+
+        let outcome=retry_clip_analysis(&mut c,1).unwrap();
+        assert_eq!(outcome.reset,1,"失败的封面任务复位");
+        let (status,attempt,summary):(String,i64,Option<String>)=c.query_row("SELECT status,attempt,blocked_summary FROM jobs WHERE id=?1",[thumb],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!((status.as_str(),attempt,summary),("pending",0,None));
+        assert!(outcome.enqueued>=1,"L1 从没排过,这次要补上");
+        let l1: i64=c.query_row("SELECT count(*) FROM jobs WHERE kind='analyze_l1' AND clip_id=1 AND status='pending'",[],|r|r.get(0)).unwrap();
+        assert_eq!(l1,1);
+        assert_eq!(super::super::jobs::get(&c,motion).unwrap().status,super::super::jobs::JobStatus::Done,"已完成的不重排");
+
+        // 原片不在了:拒绝,且不动任何行。
+        std::fs::remove_file(&file).unwrap();
+        let error=retry_clip_analysis(&mut c,1).unwrap_err().to_string();
+        assert!(error.contains("原片不在原来的位置"),"{error}");
     }
 }

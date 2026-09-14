@@ -111,6 +111,9 @@ export interface SettingsStatus {
   cache: {
     database_bytes: number;
     disk_bytes: number;
+    /** R16:预览小文件合计与目录上限(字节);旧后端没有这两项。 */
+    proxy_bytes?: number;
+    proxy_limit_bytes?: number;
   };
   /** R10 U-22:首启引导已跳过/完成(settings `onboarding.first_run_done`)。FirstRunGuide 只看这一位。 */
   first_run_done?: boolean;
@@ -136,6 +139,8 @@ export interface ImportProgress {
   running: number;
   waiting_for_permit: number;
   paused_for_memory: boolean;
+  /** R16 §3⑤:不认领重活的原因(memory / thermal / idle_wait);R16 P1-6 用户「全部暂停」报 user;旧后端缺省。 */
+  paused_reason?: "user" | "memory" | "thermal" | "idle_wait" | null;
   /** Z-01(R14 stress):当前集已登记的素材数 / 其中画质 + 运镜分析已落终态的数;旧后端缺省。 */
   analysis_total?: number;
   analysis_done?: number;
@@ -2009,4 +2014,199 @@ export function resetProjectLibrary(): Promise<ResetLibraryResult> {
 /** R15:恢复页上的「重置项目库」(同一件事,走恢复页的运行时状态)。 */
 export function resetRecoveryLibrary(): Promise<ResetLibraryResult> {
   return invoke<ResetLibraryResult>("reset_recovery_library");
+}
+
+/* ---- R16 车道 B:章节与批量(只追加) ---- */
+
+/** 「删除这一章…」:镜移到相邻章(先上一章,没有就下一章),返回镜移去的章 id;`undoStoryChange` 可撤。 */
+export function deleteChapter(chapterId: number): Promise<number> {
+  return invoke<number>("delete_chapter", { chapterId });
+}
+
+/** 批量评级的一条(与 `rateClip` 的三个参数同义;清除 = 同一 clip 的 `binary 0` + `star 0` 两条)。 */
+export interface ClipRatingEntry {
+  clip_id: number;
+  rating_type: RatingType;
+  value: number;
+}
+
+/** R16 P1-5:一次 IPC 写入多条评级(多选热键 / 菜单「收藏 / 拒绝 / 清除评级(n 条)」/ 撤销回写旧值);任何一条无效整批不写。 */
+export function rateClips(entries: ClipRatingEntry[]): Promise<ClipRating[]> {
+  return invoke<ClipRating[]>("rate_clips", { entries });
+}
+
+/** R16 P2-3:任意一集改名(封存后也能改);校验与 `renameCurrentEpisode` 相同。 */
+export async function renameEpisode(episodeId: number, title: string, theme: string): Promise<EpisodeSummary> {
+  return invoke<EpisodeSummary>("rename_episode", { episodeId, title, theme });
+}
+
+// ---------------------------------------------------------------------------
+// R16 车道 C:新 Rust 命令(只追加)。
+// ---------------------------------------------------------------------------
+
+/** P1-7:单条重新定位的结果。 */
+export interface RelinkClipOutcome {
+  clip_id: number;
+  file_name: string;
+  volume_uuid: string;
+}
+
+/** P1-7:「找到它…」的文件面板(标题带原片文件名);取消返回 null。 */
+export function pickRelinkFile(fileName: string): Promise<string | null> {
+  return invoke<string | null>("pick_relink_file", { fileName });
+}
+
+/** P1-7:把一条缺失素材指向用户选中的同名文件(后端校验同名 + 时长 ±0.5 s)。 */
+export function relinkClip(clipId: number, path: string): Promise<RelinkClipOutcome> {
+  return invoke<RelinkClipOutcome>("relink_clip", { clipId, path });
+}
+
+/** P1-6:导入抽屉「后台任务」页的一行(正在跑的任务)。 */
+export interface RunningJob {
+  id: number;
+  kind: string;
+  clip_id: number | null;
+  file_name: string | null;
+  started_at: string;
+  cancel_requested: boolean;
+}
+
+/** P1-6:当前正在跑的任务;每行「取消」走 `cancelJob`。 */
+export function listRunningJobs(): Promise<RunningJob[]> {
+  return invoke<RunningJob[]>("list_running_jobs");
+}
+
+/** P1-6:状态条「全部暂停 / 继续」——worker 不再领取新任务(导出 / 缓存清理除外),正在跑的跑完;持久化。 */
+export function setJobsPaused(paused: boolean): Promise<boolean> {
+  return invoke<boolean>("set_jobs_paused", { paused });
+}
+
+/** P1-6:当前是否被用户暂停。 */
+export function getJobsPaused(): Promise<boolean> {
+  return invoke<boolean>("get_jobs_paused");
+}
+
+/** P2-4:「重新分析这条」的结果:复位了几条失败任务、补排了几项(两者都 0 = 这条已经分析完)。 */
+export interface RetryAnalysisOutcome {
+  clip_id: number;
+  reset: number;
+  enqueued: number;
+}
+
+/** P2-4:清这条素材的失败标记并按既有入队逻辑重排画质 / 运镜 / 时刻分 / 封面。 */
+export function retryClipAnalysis(clipId: number): Promise<RetryAnalysisOutcome> {
+  return invoke<RetryAnalysisOutcome>("retry_clip_analysis", { clipId });
+}
+
+/** P2-6:删除一档已导入的转写模型文件(不可逆,界面先确认);返回释放的字节数。 */
+export function deleteWhisperModel(tier: string): Promise<number> {
+  return invoke<number>("delete_whisper_model", { tier });
+}
+
+/** P2-6:删除一个预览调色文件(只认文件名;不可逆,界面先确认);返回删后完整列表。 */
+export function deleteDisplayLut(name: string): Promise<string[]> {
+  return invoke<string[]>("delete_display_lut", { name });
+}
+
+/** P2-7:在 Finder 中显示这条素材的原片(原片不在原位时报缺失页那句人话)。 */
+export function revealClip(clipId: number): Promise<void> {
+  return invoke<void>("reveal_clip", { clipId });
+}
+
+/** P2-10:一条标签;AI 的(`ai_l3`)与用户的(`user`)一起列,只有用户的可删。 */
+export interface ClipTag {
+  id: number;
+  label: string;
+  source: string;
+  deletable: boolean;
+}
+
+export function listTags(clipId: number): Promise<ClipTag[]> {
+  return invoke<ClipTag[]>("list_tags", { clipId });
+}
+
+/** P2-10:加一条用户标签(去空白、≤32 字、同名不重复——同名时返回已有那条)。 */
+export function addTag(clipId: number, text: string): Promise<ClipTag> {
+  return invoke<ClipTag>("add_tag", { clipId, text });
+}
+
+/** P2-10:删一条用户标签;AI 标签会被后端拒绝。 */
+export function removeTag(clipId: number, tagId: number): Promise<void> {
+  return invoke<void>("remove_tag", { clipId, tagId });
+}
+
+// ---------------------------------------------------------------------------
+// R17 车道 B:应用内自动升级。下面这几条签名是按车道 A 任务书里的约定先行追加的,
+// 合并时以车道 A 的 Rust 侧为准(同名同形状)。
+// ---------------------------------------------------------------------------
+
+/** R17:`check_for_update` 的结果——有没有新版本、版本号、更新说明(markdown)、发布时间。 */
+export interface UpdateCheckResult {
+  available: boolean;
+  /** 有新版本时才有;`null` = 已是最新 / 离线。 */
+  version: string | null;
+  notes: string | null;
+  pub_date: string | null;
+  /** 当前运行版本。 */
+  current_version: string;
+  /** 端点没连上(断网、超时):不是错误,`available` 一定是 false,前端静默。 */
+  offline: boolean;
+  /** 这个版本被用户「跳过」过;`available` 仍为 true,由前端决定提不提示。 */
+  skipped?: boolean;
+}
+
+/** R17:问一次更新服务器(后端负责签名校验与版本比较)。离线时返回 `offline: true`,不 reject。 */
+export function checkForUpdate(): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("check_for_update");
+}
+
+/** R17:下载并安装刚查到的那个版本;进度走 `tripcut:update-progress` 事件,失败 reject。 */
+export function downloadAndInstallUpdate(): Promise<void> {
+  return invoke<void>("download_and_install");
+}
+
+/** R17:装好之后重启到新版本。 */
+export function restartToUpdate(): Promise<void> {
+  return invoke<void>("restart_to_update");
+}
+
+/** R17:下载进度事件名(后端 Tauri 事件 → 同名 window CustomEvent,`detail` = UpdateProgressEvent)。 */
+export const UPDATE_PROGRESS_EVENT = "tripcut:update-progress";
+
+export interface UpdateProgressEvent {
+  downloaded: number;
+  /** 服务器没给长度时为 null。 */
+  total: number | null;
+}
+
+/** R17:与 `bridgeMusicAnalyzedEvents` 同一套约定;非 Tauri 环境静默退化为 no-op。 */
+export async function bridgeUpdateProgressEvents(): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<UpdateProgressEvent>(UPDATE_PROGRESS_EVENT, (event) => {
+      window.dispatchEvent(new CustomEvent<UpdateProgressEvent>(UPDATE_PROGRESS_EVENT, { detail: event.payload }));
+    });
+  } catch {
+    return () => undefined;
+  }
+}
+
+/**
+ * R17:设置键——「自动更新」(默认 true:发现新版本就在后台静默下载;业主 09-14 拍板,替代最初的
+ * `updater.auto_check`)、「有新版本先问我再下载」(默认 false)、上次检查时间(ISO)、用户点过「跳过」的版本号。
+ */
+export const UPDATER_AUTO_UPDATE_KEY = "updater.auto_update";
+export const UPDATER_ASK_BEFORE_DOWNLOAD_KEY = "updater.ask_before_download";
+export const UPDATER_LAST_CHECK_KEY = "updater.last_check";
+export const UPDATER_SKIPPED_VERSION_KEY = "updater.skipped_version";
+
+/** R17:自动更新失败时的兜底——手动下载页(GitHub release)。 */
+export const UPDATE_RELEASE_PAGE_URL = "https://github.com/qx04222/tripcut-studio/releases/latest";
+
+/**
+ * R17:在系统浏览器里打开一个网址(后端白名单只放行下载页)。车道 A 若没提供 `open_url`,
+ * 调用方会退回 `window.open`——见 `workspace/update/updateStore.ts`。
+ */
+export function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>("open_url", { url });
 }

@@ -9,15 +9,16 @@ import {
   rateClip,
   setClipTimeStage,
   applyNarrativeOp,
+  undoNarrativeOp,
   type AiDescriptionResult,
 } from "../api";
 import {
   ChapterSlotSection,
   EmptyInspectorNote,
   RatingControls,
-  TagsSection,
   TakeSwitcher,
 } from "./inspectorFields";
+import { InspectorTags } from "./InspectorTags";
 import { InspectorHeader } from "./InspectorHeader";
 import { InspectorCollapsibleSections } from "./InspectorCollapsible";
 import { GapInspector } from "./InspectorSections";
@@ -36,6 +37,7 @@ import { planBandReorder, useBandDrag } from "./useBandDrag";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { useSelection } from "./useSelection";
 import { INSPECTOR_TITLES } from "./copy";
+import { pushUndo } from "./undoStack";
 
 export type InspectorSectionId = "techcheck" | "dimensions" | "ai" | "audio" | "similar";
 
@@ -125,6 +127,10 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   const [llmEnabled, setLlmEnabled] = useState(false);
   const [llmBudgetExhausted, setLlmBudgetExhausted] = useState(false);
   const [ratingBusy, setRatingBusy] = useState(false);
+  // R16 P2-10:标签段自己拉 `list_tags`(AI + 用户),条数报上来给段标题与可见性。
+  const [tagCount, setTagCount] = useState<{ clipId: number; count: number } | null>(null);
+  const tagTotal = tagCount?.clipId === clipId ? tagCount.count : aiDescription?.tags.length ?? 0;
+  const onTagCount = useCallback((count: number) => setTagCount({ clipId, count }), [clipId]);
   // 计数带着「是哪条素材的」:换素材不靠 effect 清零 —— 子面板的上报 effect 比父的清零 effect
   // 先跑,清零会把刚到的计数抹掉,状态字永远「加载中」(U-27 的第二个根因)。
   const [audioCount, setAudioCount] = useState<{ clipId: number; count: number } | null>(null);
@@ -226,7 +232,17 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
       if (!placement || placement.beatId === null) return;
       const beatId = placement.beatId;
       void applyNarrativeOp({ op: "move_beat", beat_id: beatId, to_chapter_id: chapterId, to_order: 0 })
-        .then(() => refreshClipsFeed(true))
+        .then(() => {
+          // R16 P2-2:叙事修改也进全局撤销栈(⌘Z → undo_narrative_op)。
+          pushUndo({
+            label: "移到别的章",
+            undo: async () => {
+              await undoNarrativeOp();
+              await refreshClipsFeed(true);
+            },
+          });
+          return refreshClipsFeed(true);
+        })
         .catch(() => undefined);
     },
     [placement],
@@ -271,7 +287,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
 
   const canReassign = Boolean(placement && placement.beatId !== null && chapterOptions.length > 0);
   const sections = visibleDefaultSections({
-    tagCount: aiDescription?.tags.length ?? 0,
+    tagCount: tagTotal,
     hasPlacement: placement !== null,
     canReassign,
     hasStack: stack !== null,
@@ -286,8 +302,8 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
         </DefaultSectionCard>
       ) : null}
       {sections.includes("tags") ? (
-        <DefaultSectionCard id="tags" meta={`${aiDescription?.tags.length ?? 0} 个`}>
-          <TagsSection aiDescription={aiDescription} />
+        <DefaultSectionCard id="tags" meta={`${tagTotal} 个`}>
+          <InspectorTags clipId={clipId} readOnly={feed.episode.viewing !== null} onCount={onTagCount} />
         </DefaultSectionCard>
       ) : null}
       {sections.includes("chapter") ? (

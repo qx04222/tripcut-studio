@@ -13,6 +13,9 @@ import { HomeScreen } from "./HomeScreen";
 import { useHomeVisible } from "./homeModel";
 import { ToolchainBanner } from "./ToolchainBanner";
 import { ToastHost } from "./ui/Toast";
+import { UpdateHost } from "./update/UpdateHost";
+import { ClipRemovalHost } from "./ClipRemovalHost";
+import { LAYOUT_RESET_EVENT } from "./layoutReset";
 import { TopBar } from "./TopBar";
 import { popModal, pushModal } from "./modalStack";
 import { getClipsFeedSnapshot } from "./useClipsFeed";
@@ -125,6 +128,16 @@ export function WorkspaceShell(): JSX.Element {
   // 拖动期间只改 CSS 变量,不 setState —— 三栏不重渲染(规格 §10);
   // 松手(onLayoutChanged)才把最终值 dispatch 出去,由 store 的 400ms debounce 落盘。
   const latest = useRef({ pool: poolWidth, inspector: inspectorWidth, monitor: monitorRatio });
+  // R16 P2-12「恢复默认布局」:Panel 只认 defaultSize,store 改了它不动 —— 换 key 让整组 Panel 按默认值重挂。
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  useEffect(() => {
+    const onReset = () => {
+      latest.current = { pool: getWorkspaceSnapshot().poolWidth, inspector: getWorkspaceSnapshot().inspectorWidth, monitor: getWorkspaceSnapshot().monitorRatio };
+      setLayoutEpoch((epoch) => epoch + 1);
+    };
+    window.addEventListener(LAYOUT_RESET_EVENT, onReset);
+    return () => window.removeEventListener(LAYOUT_RESET_EVENT, onReset);
+  }, []);
   const paint = useCallback((name: string, value: string) => {
     shellRef.current?.style.setProperty(name, value);
   }, []);
@@ -282,10 +295,14 @@ export function WorkspaceShell(): JSX.Element {
       {homeOpen ? null : <PipelineHint />}
       {/* R12 §3:全应用唯一的 toast 宿主(顶部居中、一条、3–5 秒);各栏只 showToast,不各自挂。 */}
       <ToastHost />
+      {/* R17 车道 B:应用内自动升级(启动 30 秒后查;提示走上面那条 toast)。 */}
+      <UpdateHost />
+      {/* R16 P1-1:「移除素材…」的确认卡(全应用一份)。 */}
+      <ClipRemovalHost />
       {/* R13 §3:功能气泡宿主,全应用一份;首页(空库 / 点 logo)盖在三栏上。 */}
       <GuideHost />
       {homeOpen ? <HomeScreen /> : null}
-      <Group orientation="horizontal" className="workspace-columns" onLayoutChanged={commitSizes}>
+      <Group key={layoutEpoch} orientation="horizontal" className="workspace-columns" onLayoutChanged={commitSizes}>
         {/*
           竖条与整栏是两个不同 id / key 的 Panel,而不是同一个 Panel 换 props:
           react-resizable-panels 按实例记尺寸,同一实例从 44px 竖条切成 minSize 280 的

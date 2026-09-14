@@ -19,6 +19,10 @@ export interface ToastItem {
   text: string;
   tone: ToastTone;
   action: ToastAction | null;
+  /** R17:主动作之后的次要动作(ghost);只有更新提示这种「三选一」才用,常规反馈仍是至多一个动作。 */
+  actions: ToastAction[];
+  /** R17:不自己走(没有计时器、没有底边细线);用户点动作或关闭才消失。 */
+  sticky: boolean;
   durationMs: number;
 }
 
@@ -27,6 +31,10 @@ export interface ToastOptions {
   action?: ToastAction;
   /** 停留时长;夹在 3–5 秒之间(带动作的默认 5 秒,不带的 4 秒)。 */
   durationMs?: number;
+  /** R17:次要动作,排在 `action` 之后。 */
+  actions?: ToastAction[];
+  /** R17:置为 true 则不自动消失(更新提示:用户没看到之前不该自己走)。 */
+  sticky?: boolean;
 }
 
 export const TOAST_MIN_MS = 3_000;
@@ -58,14 +66,17 @@ export function showToast(text: string, options: ToastOptions = {}): number {
   const id = nextId;
   nextId += 1;
   const durationMs = clampDuration(options.durationMs ?? (options.action ? TOAST_WITH_ACTION_MS : TOAST_DEFAULT_MS));
-  current = { id, text, tone: options.tone ?? "neutral", action: options.action ?? null, durationMs };
-  timer = setTimeout(() => {
-    if (current?.id === id) {
-      current = null;
-      timer = null;
-      emit();
-    }
-  }, durationMs);
+  const sticky = options.sticky === true;
+  current = { id, text, tone: options.tone ?? "neutral", action: options.action ?? null, actions: options.actions ?? [], sticky, durationMs };
+  if (!sticky) {
+    timer = setTimeout(() => {
+      if (current?.id === id) {
+        current = null;
+        timer = null;
+        emit();
+      }
+    }, durationMs);
+  }
   emit();
   return id;
 }

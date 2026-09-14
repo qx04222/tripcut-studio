@@ -19,6 +19,38 @@ import {
 } from "../api";
 import { getClipsFeedSnapshot, refreshClipsFeed } from "./useClipsFeed";
 import { failureText } from "./errorText";
+import { SHOT_REMOVED_TOAST } from "./copy";
+import { dropUndo, pushUndo, runUndoById } from "./undoStack";
+
+/**
+ * R16 P2-2:镜头带的每次顺序写入都往全局撤销栈推一条(⌘Z 与 toast「撤销」走同一条栈)。
+ * 后端 `undo_story_change` 只认「最近一次」,所以栈里同时只留最新的那条镜头带条目 —— 旧的一律拿掉,
+ * 免得 ⌘Z 两次把同一步撤两回。
+ */
+let lastStoryUndoId: number | null = null;
+export function pushStoryUndo(label: string): number {
+  if (lastStoryUndoId !== null) dropUndo(lastStoryUndoId);
+  const id = pushUndo({
+    label,
+    undo: async () => {
+      await undoStoryChange();
+      await refreshClipsFeed(true);
+    },
+  });
+  lastStoryUndoId = id;
+  return id;
+}
+
+/** 从镜头带移出一个镜(R16 P1-4):顺序表里少传它那条 ref,精选段本身保留(仍在候选里)。 */
+export function planBandRemove(board: Storyboard, itemKey: string): BandReorderPlan {
+  const ordered = flattenStoryByChapter(board.chapters, board.items);
+  if (!ordered.some((item) => item.key === itemKey)) return null;
+  return {
+    kind: "reorder",
+    label: SHOT_REMOVED_TOAST,
+    items: ordered.filter((item) => item.key !== itemKey).map((item, position) => ({ ...item, position })),
+  };
+}
 
 /**
  * 镜头带拖排的写入路径(规格 §3.3)。顺序计算是纯函数,组件只负责把两个 key 交进来 ——
@@ -26,7 +58,7 @@ import { failureText } from "./errorText";
  */
 
 export type BandReorderPlan =
-  | { kind: "reorder"; items: StoryItem[] }
+  | { kind: "reorder"; items: StoryItem[]; label?: string }
   /**
    * 跨章节落点。`set_story_order` 只写顺序,**不写章节归属**
    * (`src-tauri/src/core/story.rs:600` 只更新 story_order 表),章节是按素材
@@ -137,7 +169,8 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
       void (async () => {
         try {
           await setStoryOrder(storyOrderRefs(plan.items));
-          setNotice(REORDER_TOAST);
+          pushStoryUndo(plan.label ?? "调整顺序");
+          setNotice(plan.label === SHOT_REMOVED_TOAST ? SHOT_REMOVED_TOAST : REORDER_TOAST);
           setUndoable(true);
           await refreshClipsFeed(true);
           // 拉回权威顺序后必须把乐观值让开,否则它会永久盖住后续每一轮轮询。
@@ -179,6 +212,7 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
           if (!candidate) throw new Error("素材还不在候选里；先在媒体池收藏它");
           const next = reorderStoryItem(latest.chapters, latest.items, candidate, null);
           await setStoryOrder(storyOrderRefs(next));
+          pushStoryUndo("加入镜头带");
           setNotice(insertNotice(latest.chapters, candidate, favorited));
           setUndoable(true);
           await refreshClipsFeed(true);
@@ -197,11 +231,16 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
   const undo = useCallback(() => {
     void (async () => {
       try {
-        await undoStoryChange();
+        // 走全局栈撤那一条(它已被 ⌘Z 撤过就直接调后端,别让按钮变哑巴)。
+        const id = lastStoryUndoId;
+        lastStoryUndoId = null;
+        if (id === null || !(await runUndoById(id))) {
+          await undoStoryChange();
+          await refreshClipsFeed(true);
+        }
         setOptimisticItems(null);
         setUndoable(false);
         setNotice("已撤销最近一次顺序调整");
-        await refreshClipsFeed(true);
       } catch (error) {
         setNotice(failureText("撤销", error));
       }

@@ -28,7 +28,6 @@ import {
 import { DEFAULT_SETTINGS, applyAppearanceSettings } from "../../appearance";
 import { WORKSPACE_FLAG_KEY, readUiBool } from "../uiSettings";
 import type { SettingsForm } from "./settingsFormTypes";
-import { useUpdaterFlow } from "./useUpdaterFlow";
 import { bytesLabel } from "./settingsModel";
 import { useGenerationSettings } from "./useGenerationSettings";
 import { describeError, failureText } from "../errorText";
@@ -37,7 +36,7 @@ export type { SettingsForm } from "./settingsFormTypes";
 
 /**
  * 设置表单的全部状态与动作,逐段迁自 `src/SettingsPage.tsx`(载入、`save` 的版本号 +
- * 串行队列 + 失败回滚、updater 三步、MiniMax key、设备时钟、缓存、自检、日志)。
+ * 串行队列 + 失败回滚、MiniMax key、设备时钟、缓存、自检、日志)。
  * 文案一字不动——`SettingsSheet.test` 与 `useSettingsForm.test` 按原串断言。
  */
 export function useSettingsForm(): SettingsForm {
@@ -62,7 +61,6 @@ export function useSettingsForm(): SettingsForm {
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const saveVersionRef = useRef(new Map<string, number>());
 
-  const { updater, updatePending, runUpdateCheck, runUpdateInstall, runRestart } = useUpdaterFlow();
   const saveRef = useRef<(key: string, value: string) => Promise<boolean>>(async () => false);
   const generation = useGenerationSettings(saveRef, settingsRef, setSettings);
   const { applyLoaded: applyGenerationLoaded } = generation;
@@ -376,8 +374,6 @@ export function useSettingsForm(): SettingsForm {
     deviceClocks,
     clockDrafts,
     setClockDraft,
-    updater,
-    updatePending,
     cacheConfirm,
     workspaceV2,
     setDraft,
@@ -392,9 +388,6 @@ export function useSettingsForm(): SettingsForm {
     openLogs,
     clearCache,
     rollbackTool,
-    runUpdateCheck,
-    runUpdateInstall,
-    runRestart,
     toggleWorkspaceFlag,
     refreshStatus,
     refreshLlm,

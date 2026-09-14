@@ -1,9 +1,13 @@
-import type { JSX } from "react";
+import { useState, type JSX } from "react";
 
-import { Button, SectionHeader, Select } from "../ui";
+import { enqueueMomentsBackfill, enqueueOcrForEpisode } from "../../api";
+import { SETTINGS_ACTIONS } from "../copy";
+import { failureText } from "../errorText";
+import { Button, SectionHeader, Select, showToast } from "../ui";
 import { RollbackControl, SettingsRow, StatusPill, ToolReadout } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 import { ToolchainGuide } from "./ToolchainGuide";
+import { LutFilesRow, WhisperModelDelete } from "./ManagedFilesR16";
 import { WhisperModelCard } from "./WhisperModelCard";
 
 const TOOL_PATHS = [
@@ -18,6 +22,20 @@ export function ToolsSection(): JSX.Element {
   const toolStatus = (readout: string) =>
     readout === "视频处理组件" ? status?.ffmpeg : readout === "媒体信息组件" ? status?.ffprobe : status?.whisper.binary;
   const component = (id: string) => componentStatuses.find((entry) => entry.id === id);
+  // R16 P2-5:换了更好的模型之后整集重算 —— 两条排队命令,耗时在文案里说清,结果 toast 说排了几条。
+  const [rerunning, setRerunning] = useState<"moments" | "ocr" | null>(null);
+  const rerun = async (kind: "moments" | "ocr") => {
+    setRerunning(kind);
+    try {
+      const count = kind === "moments" ? await enqueueMomentsBackfill() : await enqueueOcrForEpisode();
+      const what = kind === "moments" ? "时刻分" : "画面文字";
+      showToast(count > 0 ? `已排队 ${count} 条素材重新${kind === "moments" ? "计算" : "识别"}${what},后台慢慢跑,不用等` : `没有需要重新${kind === "moments" ? "计算" : "识别"}的素材`, { tone: count > 0 ? "success" : "neutral" });
+    } catch (error) {
+      showToast(failureText(kind === "moments" ? SETTINGS_ACTIONS.recomputeMoments : SETTINGS_ACTIONS.rerunOcr, error), { tone: "danger" });
+    } finally {
+      setRerunning(null);
+    }
+  };
 
   return (
     <>
@@ -78,7 +96,13 @@ export function ToolsSection(): JSX.Element {
             <WhisperModelCard component={component("whisper-model")} busy={busy} onImported={form.refreshStatus} />
           ) : null}
           <RollbackControl componentStatus={component("whisper-model")} busy={busy} onRollback={() => void form.rollbackTool("whisper-model")} />
+          {/* R16 P2-6:模型在的时候才有得删;删后重新检测,缺失卡自动出现。 */}
+          {status?.whisper.model_available ? (
+            <WhisperModelDelete tier={settings["tools.whisper_model_tier"] ?? "large-v3-turbo"} busy={busy} onDeleted={form.refreshStatus} />
+          ) : null}
         </SettingsRow>
+        {/* R16 P2-6:选错的 .cube 不再永远在列表里。 */}
+        <LutFilesRow />
         <SettingsRow title="画面识别组件" help={status?.clip_sidecar.note ?? "本地画面搜索服务。"} className="settings-sheet-row--stack">
           <div className="settings-sheet-readout">
             <div className="settings-sheet-readout-head">
@@ -95,6 +119,16 @@ export function ToolsSection(): JSX.Element {
           <Button size="sm" disabled={busy || !status?.clip_sidecar.available} onClick={() => void form.runSelfCheck()}>
             {status?.clip_sidecar.available ? "运行自检" : "组件尚未提供"}
           </Button>
+        </SettingsRow>
+        <SettingsRow title="整集重算" help="换了更好的模型、或觉得之前算得不准时用;会把本集每条素材重新排队,几十条要跑几分钟到十几分钟,后台进行,不影响继续筛片。" className="settings-sheet-row--stack">
+          <div className="settings-sheet-actions">
+            <Button size="sm" busy={rerunning === "moments"} disabled={busy || rerunning !== null} onClick={() => void rerun("moments")}>
+              {SETTINGS_ACTIONS.recomputeMoments}
+            </Button>
+            <Button size="sm" busy={rerunning === "ocr"} disabled={busy || rerunning !== null} onClick={() => void rerun("ocr")}>
+              {SETTINGS_ACTIONS.rerunOcr}
+            </Button>
+          </div>
         </SettingsRow>
       </div>
     </>

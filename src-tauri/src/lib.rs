@@ -3,6 +3,7 @@ mod app_paths;
 mod libraries;
 mod notify;
 mod packaging;
+mod update_flow;
 mod updater;
 #[cfg(target_os = "macos")]
 pub mod player;
@@ -63,6 +64,9 @@ struct WakeObserver(Retained<ProtocolObject<dyn NSObjectProtocol>>);
 unsafe impl Send for WakeObserver {}
 #[cfg(target_os = "macos")]
 unsafe impl Sync for WakeObserver {}
+
+/// R16 P1-6:用户「全部暂停」的持久化键(`ui.` 前缀走 settings 表的不透明字符串通道)。
+const JOBS_PAUSED_KEY: &str = "ui.jobs.paused";
 
 #[derive(Clone)]
 struct RuntimeState {
@@ -562,12 +566,8 @@ fn rollback_component(
         return Err("只读窗口不能回滚组件".into());
     }
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    let model_tier = core::settings::string_value(
-        &connection,
-        core::settings::WHISPER_MODEL_TIER_KEY,
-        "large-v3-turbo",
-    )
-    .map_err(|error| error.to_string())?;
+    let model_tier =
+        core::settings::whisper_model_tier(&connection).map_err(|error| error.to_string())?;
     core::provisioning::rollback_component_guarded(&connection, &component, &model_tier)
         .map_err(|error| error.to_string())
 }
@@ -579,12 +579,8 @@ fn start_component_install(
     provisioning: tauri::State<'_, ProvisioningState>,
 ) -> std::result::Result<(), String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    let model_tier = core::settings::string_value(
-        &connection,
-        core::settings::WHISPER_MODEL_TIER_KEY,
-        "large-v3-turbo",
-    )
-    .map_err(|error| error.to_string())?;
+    let model_tier =
+        core::settings::whisper_model_tier(&connection).map_err(|error| error.to_string())?;
     let mut tasks = provisioning
         .tasks
         .lock()
@@ -617,12 +613,8 @@ fn get_install_progress(
     provisioning: tauri::State<'_, ProvisioningState>,
 ) -> std::result::Result<core::provisioning::InstallProgress, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
-    let model_tier = core::settings::string_value(
-        &connection,
-        core::settings::WHISPER_MODEL_TIER_KEY,
-        "large-v3-turbo",
-    )
-    .map_err(|error| error.to_string())?;
+    let model_tier =
+        core::settings::whisper_model_tier(&connection).map_err(|error| error.to_string())?;
     let tasks = provisioning
         .tasks
         .lock()
@@ -713,6 +705,18 @@ fn rename_current_episode(
 ) -> std::result::Result<core::episode::EpisodeSummary, String> {
     let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::episode::rename_current(&mut connection, &title, &theme).map_err(|error| error.to_string())
+}
+
+/// R16 P2-3:任意一集改名(切集弹层与首页卡的「重命名」)。
+#[tauri::command]
+fn rename_episode(
+    episode_id: i64,
+    title: String,
+    theme: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::episode::EpisodeSummary, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::episode::rename_episode(&mut connection, episode_id, &title, &theme).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -945,6 +949,92 @@ async fn ask_director(
     .await
     .map_err(|error| format!("导演问答任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
+}
+
+// ---- R17 车道 A:应用内自动升级(实现见 update_flow.rs;前端接线由车道 B 做) ----
+
+/// 问一次端点。断网/超时静默(`offline: true`),不算错误。成功时顺手写 `updater.last_check`。
+#[tauri::command]
+async fn check_for_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<update_flow::UpdateCheck, String> {
+    let skipped = {
+        let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+        core::settings::string_value(&connection, core::settings::UPDATER_SKIPPED_VERSION_KEY, "")
+            .map_err(|error| error.to_string())?
+    };
+    let check = update_flow::check(&app, &skipped).await?;
+    if !check.offline && !state.read_only {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+        if let Err(error) = core::settings::set_setting(
+            &connection,
+            core::settings::UPDATER_LAST_CHECK_KEY,
+            &now.to_string(),
+        ) {
+            tracing::warn!(%error, "could not record updater.last_check");
+        }
+    }
+    Ok(check)
+}
+
+/// 后台下载并暂存(签名校验过才暂存);不替换 bundle,不挡界面。进度走 `tripcut:update-progress`。
+#[tauri::command]
+async fn download_update(app: tauri::AppHandle) -> std::result::Result<String, String> {
+    update_flow::download(&app).await
+}
+
+/// 下载 + 立即替换 bundle(设置页「下载并安装」那条手动路径)。重启后生效。
+#[tauri::command]
+async fn download_and_install(app: tauri::AppHandle) -> std::result::Result<String, String> {
+    let version = update_flow::download(&app).await?;
+    update_flow::install_staged(&app)?;
+    Ok(version)
+}
+
+/// 把暂存包装进去;返回装了哪个版本(没有暂存则 null)。
+#[tauri::command]
+fn install_staged_update(app: tauri::AppHandle) -> std::result::Result<Option<String>, String> {
+    update_flow::install_staged(&app)
+}
+
+/// 「立即重启」:有暂存包先装,再重启进程。
+#[tauri::command]
+fn restart_to_update(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    update_flow::install_staged(&app)?;
+    app.restart()
+}
+
+/// 启动时问一句:开关开着且离上次检查超过 6 小时才 `should_check_now`——端点检查便宜但不白问。
+#[tauri::command]
+fn get_auto_update_plan(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<update_flow::AutoUpdatePlan, String> {
+    use core::settings::{
+        string_value, UPDATER_ASK_BEFORE_DOWNLOAD_KEY, UPDATER_AUTO_UPDATE_KEY, UPDATER_LAST_CHECK_KEY,
+    };
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let auto_update = string_value(&connection, UPDATER_AUTO_UPDATE_KEY, "true").map_err(|error| error.to_string())?;
+    let ask = string_value(&connection, UPDATER_ASK_BEFORE_DOWNLOAD_KEY, "false").map_err(|error| error.to_string())?;
+    let last_check = string_value(&connection, UPDATER_LAST_CHECK_KEY, "").map_err(|error| error.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    Ok(update_flow::AutoUpdatePlan {
+        auto_update: auto_update == "true",
+        ask_before_download: ask == "true",
+        should_check_now: update_flow::should_auto_check(&auto_update, Some(last_check.as_str()), now),
+    })
+}
+
+#[tauri::command]
+fn get_update_status(app: tauri::AppHandle) -> update_flow::UpdateStatus {
+    update_flow::status(&app)
 }
 
 #[tauri::command]
@@ -1185,6 +1275,11 @@ fn get_import_progress(
         .worker_control
         .as_ref()
         .is_some_and(core::jobs::WorkerControl::pause_state);
+    // R16 §3⑤:不认领重活的原因(memory / thermal / idle_wait),状态条据此说人话。
+    progress.paused_reason = state
+        .worker_control
+        .as_ref()
+        .and_then(core::jobs::WorkerControl::pause_reason);
     // 解码类吃满许可时,把还在排队的解码任务数报给界面,否则界面上只会"停住"。
     if state
         .worker_control
@@ -1339,6 +1434,136 @@ async fn relink_volume(
     .await
     .map_err(|error| format!("重连素材任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
+}
+
+/// R16 P1-7:缺失页每条「找到它…」/ 检查器头 → 文件面板选中同名文件 → 单条重绑。
+/// 同名 + 时长 ±0.5 s 校验在 `core::media_source::relink_clip`;ffprobe 要跑,放阻塞线程池。
+#[tauri::command]
+async fn relink_clip(
+    clip_id: i64,
+    path: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::media_source::RelinkClipOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能重连素材".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        core::media_source::relink_clip(&mut connection, clip_id, &PathBuf::from(path))
+    })
+    .await
+    .map_err(|error| format!("重连素材任务异常结束:{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+/// R16 P1-7:「找到它…」的文件面板;标题带原片文件名,用户一眼知道该选哪个。
+#[tauri::command]
+async fn pick_relink_file(file_name: String) -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title(format!("找到 {file_name}"))
+        .pick_file()
+        .await
+        .map(|file| file.path().to_string_lossy().into_owned()))
+}
+
+/// R16 P1-6:状态条「全部暂停 / 继续」。worker 不再认领新任务(导出 / 缓存清理除外),
+/// 正在跑的跑完;写设置键 `ui.jobs.paused`,下次启动照旧。
+#[tauri::command]
+fn set_jobs_paused(paused: bool, state: tauri::State<'_, RuntimeState>) -> std::result::Result<bool, String> {
+    let control = state.worker_control.clone().ok_or("只读窗口没有后台任务")?;
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::settings::set_setting(&connection, JOBS_PAUSED_KEY, if paused { "true" } else { "false" })
+        .map_err(|error| error.to_string())?;
+    control.set_paused_by_user(paused);
+    Ok(control.paused_by_user())
+}
+
+/// R16 P1-6:当前是否被用户暂停(状态条按它画「全部暂停」还是「继续」)。
+#[tauri::command]
+fn get_jobs_paused(state: tauri::State<'_, RuntimeState>) -> bool {
+    state.worker_control.as_ref().is_some_and(core::jobs::WorkerControl::paused_by_user)
+}
+
+/// R16 P1-6:导入抽屉「后台任务」页的正在处理列表;每行「取消」走既有 `cancel_job`。
+#[tauri::command]
+fn list_running_jobs(state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::jobs::RunningJob>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::jobs::list_running_jobs(&connection).map_err(|error| error.to_string())
+}
+
+/// R16 P2-4:检查器技术检查段「重新分析这条」——清这条的失败标记、按既有入队逻辑重排。
+#[tauri::command]
+fn retry_clip_analysis(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::import_control::RetryAnalysisOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能重新分析".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let outcome = core::import_control::retry_clip_analysis(&mut connection, clip_id).map_err(|error| error.to_string())?;
+    if let Some(control) = state.worker_control.as_ref() {
+        control.wake_worker();
+    }
+    Ok(outcome)
+}
+
+/// R16 P2-6:设置 › 工具与模型 › 删除一档已导入的转写模型文件(连 `.prev`);返回释放字节数。
+#[tauri::command]
+fn delete_whisper_model(tier: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<u64, String> {
+    if state.read_only {
+        return Err("只读窗口不能删除模型".into());
+    }
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::provisioning::delete_whisper_model(&connection, &tier).map_err(|error| error.to_string())
+}
+
+/// R16 P2-6:设置 › 工具与模型 › 删除 `luts/` 里的一个 `.cube`(只认文件名);返回删后列表。
+#[tauri::command]
+fn delete_display_lut(name: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<String>, String> {
+    if state.read_only {
+        return Err("只读窗口不能删除调色文件".into());
+    }
+    let root = crate::app_paths::app_support_root().ok_or_else(|| "无法确定应用支持目录".to_owned())?;
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::provisioning::delete_display_lut(&connection, &root.join("luts"), &name)
+        .map(|paths| paths.into_iter().map(|path| path.to_string_lossy().into_owned()).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// R16 P2-7:卡片菜单「在 Finder 中显示」——复用 `reveal_in_finder`;原片不在原位时给缺失页那句人话。
+/// 只做快速哈希核对(不算完整哈希):这是"给我看文件",不是"确认同一份内容"。
+#[tauri::command]
+fn reveal_clip(clip_id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let path = core::media_source::clip_path_for_full_hash(&connection, clip_id).map_err(|error| error.to_string())?;
+    reveal_in_finder(&path).map_err(|error| error.to_string())
+}
+
+/// R16 P2-10:检查器标签段。AI 标签(`ai_l3`)与用户标签(`user`)一起列;只有用户标签可删。
+#[tauri::command]
+fn list_tags(clip_id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::tags::Tag>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::tags::list_tags(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_tag(clip_id: i64, text: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<core::tags::Tag, String> {
+    if state.read_only {
+        return Err("只读窗口不能改标签".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::tags::add_tag(&mut connection, clip_id, &text).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_tag(clip_id: i64, tag_id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    if state.read_only {
+        return Err("只读窗口不能改标签".into());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::tags::remove_tag(&mut connection, clip_id, tag_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1810,6 +2035,17 @@ fn merge_chapters(
         .map_err(|error| error.to_string())
 }
 
+/// R16 P2-1:删除一章(镜移到相邻章),返回镜移去的章 id;`undo_story_change` 可撤。
+#[tauri::command]
+fn delete_chapter(
+    chapter_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<i64, String> {
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story::delete_chapter(&mut connection, chapter_id).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn undo_story_change(
     state: tauri::State<'_, RuntimeState>,
@@ -2156,6 +2392,17 @@ fn rate_clip(
         .map_err(|error| error.to_string())
 }
 
+/// R16 P1-5:一次事务写入多条评级(多选热键 / 菜单批量 / 撤销回写)。任何一条无效整批不写。
+#[tauri::command]
+fn rate_clips(
+    entries: Vec<core::ratings::ClipRatingEntry>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<ClipRating>, String> {
+    let mut connection =
+        core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::ratings::rate_clips(&mut connection, &entries).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn clear_clip_rating(
     clip_id: i64,
@@ -2252,6 +2499,10 @@ async fn player_open(
     tauri::async_runtime::spawn_blocking(move || {
         let (connection, path, time_mapper) =
             crate::player::resolve_playback_source(&db_path, &cache_root, clip_id)?;
+        // R16:预览小文件的 LRU 按「最近播放」排,打开即 touch(没有代理时是空操作)。
+        if time_mapper.is_some() {
+            core::artifacts::touch_proxy_played(&connection, &cache_root, clip_id);
+        }
         let status = player.open(path, clip_id, time_mapper)?;
         apply_stored_display_prefs(&connection, clip_id, &player);
         Ok::<PlayerStatus, String>(status)
@@ -2505,8 +2756,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ProvisioningState::default())
+        .manage(update_flow::UpdateFlowState::default())
         .setup(move |app| {
             packaging::configure(app);
+            update_flow::spawn_selftest_if_requested(app.handle());
             *setup_signal_app_handle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app.handle().clone());
@@ -2658,8 +2911,11 @@ pub fn run() {
                 if strip_jobs > 0 {
                     tracing::info!(strip_jobs, "enqueued missing film-strip jobs");
                 }
-                let clip_embeddings =
-                    core::clip_search::enqueue_missing(&mut connection, &cache_root)?;
+                let clip_embeddings = if core::memory_profile::sidecars_enabled(&connection) {
+                    core::clip_search::enqueue_missing(&mut connection, &cache_root)?
+                } else {
+                    0
+                };
                 if clip_embeddings > 0 {
                     tracing::info!(clip_embeddings, "enqueued missing Chinese-CLIP embeddings");
                 }
@@ -2707,8 +2963,14 @@ pub fn run() {
                     tracing::warn!(%error, "could not create startup database snapshot");
                 }
             }
-            let worker_count = core::settings::worker_count(&connection)?;
-            let decode_permits = core::memory_profile::resolve(&connection)?.decode_permits();
+            // R16 车道 E:档位一次解析,worker 数按档位封顶(低配档最多 2)。
+            let memory_profile = core::memory_profile::resolve(&connection)?;
+            let worker_count =
+                core::settings::worker_count(&connection)?.min(memory_profile.max_worker_count());
+            let idle_only = core::settings::background_only_when_idle(&connection)?;
+            // R16 §3⑥:播放器低配参数表随档位。
+            crate::player::mpv_options::set_low_spec(memory_profile.low_spec_player());
+            tracing::info!(profile = memory_profile.as_str(), worker_count, idle_only, "memory profile resolved");
             let window_state = core::settings::window_state(&connection)?;
             drop(connection);
 
@@ -2730,7 +2992,8 @@ pub fn run() {
                 let event_app = app.handle().clone();
                 let permission_app = app.handle().clone();
                 let runner = core::jobs::JobRunner::new(db_path.clone(), worker_count)
-                    .with_decode_limit(decode_permits)
+                    .with_memory_profile(memory_profile)
+                    .with_idle_only(idle_only)
                     .with_notifier(std::sync::Arc::new(move |title: &str, body: &str| {
                         notify::post(&notifier_app, title, body)
                     }))
@@ -2750,6 +3013,14 @@ pub fn run() {
                         );
                     }));
                 let control = runner.control();
+                // R16 P1-6:上次退出前按了「全部暂停」就照旧暂停着,不偷偷恢复。
+                let restore_paused = core::db::open_project(&db_path)
+                    .and_then(|connection| core::settings::setting_value(&connection, JOBS_PAUSED_KEY))
+                    .map(|value| value.as_deref() == Some("true"))
+                    .unwrap_or(false);
+                if restore_paused {
+                    control.set_paused_by_user(true);
+                }
                 tauri::async_runtime::spawn(runner.run());
                 Some(control)
             };
@@ -2946,6 +3217,7 @@ pub fn run() {
             list_episodes,
             get_current_episode,
             rename_current_episode,
+            rename_episode,
             archive_current_episode,
             create_episode,
             delete_episode,
@@ -3011,6 +3283,7 @@ pub fn run() {
             import_lut,
             rate_clip,
             clear_clip_rating,
+            rate_clips,
             list_select_segments,
             create_select_segment,
             delete_select_segment,
@@ -3042,6 +3315,7 @@ pub fn run() {
             set_story_order,
             rename_chapter,
             merge_chapters,
+            delete_chapter,
             undo_story_change,
             get_clip_artifacts,
             start_export,
@@ -3077,13 +3351,36 @@ pub fn run() {
             player_set_speed,
             #[cfg(target_os = "macos")]
             player_status,
-            simulate_wake
+            simulate_wake,
+            // R16 车道 C:新命令统一追加在这里(不重排)。
+            relink_clip,
+            pick_relink_file,
+            set_jobs_paused,
+            get_jobs_paused,
+            // R17 车道 A:应用内自动升级。
+            check_for_update,
+            download_update,
+            download_and_install,
+            install_staged_update,
+            restart_to_update,
+            get_auto_update_plan,
+            get_update_status,
+            list_running_jobs,
+            retry_clip_analysis,
+            delete_whisper_model,
+            delete_display_lut,
+            reveal_clip,
+            list_tags,
+            add_tag,
+            remove_tag
         ])
         .build(context);
     let app = result.expect("旅剪工作台启动失败");
     // macOS 上退出走 process::exit,run() 之后的代码永不执行;必须在 Exit 事件里清哨兵。
-    app.run(move |_app_handle, event| {
+    app.run(move |app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            // R17 车道 A:后台下载好的更新包在退出时才替换 bundle(运行中替换会混用两版资源)。
+            update_flow::install_staged_on_exit(app_handle);
             if let Some(root) = clean_shutdown_root
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

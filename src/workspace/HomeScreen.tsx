@@ -3,11 +3,12 @@ import { useCallback, useEffect, useState, type JSX } from "react";
 import { createEpisode, deleteEpisode, listEpisodes, setSetting, type EpisodeSummary } from "../api";
 import { episodeErrorMessage } from "../EpisodePanel";
 import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
+import { EpisodeMenu, EpisodeRenameInline, type EpisodeMenuState } from "./EpisodeMenu";
 import { EpisodeCard, TemplateCard } from "./HomeCards";
 import { HOME_TEMPLATES, TEMPLATE_PRESELECT_KEY, episodeProgress, recentEpisodes, templateEpisodeTitle, type HomeTemplate } from "./homeModel";
 import { pinHome } from "./homeStore";
 import { ONBOARDING_STEPS } from "./onboarding";
-import { Button, Icon, Menu } from "./ui";
+import { Button, Icon } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 import { usePipeline } from "./usePipeline";
 import { useOccludesPlayer } from "./usePlayerOcclusion";
@@ -30,8 +31,10 @@ export function HomeScreen(): JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingTemplate, setPendingTemplate] = useState<HomeTemplate | null>(null);
   // R15:集卡片「···」菜单与「删除这一集」确认。
-  const [menu, setMenu] = useState<{ episode: EpisodeSummary; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<EpisodeMenuState | null>(null);
   const [deleting, setDeleting] = useState<EpisodeSummary | null>(null);
+  // R16 P2-3:集卡「重命名」针对哪一集。
+  const [renaming, setRenaming] = useState<EpisodeSummary | null>(null);
 
   const refresh = useCallback(() => {
     void listEpisodes()
@@ -160,6 +163,18 @@ export function HomeScreen(): JSX.Element {
                 />
               ))}
             </ul>
+            {renaming ? (
+              <EpisodeRenameInline
+                episode={renaming}
+                onSaved={(renamed) => {
+                  setRenaming(null);
+                  setNotice(`已改名为「${renamed.title}」`);
+                  refresh();
+                }}
+                onCancel={() => setRenaming(null)}
+                onError={setNotice}
+              />
+            ) : null}
             {deleting ? (
               <EpisodeDeleteConfirm
                 episode={deleting}
@@ -170,16 +185,17 @@ export function HomeScreen(): JSX.Element {
               />
             ) : null}
             {menu ? (
-              <Menu
-                items={[{ id: "delete", label: "删除这一集", ariaLabel: "删除这一集" }]}
-                x={menu.x}
-                y={menu.y}
-                ariaLabel={`集操作 · ${menu.episode.title}`}
-                onSelect={(id) => {
-                  if (id === "delete") {
-                    setDeleting(menu.episode);
-                    setNotice(null);
-                  }
+              <EpisodeMenu
+                menu={menu}
+                onRename={(episode) => {
+                  setRenaming(episode);
+                  setDeleting(null);
+                  setNotice(null);
+                }}
+                onDelete={(episode) => {
+                  setDeleting(episode);
+                  setRenaming(null);
+                  setNotice(null);
                 }}
                 onClose={() => setMenu(null)}
               />

@@ -14,12 +14,13 @@ import {
 } from "../api";
 import { EpisodeArchiveControls, EpisodeList, PLATFORM_LABELS, episodeErrorMessage } from "../EpisodePanel";
 import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
+import { EpisodeMenu, EpisodeRenameInline, type EpisodeMenuState } from "./EpisodeMenu";
 import { WorkspaceEpisodeCreateForm, WorkspaceEpisodeRenameForm } from "./EpisodeForms";
 import { openHistoricalEpisode, returnToActiveEpisode } from "../historyView";
 import { LibraryPanel } from "../LibraryPanel";
 import { useFocusTrap } from "../useFocusTrap";
 import { isTopModal, popModal, pushModal } from "./modalStack";
-import { Button, Icon, Menu } from "./ui";
+import { Button, Icon } from "./ui";
 import { failureText } from "./errorText";
 import { useWorkspace } from "./WorkspaceStore";
 
@@ -39,8 +40,10 @@ export function EpisodeSwitcher(): JSX.Element {
   const [creating, setCreating] = useState(false);
   const [archiveArmed, setArchiveArmed] = useState(false);
   // R15:「···」菜单开在哪一集、哪个位置;「删除这一集」的确认块针对哪一集。
-  const [menu, setMenu] = useState<{ episode: EpisodeSummary; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<EpisodeMenuState | null>(null);
   const [deleting, setDeleting] = useState<EpisodeSummary | null>(null);
+  // R16 P2-3:任意集的内联改名针对哪一集。
+  const [renaming, setRenaming] = useState<EpisodeSummary | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftTheme, setDraftTheme] = useState("");
   const [draftPlatform, setDraftPlatform] = useState<TargetPlatform>("general");
@@ -211,6 +214,22 @@ export function EpisodeSwitcher(): JSX.Element {
   };
 
   const archiveUnavailable = current ? current.clip_count === 0 : true;
+  // 弹层里一次只开一块(改名表单 / 新建 / 封存确认 / 删除确认 / 内联改名 / 菜单),开任何一块前先全收起。
+  const closePanels = () => {
+    setArchiveArmed(false);
+    setEditing(false);
+    setCreating(false);
+    setDeleting(null);
+    setRenaming(null);
+    setMenu(null);
+    setNotice(null);
+  };
+  // R16 P2-3:任意集内联改名成功后收起表单、报一句、重读列表(当前集改了名,胶囊也跟着换)。
+  const afterRename = async (renamed: EpisodeSummary) => {
+    closePanels();
+    setNotice(`已改名为「${renamed.title}」`);
+    await refresh().catch(() => undefined);
+  };
 
   return (
     <div className="workspace-episode-switcher">
@@ -221,15 +240,7 @@ export function EpisodeSwitcher(): JSX.Element {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="切换集"
-        onClick={() => {
-          setOpen((value) => !value);
-          setArchiveArmed(false);
-          setEditing(false);
-          setCreating(false);
-          setDeleting(null);
-          setMenu(null);
-          setNotice(null);
-        }}
+        onClick={() => { setOpen((value) => !value); closePanels(); }}
       >
         {/* Z-14:只读查看已封存集时胶囊写被查看的集名(此前仍写当前集,和媒体池对不上)。 */}
         <span className="workspace-episode-label">{viewingEpisode ? `只读 · ${viewingEpisode.title}` : current ? current.title : "切换集"}</span>
@@ -269,19 +280,13 @@ export function EpisodeSwitcher(): JSX.Element {
                 onPlatformChange={setDraftPlatform}
                 onOrientationChange={setDraftOrientation}
                 onSave={() => void saveRename()}
-                onCancel={() => {
-                  setEditing(false);
-                  setNotice(null);
-                }}
+                onCancel={closePanels}
               />
             ) : creating ? (
               <WorkspaceEpisodeCreateForm
                 busy={busy}
                 onCreate={(title) => void create(title)}
-                onCancel={() => {
-                  setCreating(false);
-                  setNotice(null);
-                }}
+                onCancel={closePanels}
               />
             ) : (
               <div className="episode-actions">
@@ -289,9 +294,8 @@ export function EpisodeSwitcher(): JSX.Element {
                   type="button"
                   disabled={busy}
                   onClick={() => {
+                    closePanels();
                     setCreating(true);
-                    setArchiveArmed(false);
-                    setNotice(null);
                   }}
                 >
                   新建集
@@ -304,8 +308,8 @@ export function EpisodeSwitcher(): JSX.Element {
                     setDraftTheme(current.theme);
                     setDraftPlatform(current.target_platform);
                     setDraftOrientation(current.canvas_orientation);
+                    closePanels();
                     setEditing(true);
-                    setNotice(null);
                   }}
                 >
                   重命名本集
@@ -319,14 +323,13 @@ export function EpisodeSwitcher(): JSX.Element {
                   onArchivePlatformChange={setArchivePlatform}
                   onArchiveOrientationChange={setArchiveOrientation}
                   onArchive={() => void archive()}
-                  onCancelArchive={() => {
-                    setArchiveArmed(false);
-                    setNotice(null);
-                  }}
+                  onCancelArchive={closePanels}
                 />
               </div>
             )
           ) : null}
+
+          {renaming ? <EpisodeRenameInline episode={renaming} onSaved={afterRename} onCancel={closePanels} onError={setNotice} /> : null}
 
           {deleting ? (
             <EpisodeDeleteConfirm
@@ -334,10 +337,7 @@ export function EpisodeSwitcher(): JSX.Element {
               busy={busy}
               consequence={episodeDeleteConsequence(deleting, episodes)}
               onConfirm={() => void remove(deleting)}
-              onCancel={() => {
-                setDeleting(null);
-                setNotice(null);
-              }}
+              onCancel={closePanels}
             />
           ) : null}
 
@@ -370,19 +370,15 @@ export function EpisodeSwitcher(): JSX.Element {
           />
 
           {menu ? (
-            <Menu
-              items={[{ id: "delete", label: "删除这一集", ariaLabel: "删除这一集" }]}
-              x={menu.x}
-              y={menu.y}
-              ariaLabel={`集操作 · ${menu.episode.title}`}
-              onSelect={(id) => {
-                if (id === "delete") {
-                  setDeleting(menu.episode);
-                  setArchiveArmed(false);
-                  setEditing(false);
-                  setCreating(false);
-                  setNotice(null);
-                }
+            <EpisodeMenu
+              menu={menu}
+              onRename={(episode) => {
+                closePanels();
+                setRenaming(episode);
+              }}
+              onDelete={(episode) => {
+                closePanels();
+                setDeleting(episode);
               }}
               onClose={() => setMenu(null)}
             />

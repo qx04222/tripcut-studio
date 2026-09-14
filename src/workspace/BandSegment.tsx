@@ -7,6 +7,7 @@ import type { GenerationAvailability, StoryGap } from "../api";
 import { GENERATION_STATUS_LABELS } from "../Storyboard";
 import { segmentAriaLabel, slotLabelZh, type BandSegment } from "./shotBandModel";
 import { GapMoreMenu } from "./BandGapMenu";
+import { ShotMenu, ShotMoreButton } from "./BandSegmentMenu";
 import { Badge, Button, Card, CoverImage, Icon, type MenuItem } from "./ui";
 import { openSettings } from "./openSettings";
 
@@ -202,6 +203,7 @@ export function SegmentCard({
   onStep,
   canStepBack = true,
   canStepForward = true,
+  readOnly = false,
   children,
   extra,
 }: {
@@ -218,6 +220,8 @@ export function SegmentCard({
   /** R12 §2:「往前 / 往后」按钮能不能按(章首 / 章尾各禁一边);不传 = 都能。 */
   canStepBack?: boolean;
   canStepForward?: boolean;
+  /** R16 §1:只读历史集 —— 菜单里会改数据的项禁用(导出照常)。 */
+  readOnly?: boolean;
   children?: JSX.Element | null;
   /** R13 §4:精选段镜块两侧的拖边把手(与默认瓦片内容并存)。 */
   extra?: JSX.Element | null;
@@ -227,6 +231,8 @@ export function SegmentCard({
     disabled: dragDisabled,
   });
   const label = segmentAriaLabel(segment);
+  // R16 §1:镜块「···」与右键共用一份菜单锚点。
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   // Y-07(0.7.0 真机):按住镜块本体拖曾经等于页面选字,只有 ⠿ 把手能拖,而引导和手册都说
   // 「拖动镜块」。指针监听挂到整块上(传感器只有 PointerSensor,距离 6px 才起拖,所以块内
   // 按钮照常点击;拖边把手自己 stopPropagation);dnd 的 aria 属性只给把手,gridcell 根不沾。
@@ -266,6 +272,11 @@ export function SegmentCard({
       className={classes}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       onClick={onSelect}
+      onContextMenu={(event) => {
+        if (segment.kind !== "clip") return;
+        event.preventDefault();
+        setMenuAnchor({ x: event.clientX, y: event.clientY });
+      }}
       {...tileListeners}
     >
       {children ?? (
@@ -331,6 +342,10 @@ export function SegmentCard({
             }}
           />
         </span>
+      ) : null}
+      {segment.kind === "clip" ? <ShotMoreButton expanded={menuAnchor !== null} onOpen={setMenuAnchor} /> : null}
+      {menuAnchor && segment.kind === "clip" ? (
+        <ShotMenu segment={segment} anchor={menuAnchor} canStepBack={canStepBack && !dragDisabled} canStepForward={canStepForward && !dragDisabled} readOnly={readOnly} onStep={onStep} onClose={() => setMenuAnchor(null)} />
       ) : null}
       {segment.kind === "clip" ? (
         <Button

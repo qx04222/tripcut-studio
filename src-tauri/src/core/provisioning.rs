@@ -139,11 +139,7 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
 ///
 /// 源文件不动。
 pub fn import_whisper_model(connection: &Connection, source: &Path) -> Result<WhisperModelImportOutcome> {
-    let active_tier = super::settings::string_value(
-        connection,
-        super::settings::WHISPER_MODEL_TIER_KEY,
-        super::transcribe::DEFAULT_MODEL_TIER,
-    )?;
+    let active_tier = super::settings::whisper_model_tier(connection)?;
     import_whisper_model_into(
         source,
         &models_dir()?,
@@ -505,17 +501,75 @@ pub fn rollback_component_guarded(
     rollback_component(component, model_tier)
 }
 
+/// R16 P2-6:删除一档已导入的转写模型文件(`models/<file>` 连同 `.prev` 备份)。不可逆,
+/// 确认在界面做;有转写任务在跑时拒绝(与回滚同一道闸)。文件本来就不在 = 无事可做,不算错。
+pub fn delete_whisper_model(connection: &Connection, tier: &str) -> Result<u64> {
+    let running: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status = 'running' AND kind = 'transcribe'",
+        [],
+        |row| row.get(0),
+    )?;
+    if running > 0 {
+        return Err(CoreError::InvalidTransition(
+            "有转写任务正在运行,请等它完成后再删除模型".to_owned(),
+        ));
+    }
+    delete_whisper_model_in(&models_dir()?, tier)
+}
+
+/// `delete_whisper_model` 的可注入内核:返回释放的字节数。
+pub(crate) fn delete_whisper_model_in(models: &Path, tier: &str) -> Result<u64> {
+    if !matches!(tier, "large-v3-turbo" | "small") {
+        return Err(CoreError::InvalidSchema(format!("未知的转写模型档:{tier}")));
+    }
+    let destination = models.join(super::settings::model_file_for_tier(tier));
+    let mut freed = 0_u64;
+    for path in [destination.clone(), prev_path_for(&destination)] {
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                freed = freed.saturating_add(metadata.len());
+                std::fs::remove_file(&path)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(freed)
+}
+
+/// R16 P2-6:删除 `luts/` 里的一个 `.cube`。只认**文件名**(不接受路径,挡住目录穿越),
+/// 顺手把引用它的 `clips.display_lut_path` 清掉(否则播放器下次会拿一个不存在的文件)。
+/// 返回删后完整列表(与 `list_display_luts` 同形)。
+pub fn delete_display_lut(connection: &Connection, luts_dir: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    let is_plain_name = !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name != "."
+        && name != "..";
+    let is_cube = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cube"));
+    if !is_plain_name || !is_cube {
+        return Err(CoreError::Player(format!("不是可删除的调色文件名:{name}")));
+    }
+    let target = luts_dir.join(name);
+    if target.is_file() {
+        std::fs::remove_file(&target)?;
+    }
+    connection.execute(
+        "UPDATE clips SET display_lut_path = NULL WHERE display_lut_path = ?1",
+        [target.to_string_lossy().as_ref()],
+    )?;
+    super::player_prefs::list_display_luts(luts_dir)
+}
+
 pub fn component_statuses(connection: &Connection) -> Result<Vec<ComponentStatus>> {
     let cache_root = super::channel_memory::channel_path_for_project(connection)
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("cache")))
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     let settings = super::settings::status(connection, &cache_root)?;
-    let model_tier = super::settings::string_value(
-        connection,
-        super::settings::WHISPER_MODEL_TIER_KEY,
-        "large-v3-turbo",
-    )?;
+    let model_tier = super::settings::whisper_model_tier(connection)?;
     let model_file = super::settings::model_file_for_tier(&model_tier);
     let model_ok = models_dir()?.join(model_file).is_file();
 
@@ -993,5 +1047,47 @@ mod tests {
             error.to_string().contains("不支持回滚"),
             "没有任务在跑时应该像此前一样放行到 rollback_component 本体：{error}"
         );
+    }
+
+    /// R16 P2-6:删模型连 `.prev` 一起删并报释放字节;未知档拒绝;不在 = 0。
+    #[test]
+    fn delete_whisper_model_removes_file_and_prev_backup() {
+        let directory = TestDirectory::new();
+        let models = directory.path().join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let file = models.join(crate::core::settings::model_file_for_tier("small"));
+        std::fs::write(&file, b"12345").unwrap();
+        std::fs::write(prev_path_for(&file), b"123").unwrap();
+        assert_eq!(delete_whisper_model_in(&models, "small").unwrap(), 8);
+        assert!(!file.exists() && !prev_path_for(&file).exists());
+        assert_eq!(delete_whisper_model_in(&models, "small").unwrap(), 0);
+        assert!(delete_whisper_model_in(&models, "medium").is_err());
+    }
+
+    /// R16 P2-6:删 LUT 只认文件名、清掉引用它的素材偏好、返回剩余列表。
+    #[test]
+    fn delete_display_lut_refuses_paths_and_clears_clip_references() {
+        let directory = TestDirectory::new();
+        let luts = directory.path().join("luts");
+        std::fs::create_dir_all(&luts).unwrap();
+        std::fs::write(luts.join("Teal.cube"), b"LUT_3D_SIZE 2").unwrap();
+        std::fs::write(luts.join("Warm.cube"), b"LUT_3D_SIZE 2").unwrap();
+        let connection = crate::core::db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('v')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, display_lut_path) VALUES (1, 'v', 'a.mov', ?1), (2, 'v', 'b.mov', ?2)",
+                [luts.join("Teal.cube").to_string_lossy().as_ref(), luts.join("Warm.cube").to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        assert!(delete_display_lut(&connection, &luts, "../Teal.cube").is_err());
+        assert!(delete_display_lut(&connection, &luts, "notes.txt").is_err());
+        let remaining = delete_display_lut(&connection, &luts, "Teal.cube").unwrap();
+        assert_eq!(remaining, vec![luts.join("Warm.cube")]);
+        let (a, b): (Option<String>, Option<String>) = connection
+            .query_row("SELECT (SELECT display_lut_path FROM clips WHERE id=1), (SELECT display_lut_path FROM clips WHERE id=2)", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert!(a.is_none(), "引用被删 LUT 的素材要清掉偏好");
+        assert!(b.is_some(), "别的 LUT 不动");
     }
 }

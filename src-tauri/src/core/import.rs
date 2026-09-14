@@ -54,6 +54,9 @@ pub struct ImportProgress {
     pub waiting_for_permit: u64,
     /// 是否因内存压力暂停了解码与大模型任务(由 Tauri 层填充,默认 false)。
     pub paused_for_memory: bool,
+    /// R16 §3⑤:不认领重活的原因——`memory` / `thermal`(过热,并发降到 1)/ `idle_wait`
+    /// (等用户空闲);由 Tauri 层填充,默认 None。
+    pub paused_reason: Option<&'static str>,
     /// Z-01:当前集已登记的素材数(分析进度的分母;登记未完成的文件不在里面)。
     #[serde(default)]
     pub analysis_total: u64,
@@ -1450,6 +1453,7 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
                     running: row.get::<_, i64>(3)?.max(0) as u64,
                     waiting_for_permit: 0,
                     paused_for_memory: false,
+                    paused_reason: None,
                     analysis_total,
                     analysis_done,
                     duplicate: row.get::<_, i64>(4)?.max(0) as u64,
@@ -2833,6 +2837,7 @@ mod tests {
                 running: 1,
                 waiting_for_permit: 0,
                 paused_for_memory: false,
+                paused_reason: None,
                 analysis_total: 0,
                 analysis_done: 0,
                 duplicate: 0,

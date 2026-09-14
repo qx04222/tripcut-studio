@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
-import { deleteSelectSegment, listSelectSegments, playerCommand, type SelectSegment } from "../api";
+import { listSelectSegments, playerCommand, type SelectSegment } from "../api";
 import { ExportSelectedButton } from "./deliver/QuickExportEntry";
+import { deleteSegmentWithUndo } from "./segmentDeletion";
 import { Button, Icon } from "./ui";
-import { refreshClipsFeed } from "./useClipsFeed";
 import { failureText } from "./errorText";
 
 /**
@@ -89,10 +89,9 @@ export function SelectSegmentsSection({
     async (segment: SelectSegment) => {
       setBusyId(segment.id);
       try {
-        await deleteSelectSegment(segment.id);
-        setNotice("已删除精选段");
-        await refreshClipsFeed(true);
-        reload();
+        // R16 P1-2:软删可撤销 —— toast「撤销」与 ⌘Z 同一条栈,restore_select_segment 拿回来。
+        await deleteSegmentWithUndo(segment.id, reload);
+        setNotice(null);
       } catch (error) {
         setNotice(failureText("删除精选段", error));
       } finally {

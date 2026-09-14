@@ -596,7 +596,8 @@ async function workspaceScript(page, context, viteUrl) {
       if (primaries !== 1) failures.push(`24-home: ${primaries} primary buttons (expected 1)`);
       const episodes = home.getByRole("list", { name: "最近的集" });
       await episodes.waitFor({ timeout: STEP_TIMEOUT_MS });
-      const cards = episodes.getByRole("button");
+      // R15 起每张集卡旁边多了一颗「···」(集操作)按钮,也是 button —— 只数卡本体。
+      const cards = episodes.locator(".home-episode-card");
       if ((await cards.count()) < 1) failures.push("24-home: 最近的集没有卡片");
       const first = await cards.first().innerText();
       if (!first.includes("进行中")) failures.push(`24-home: 第一张集卡不是进行中的集: ${first.replace(/\n/g, " | ")}`);
@@ -749,6 +750,171 @@ async function workspaceScript(page, context, viteUrl) {
       if (/remux|H\.264|tick|VFR|sidecar/i.test(text)) failures.push("28-jianying-kit: 素材包文案出现内部术语");
     },
     settle: 700,
+  });
+  await page.keyboard.press("Escape");
+
+  // R16 车道 B(§1 / §2 P1-3、P2-1):章头「···」→ 菜单「章操作 · <章名>」四项顺序冻结(重命名 · 并入上一章 · 这章够了 · 删除这一章…);
+  // 第 1 章的「并入上一章」禁用;「重命名」进内联输入框「章节名」(Esc 取消,不用 window.prompt)。菜单开着时截图。
+  await shot(page, "30-chapter-menu", {
+    locate: (p) => p.getByRole("region", { name: "镜头带" }).getByRole("button", { name: /^章操作 · / }),
+    act: async (more, p) => {
+      await p.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
+      const band = p.getByRole("region", { name: "镜头带" });
+      const title = (await more.getAttribute("aria-label")).replace(/^章操作 · /, "");
+      await more.click();
+      const menu = p.getByRole("menu", { name: `章操作 · ${title}` });
+      await menu.waitFor({ timeout: STEP_TIMEOUT_MS });
+      const items = await menu.getByRole("menuitem").allInnerTexts();
+      if (items.join("|") !== "重命名|并入上一章|这章够了|删除这一章…") failures.push(`30-chapter-menu: 菜单项 ${items.join("|")}`);
+      if (!(await menu.getByRole("menuitem", { name: "并入上一章" }).isDisabled())) failures.push("30-chapter-menu: 第 1 章的「并入上一章」没有禁用");
+      // 截完菜单再走「重命名」:输入框在章头里出现、预填章名、Esc 收回。
+      p.once("dialog", (dialog) => {
+        failures.push(`30-chapter-menu: 出现了原生弹窗 ${dialog.type()}`);
+        void dialog.dismiss();
+      });
+      await p.screenshot({ path: join(outDir, "30-chapter-menu-open.png"), fullPage: false });
+      await menu.getByRole("menuitem", { name: "重命名" }).click();
+      const input = band.getByRole("textbox", { name: "章节名" });
+      await input.waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("30-chapter-menu: 「重命名」后没有出现内联输入框「章节名」"));
+      if ((await input.count()) > 0 && (await input.inputValue()) !== title) failures.push(`30-chapter-menu: 输入框预填 ${await input.inputValue()},不是 ${title}`);
+    },
+    settle: 500,
+  });
+  await page.keyboard.press("Escape");
+
+  // R16 §1 车道 A:实体菜单。素材卡右键菜单(媒体池 / 检查器头部「···」同一张表)、镜块「···」菜单、
+  // 「移除素材…」的后果预览确认卡(alertdialog,复用导入页那张)。截图停在三张菜单都开过、确认卡开着的一刻。
+  await shot(page, "29-entity-menus", {
+    locate: (p) => p.getByRole("region", { name: "媒体池" }).getByRole("gridcell"),
+    act: async (cell, p) => {
+      await cell.click();
+      await cell.click({ button: "right" });
+      const poolMenu = p.getByRole("menu", { name: "素材操作" });
+      await poolMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
+      const poolItems = await poolMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+      if (poolItems.join("|") !== "收藏|拒绝|清除评级|加入镜头带|导出所选|在 Finder 中显示|移除素材") failures.push(`29-entity-menus: 媒体池菜单 ${poolItems.join("|")}`);
+      await p.keyboard.press("Escape");
+      await poolMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
+
+      // 检查器头部「···」:同一张表。
+      const inspector = p.getByRole("region", { name: "检查器" });
+      const more = inspector.getByRole("button", { name: "更多" }).first();
+      if ((await more.count()) === 0) failures.push("29-entity-menus: 检查器头部缺「更多」");
+      else {
+        await more.click();
+        const items = await p.getByRole("menu", { name: "素材操作" }).getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+        if (items.join("|") !== poolItems.join("|")) failures.push(`29-entity-menus: 检查器菜单与媒体池不一致 ${items.join("|")}`);
+        await p.keyboard.press("Escape");
+      }
+
+      // 镜块「···」:往前 · 往后 · 从镜头带移出 · 删除精选段 · 导出这一段。
+      const band = p.getByRole("region", { name: "镜头带" });
+      const shotCell = band.getByRole("gridcell", { name: /^镜头 \d+：/ }).first();
+      if ((await shotCell.count()) === 0) failures.push("29-entity-menus: 镜头带上没有镜块");
+      else {
+        await shotCell.click();
+        await shotCell.getByRole("button", { name: "更多" }).click();
+        const shotMenu = p.getByRole("menu", { name: "镜块操作" });
+        await shotMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
+        const items = await shotMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+        if (items.join("|") !== "往前|往后|从镜头带移出|删除精选段|导出这一段") failures.push(`29-entity-menus: 镜块菜单 ${items.join("|")}`);
+        await p.keyboard.press("Escape");
+        await shotMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
+      }
+
+      // 「移除素材…」→ 后果预览确认卡(不确认)。
+      await cell.click({ button: "right" });
+      await p.getByRole("menu", { name: "素材操作" }).getByRole("menuitem", { name: "移除素材" }).click();
+      const confirm = p.getByRole("alertdialog", { name: "确认移除素材" });
+      await confirm.waitFor({ timeout: STEP_TIMEOUT_MS });
+      const text = await confirm.innerText();
+      if (!/将移除 \d+ 条素材、\d+ 条评分记录、\d+ 个精选段/.test(text)) failures.push(`29-entity-menus: 确认卡缺后果数字: ${text.replace(/\n/g, " | ")}`);
+      if ((await confirm.getByRole("button", { name: "确认移除，保留原视频" }).count()) !== 1) failures.push("29-entity-menus: 确认卡缺主按钮");
+      if (/tick|VFR|remux|sidecar|L1|L3|hero|Stack/.test(text)) failures.push("29-entity-menus: 确认卡出现内部术语");
+    },
+    settle: 500,
+  });
+  await page.keyboard.press("Escape");
+  await page.getByRole("alertdialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("29-entity-menus: Esc 没关掉确认卡"));
+  // R16 车道 C(P1-7):缺失素材页每条「找到它…」——点第一条,假后端把它从清单里拿掉并报「已找到」。
+  await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
+  await shot(page, "31-missing-relink", {
+    locate: (p) => p.getByRole("button", { name: "导入素材", exact: true }),
+    act: async (button, p) => {
+      await button.click();
+      const dialog = p.getByRole("dialog").first();
+      await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      await dialog.getByRole("tab", { name: "缺失素材" }).click();
+      const finders = dialog.getByRole("button", { name: /^找到 / });
+      const before = await finders.count();
+      if (before < 2) failures.push(`31-missing-relink: 缺失页每条应有「找到它…」,只见 ${before}`);
+      await finders.first().click();
+      await dialog.getByText(/已找到/).waitFor({ timeout: STEP_TIMEOUT_MS });
+      if ((await finders.count()) !== before - 1) failures.push("31-missing-relink: 找到后那条没从清单里消失");
+      const text = await dialog.innerText();
+      if (/relink|uuid|rel_path/i.test(text)) failures.push("31-missing-relink: 缺失页文案出现内部术语");
+    },
+    settle: 700,
+  });
+  await page.keyboard.press("Escape");
+
+  // R17 车道 B:应用内自动升级。`?update=ask` = 假后端有 0.8.0 且用户勾了「先问我再下载」;启动 30 秒的
+  // 延迟用 Playwright 时钟拨过去。硬断言:toast 是 role=status、三枚按钮名一字不差、不是 aria-modal、
+  // 素材网格仍可点(不打断);「现在更新」后状态条出现「正在下载更新 nn%」;下完出「更新已下载」toast。
+  await page.clock.install();
+  await page.goto(`${viteUrl}?update=ask`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+  await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+  await page.waitForTimeout(800);
+  await page.clock.runFor(31_000);
+  await shot(page, "32-update-toast", {
+    locate: (p) => p.getByRole("status").filter({ hasText: "有新版本 0.8.0" }),
+    act: async (toast, p) => {
+      if ((await toast.getAttribute("aria-modal")) !== null) failures.push("32-update-toast: 提示不该是 aria-modal");
+      const buttons = await toast.getByRole("button").allInnerTexts();
+      if (buttons.join("|") !== "现在更新|稍后|跳过这个版本|") failures.push(`32-update-toast: 按钮 ${buttons.join("|")}`);
+      if ((await p.getByRole("dialog").count()) !== 0) failures.push("32-update-toast: 更新提示不该带 dialog");
+      const text = await toast.innerText();
+      if (/tauri|updater|minisign|signature|json/i.test(text)) failures.push("32-update-toast: 出现内部术语");
+      // 不打断:提示在的时候素材照样能选。
+      await p.getByRole("gridcell").nth(1).click();
+    },
+    settle: 500,
+  });
+  await page.getByRole("status").filter({ hasText: "有新版本 0.8.0" }).getByRole("button", { name: "现在更新" }).click();
+  await shot(page, "32-update-downloading", {
+    locate: (p) => p.getByRole("status", { name: "后台状态" }).getByText(/正在下载更新 \d+%/),
+    settle: 200,
+  });
+  await shot(page, "32-update-ready", {
+    locate: (p) => p.getByRole("status").filter({ hasText: "更新已下载 0.8.0" }),
+    act: async (toast) => {
+      const buttons = await toast.getByRole("button").allInnerTexts();
+      if (buttons.join("|") !== "重启完成更新|稍后|跳过这个版本|") failures.push(`32-update-ready: 按钮 ${buttons.join("|")}`);
+    },
+    settle: 400,
+  });
+  await page.getByRole("status").filter({ hasText: "更新已下载 0.8.0" }).getByRole("button", { name: "稍后" }).click();
+  // 设置 › 关于:「自动更新」开关(默认开)、「有新版本时先问我再下载」、「检查更新」、版本与上次检查、「查看更新说明」。
+  await shot(page, "33-update-settings", {
+    locate: (p) => p.getByRole("button", { name: "设置", exact: true }),
+    act: async (button, p) => {
+      await button.click();
+      const dialog = p.getByRole("dialog", { name: "设置" });
+      await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      await dialog.getByRole("tab", { name: /^关于/ }).click();
+      const toggle = dialog.getByRole("switch", { name: "自动更新" });
+      await toggle.waitFor({ timeout: STEP_TIMEOUT_MS });
+      if ((await toggle.getAttribute("aria-checked")) !== "true") failures.push("33-update-settings: 「自动更新」默认没开");
+      if ((await dialog.getByRole("checkbox", { name: "有新版本时先问我再下载" }).count()) !== 1) failures.push("33-update-settings: 缺「有新版本时先问我再下载」");
+      if ((await dialog.getByRole("button", { name: "检查更新" }).count()) !== 1) failures.push("33-update-settings: 缺「检查更新」");
+      if ((await dialog.getByRole("button", { name: "重启完成更新" }).count()) !== 1) failures.push("33-update-settings: 下完后关于分区没有「重启完成更新」");
+      if ((await dialog.getByText(/当前版本 .+ · (上次检查 |还没检查过更新)/).count()) !== 1) failures.push("33-update-settings: 缺「当前版本 · 上次检查」");
+      await dialog.getByRole("button", { name: "查看更新说明" }).click();
+      const notes = await dialog.locator(".update-r17-notes").innerText().catch(() => "");
+      if (!notes.includes("素材可以跨集移动了") || /[#*[\]]/.test(notes)) failures.push(`33-update-settings: 更新说明没展成纯文本: ${notes.slice(0, 80)}`);
+    },
+    settle: 600,
   });
   await page.keyboard.press("Escape");
 }

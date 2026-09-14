@@ -26,8 +26,20 @@ mpv / libmpv
 libplacebo 7.360.1
   License: GNU Lesser General Public License, version 2.1 or later.
   Source: https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/
-  This distribution uses an OpenGL-only build. Vulkan, shaderc and glslang are
-  disabled because TripCut does not use those backends.
+  This distribution uses an OpenGL-only build. Vulkan, shaderc, glslang and
+  lcms are disabled because TripCut does not use those backends. The
+  header-only fast_float library (Apache-2.0 OR MIT OR BSL-1.0,
+  https://github.com/fastfloat/fast_float) is compiled into libplacebo; its
+  license text is bundled as legal/libplacebo/LICENSE-fast_float.
+
+Subtitle rendering chain (statically linked into libmpv)
+  libass (ISC), FreeType (FTL), FriBidi (LGPL-2.1-or-later), HarfBuzz (MIT)
+  and libunibreak (Zlib) are built from pinned source archives and linked
+  statically into Contents/Frameworks/libmpv.2.dylib. Their license and
+  attribution files are under legal/native/<component>/ and the exact
+  versions in legal/native/build-manifest.txt. libmpv itself remains a
+  replaceable dynamic library, so the LGPL relinking requirement for FriBidi
+  is met at the libmpv boundary.
 
 whisper.cpp
   License: MIT
@@ -55,8 +67,9 @@ The in-app Open-Source Licenses screen lists the direct Cargo and npm
 dependencies, locked versions, SPDX license expressions, ecosystem, and
 runtime/build/development scope. Every packaged native Mach-O file is mapped to
 a component, SPDX expression, artifact hash and bundled license evidence in
-legal/native-sbom.json. Homebrew bottle SPDX records and selected license and
-copyright materials for dynamic dependencies are retained under legal/native/.
+legal/native-sbom.json; components statically linked into a packaged file are
+listed under that file's embeddedComponents. Selected license and copyright
+materials for the subtitle rendering chain are retained under legal/native/.
 
 Relinking and source availability
 ---------------------------------

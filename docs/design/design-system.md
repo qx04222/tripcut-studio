@@ -168,6 +168,23 @@ R9 从头到尾**没有改**下列 AX 名（`src/workspace/axNames.test.tsx` 与
 `选择新位置` 改成 `重新定位`（`ImportMissingTab`，规格 §4.1 明确要求；旧壳
 `MissingMediaPanel` 本体不受影响，仍叫旧名，等 R10 删旧壳时一起消失）。
 
+### R16 冻结的实体交互规则（规格 §1，`docs/superpowers/specs/2026-09-14-r16-human-ui-lowspec-design.md`）
+
+以下规则在 R16 定死，此后各车道新增的实体菜单一律照此实现，不再逐条商议：
+
+- **每个实体一个「···」/ 右键菜单**，同一实体在不同栏里菜单项完全一致（复用 kit `Menu`）：
+  - 素材卡（媒体池 / 检查器头）：收藏 · 拒绝 · 清除评级 · 加入镜头带 · 导出所选… · 在 Finder 中
+    显示 · 移除素材…（多选时项目名带「(n 条)」）
+  - 镜块（镜头带）：往前 · 往后 · 从镜头带移出 · 删除精选段 · 导出这一段…
+  - 章头：重命名 · 并入上一章 · 这章够了 / 还是要镜头 · 删除这一章…
+  - 集（切集弹层 / 首页卡）：重命名 · 删除这一集…
+  - 后台任务行：取消；状态条：全部暂停 / 继续
+- **可逆操作不弹确认，出 5 秒 toast「撤销」**（拖排、忽略缺口、删精选段、移出镜头带、批量评级、
+  并入上一章）；**不可逆才弹确认卡**，并列出后果数字（移除素材、删章、删集、删文件）。
+- **批量 = 同一菜单项 + 「(n 条)」**；热键在多选非空时作用于整组。
+- **统一 ⌘Z 栈**：拖排 + 叙事修改 + 批量评级（记旧值回写），全局一条栈，≤50 条，按 id 精撤——
+  toast「撤销」按钮与 ⌘Z 谁先来谁撤，不会撤两次。
+
 ## 7. R10 新组件
 
 > 依据：`docs/superpowers/specs/2026-09-13-r10-usability-design.md`；各车道报告
@@ -327,3 +344,58 @@ R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道�
 素材包」二选一互斥，不新增第三个名。
 
 未改的冻结名：顶栏四按钮、五个 landmark、附属带 tablist 与五个 tab、三个模态的 9 处冻结串、集切换两串、首启弹窗标题「先把本地工具链接好」与按钮「暂时进入工作台」（`smoke-gui.mjs` / `ax-helpers.mjs` 锚点，车道 A 若撤弹窗一并处理）。
+
+## 15. R16 新组件与新增 AX 名（车道 wire/chapters/rust/perf）
+
+> 依据：规格 §1–§3（`docs/superpowers/specs/2026-09-14-r16-human-ui-lowspec-design.md`）；车道报告
+> `.superpowers/sdd/r16/lane-wire-report.md`、`lane-rust-report.md`、`lane-perf-report.md`（车道
+> chapters 报告未入库，由合并提交 `1747e78` 及子提交 `a1f4788`/`6dfd5ba`/`8ad05e2`/`8f924fc` 复原，
+> 详见 `docs/qa/2026-09-14-unattended-r15-r16.md` §3）；车道 minos 未改前端，无新 AX 名。**尚未经过
+> 真机走查核对**（R16 验收状态见同一份 QA 文档 §6：复验进行中）。
+
+| 组件 / 位置 | 文件 | AX 名 | 行为 |
+|---|---|---|---|
+| 素材卡 / 检查器头「···」菜单 | `src/workspace/clipMenuModel.ts`、`ClipMenu.tsx` | button「更多」（`aria-haspopup=menu`）；menu「素材操作」 | 收藏 · 拒绝 · 清除评级 · 加入镜头带 · 导出所选 · 在 Finder 中显示 · 移除素材（多选带「(n 条)」）；批量评级走 `rate_clips` 一次 IPC，撤销回写旧值并入 ⌘Z 栈。 |
+| 镜块「···」/ 右键菜单 | `src/workspace/BandSegmentMenu.tsx` | button「更多」（`.band-segment-more`，选中/悬停露出）；menu「镜块操作」 | 往前 · 往后 · 从镜头带移出 · 删除精选段 · 导出这一段；移出/删段走 toast「撤销」，同一条 ⌘Z 栈。 |
+| 章头「···」菜单 + 内联改名 | `src/workspace/BandChapterHeadActions.tsx`、`BandChapterMenu.tsx` | button「章操作 · <章名>」；textbox「章节名」 | 双击章名或菜单「重命名」进内联输入框（Enter 提交、Esc 取消，不用 `window.prompt`）；「并入上一章」toast 撤销；「删除这一章…」走 alertdialog「确认删除章」，列「这一章的 n 个镜头会移到「邻章」」；首章「并入上一章」禁用，有镜的章「这章够了」禁用。 |
+| 集菜单 + 内联改名 | `src/workspace/EpisodeMenu.tsx`、`EpisodeRenameInline` | form「重命名集」；textbox「新的集标题」；button「保存」「取消」 | 切集弹层与首页集卡共用同一菜单：重命名 · 删除这一集；只改标题，主题原样带回。 |
+| 移除素材确认卡 | `src/workspace/import/RemovalConfirm.tsx` | alertdialog「确认移除素材」；button「确认移除，保留原视频」 | 与导入页同名同皮抽成公共组件，列出后果数字；缺失卷「这个盘不会再回来了…」走同一条确认卡。 |
+| 缺失卷移除入口 | `src/workspace/import/MissingVolumeRemove.tsx` | button「这个盘不会再回来了…」（aria-label 去「…」） | 缺失页卷组头，「重新定位」右侧。 |
+| 缺失页 / 检查器重新定位 | `src/workspace/InspectorRelink.tsx` | button「找到 <文件名>」；group「原片不在原来的位置」 | 缺失页每条 + 检查器头同入口，成功后该条立刻消失并提示「已找到 …」。 |
+| 后台任务「正在处理」区 | 导入抽屉「后台任务」页 | region「正在处理」；button「取消 <任务名> <文件名>」「确定取消 …」「保留」 | 行内确认一次（不弹原生对话框）；任务名中文，无内部术语。 |
+| 状态条「全部暂停 / 继续」 | `StatusStrip` | button「全部暂停」/「继续后台任务」（同一颗按钮按态换名；`aria-pressed`）；status「后台已暂停」 | 「继续」的 AX 名特意加长为「继续后台任务」，避免与「导入剪映继续剪」在探针里撞子串（`a4488c7`）。暂停期间仍放行用户此刻点的导出与缓存清理。 |
+| 检查器「重新分析这条」 | 技术检查段 | button「重新分析这条」 | 失败时主按钮、正常时 ghost、进行中禁用；已经分析完时提示「不用重跑」。 |
+| 设置 › 工具与模型删除入口 | `src/workspace/settings/ToolsSection.tsx` | list「预览调色文件」；button「删除 <文件名>」「确定删除 <文件名>」；button「删除已导入的模型文件」「确定删除 <档> 模型文件」 | 各一次行内确认（不弹原生对话框）；删后重新检测，缺失卡自动出现。 |
+| 素材菜单「在 Finder 中显示」 | `ClipMenu.tsx` | menuitem「在 Finder 中显示」 | 「导出所选」之后一项，路径按快速哈希核对。 |
+| 检查器标签段 | `src/workspace/InspectorTags.tsx` | button「删除标签 <文本>」（仅 user 标签）；textbox「新标签」；button「确认添加标签」 | 用户 chip 带 ×，AI chip 无 ×；AI 标签不可删——删除请求返回一句解释（见 §3 P2-10 限制）。 |
+| 设置 › 播放与导出补全 | `src/workspace/settings/PlaybackSection.tsx` | button「清除」（aria-label「清除导出文件夹」）；button「恢复默认布局」 | 「清除」记过才出现；「恢复默认布局」写 `ui.pane.*` 五键默认，换 key 重挂三栏。 |
+| 设置 › 关于补全 | `src/workspace/settings/AboutSection.tsx` | button「重置新手引导」；button「复制诊断信息」 | 「重置新手引导」连四步提示一起清；「复制诊断信息」不含任何绝对路径（`stripPaths` 白名单前缀）。 |
+| 设置 › 性能新控件（车道 perf） | `src/workspace/settings/PerformanceSection.tsx` | combobox「省电 / 低配模式」（自动 / 开 / 关）；combobox「预览小文件最多占」（5/10/20/50/100 GB）；switch「只在我不用电脑时做后台工作」 | 已有名（「后台同时处理几条」「预览用小文件」「内存档位」「切回旧界面」）未动。 |
+
+### R16 新增 AX 名一览（冻结名一个未动）
+
+- **菜单容器 / 「···」按钮**：menu「素材操作」（媒体池右键 / 检查器头部共用）、menu「镜块操作」；
+  检查器头部 button「更多」（`aria-haspopup=menu`）；镜块 button「更多」。
+- **素材菜单项**（可见文案多选带「(n 条)」，AX 名去「…」）：收藏 · 拒绝 · 清除评级 · 加入镜头带 ·
+  导出所选 · 在 Finder 中显示 · 移除素材。
+- **镜块菜单项**：往前 · 往后 · 从镜头带移出 · 删除精选段 · 导出这一段。
+- **章头菜单项**：重命名 · 并入上一章 · 这章够了 / 还是要镜头 · 删除这一章…；button「章操作 ·
+  <章名>」；textbox「章节名」。
+- **集菜单**：form「重命名集」；textbox「新的集标题」（集菜单本身沿用 R15 冻结名「删除这一集」）。
+- **确认卡**：alertdialog「确认移除素材」；alertdialog「确认删除章」；button「确认移除，保留原视频」
+  「删除这一章」。
+- **设置补全**：「重新计算时刻分」「重新识别画面文字」「清除」（aria-label「清除导出文件夹」）
+  「恢复默认布局」「重置新手引导」「复制诊断信息」；「删除 <文件名>」「删除已导入的模型文件」。
+- **性能（车道 perf）**：combobox「省电 / 低配模式」；combobox「预览小文件最多占」；switch「只在我
+  不用电脑时做后台工作」。
+- **toast 正文**（无固定枚举，`role=status`）：「已删除精选段」「已从镜头带移出」「已把「x」并入
+  「y」」「已对 n 条…」「已撤销 · {标签}」「没有可撤销的操作」；按钮统一「撤销」。
+- **状态条**：button「全部暂停」/「继续后台任务」（同一按钮，按态换名）；status「后台已暂停」。
+- **标签**：button「删除标签 <文本>」；textbox「新标签」；button「确认添加标签」。
+
+全部常量集中在 `src/workspace/copy.ts` 末尾（`CLIP_MENU` / `SHOT_MENU` / `SETTINGS_ACTIONS` /
+`menuLabelWithCount` / `menuAriaLabel`）。
+
+**未改的冻结名**：本轮三条前端车道（wire/chapters/perf）新增控件均为新增，未修改 §6 冻结清单与
+R10–R14 各节记录的任何既有 AX 名，仅有一处车道内部改名（P1-6「继续」→「继续后台任务」，`a4488c7`，
+理由见上表状态条一行）。

@@ -1,6 +1,7 @@
 import type { JSX, MouseEvent } from "react";
 
 import { cancelGeneration, retryGeneration, type StoryGap } from "../api";
+import { ChapterMoreButton, ChapterTitle, type ChapterActions } from "./BandChapterHeadActions";
 import { GapSlotBody, SegmentCard, bandDurationLabel, gapPrimaryAction } from "./BandSegment";
 import { TrimHandles } from "./BandTrimHandles";
 import { refreshClipsFeed } from "./useClipsFeed";
@@ -60,6 +61,7 @@ export function BandChapterSection({
   collapsed = false,
   onToggleFold,
   trim,
+  actions,
 }: {
   chapter: BandChapter;
   /** 视口外的虚拟化折叠:只画带头 + 一行「n 个镜头」。 */
@@ -90,6 +92,8 @@ export function BandChapterSection({
   onToggleFold?: (chapter: BandChapter) => void;
   /** R13 §4:精选段镜块的拖边裁剪;不传 = 没有把手。 */
   trim?: BandTrimApi;
+  /** R16 §1:章名双击改名 + 章头「···」菜单;不传 = 只读带头。 */
+  actions?: ChapterActions;
 }): JSX.Element {
   // 往前 / 往后的边界:章首禁「往前」、章尾禁「往后」(空槽位不参与)。
   const clipKeys = chapter.segments.filter((segment) => segment.kind === "clip").map((segment) => segment.key);
@@ -128,9 +132,7 @@ export function BandChapterSection({
         <Badge tone="accent" className="band-chapter-ordinal">
           {String(chapter.ordinal).padStart(2, "0")}
         </Badge>
-        <strong className="band-chapter-title" title={chapter.title}>
-          {chapter.title}
-        </strong>
+        <ChapterTitle chapter={chapter} actions={actions} />
         {/* 0:00 的时长不占带头的位置(空章的带头只有一格宽,R10 U-29)。 */}
         {chapter.durationMs > 0 ? <span className="band-chapter-meta">{bandDurationLabel(chapter.durationMs)}</span> : null}
         <span className="band-chapter-meta">{bandCountLabel(chapter.clipCount, chapter.gapCount)}</span>
@@ -143,6 +145,7 @@ export function BandChapterSection({
             这章够了
           </Badge>
         ) : null}
+        {actions ? <ChapterMoreButton chapter={chapter} actions={actions} /> : null}
       </div>
       </div>
       {chapter.segments.length === 0 ? (
@@ -178,6 +181,7 @@ export function BandChapterSection({
               onStep={(direction) => onStep(segment, direction)}
               canStepBack={clipKeys.indexOf(segment.key) > 0}
               canStepForward={clipKeys.indexOf(segment.key) < clipKeys.length - 1}
+              readOnly={readOnly}
               extra={trim && segment.kind === "clip" && segment.segmentId !== null ? <TrimHandles segment={segment} trim={trim} disabled={readOnly} /> : null}
             >
               {segment.kind === "slot" && segment.gap ? (

@@ -117,3 +117,7 @@ export async function createTestApiMock(
   }
   return mock as TestApiMock;
 }
+
+// R17 车道 B:自动升级——壳一挂载 UpdateHost 就桥接进度事件(要回解除函数);检查更新默认「已是最新」。
+SHELL_DEFAULTS.bridgeUpdateProgressEvents = () => () => undefined;
+SHELL_DEFAULTS.checkForUpdate = () => ({ available: false, version: "0.0.0", notes: "", pub_date: "" });

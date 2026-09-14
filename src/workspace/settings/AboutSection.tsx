@@ -3,8 +3,12 @@ import { useCallback, useState, type JSX } from "react";
 import { HelpOverlay } from "../../HelpOverlay";
 import { HELP_FAQS, KEYBOARD_SHORTCUT_GROUPS, WORKFLOW_STEPS } from "../../helpContent";
 import { GENERATED_LICENSES } from "../../licenses.generated";
-import { resetGuides } from "../guides";
+import { SETTINGS_ACTIONS } from "../copy";
+import { copyDiagnostics } from "../diagnostics";
+import { failureText } from "../errorText";
+import { resetOnboarding } from "../onboardingReset";
 import { Button, SectionHeader, showToast } from "../ui";
+import { AboutUpdate } from "./AboutUpdate";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 
@@ -15,7 +19,7 @@ const KEYBOARD_SHORTCUT_COUNT = KEYBOARD_SHORTCUT_GROUPS.reduce(
 
 export function AboutSection(): JSX.Element {
   const form = useSettingsFormContext();
-  const { appInfo, updater, updatePending } = form;
+  const { appInfo } = form;
   const [helpOpen, setHelpOpen] = useState(false);
   const closeHelp = useCallback(() => setHelpOpen(false), []);
   const [licensesOpen, setLicensesOpen] = useState(false);
@@ -30,57 +34,41 @@ export function AboutSection(): JSX.Element {
         >
           <Button onClick={() => setHelpOpen(true)}>打开中文帮助</Button>
         </SettingsRow>
-        <SettingsRow
-          title="应用更新"
-          help={`当前版本 ${appInfo?.version ?? "—"} · 更新包已校验签名后才会安装`}
-          className="settings-sheet-row--stack"
-        >
-          <div className="settings-sheet-actions">
-            <Button
-              data-updater-action="check"
-              disabled={updater.phase === "checking" || updater.phase === "downloading"}
-              onClick={() => void form.runUpdateCheck()}
-            >
-              {updater.phase === "checking" ? "正在检查更新…" : "检查更新"}
-            </Button>
-            {(updater.phase === "available" || updater.phase === "downloading" || updater.phase === "error") && updatePending ? (
-              <Button
-                variant="primary"
-                data-updater-action="install"
-                disabled={updater.phase === "downloading"}
-                onClick={() => void form.runUpdateInstall()}
-              >
-                {updater.phase === "downloading" ? "正在下载并安装…" : "下载并安装"}
-              </Button>
-            ) : null}
-            {updater.phase === "ready" ? (
-              <Button variant="primary" data-updater-action="restart" onClick={() => void form.runRestart()}>
-                立即重启
-              </Button>
-            ) : null}
-          </div>
-          <p className="settings-sheet-updater" data-testid="updater-status" data-updater-status={updater.phase}>
-            {updater.message}
-          </p>
-        </SettingsRow>
+        {/* R17 车道 B:自动更新开关 + 检查更新(内联结果,与启动自动流程同一份 store)。 */}
+        <AboutUpdate version={appInfo?.version} settings={form.settings} save={form.save} />
       </div>
 
       <div className="settings-sheet-group">
-        {/* R13 §3(车道 B):七个功能气泡各只弹一次;想再看一遍从这里重置(guide.*.viewed 写回 false)。 */}
-        <SettingsRow title="新手引导" help="工作区里那些「知道了」的小气泡各只出现一次;重置后会再出现一遍。">
+        {/* R13 §3 → R16 P2-11:功能气泡、首页三步卡、四步提示、首启向导一起重置(名副其实)。 */}
+        <SettingsRow title="新手引导" help="工作区里那些「知道了」的小气泡、每一步的提示条和首页的上手卡各只出现一次;重置后都会再出现一遍。">
           <Button
             onClick={() => {
-              void resetGuides().then(() => showToast("新手引导已重置,回到工作区就会再出现", { tone: "success" }));
+              void resetOnboarding()
+                .then(() => showToast("新手引导已重置:气泡、四步提示和首启向导下次都会再出现", { tone: "success" }))
+                .catch((error) => showToast(failureText(SETTINGS_ACTIONS.resetOnboarding, error), { tone: "danger" }));
             }}
           >
-            重置新手引导
+            {SETTINGS_ACTIONS.resetOnboarding}
           </Button>
         </SettingsRow>
         {/* R11 简化专项 #2:「打开日志目录」从隐私与诊断搬到关于 —— 出了问题要日志时不用翻高级。 */}
-        <SettingsRow title="诊断日志" help="出问题时把这个目录发给我们;日志只保留 7 天,素材路径只记文件名。">
-          <Button disabled={form.busy} onClick={() => void form.openLogs()}>
-            打开日志目录
-          </Button>
+        <SettingsRow title="诊断日志" help="出问题时先「复制诊断信息」贴给我们(只有版本、工具链、内存档和最近 3 条错误,不含任何路径);要日志再打开目录,日志只保留 7 天。" className="settings-sheet-row--stack">
+          <div className="settings-sheet-actions">
+            {/* R16 P2-13:报 bug 时业主要的第一件事。 */}
+            <Button
+              disabled={form.busy}
+              onClick={() => {
+                void copyDiagnostics()
+                  .then(() => showToast("诊断信息已复制,直接粘贴发给我们", { tone: "success" }))
+                  .catch((error) => showToast(failureText(SETTINGS_ACTIONS.copyDiagnostics, error), { tone: "danger" }));
+              }}
+            >
+              {SETTINGS_ACTIONS.copyDiagnostics}
+            </Button>
+            <Button variant="ghost" disabled={form.busy} onClick={() => void form.openLogs()}>
+              打开日志目录
+            </Button>
+          </div>
         </SettingsRow>
       </div>
       <SectionHeader title="应用信息" description="本地优先的旅途素材筛选与交付工作台。" className="settings-sheet-section-gap" />

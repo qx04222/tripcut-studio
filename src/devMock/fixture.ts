@@ -763,6 +763,9 @@ const DEFAULT_SETTINGS: SettingsMap = {
   "performance.worker_count": "4",
   "performance.proxy_enabled": "true",
   "performance.memory_profile": "auto",
+  "performance.low_spec_mode": "auto",
+  "performance.proxy_cache_limit_gb": "10",
+  "performance.background_only_when_idle": "false",
   "tools.ffmpeg_path": "",
   "tools.ffprobe_path": "",
   "tools.whisper_path": "",
@@ -2116,3 +2119,198 @@ HANDLERS.export_jianying_kit = ({ destDir }) => {
   return { ...plan, job_id: 3 };
 };
 (MOCK_COMMANDS as string[]).push("plan_jianying_kit", "export_jianying_kit");
+// ---------------------------------------------------------------------------
+// R16 车道 B(章节与批量)。只追加不改上面的表。
+// `delete_chapter`:镜移到相邻章(先上一章,没有就下一章),只剩一章时拒绝;`merge_chapters` 在上面只计
+// undo 栈,这里补上真把镜挪过去(截图剧本要看得见章少了一章)。
+// ---------------------------------------------------------------------------
+function mockMoveChapter(sourceId: number, targetId: number): void {
+  for (const item of storyboard.items) if (item.chapter_id === sourceId) item.chapter_id = targetId;
+  const source = storyboard.chapters.find((chapter) => chapter.id === sourceId);
+  const target = storyboard.chapters.find((chapter) => chapter.id === targetId);
+  if (source && target) target.clip_count += source.clip_count;
+  storyboard.chapters = storyboard.chapters.filter((chapter) => chapter.id !== sourceId);
+  state.undoStack += 1;
+  bump(state);
+}
+HANDLERS.merge_chapters = ({ sourceChapterId, targetChapterId }) => {
+  mockMoveChapter(num(sourceChapterId, "sourceChapterId"), num(targetChapterId, "targetChapterId"));
+};
+HANDLERS.delete_chapter = ({ chapterId }) => {
+  const id = num(chapterId, "chapterId");
+  const index = storyboard.chapters.findIndex((chapter) => chapter.id === id);
+  if (index < 0) throw new Error(`章节 ${id} 不存在`);
+  const neighbour = storyboard.chapters[index - 1] ?? storyboard.chapters[index + 1];
+  if (!neighbour) throw new Error("只剩这一章了,不能删除;可以改名或「这章够了」");
+  mockMoveChapter(id, neighbour.id);
+  return neighbour.id;
+};
+(MOCK_COMMANDS as string[]).push("delete_chapter");
+// `rate_clips`:逐条套用上面 `rate_clip` 的规则(值 0 = 清掉那一维),一次 bump。
+HANDLERS.rate_clips = ({ entries }) => {
+  const list = entries as { clip_id: number; rating_type: string; value: number }[];
+  const written: ClipRating[] = [];
+  for (const entry of list) {
+    const clip = clipById(entry.clip_id);
+    if (entry.rating_type === "binary") clip.binary_rating = (entry.value === 0 ? null : entry.value) as ClipListItem["binary_rating"];
+    else clip.star_rating = (entry.value === 0 ? null : entry.value) as ClipListItem["star_rating"];
+    written.push({ clip_id: clip.id as number, segment_id: 0, rating_type: entry.rating_type as ClipRating["rating_type"], value: entry.value, rated_at: new Date().toISOString() });
+  }
+  bump(state);
+  return written;
+};
+(MOCK_COMMANDS as string[]).push("rate_clips");
+HANDLERS.rename_episode = ({ episodeId, title, theme }) => {
+  const episode = state.episodes.find((item) => item.id === num(episodeId, "episodeId"));
+  if (!episode) throw new Error(`集 ${String(episodeId)} 不存在`);
+  const nextTitle = str(title, "title").trim();
+  if (nextTitle === "") throw new Error("集标题必须为 1-120 字");
+  episode.title = nextTitle;
+  episode.theme = str(theme, "theme").trim();
+  return episode;
+};
+(MOCK_COMMANDS as string[]).push("rename_episode");
+// R16 车道 C:新 Rust 命令的假实现(只追加)。
+// ---------------------------------------------------------------------------
+// P1-7:「找到它…」——mock 里文件面板直接给一条同名假路径;relink 把那条从缺失清单里拿掉。
+HANDLERS.pick_relink_file = ({ fileName }) => `/Volumes/TRIP_2026_NEW/${str(fileName, "fileName")}`;
+HANDLERS.relink_clip = ({ clipId }) => {
+  const id = Number(clipId);
+  const index = MISSING_CLIPS.findIndex((clip) => clip.clip_id === id);
+  if (index < 0) throw new Error(`素材 ${id} 不在缺失清单里`);
+  const [found] = MISSING_CLIPS.splice(index, 1);
+  bump(state);
+  return { clip_id: id, file_name: found!.file_name, volume_uuid: "NEW-DISK" };
+};
+(MOCK_COMMANDS as string[]).push("pick_relink_file", "relink_clip");
+import type { RunningJob } from "../api";
+// P1-6:后台任务行 + 全部暂停。假后端里有两行正在跑的任务;取消把那行拿掉;暂停态存在 state.settings 里。
+const RUNNING_JOBS: RunningJob[] = [
+  { id: 901, kind: "analyze_l1", clip_id: 5, file_name: "DJI_20260812_091522_0005_D.MP4", started_at: "2026-09-14T09:12:00Z", cancel_requested: false },
+  { id: 902, kind: "transcribe", clip_id: 8, file_name: "C0048.MP4", started_at: "2026-09-14T09:12:30Z", cancel_requested: false },
+];
+HANDLERS.list_running_jobs = () => RUNNING_JOBS.map((job) => ({ ...job }));
+HANDLERS.cancel_job = ({ jobId }) => {
+  const index = RUNNING_JOBS.findIndex((job) => job.id === Number(jobId));
+  if (index >= 0) RUNNING_JOBS.splice(index, 1);
+};
+HANDLERS.set_jobs_paused = ({ paused }) => {
+  state.settings["ui.jobs.paused"] = paused ? "true" : "false";
+  return Boolean(paused);
+};
+HANDLERS.get_jobs_paused = () => state.settings["ui.jobs.paused"] === "true";
+(MOCK_COMMANDS as string[]).push("list_running_jobs", "set_jobs_paused", "get_jobs_paused");
+// P2-4:重新分析这条——mock 里把这条的分析状态改回 pending,报「复位 1、补排 2」。
+HANDLERS.retry_clip_analysis = ({ clipId }) => {
+  const id = Number(clipId);
+  const clip = state.clips.find((candidate) => candidate.id === id);
+  if (!clip) throw new Error(`素材 ${id} 不存在`);
+  clip.analysis_status = "pending";
+  clip.analysis_error = null;
+  clip.motion_status = "pending";
+  bump(state);
+  return { clip_id: id, reset: 1, enqueued: 2 };
+};
+(MOCK_COMMANDS as string[]).push("retry_clip_analysis");
+// P2-6:删 LUT / 删模型。mock 里 LUT 列表可增可删;删模型把 settings 状态里的 model_available 翻成 false。
+const MOCK_LUTS: string[] = [...(handleMockCommand("list_display_luts", {}) as string[])];
+HANDLERS.list_display_luts = () => [...MOCK_LUTS];
+HANDLERS.import_lut = ({ path }) => {
+  const source = str(path, "path");
+  const fileName = source.split("/").pop() ?? source;
+  MOCK_LUTS.push(`/Users/mock/Library/Application Support/TripCutStudio/luts/${fileName}`);
+  return [...MOCK_LUTS];
+};
+HANDLERS.delete_display_lut = ({ name }) => {
+  const target = str(name, "name");
+  if (target.includes("/")) throw new Error(`不是可删除的调色文件名:${target}`);
+  const index = MOCK_LUTS.findIndex((path) => path.endsWith(`/${target}`));
+  if (index >= 0) MOCK_LUTS.splice(index, 1);
+  return [...MOCK_LUTS];
+};
+let mockWhisperModelDeleted = false;
+HANDLERS.delete_whisper_model = ({ tier }) => {
+  str(tier, "tier");
+  mockWhisperModelDeleted = true;
+  return 1_620_000_000;
+};
+const originalSettingsStatus = HANDLERS.get_settings_status!;
+HANDLERS.get_settings_status = (args) => {
+  const status = originalSettingsStatus(args) as { whisper: { model_available: boolean } };
+  if (mockWhisperModelDeleted) status.whisper.model_available = false;
+  return status;
+};
+(MOCK_COMMANDS as string[]).push("delete_display_lut", "delete_whisper_model");
+// P2-7:在 Finder 中显示——mock 里什么都不打开;缺失清单里的素材照真后端一样拒绝。
+HANDLERS.reveal_clip = ({ clipId }) => {
+  const id = Number(clipId);
+  if (MISSING_CLIPS.some((clip) => clip.clip_id === id)) throw new Error("原片不在原来的位置(可能拔了卡或移了文件夹);去缺失素材页重新定位");
+};
+(MOCK_COMMANDS as string[]).push("reveal_clip");
+// P2-10:手动标签。mock 里按素材各存一份;AI 描述的三个标签算 ai_l3(不可删),用户加的可删。
+import type { ClipTag } from "../api";
+const MOCK_TAGS = new Map<number, ClipTag[]>();
+let mockTagSeq = 1000;
+function mockTagsFor(clipId: number): ClipTag[] {
+  let tags = MOCK_TAGS.get(clipId);
+  if (!tags) {
+    const described = handleMockCommand("get_ai_description", { clipId }) as { tags: string[] } | null;
+    tags = (described?.tags ?? []).map((label) => ({ id: ++mockTagSeq, label, source: "ai_l3", deletable: false }));
+    MOCK_TAGS.set(clipId, tags);
+  }
+  return tags;
+}
+HANDLERS.list_tags = ({ clipId }) => mockTagsFor(Number(clipId)).map((tag) => ({ ...tag }));
+HANDLERS.add_tag = ({ clipId, text }) => {
+  const label = str(text, "text").split(/\s+/).filter(Boolean).join(" ");
+  if (!label) throw new Error("标签不能是空的");
+  if ([...label].length > 32) throw new Error("标签太长了(最多 32 个字)");
+  const tags = mockTagsFor(Number(clipId));
+  const existing = tags.find((tag) => tag.label === label);
+  if (existing) return { ...existing };
+  const tag: ClipTag = { id: ++mockTagSeq, label, source: "user", deletable: true };
+  tags.push(tag);
+  return { ...tag };
+};
+HANDLERS.remove_tag = ({ clipId, tagId }) => {
+  const tags = mockTagsFor(Number(clipId));
+  const index = tags.findIndex((tag) => tag.id === Number(tagId));
+  if (index < 0) throw new Error("这条标签已经不在了");
+  if (!tags[index]!.deletable) throw new Error("AI 生成的标签不能删除;重新生成 AI 描述会整组替换它们");
+  tags.splice(index, 1);
+};
+(MOCK_COMMANDS as string[]).push("list_tags", "add_tag", "remove_tag");
+// ---------------------------------------------------------------------------
+// R17 车道 B:应用内自动升级。`?update=1` 让假后端说「有新版本」,下载走 1.5 秒的假进度
+// (每 150ms 一条 `tripcut:update-progress` window 事件);`?update=fail` 下载到一半就断网。
+// `?update=ask` 再把「有新版本时先问我再下载」勾上(先出「有新版本」那条 toast)。
+// 默认(不带参数)永远「已是最新」,免得每张截图都顶着一条更新 toast。
+// ---------------------------------------------------------------------------
+const mockUpdateMode = typeof location !== "undefined" ? new URLSearchParams(location.search).get("update") : null;
+if (mockUpdateMode === "ask") state.settings["updater.ask_before_download"] = "true";
+const MOCK_UPDATE_VERSION = "0.8.0";
+const MOCK_UPDATE_NOTES = [
+  "## 0.8.0",
+  "",
+  "- 启动后会自动发现新版本,一条提示、点一下就装好",
+  "- 素材可以跨集移动了",
+  "- 修了导出时偶尔卡在 99% 的问题",
+  "",
+  "详见 [更新说明](https://github.com/qx04222/tripcut-studio/releases)。",
+].join("\n");
+HANDLERS.check_for_update = () => {
+  if (mockUpdateMode === null) return { available: false, version: APP_INFO.version, notes: "", pub_date: "", current_version: "0.8.0", offline: false, skipped: false };
+  return { available: true, version: MOCK_UPDATE_VERSION, notes: MOCK_UPDATE_NOTES, pub_date: "2026-09-14T08:00:00Z", current_version: "0.8.0", offline: false, skipped: false };
+};
+HANDLERS.download_and_install = async () => {
+  const total = 48_000_000;
+  const steps = 10;
+  for (let step = 1; step <= steps; step += 1) {
+    await new Promise((resolveStep) => setTimeout(resolveStep, 150));
+    if (mockUpdateMode === "fail" && step === 4) throw new Error("error sending request for url (https://github.com/...): connection reset");
+    window.dispatchEvent(new CustomEvent("tripcut:update-progress", { detail: { downloaded: Math.round((total * step) / steps), total } }));
+  }
+};
+HANDLERS.restart_to_update = noop;
+HANDLERS.open_url = noop;
+(MOCK_COMMANDS as string[]).push("check_for_update", "download_and_install", "restart_to_update", "open_url");

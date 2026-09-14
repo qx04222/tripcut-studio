@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listMissingClips, pickRelinkFolder, relinkVolume, type MissingClip, type RelinkOutcome } from "../../api";
+import { listMissingClips, pickRelinkFile, pickRelinkFolder, relinkClip, relinkVolume, type MissingClip, type RelinkOutcome } from "../../api";
 import { groupByVolume, type VolumeGroup } from "./importModel";
 import { failureText } from "../errorText";
 
@@ -12,6 +12,10 @@ export interface MissingMedia {
   notice: string | null;
   relink(volumeUuid: string): Promise<void>;
   refresh(): void;
+  /** R16 P1-7:正在单条重连的素材 id。 */
+  busyClip: number | null;
+  /** R16 P1-7:「找到它…」——文件面板选同名文件 → `relink_clip`;取消不调。 */
+  relinkOne(clipId: number, fileName: string): Promise<void>;
 }
 
 /** 抽自 `MissingMediaPanel`:拉缺失清单、按卷分组、选新位置重绑(取消不调 relink)。 */
@@ -42,6 +46,25 @@ export function useMissingMedia(): MissingMedia {
     }
   }, [refresh]);
 
+  const [busyClip, setBusyClip] = useState<number | null>(null);
+  const relinkOne = useCallback(async (clipId: number, fileName: string) => {
+    setBusyClip(clipId);
+    setNotice(null);
+    try {
+      const path = await pickRelinkFile(fileName);
+      if (!path) return;
+      const outcome = await relinkClip(clipId, path);
+      setNotice(`已找到 ${outcome.file_name},分析结果与评分都还在。`);
+      // 成功那条立刻从本地清单拿掉,再对齐一次后端。
+      setClips((current) => current.filter((clip) => clip.clip_id !== clipId));
+      refresh();
+    } catch (error) {
+      setNotice(failureText("找到它", error, "请选同名、同一段视频的那个文件"));
+    } finally {
+      setBusyClip(null);
+    }
+  }, [refresh]);
+
   const groups = useMemo(() => groupByVolume(clips), [clips]);
-  return { clips, groups, busy, results, notice, relink, refresh };
+  return { clips, groups, busy, results, notice, relink, refresh, busyClip, relinkOne };
 }

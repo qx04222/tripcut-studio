@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.7.2"
+version = "0.8.1"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -41,6 +41,8 @@ objc2-foundation = { version = "=0.3.2", features = [
     "objc2-core-foundation",
     "NSNotification",
     "NSOperation",
+    # R16 车道 E:`NSProcessInfo.thermalState` 散热三档退避(core/thermal.rs);同一 crate 加一个 feature,不引新依赖。
+    "NSProcessInfo",
     "NSString",
     "block2",
 ] }

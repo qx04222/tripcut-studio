@@ -109,6 +109,41 @@ describe("useClipsFeed —— 全应用唯一的 clips 修订轮询", () => {
     }
   });
 
+  /** R16 车道 E(§3 ④):IPC 每轮返回新数组但内容没变 → feed 引用不换、订阅者不重渲染。 */
+  it("R16:轮询结果与上一轮一字不差时,feed 引用不变、订阅者不重渲染", async () => {
+    let renders = 0;
+    const Pane = () => {
+      useClipsFeed();
+      renders += 1;
+      return null;
+    };
+    render(<Pane />);
+    await waitFor(() => expect(getClipsFeedSnapshot().loading).toBe(false));
+    const before = getClipsFeedSnapshot();
+    const rendersBefore = renders;
+    // 元数据每路都换成新数组(内容相同),修订号不变。
+    apiMocks.listShotStacks.mockResolvedValue([]);
+    apiMocks.listStoryGaps.mockResolvedValue([]);
+    apiMocks.listClipDimensions.mockResolvedValue([]);
+    apiMocks.listAssetSafety.mockResolvedValue([]);
+    apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
+    await refreshClipsFeed();
+    await refreshClipsFeed();
+    expect(apiMocks.listShotStacks).toHaveBeenCalledTimes(3);
+    expect(getClipsFeedSnapshot()).toBe(before);
+    expect(renders).toBe(rendersBefore);
+    // 真变了(镜头带多了一组)就换引用、重渲染一次,且没变的那几路仍沿用旧引用。
+    apiMocks.listShotStacks.mockResolvedValue([{ id: 1, members: [{ clip_id: 7 }] }]);
+    await refreshClipsFeed();
+    const after = getClipsFeedSnapshot();
+    expect(after).not.toBe(before);
+    expect(after.gaps).toBe(before.gaps);
+    expect(after.dimensions).toBe(before.dimensions);
+    expect(after.episode).toBe(before.episode);
+    expect(after.clips).toBe(before.clips);
+    await waitFor(() => expect(renders).toBe(rendersBefore + 1));
+  });
+
   it("revision 变了就整表重拉", async () => {
     apiMocks.getClipsRevision.mockResolvedValueOnce("rev-1").mockResolvedValueOnce("rev-2");
     await refreshClipsFeed();

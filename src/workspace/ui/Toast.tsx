@@ -14,6 +14,7 @@ const TONE_ICON: Record<ToastItem["tone"], IconName> = {
 
 /**
  * R12 §3:顶部居中的单条 toast(`role=status`)。文字 + 至多一个动作 + 关闭。
+ * R17:更新提示例外——`actions` 追加次要动作、`sticky` 不自动走(见 toastStore)。
  * 底边一根按停留时长流走的细线,让「它会自己走」这件事看得见;`prefers-reduced-motion`
  * 下不做动画。宿主只在工作区壳里挂一次(`ToastHost`),别在栏里各挂一份。
  */
@@ -31,7 +32,7 @@ export function ToastHost(): JSX.Element | null {
   }, [toast]);
 
   if (toast === null) return null;
-  const { id, text, tone, action, durationMs } = toast;
+  const { id, text, tone, action, actions, sticky, durationMs } = toast;
   return (
     <div className="ui-toast-host">
       <div
@@ -57,8 +58,23 @@ export function ToastHost(): JSX.Element | null {
             {action.label}
           </Button>
         ) : null}
+        {/* R17:次要动作(更新提示的「稍后 / 跳过这个版本」)。 */}
+        {actions.map((secondary) => (
+          <Button
+            key={secondary.label}
+            variant="ghost"
+            size="sm"
+            className="ui-toast-action ui-toast-action--secondary"
+            onClick={() => {
+              dismissToast(id);
+              secondary.onClick();
+            }}
+          >
+            {secondary.label}
+          </Button>
+        ))}
         <Button variant="icon" size="sm" icon="x" className="ui-toast-close" aria-label="关闭提示" onClick={() => dismissToast(id)} />
-        <span className="ui-toast-timer" aria-hidden="true" />
+        {sticky ? null : <span className="ui-toast-timer" aria-hidden="true" />}
       </div>
     </div>
   );

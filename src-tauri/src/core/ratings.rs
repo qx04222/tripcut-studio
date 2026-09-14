@@ -203,7 +203,42 @@ pub fn rate_clip(
 ) -> Result<ClipRating> {
     validate_rating(rating_type, value)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    super::episode::ensure_clip_writable(&transaction, clip_id)?;
+    let rating = insert_rating(&transaction, clip_id, rating_type, value)?;
+    transaction.commit()?;
+    Ok(rating)
+}
+
+/// 一条评级请求(R16 P1-5 批量评级的单元;与 `rate_clip` 的三个参数同义)。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ClipRatingEntry {
+    pub clip_id: i64,
+    pub rating_type: String,
+    pub value: i64,
+}
+
+/// R16 P1-5:一次事务写入多条评级(多选 F/X/1–5/0、菜单「收藏 / 拒绝 / 清除评级(n 条)」、撤销回写旧值)。
+/// 任何一条无效(类型 / 值 / 只读集 / 素材不存在)整批回滚,一条也不写。
+/// 「清除」= 同一 clip 两条 `(binary, 0)` + `(star, 0)`,与 `clear_clip_rating` 同一种标记。
+pub fn rate_clips(connection: &mut Connection, entries: &[ClipRatingEntry]) -> Result<Vec<ClipRating>> {
+    for entry in entries {
+        validate_rating(&entry.rating_type, entry.value)?;
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut written = Vec::with_capacity(entries.len());
+    for entry in entries {
+        written.push(insert_rating(&transaction, entry.clip_id, &entry.rating_type, entry.value)?);
+    }
+    transaction.commit()?;
+    Ok(written)
+}
+
+fn insert_rating(
+    transaction: &rusqlite::Transaction<'_>,
+    clip_id: i64,
+    rating_type: &str,
+    value: i64,
+) -> Result<ClipRating> {
+    super::episode::ensure_clip_writable(transaction, clip_id)?;
     let duration_ticks = transaction
         .query_row(
             "SELECT duration_ticks FROM clips WHERE id = ?1",
@@ -214,7 +249,7 @@ pub fn rate_clip(
         .flatten()
         .ok_or_else(|| CoreError::Rating(format!("素材 {clip_id} 不存在或时长尚未就绪")))?;
 
-    let segment_id = representative_segment(&transaction, clip_id, duration_ticks)?;
+    let segment_id = representative_segment(transaction, clip_id, duration_ticks)?;
     transaction.execute(
         "INSERT INTO ratings(segment_id, rating_type, value, rated_at)
          VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
@@ -226,7 +261,6 @@ pub fn rate_clip(
         [rating_id],
         |row| row.get::<_, String>(0),
     )?;
-    transaction.commit()?;
 
     Ok(ClipRating {
         clip_id,
@@ -429,6 +463,44 @@ mod tests {
         let clips = import::list_clips(&connection).unwrap();
 
         assert_eq!(clips[0].star_rating, Some(0));
+    }
+
+    /// R16 P1-5:批量评级一次事务;有一条坏的整批不写。
+    #[test]
+    fn rate_clips_writes_all_entries_in_one_transaction_or_none() {
+        let (_directory, mut connection, clip_id) = connection_with_clip();
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path, duration_ticks, tb_num, tb_den, imported_at)
+                 VALUES ('rating-volume', 'second.mov', 9000, 1, 1000, '2026-08-31T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let second = connection.last_insert_rowid();
+        let entry = |clip_id: i64, rating_type: &str, value: i64| ClipRatingEntry {
+            clip_id,
+            rating_type: rating_type.to_owned(),
+            value,
+        };
+
+        let written = rate_clips(
+            &mut connection,
+            &[entry(clip_id, BINARY_RATING, 1), entry(second, BINARY_RATING, 1), entry(second, STAR_RATING, 4)],
+        )
+        .unwrap();
+        assert_eq!(written.len(), 3);
+        let clips = import::list_clips(&connection).unwrap();
+        assert_eq!(clips.iter().map(|clip| clip.binary_rating).collect::<Vec<_>>(), vec![Some(1), Some(1)]);
+
+        // 第二条无效(星级 9)→ 第一条也不写。
+        let error = rate_clips(&mut connection, &[entry(clip_id, BINARY_RATING, -1), entry(second, STAR_RATING, 9)]).unwrap_err();
+        assert!(error.to_string().contains("无效评级"));
+        // 第二条素材不存在 → 事务回滚,第一条的 -1 不落地。
+        let error = rate_clips(&mut connection, &[entry(clip_id, BINARY_RATING, -1), entry(999_999, BINARY_RATING, -1)]).unwrap_err();
+        assert!(error.to_string().contains("999999"));
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM ratings", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(import::list_clips(&connection).unwrap()[0].binary_rating, Some(1));
     }
 
     #[test]

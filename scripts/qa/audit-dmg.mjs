@@ -52,6 +52,44 @@ function relativeTo(root, path) {
   return path.slice(root.length + 1);
 }
 
+function parseVersion(text) {
+  const parts = String(text ?? "").trim().split(".").map((part) => Number.parseInt(part, 10));
+  return parts.length > 0 && parts.every((part) => Number.isFinite(part)) ? parts : undefined;
+}
+
+function compareVersions(left, right) {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+// Minimum macOS a Mach-O will load on (dyld refuses anything newer than the
+// running OS: "built for macOS 27.0 which is newer than running OS").
+// Reads LC_BUILD_VERSION (platform 1 = macOS) or the legacy
+// LC_VERSION_MIN_MACOSX; returns undefined when neither is present.
+function machoMinimumMacOS(path) {
+  const lines = run("otool", ["-l", path]).stdout.split("\n").map((line) => line.trim());
+  const found = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] === "cmd LC_BUILD_VERSION") {
+      const block = lines.slice(index + 1, index + 8);
+      const platform = block.find((line) => line.startsWith("platform "))?.split(/\s+/)[1];
+      const minos = block.find((line) => line.startsWith("minos "))?.split(/\s+/)[1];
+      const sdk = block.find((line) => line.startsWith("sdk "))?.split(/\s+/)[1];
+      if (platform === "1" || platform === "macos") found.push({ command: "LC_BUILD_VERSION", minos, sdk });
+    } else if (lines[index] === "cmd LC_VERSION_MIN_MACOSX") {
+      const block = lines.slice(index + 1, index + 6);
+      const minos = block.find((line) => line.startsWith("version "))?.split(/\s+/)[1];
+      const sdk = block.find((line) => line.startsWith("sdk "))?.split(/\s+/)[1];
+      found.push({ command: "LC_VERSION_MIN_MACOSX", minos, sdk });
+    }
+  }
+  return found[0];
+}
+
 function auditBundledH264(appPath, workDirectory) {
   const ffmpeg = join(appPath, "Contents/MacOS/ffmpeg");
   const ffprobe = join(appPath, "Contents/MacOS/ffprobe");
@@ -128,6 +166,7 @@ function auditApp(appPath, workDirectory) {
       fileType: fileType.stdout,
       uuids: run("dwarfdump", ["--uuid", path]).stdout.split("\n").filter(Boolean),
       dependencies,
+      minimumMacOS: machoMinimumMacOS(path) ?? null,
     });
   }
   macho.sort((left, right) => left.path.localeCompare(right.path));
@@ -193,6 +232,18 @@ function auditApp(appPath, workDirectory) {
           failures.push(`missing license evidence: ${entry.path} -> ${evidence}`);
         }
       }
+      // Statically linked third parties (e.g. the libass chain inside libmpv)
+      // have no Mach-O of their own but the same evidence obligations.
+      for (const embedded of entry.embeddedComponents ?? []) {
+        if (!embedded.component || !embedded.licenseConcluded || embedded.licenseConcluded === "NOASSERTION") {
+          failures.push(`unknown embedded component/license: ${entry.path}`);
+        }
+        for (const evidence of embedded.licenseEvidence ?? []) {
+          if (!existsSync(join(appPath, "Contents/Resources/legal", evidence))) {
+            failures.push(`missing license evidence: ${entry.path} [${embedded.component}] -> ${evidence}`);
+          }
+        }
+      }
       return failures;
     }),
   ];
@@ -216,7 +267,28 @@ function auditApp(appPath, workDirectory) {
     .filter((line) => runtimeStringPattern.test(line))
     .map((line) => `${entry.path}: ${line}`));
   const encoderSmoke = auditBundledH264(appPath, workDirectory);
+  const infoPlist = run("plutil", ["-extract", "LSMinimumSystemVersion", "raw", "-o", "-", join(appPath, "Contents/Info.plist")]);
+  const declaredMinimumMacOS = infoPlist.exitCode === 0 ? infoPlist.stdout.trim() : undefined;
+  let configuredMinimumMacOS;
+  try {
+    configuredMinimumMacOS = JSON.parse(readFileSync(join(repoRoot, "src-tauri/tauri.conf.json"), "utf8"))
+      ?.bundle?.macOS?.minimumSystemVersion;
+  } catch {
+    configuredMinimumMacOS = undefined;
+  }
+  const declaredVersion = parseVersion(declaredMinimumMacOS);
+  const minimumMacOSViolations = macho.flatMap((entry) => {
+    const minos = parseVersion(entry.minimumMacOS?.minos);
+    if (!declaredVersion) return [`${entry.path}: no LSMinimumSystemVersion to compare against`];
+    if (!minos) return [`${entry.path}: no LC_BUILD_VERSION/LC_VERSION_MIN_MACOSX`];
+    return compareVersions(minos, declaredVersion) > 0
+      ? [`${entry.path}: minos ${entry.minimumMacOS.minos} > declared ${declaredMinimumMacOS} (sdk ${entry.minimumMacOS.sdk})`]
+      : [];
+  });
   return {
+    declaredMinimumMacOS,
+    configuredMinimumMacOS,
+    minimumMacOSViolations,
     appPath,
     aggregateMachOSha256: aggregate,
     macho,
@@ -310,6 +382,19 @@ const checks = [
     id: "app.no-external-backend-discovery",
     pass: (appAudit?.runtimeStringHits.length ?? 1) === 0,
     detail: appAudit?.runtimeStringHits.join("\n") || "no external ggml backend discovery strings",
+  },
+  {
+    id: "app.min-os-version",
+    pass: Boolean(appAudit?.declaredMinimumMacOS)
+      && appAudit?.declaredMinimumMacOS === appAudit?.configuredMinimumMacOS
+      && appAudit?.minimumMacOSViolations.length === 0,
+    detail: !appAudit?.declaredMinimumMacOS
+      ? "Info.plist has no LSMinimumSystemVersion"
+      : appAudit.declaredMinimumMacOS !== appAudit.configuredMinimumMacOS
+        ? `Info.plist LSMinimumSystemVersion ${appAudit.declaredMinimumMacOS} != tauri.conf.json minimumSystemVersion ${appAudit.configuredMinimumMacOS}`
+        : appAudit.minimumMacOSViolations.length > 0
+          ? `${appAudit.minimumMacOSViolations.length}/${appAudit.macho.length} Mach-O newer than declared ${appAudit.declaredMinimumMacOS}:\n${appAudit.minimumMacOSViolations.join("\n")}`
+          : `all ${appAudit.macho.length} Mach-O files load on macOS ${appAudit.declaredMinimumMacOS}`,
   },
   {
     id: "app.bundled-h264-videotoolbox",

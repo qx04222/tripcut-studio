@@ -65,7 +65,7 @@ async function settle(): Promise<void> {
 }
 
 describe("HomeScreen · R15 集卡片「···」→「删除这一集」", () => {
-  it("每张集卡右上角有「集操作 · <标题>」,菜单里只有「删除这一集」,确认块说原片不会被删", async () => {
+  it("每张集卡右上角有「集操作 · <标题>」,菜单里有「重命名」「删除这一集」,确认块说原片不会被删", async () => {
     render(<HomeScreen />);
     await settle();
     const list = screen.getByRole("list", { name: "最近的集" });
@@ -73,7 +73,8 @@ describe("HomeScreen · R15 集卡片「···」→「删除这一集」", () =
       within(list).getByRole("button", { name: "集操作 · 建错的 EP2" }).click();
     });
     const menu = screen.getByRole("menu", { name: "集操作 · 建错的 EP2" });
-    expect(within(menu).getAllByRole("menuitem")).toHaveLength(1);
+    // R16 P2-3:菜单多了第一项「重命名」;「删除这一集」仍在。
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["重命名", "删除这一集"]);
     await act(async () => {
       within(menu).getByRole("menuitem", { name: "删除这一集" }).click();
     });

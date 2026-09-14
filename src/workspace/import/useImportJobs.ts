@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelImportBatch,
+  cancelJob,
   dismissImportNotices,
   getClipsRevision,
   getCurrentEpisode,
   getImportProgress,
   listClips,
   listImportBatches,
+  listRunningJobs,
   previewImportRemoval,
   removeImportedMaterial,
   type ClipListItem,
@@ -14,6 +16,7 @@ import {
   type ImportProgress,
   type RemovalPreview,
   type RemovalRequest,
+  type RunningJob,
 } from "../../api";
 import { analysisProgress, type AnalysisProgress } from "./importModel";
 import { failureText } from "../errorText";
@@ -45,6 +48,10 @@ export interface ImportJobs {
   cancelConfirmation(): void;
   cancelBatch(id: number): Promise<void>;
   dismissNotices(): Promise<void>;
+  /** R16 P1-6:正在跑的任务行(随批次一起轮询;旧后端没有这条命令时为空)。 */
+  runningJobs: readonly RunningJob[];
+  /** R16 P1-6:取消一行(确认由界面做一次);取消后立即从本地列表拿掉。 */
+  cancelRunningJob(id: number): Promise<void>;
 }
 
 /**
@@ -58,6 +65,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
   const [clips, setClips] = useState<ClipListItem[]>([]);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [batches, setBatches] = useState<ImportBatch[]>([]);
+  const [runningJobs, setRunningJobs] = useState<RunningJob[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ImportJobs["confirmation"]>(null);
@@ -80,24 +88,30 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
       shouldFetchClips = true;
     }
 
+    // R16 P1-6:正在跑的任务行跟着同一拍轮询;旧后端 / 替身没有这条命令就当作空列表。
+    const fetchRunning = () => Promise.resolve().then(() => listRunningJobs()).then((rows) => rows ?? []).catch(() => [] as RunningJob[]);
+
     if (!shouldFetchClips) {
-      const [nextProgress, nextBatches] = await Promise.all([getImportProgress(), listImportBatches()]);
+      const [nextProgress, nextBatches, nextRunning] = await Promise.all([getImportProgress(), listImportBatches(), fetchRunning()]);
       if (!isActive() || request !== refreshRequest.current) return;
       setProgress(nextProgress);
       setBatches(nextBatches);
+      setRunningJobs(nextRunning);
       return;
     }
 
-    const [nextProgress, nextClips, currentEpisode, nextBatches] = await Promise.all([
+    const [nextProgress, nextClips, currentEpisode, nextBatches, nextRunning] = await Promise.all([
       getImportProgress(),
       listClips(),
       getCurrentEpisode(),
       listImportBatches(),
+      fetchRunning(),
     ]);
     if (!isActive() || request !== refreshRequest.current) return;
     setProgress(nextProgress);
     setClips(nextClips.filter((clip) => clip.episode_id === currentEpisode.id));
     setBatches(nextBatches);
+    setRunningJobs(nextRunning);
     lastClipsRevision.current = nextRevision;
   }, []);
 
@@ -197,6 +211,14 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
     });
   }, [changed, run]);
 
+  const cancelRunningJob = useCallback(async (id: number) => {
+    await run(async () => {
+      await cancelJob(id);
+      setRunningJobs((current) => current.filter((job) => job.id !== id));
+      setNotice("已取消这项任务;已经完成的部分保留,需要时可以重新分析这条素材。");
+    });
+  }, [run]);
+
   const readyClips = useMemo(() => clips.filter((clip) => clip.status === "ready"), [clips]);
   const quality = useMemo(() => analysisProgress(readyClips, "analysis"), [readyClips]);
   const motion = useMemo(() => analysisProgress(readyClips, "motion"), [readyClips]);
@@ -204,5 +226,6 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
   return {
     progress, clips, readyClips, quality, motion, refreshError, batches, busy, notice, confirmation,
     refresh: () => refresh(), arm, confirmRemoval, cancelConfirmation, cancelBatch, dismissNotices,
+    runningJobs, cancelRunningJob,
   };
 }

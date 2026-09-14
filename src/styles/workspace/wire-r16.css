@@ -1,0 +1,71 @@
+/*
+ * R16 车道 A(接现成命令):实体菜单入口、移除确认卡宿主、设置页新行。
+ * 只能在 workspace.css 头部 @import;选择器都带自己面板的根类。颜色只用既有 token。
+ */
+
+/* 检查器头部「···」:与上一条 / 下一条并排,同一尺寸。 */
+.inspector-head .inspector-head-more {
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+/* 移除素材确认卡(居中 sheet 里复用导入页的 alertdialog 皮)。 */
+.clip-removal-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+.clip-removal-body .import-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 3px solid var(--danger);
+}
+.clip-removal-body .import-confirm-title {
+  color: var(--text-primary);
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--lh-15);
+}
+.clip-removal-body .import-confirm p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+.clip-removal-body .import-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}
+
+/* 镜块「···」:与往前 / 往后同一排、贴右;悬停 / 选中 / 聚焦时露出(同 .band-segment-steps 的规则)。 */
+.workspace-shell .shot-band .band-segment-more.ui-button {
+  position: absolute;
+  top: 66px;
+  right: 4px;
+  width: 22px;
+  height: 20px;
+  min-width: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--media-overlay);
+  color: var(--media-ink);
+  font-weight: 600;
+  letter-spacing: 1px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.workspace-shell .shot-band .band-segment:hover .band-segment-more,
+.workspace-shell .shot-band .band-segment.ui-card--selected .band-segment-more,
+.workspace-shell .shot-band .band-segment-more:focus-visible,
+.workspace-shell .shot-band .band-segment-more[aria-expanded="true"] {
+  opacity: 1;
+}
+
+/* 缺失页卷组:「这个盘不会再回来了…」紧跟「重新定位」右侧,ghost 危险色。 */
+.import-drawer .import-missing-head .import-missing-gone {
+  margin-left: var(--space-1);
+}

@@ -29,6 +29,14 @@
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
 @import "./workspace/chrome.css";
+/* R17 车道 B(应用内自动升级:更新 toast 次要动作 / 状态条下载进度 / 设置 › 关于 更新区块),同样只能在头部 @import。 */
+@import "./workspace/update-r17.css";
+/* R16 车道 B(章节与批量:章头改名 / 章操作菜单 / 删章确认 / 集改名),同样只能在头部 @import。 */
+@import "./workspace/chapters-r16.css";
+/* R16 车道 A(实体菜单 / 移除确认卡 / 设置新行),同样只能在头部 @import。 */
+@import "./workspace/wire-r16.css";
+/* R16 车道 C(新 Rust 命令 + 各自 UI:找到它 / 后台任务取消暂停 / 标签 / 删文件),同样只能在头部 @import。 */
+@import "./workspace/rust-r16.css";
 /* R15(删除 / 重置):「···」菜单、删除集确认块、设置两项危险操作,同样只能在头部 @import。 */
 @import "./workspace/reset-r15.css";
 /* R14 车道 stress(压力测试修复:缺失素材 / 只读集 / 状态条),同样只能在头部 @import。 */

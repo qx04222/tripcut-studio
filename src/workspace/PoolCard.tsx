@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import { memo, type JSX } from "react";
 
 import { AnalysisBadges, analysisBadgeKinds } from "../AnalysisPanel";
 import type { ClipListItem } from "../api";
@@ -56,7 +56,16 @@ function RatingMark({ clip }: { clip: ClipListItem }): JSX.Element {
   return <small className="pool-card-rating unrated">{label}</small>;
 }
 
-export function PoolCard({
+/**
+ * R16 车道 E(§3 ④):`React.memo` —— 空闲态的重渲染主要靠 `useClipsFeed` 不换引用挡在上游;
+ * memo 挡的是父组件(MediaPool)因选中 / 滚动窗口等原因重渲染时,props 没变的卡片。
+ * 注意 `onSelect` / `onToggleStack` 目前在 MediaPool 里是内联闭包(每次渲染新函数),
+ * 那类重渲染 memo 挡不住 —— 要等 MediaPool 把回调稳定下来(不在本车道文件所有权内)。
+ * 不能自定义比较器忽略回调:`onToggleStack` 捕获了 `expandedStackId`,忽略它会用旧状态切换。
+ */
+export const PoolCard = memo(PoolCardInner);
+
+function PoolCardInner({
   clip,
   columnIndex,
   semanticScore,

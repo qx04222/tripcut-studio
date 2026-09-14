@@ -9,7 +9,6 @@ import type {
   SettingsMap,
   SettingsStatus,
 } from "../../api";
-import type { UpdaterView } from "../../updaterClient";
 
 export interface SettingsForm {
   settings: SettingsMap;
@@ -33,8 +32,6 @@ export interface SettingsForm {
   deviceClocks: DeviceClockSetting[];
   clockDrafts: Record<string, string>;
   setClockDraft(model: string, value: string): void;
-  updater: UpdaterView;
-  updatePending: boolean;
   cacheConfirm: boolean;
   workspaceV2: boolean;
   /** 只改本地草稿(路径框 / 预算框逐字输入),不落盘。 */
@@ -57,9 +54,6 @@ export interface SettingsForm {
   openLogs(): Promise<void>;
   clearCache(): Promise<void>;
   rollbackTool(componentId: string): Promise<void>;
-  runUpdateCheck(): Promise<void>;
-  runUpdateInstall(): Promise<void>;
-  runRestart(): Promise<void>;
   toggleWorkspaceFlag(): Promise<void>;
   refreshStatus(): Promise<void>;
   refreshLlm(): Promise<void>;

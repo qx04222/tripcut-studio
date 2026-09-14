@@ -13,8 +13,20 @@
 # libavcodec.pc 等文件。本脚本靠 PKG_CONFIG_PATH 把它排在 Homebrew 前面,
 # 让 mpv 的 meson 依赖探测优先找到 LGPL ffmpeg,而不是 Homebrew 的 GPL ffmpeg。
 #
+# 字幕渲染链(libass/freetype/fribidi/harfbuzz/libunibreak)不再从 Homebrew 拿:
+# bottle 的 minos 跟本机大版本走(26.0),发布包在 macOS 14–26 上 dyld 直接拒绝加载,
+# 而且会把 glib/pcre2/libintl/graphite2/libpng 一并拖进包里。改为 build-mpv-deps.sh
+# 以 MACOSX_DEPLOYMENT_TARGET=14.0 源码构建的静态库,-Dprefer_static=true 链进 libmpv。
+# jpeg(截图编码)、uchardet(外挂字幕编码探测)、lcms2(ICC 配置文件)TripCut 都不用,关掉。
+#
 # 产物:$OUT/lib/libmpv.*.dylib + $OUT/include/mpv/*.h,由 package-dmg.sh 内嵌进 .app。
 set -euo pipefail
+
+# 最低系统版本(R16 车道 D),与 tauri.conf.json 的 minimumSystemVersion 一致。
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+export CFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+export OBJCFLAGS="$CFLAGS"
+export LDFLAGS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 
 MPV_TAG="${MPV_TAG:-v0.41.0}"
 MPV_COMMIT="${MPV_COMMIT:-41f6a645068483470267271e1d09966ca3b9f413}"
@@ -22,6 +34,7 @@ WORK="${WORK:-/tmp/mpv-lgpl}"
 OUT="$WORK/out"
 FFMPEG_OUT="${FFMPEG_OUT:-/tmp/ffmpeg-lgpl/out}"
 LIBPLACEBO_OUT="${LIBPLACEBO_OUT:-/tmp/libplacebo-tripcut/out-v7.360.1-opengl}"
+MPV_DEPS_OUT="${MPV_DEPS_OUT:-$HOME/Library/Caches/tripcut-build/native/mpv-deps/out}"
 
 export PATH="/opt/homebrew/bin:$PATH"
 
@@ -37,7 +50,10 @@ fi
 if otool -L "$LIBPLACEBO_OUT/lib/libplacebo.360.dylib" | grep -qE 'libvulkan|libshaderc'; then
   echo "ERROR: libplacebo 仍含未使用的 Vulkan/shaderc 依赖"; exit 1
 fi
-if ! grep -q "^License: LGPL" "/tmp/ffmpeg-lgpl/configure.log" 2>/dev/null; then
+[ -f "$MPV_DEPS_OUT/lib/libass.a" ] && [ -f "$MPV_DEPS_OUT/lib/pkgconfig/libass.pc" ] || {
+  echo "ERROR: 找不到静态 libass 链($MPV_DEPS_OUT);先跑 scripts/build-mpv-deps.sh"; exit 1
+}
+if ! grep -q "^License: LGPL" "$(dirname "$FFMPEG_OUT")/configure.log" 2>/dev/null; then
   echo "WARN: 没找到 ffmpeg configure.log 里的 License: LGPL 记录,继续但请自行确认"
 fi
 
@@ -109,11 +125,14 @@ echo "==> meson setup(LGPL:-Dgpl=false,只要 libmpv,不要 cplayer 命令行程
 # PKG_CONFIG_PATH 顺序很关键:LGPL ffmpeg 的 pkgconfig 目录放最前面,
 # 这样 libavcodec/libavformat/... 这些包名会先命中我们自编的 LGPL 版本,
 # 而不是 /opt/homebrew/lib/pkgconfig 里被 symlink 进去的 Homebrew GPL ffmpeg。
-# libass/libplacebo 等非 ffmpeg 依赖仍然从 Homebrew 拿(它们本身不是 GPL)。
-export PKG_CONFIG_PATH="$FFMPEG_OUT/lib/pkgconfig:$LIBPLACEBO_OUT/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig"
+# libass 链来自 build-mpv-deps.sh 的静态库;用 PKG_CONFIG_LIBDIR 彻底把 Homebrew 的
+# .pc 目录排除在外——任何没在这三个目录里的依赖都只能是"没找到",不会悄悄链上 bottle。
+export PKG_CONFIG_LIBDIR="$FFMPEG_OUT/lib/pkgconfig:$LIBPLACEBO_OUT/lib/pkgconfig:$MPV_DEPS_OUT/lib/pkgconfig"
+unset PKG_CONFIG_PATH
 
 rm -rf build
 meson setup build \
+  -Dprefer_static=true \
   -Dgpl=false \
   -Dcplayer=false \
   -Dlibmpv=true \
@@ -124,6 +143,9 @@ meson setup build \
   -Dvulkan=disabled \
   -Dshaderc=disabled \
   -Dzimg=disabled \
+  -Djpeg=disabled \
+  -Duchardet=disabled \
+  -Dlcms2=disabled \
   -Dcdda=disabled \
   -Ddvdnav=disabled \
   -Ddvbin=disabled \
@@ -152,7 +174,7 @@ fi
 if ! grep -qE "^\s*rubberband\s+: (false|disabled)" "$WORK/meson-setup.log"; then
   echo "ERROR: rubberband 选项没有生效为 false"; exit 1
 fi
-for DISABLED_OPTION in vulkan shaderc zimg videotoolbox-pl; do
+for DISABLED_OPTION in vulkan shaderc zimg videotoolbox-pl jpeg uchardet lcms2; do
   if ! grep -qE "^[[:space:]]*${DISABLED_OPTION}[[:space:]]*:[[:space:]]+disabled" "$WORK/meson-setup.log"; then
     echo "ERROR: $DISABLED_OPTION 没有被明确禁用"; exit 1
   fi
@@ -177,6 +199,15 @@ if ! otool -L "$LIBMPV" | grep -q "$FFMPEG_OUT/lib"; then
   echo "ERROR: 没有链接到期望的 LGPL ffmpeg ($FFMPEG_OUT/lib)"; exit 1
 fi
 echo "    OK: $(otool -L "$LIBMPV" | grep -c "$FFMPEG_OUT/lib") 个 ffmpeg 库来自 $FFMPEG_OUT"
+if otool -L "$LIBMPV" | grep -qE '/opt/homebrew|/usr/local'; then
+  echo "ERROR: libmpv 仍链接 Homebrew/usr-local 动态库(字幕链应已静态链入)"; otool -L "$LIBMPV"; exit 1
+fi
+for SYM in ass_library_init ass_renderer_init; do
+  nm -gU "$LIBMPV" | grep "_${SYM}\$" >/dev/null || { echo "ERROR: libass 没有静态链进 libmpv(缺 $SYM)"; exit 1; }
+done
+MINOS="$(otool -l "$LIBMPV" | grep -A3 LC_BUILD_VERSION | awk '/minos/ {print $2; exit}')"
+[ "$MINOS" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "ERROR: libmpv minos=$MINOS,期望 $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+echo "    OK: libass 链已静态链入,minos $MINOS"
 
 echo "==> 自检 2/3:递归展开整棵依赖树,查有没有 x264/x265/dvdnav 等 GPL 库"
 SEEN_FILE=$(mktemp)

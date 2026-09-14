@@ -90,4 +90,10 @@ describe("R10 U-08:三段式流水线", () => {
     expect(decodeQueueHint(progress({}), busy)).toBeNull();
     expect(decodeQueueHint(progress({ waiting_for_permit: 38 }), busy)).not.toContain("等待解码许可");
   });
+  it("decodeQueueHint:R16 §3⑤ 热 / 空闲各一句人话;user 交给状态条不重复", () => {
+    const busy = pipelineSegments(progress({}), 21, quality, motion);
+    expect(decodeQueueHint(progress({ paused_reason: "thermal" }), busy)).toContain("电脑有点热");
+    expect(decodeQueueHint(progress({ waiting_for_permit: 3, paused_reason: "idle_wait" }), busy)).toContain("不用电脑时");
+    expect(decodeQueueHint(progress({ paused_reason: "user" }), busy)).toBeNull();
+  });
 });

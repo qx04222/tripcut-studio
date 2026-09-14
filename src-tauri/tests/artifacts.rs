@@ -135,6 +135,35 @@ fn insert_clip(connection: &Connection, path: &Path, height: i64) -> (i64, Strin
     (connection.last_insert_rowid(), source_hash)
 }
 
+/// R16 §3③:预览小文件策略按 `clips.codec` 判——要走真转码路径的测试把编码改成 hevc。
+fn mark_codec(connection: &Connection, clip_id: i64, codec: &str) {
+    connection
+        .execute("UPDATE clips SET codec = ?2 WHERE id = ?1", params![clip_id, codec])
+        .unwrap();
+}
+
+/// R16 §3③:≤1080p H.264 8-bit 源片的 proxy 任务以 direct 完成——不起 ffmpeg、不落文件、
+/// 不登记 cache_artifacts,播放器直接播原片。
+#[test]
+fn plain_h264_720p_source_skips_proxy_and_completes_direct() {
+    let Some(ffmpeg) = ffmpeg_or_skip() else { return };
+    let directory = TestDirectory::new("proxy-direct");
+    let source = directory.path.join("source.mp4");
+    generate_video(&ffmpeg, &source, 720, true).unwrap();
+    let mut connection = db::open_project(&directory.db_path()).unwrap();
+    let (clip_id, source_hash) = insert_clip(&connection, &source, 720);
+    let job = enqueue_and_claim(&mut connection, "proxy", clip_id, &source, &source_hash);
+
+    artifacts::run_proxy(&mut connection, &job, &directory.cache_root()).unwrap();
+
+    assert!(!directory.cache_root().join(format!("{clip_id}/proxy.mp4")).exists());
+    let records: i64 = connection
+        .query_row("SELECT COUNT(*) FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy'", [clip_id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(records, 0);
+    assert_eq!(jobs::get(&connection, job.id).unwrap().result_path.as_deref(), Some("direct"));
+}
+
 fn enqueue_and_claim(
     connection: &mut Connection,
     kind: &str,
@@ -252,6 +281,9 @@ fn proxy_generates_540p_file_and_database_record_for_larger_source() {
     generate_video(&ffmpeg, &source, 720, true).unwrap();
     let mut connection = db::open_project(&directory.db_path()).unwrap();
     let (clip_id, source_hash) = insert_clip(&connection, &source, 720);
+    // R16 §3③:≤1080p 的 H.264 源片不再生成预览小文件(直接播原片);这条测的是「要做代理的源」
+    // 走完整条链,所以把登记的编码改成 hevc(策略只看 clips 表的元数据,文件本身照旧能转)。
+    mark_codec(&connection, clip_id, "hevc");
     let job = enqueue_and_claim(&mut connection, "proxy", clip_id, &source, &source_hash);
 
     artifacts::run_proxy(&mut connection, &job, &directory.cache_root()).unwrap();
@@ -345,6 +377,8 @@ fn corrupt_source_fails_each_artifact_independently_and_keeps_clip_metadata() {
     fs::write(&source, b"not a playable media file").unwrap();
     let mut connection = db::open_project(&directory.db_path()).unwrap();
     let (clip_id, source_hash) = insert_clip(&connection, &source, 720);
+    // R16 §3③:720p H.264 的 proxy 会以 direct 完成、不碰文件;这里要它真的去转码才能失败。
+    mark_codec(&connection, clip_id, "hevc");
 
     for kind in ["thumbnail", "waveform", "proxy"] {
         let job = enqueue_and_claim(&mut connection, kind, clip_id, &source, &source_hash);

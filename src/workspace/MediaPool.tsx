@@ -13,7 +13,7 @@ import { searchClips, searchTranscripts } from "../api";
 import { PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
 import { useMediaPoolHotkeys } from "./MediaPoolHotkeys";
 import { PoolStackStrip } from "./MediaPoolStackStrip";
-import { PoolExportContextMenu } from "./deliver/QuickExportEntry";
+import { PoolClipContextMenu } from "./ClipMenu";
 import { PaneHead } from "./PaneHead";
 import { PoolCard } from "./PoolCard";
 import { setPoolOrder } from "./poolOrder";
@@ -202,6 +202,7 @@ export function MediaPool(): JSX.Element {
     anchorId,
     anchorStack,
     clipsById: feed.clipsById,
+    multiSelection,
     expandedStackId,
     setExpandedStackId,
     selectClip,
@@ -399,8 +400,8 @@ export function MediaPool(): JSX.Element {
           onClose={() => setExpandedStackId(null)}
         />
       ) : null}
-      {/* R11 车道 E:多选右键「导出所选…」(自己去同级 grid 上挂 contextmenu,这里只追加一行)。 */}
-      <PoolExportContextMenu multiSelection={multiSelection} />
+      {/* R16 §1:素材卡右键菜单(收藏 / 拒绝 / 清除评级 / 加入镜头带 / 导出所选 / 移除素材;自己去同级 grid 上挂 contextmenu)。 */}
+      <PoolClipContextMenu multiSelection={multiSelection} />
     </div>
   );
 }

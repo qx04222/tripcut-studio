@@ -13,6 +13,8 @@ done
 [ "$(uname -s)" = "Darwin" ] || { echo "ERROR: whisper release binary must be built on macOS"; exit 1; }
 [ "$(uname -m)" = "arm64" ] || { echo "ERROR: current release baseline is arm64"; exit 1; }
 
+# 最低系统版本(R16 车道 D),与 tauri.conf.json 的 minimumSystemVersion 一致。
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 VERSION="1.9.2"
 SOURCE_URL="https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v${VERSION}.tar.gz"
 SOURCE_SHA256="a6abd064fcca8b85e794d205abf328c522e9451db43a3eadc178b883b7d0e9cd"
@@ -41,6 +43,7 @@ patch -d "$SOURCE_ROOT" -p1 --forward --batch < "$SOURCE_PATCH"
 cmake -S "$SOURCE_ROOT" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
   -DCMAKE_INSTALL_PREFIX="$OUTPUT_ROOT" \
   -DBUILD_SHARED_LIBS=OFF \
   -DWHISPER_USE_SYSTEM_GGML=OFF \
@@ -65,9 +68,11 @@ fi
 if rg -a -q '/opt/homebrew/Cellar/ggml|GGML_BACKEND_PATH' "$BINARY"; then
   echo "ERROR: whisper-cli can discover an external ggml backend"; exit 1
 fi
+MINOS="$(otool -l "$BINARY" | grep -A3 LC_BUILD_VERSION | awk '/minos/ {print $2; exit}')"
+[ "$MINOS" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "ERROR: whisper-cli minos=$MINOS, expected $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
 
 python3 - "$OUTPUT_ROOT/build-manifest.json" "$VERSION" "$SOURCE_URL" "$SOURCE_SHA256" "$SOURCE_PATCH" "$BINARY" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, json, os, pathlib, sys
 output, version, source_url, source_sha256, source_patch, binary = sys.argv[1:]
 binary_sha256 = hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest()
 patch_sha256 = hashlib.sha256(pathlib.Path(source_patch).read_bytes()).hexdigest()
@@ -81,6 +86,7 @@ payload = {
     "sourcePatchSha256": patch_sha256,
     "binarySha256": binary_sha256,
     "architecture": "arm64",
+    "minimumMacOS": os.environ["MACOSX_DEPLOYMENT_TARGET"],
     "sharedLibraries": False,
     "dynamicBackendLoading": False,
 }

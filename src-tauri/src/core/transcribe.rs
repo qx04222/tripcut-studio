@@ -159,11 +159,7 @@ pub fn enqueue_for_clip(
     };
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| CoreError::Transcription(format!("无法创建转写任务：{error}")))?;
-    let model_tier = super::settings::string_value(
-        connection,
-        super::settings::WHISPER_MODEL_TIER_KEY,
-        DEFAULT_MODEL_TIER,
-    )?;
+    let model_tier = super::settings::whisper_model_tier(connection)?;
     let payload_hash = blake3::hash(
         format!("transcribe\0{clip_id}\0{source_hash}\0{model_tier}").as_bytes(),
     )
@@ -240,11 +236,7 @@ pub fn run_transcribe(
             )
         }
     };
-    let model_tier = super::settings::string_value(
-        connection,
-        super::settings::WHISPER_MODEL_TIER_KEY,
-        DEFAULT_MODEL_TIER,
-    )?;
+    let model_tier = super::settings::whisper_model_tier(connection)?;
     let model = match resolve_model_for_tier(&model_tier) {
         Some(path) => path,
         None => return block_job(connection, job, &missing_model_message(&model_tier)),

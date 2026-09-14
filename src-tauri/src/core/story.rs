@@ -736,6 +736,59 @@ pub fn merge_chapters(
     Ok(())
 }
 
+/// R16 车道 B(P2-1)「删除这一章…」:把这一章的镜移到相邻章(先上一章,没有就下一章),再把它
+/// 标成 tombstone。相邻章的时间范围吸收被删章(与合并同一套规则),只剩一章时拒绝。
+/// 本质上是「并入相邻章」,快照沿用 `action = "merge"`(story_history 的 CHECK 只认 reorder / rename / merge,
+/// §4 本轮无迁移),`undo_story_change` 可整份恢复。返回镜移去的那一章 id。
+pub fn delete_chapter(connection: &mut Connection, chapter_id: i64) -> Result<i64> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let episode_id = active_episode_id(&transaction)?;
+    let (start_at, end_at) = active_chapter_bounds(&transaction, chapter_id, episode_id)?;
+    let neighbour = transaction
+        .query_row(
+            "SELECT id FROM chapters
+             WHERE episode_id = ?1 AND tombstone = 0 AND id != ?2 AND start_at <= ?3
+             ORDER BY start_at DESC, id DESC LIMIT 1",
+            params![episode_id, chapter_id, start_at],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let neighbour = match neighbour {
+        Some(id) => Some(id),
+        None => transaction
+            .query_row(
+                "SELECT id FROM chapters
+                 WHERE episode_id = ?1 AND tombstone = 0 AND id != ?2
+                 ORDER BY start_at ASC, id ASC LIMIT 1",
+                params![episode_id, chapter_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?,
+    };
+    let target_id = neighbour
+        .ok_or_else(|| CoreError::Story("只剩这一章了,不能删除;可以改名或「这章够了」".to_owned()))?;
+    let target = active_chapter_bounds(&transaction, target_id, episode_id)?;
+    record_snapshot(&transaction, episode_id, "merge")?;
+    transaction.execute(
+        "UPDATE clips SET chapter_id = ?2
+         WHERE chapter_id = ?1 AND (episode_id = ?3 OR episode_id IS NULL)",
+        params![chapter_id, target_id, episode_id],
+    )?;
+    transaction.execute(
+        "UPDATE chapters
+         SET start_at = ?2, end_at = ?3, manual = 1
+         WHERE id = ?1 AND episode_id = ?4",
+        params![target_id, target.0.min(start_at), target.1.max(end_at), episode_id],
+    )?;
+    transaction.execute(
+        "UPDATE chapters SET manual = 1, tombstone = 1
+         WHERE id = ?1 AND episode_id = ?2",
+        params![chapter_id, episode_id],
+    )?;
+    transaction.commit()?;
+    Ok(target_id)
+}
+
 pub fn undo_latest(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let episode_id = active_episode_id(&transaction)?;
@@ -1533,6 +1586,51 @@ mod tests {
         let restored = get_storyboard(&connection).unwrap();
         assert_eq!(restored.chapters.len(), 2);
         assert_eq!(restored.chapters[0].title, "清晨出发");
+    }
+
+    /// R16 P2-1:删中间一章 → 镜移到上一章、上一章吸收时间范围;删第一章 → 镜移到下一章;
+    /// 只剩一章时拒绝;整份可由 undo_latest 恢复。
+    #[test]
+    fn delete_chapter_moves_clips_to_the_neighbour_and_is_undoable() {
+        let (_directory, mut connection) = setup();
+        let a = insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, false);
+        let b = insert_clip(&connection, "b.mov", "2026-08-31T11:00:00Z", None, false);
+        let c = insert_clip(&connection, "c.mov", "2026-08-31T12:00:00Z", None, false);
+        chapterize(&mut connection).unwrap();
+        let chapters = get_storyboard(&connection).unwrap().chapters;
+        assert_eq!(chapters.len(), 3);
+        let chapter_of = |connection: &Connection, clip: i64| -> i64 {
+            connection
+                .query_row("SELECT chapter_id FROM clips WHERE id = ?1", [clip], |row| row.get(0))
+                .unwrap()
+        };
+
+        // 中间章 → 上一章。
+        let target = delete_chapter(&mut connection, chapters[1].id).unwrap();
+        assert_eq!(target, chapters[0].id);
+        assert_eq!(chapter_of(&connection, b), chapters[0].id);
+        let after = get_storyboard(&connection).unwrap().chapters;
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].clip_count, 2);
+        assert!(after[0].end_at >= chapters[1].end_at);
+
+        // 第一章 → 下一章(没有上一章)。
+        let target = delete_chapter(&mut connection, chapters[0].id).unwrap();
+        assert_eq!(target, chapters[2].id);
+        assert_eq!(chapter_of(&connection, a), chapters[2].id);
+        assert_eq!(chapter_of(&connection, c), chapters[2].id);
+        assert_eq!(get_storyboard(&connection).unwrap().chapters.len(), 1);
+
+        // 只剩一章:拒绝。
+        let error = delete_chapter(&mut connection, chapters[2].id).unwrap_err();
+        assert!(error.to_string().contains("只剩这一章"));
+
+        // 撤销两次回到三章。
+        undo_latest(&mut connection).unwrap();
+        undo_latest(&mut connection).unwrap();
+        let restored = get_storyboard(&connection).unwrap().chapters;
+        assert_eq!(restored.len(), 3);
+        assert_eq!(chapter_of(&connection, b), chapters[1].id);
     }
 
     #[test]

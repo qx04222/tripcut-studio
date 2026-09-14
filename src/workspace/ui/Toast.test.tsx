@@ -81,3 +81,42 @@ describe("Toast", () => {
     expect(getToastSnapshot()?.text).toBe("甲");
   });
 });
+
+/** R17 车道 B:更新提示要三个动作且不自己走——`actions` 追加次要动作,`sticky` 关掉计时器。 */
+describe("Toast R17 sticky + actions", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    __resetToastsForTests();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("sticky 的 toast 过了 5 秒还在;主动作之外的 actions 也能点,点完关掉", () => {
+    const later = vi.fn();
+    const skip = vi.fn();
+    render(<ToastHost />);
+    act(() => {
+      showToast("有新版本 0.8.0", {
+        sticky: true,
+        action: { label: "现在更新", onClick: vi.fn() },
+        actions: [
+          { label: "稍后", onClick: later },
+          { label: "跳过这个版本", onClick: skip },
+        ],
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(TOAST_MAX_MS + 1_000);
+    });
+    const toast = screen.getByRole("status");
+    expect(toast.textContent).toContain("有新版本 0.8.0");
+    expect(toast.querySelector(".ui-toast-timer")).toBeNull();
+    expect(screen.getByRole("button", { name: "现在更新" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "跳过这个版本" }));
+    expect(skip).toHaveBeenCalledTimes(1);
+    expect(later).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});

@@ -7,6 +7,9 @@
 
 #![allow(deprecated)]
 
+/// R16 车道 E:libmpv 初始化选项表(标准 / 低配两套),`run_worker` 只按表设置。
+pub mod mpv_options;
+
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -971,26 +974,21 @@ fn run_worker(
     surface.gl_context.makeCurrentContext();
     let _current_context = CurrentContextGuard(&surface.gl_context);
 
+    // R16 车道 E:选项从 `mpv_options` 的表来(标准 / 低配两套);required 的失败即初始化失败,
+    // optional 的失败只告警(osc 这类 cplayer 属性在 -Dcplayer=false 的分发版 libmpv 里不存在)。
+    let options = mpv_options::init_options();
     let mut mpv = Mpv::with_initializer(|initializer| {
-        initializer.set_property("vo", "libmpv")?;
-        initializer.set_property("hwdec", "videotoolbox")?;
-        initializer.set_property("keep-open", "yes")?;
-        // osc 是 mpv 自带播放器(cplayer)的屏幕控制器开关,内嵌 render API 模式下
-        // 本来就没有它。分发版链接的 LGPL libmpv 用 -Dcplayer=false 编译,
-        // 这个属性不存在,设置会返回 PropertyNotFound 并让整个初始化失败。
-        let _ = initializer.set_property("osc", false);
-        initializer.set_property("pause", true)?;
-        // 解复用缓存上限:避免长时间播放/拖动时 demuxer 缓存无界增长占满内存。
-        // 分发版 libmpv 是 -Dcplayer=false,这三项属于 demuxer 核心而非 cplayer,
-        // 理论上总是存在;仍以 if let Err 兜底,缺失时告警而不阻断初始化。
-        if let Err(error) = initializer.set_property("demuxer-max-bytes", "150MiB") {
-            tracing::warn!(%error, "设置 demuxer-max-bytes 失败");
-        }
-        if let Err(error) = initializer.set_property("demuxer-max-back-bytes", "50MiB") {
-            tracing::warn!(%error, "设置 demuxer-max-back-bytes 失败");
-        }
-        if let Err(error) = initializer.set_property("cache-secs", 10i64) {
-            tracing::warn!(%error, "设置 cache-secs 失败");
+        for option in &options {
+            let result = match option.value {
+                mpv_options::MpvValue::Str(value) => initializer.set_property(option.name, value),
+                mpv_options::MpvValue::Bool(value) => initializer.set_property(option.name, value),
+                mpv_options::MpvValue::Int(value) => initializer.set_property(option.name, value),
+            };
+            match result {
+                Ok(()) => {}
+                Err(error) if option.required => return Err(error),
+                Err(error) => tracing::warn!(%error, option = option.name, "设置 mpv 选项失败"),
+            }
         }
         Ok(())
     })

@@ -77,8 +77,9 @@ export const KEYMAP_ACTIONS: readonly KeymapActionMeta[] = [
   A("promote-hero", "定为首选", "建议与候选", ["pool"]),
   A("lock-stack", "锁定候选", "建议与候选", ["pool"]),
   A("reject-stack", "排除候选", "建议与候选", ["pool"]),
-  A("undo", "撤销", "编辑", ["global"], { inTextField: true, pending: "拖排与忽略缺口的撤销在提示条上;全局撤销以后再来" }),
-  A("redo", "重做", "编辑", ["global"], { inTextField: true, pending: "同上" }),
+  // R16 P2-2:⌘Z 接全局撤销栈(拖排 / 移出 / 叙事修改 / 批量评级);输入框里让给系统的文字撤销。
+  A("undo", "撤销", "编辑", ["global"]),
+  A("redo", "重做", "编辑", ["global"], { inTextField: true, pending: "还没有重做;撤错了再做一次就行" }),
   A("export", "导出", "编辑", ["global"], { inTextField: true }),
   A("import", "导入素材", "编辑", ["global"]),
   A("switch-episode", "切换集", "工作区", ["global"], { inTextField: true }),

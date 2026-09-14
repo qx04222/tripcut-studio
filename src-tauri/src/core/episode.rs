@@ -110,6 +110,12 @@ pub fn list_episodes(connection: &Connection) -> Result<Vec<EpisodeSummary>> {
 }
 
 pub fn rename_current(connection: &mut Connection, title: &str, theme: &str) -> Result<EpisodeSummary> {
+    let current_id = current_episode(connection)?.id;
+    rename_episode(connection, current_id, title, theme)
+}
+
+/// R16 P2-3:任意一集改名(封存后才发现名字打错)。校验与 `rename_current` 相同;不存在的集报错。
+pub fn rename_episode(connection: &mut Connection, episode_id: i64, title: &str, theme: &str) -> Result<EpisodeSummary> {
     let title = title.trim();
     let theme = theme.trim();
     if title.is_empty() || title.chars().count() > 120 {
@@ -119,12 +125,14 @@ pub fn rename_current(connection: &mut Connection, title: &str, theme: &str) -> 
         return Err(CoreError::Story("集主题最多 240 字".to_owned()));
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current = current_episode(&transaction)?;
-    transaction.execute(
+    let changed = transaction.execute(
         "UPDATE episodes SET title = ?1, theme = ?2 WHERE id = ?3",
-        params![title, theme, current.id],
+        params![title, theme, episode_id],
     )?;
-    let summary = summary_by_id(&transaction, current.id)?;
+    if changed == 0 {
+        return Err(CoreError::Story(format!("集 {episode_id} 不存在")));
+    }
+    let summary = summary_by_id(&transaction, episode_id)?;
     transaction.commit()?;
     Ok(summary)
 }
@@ -519,6 +527,22 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM episodes WHERE status='active'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// R16 P2-3:已封存的集也能改名;当前集不受影响;不存在的集报错。
+    #[test]
+    fn rename_episode_renames_archived_episodes_by_id() {
+        let (_dir, mut connection) = test_connection();
+        insert_clip(&connection, "a.mp4");
+        let outcome = archive_current(&mut connection, None).unwrap();
+        let renamed = rename_episode(&mut connection, outcome.archived.id, "  京都三日  ", "秋").unwrap();
+        assert_eq!(renamed.id, outcome.archived.id);
+        assert_eq!(renamed.title, "京都三日");
+        assert_eq!(renamed.theme, "秋");
+        assert_eq!(renamed.status, "archived");
+        assert_eq!(current_episode(&connection).unwrap().title, outcome.next.title);
+        assert!(rename_episode(&mut connection, 999_999, "x", "").unwrap_err().to_string().contains("999999"));
+        assert!(rename_episode(&mut connection, outcome.archived.id, "   ", "").is_err());
     }
 
     #[test]

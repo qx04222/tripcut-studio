@@ -4,6 +4,7 @@ import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
+import { MissingVolumeRemove } from "./MissingVolumeRemove";
 import { useMissingMedia } from "./useMissingMedia";
 
 /** 缺失素材分页(规格 §4.1):按卷分组的卡 + 「重新定位」;结果行文案逐字沿用 MissingMediaPanel。 */
@@ -42,10 +43,27 @@ export function ImportMissingTab(): JSX.Element {
                     >
                       {relinking ? "正在重连…" : "重新定位"}
                     </Button>
+                    {/* R16 P2-9:盘真丢了 → 走移除素材的后果预览。 */}
+                    <MissingVolumeRemove group={group} disabled={relinking} onRemoved={missing.refresh} />
                   </div>
                   <ul className="import-missing-files">
                     {group.clips.map((clip) => (
-                      <li key={clip.clip_id}>{clip.file_name}</li>
+                      <li key={clip.clip_id} className="import-missing-file">
+                        <span className="import-missing-file-name">{clip.file_name}</span>
+                        {/* R16 P1-7:只搬走了一个文件夹时,卷级重连找不到 —— 每条自己指路。 */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon="search"
+                          className="import-missing-find"
+                          aria-label={`找到 ${clip.file_name}`}
+                          busy={missing.busyClip === clip.clip_id}
+                          disabled={relinking || (missing.busyClip !== null && missing.busyClip !== clip.clip_id)}
+                          onClick={() => void missing.relinkOne(clip.clip_id, clip.file_name)}
+                        >
+                          找到它…
+                        </Button>
+                      </li>
                     ))}
                   </ul>
                   {outcome ? (
@@ -62,7 +80,7 @@ export function ImportMissingTab(): JSX.Element {
         )}
       </section>
       {notice ? (
-        <p className="import-note import-note--error" role="status">
+        <p className={notice.startsWith("已找到") ? "import-note" : "import-note import-note--error"} role="status">
           {notice}
         </p>
       ) : null}

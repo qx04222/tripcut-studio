@@ -49,6 +49,9 @@ const apiMocks = vi.hoisted(() => ({
   rateClip: vi.fn().mockResolvedValue({}),
   clearClipRating: vi.fn().mockResolvedValue(undefined),
   getAiDescription: vi.fn().mockResolvedValue(null),
+  listTags: vi.fn().mockResolvedValue([]),
+  addTag: vi.fn(),
+  removeTag: vi.fn().mockResolvedValue(undefined),
   describeClipWithAi: vi.fn().mockResolvedValue(null),
   setClipTimeStage: vi.fn().mockResolvedValue(undefined),
   getSettings: vi.fn().mockResolvedValue({}),
@@ -339,7 +342,8 @@ describe("检查器 · 默认层", () => {
     await renderReady();
     expect(defaultSectionTitles()).toEqual(["评级与收藏", "标签", "所属章节 / 槽位", "精选段"]);
     expect(screen.queryByText("同一镜头的多条")).toBeNull();
-    expect(screen.getByRole("button", { name: "添加标签" })).toHaveProperty("disabled", true);
+    // R16 P2-10:「添加标签」从禁用占位变成真能用(断言迁移:原来钉 disabled=true)。
+    expect(screen.getByRole("button", { name: "添加标签" })).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: "加入当前章节" })).toBeTruthy();
     expect(screen.getByText(/还没有精选段/)).toBeTruthy();
   });
@@ -495,15 +499,22 @@ describe("检查器 · 默认层", () => {
     await waitFor(() => expect(findSummary("相似镜头").textContent).toContain("无"));
   });
 
-  it("「标签」段(有标签时)渲染禁用的「添加」chip,tooltip 说明暂不支持手动标签(api.ts 无打标签写接口)", async () => {
+  // R16 P2-10(断言迁移):标签卡改从 `list_tags` 取(AI + 用户),「添加标签」真能用——
+  // 原断言钉的是 disabled + tooltip「暂不支持手动标签」,现在钉「可用、点了出输入框」。
+  it("「标签」段(有标签时)列出 list_tags 的标签,「添加标签」可用并打开输入框", async () => {
+    apiMocks.listTags.mockResolvedValue([
+      { id: 1, label: "机场", source: "ai_l3", deletable: false },
+      { id: 2, label: "出发", source: "ai_l3", deletable: false },
+    ]);
     selectClipInStack();
     render(<Inspector />);
     await screen.findByText("标签");
     // 「AI 描述」折叠段里也列同一批标签(常驻在树里),只看标签卡这一份。
-    expect(document.querySelector(".inspector-tag-list")!.textContent).toContain("机场");
+    await waitFor(() => expect(document.querySelector(".inspector-tag-list")!.textContent).toContain("机场"));
     const addButton = screen.getByRole("button", { name: "添加标签" }) as HTMLButtonElement;
-    expect(addButton.disabled).toBe(true);
-    expect(addButton.title).toBe("暂不支持手动标签");
+    expect(addButton.disabled).toBe(false);
+    fireEvent.click(addButton);
+    expect(screen.getByRole("textbox", { name: "新标签" })).toBeTruthy();
   });
 
   it("开合状态逐段记忆并写 ui.inspector.sections_open", async () => {

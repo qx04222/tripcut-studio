@@ -4,6 +4,10 @@ import { KEYMAP_ACTION_BY_ID, lookupAction, type KeymapIndex } from "./keymap";
 import { getKeymap } from "./keymapStore";
 import { isHomeOpen } from "./homeStore";
 import { isAnyModalOpen } from "./modalStack";
+import { NOTHING_TO_UNDO_TOAST, undoneToast } from "./copy";
+import { failureText } from "./errorText";
+import { showToast } from "./ui/toastStore";
+import { runUndo } from "./undoStack";
 import {
   dispatchWorkspace,
   getWorkspaceSnapshot,
@@ -25,6 +29,7 @@ export type GlobalHotkeyIntent =
   | { kind: "help" }
   | { kind: "export" }
   | { kind: "switch-episode" }
+  | { kind: "undo" }
   | { kind: "cycle-pane"; direction: 1 | -1 }
   | { kind: "escape"; target: "drawer" | "sheet" | "immersive" | "query" | null };
 
@@ -104,8 +109,10 @@ export function globalHotkeyIntent(
       return { kind: "export" };
     case "switch-episode":
       return { kind: "switch-episode" };
+    case "undo":
+      // R16 P2-2:⌘Z 接全局撤销栈(undoStack.ts);redo 仍只登记键。
+      return { kind: "undo" };
     default:
-      // undo / redo 只登记键(还没有全局撤销栈),按了什么都不做、也不吞事件。
       return null;
   }
 }
@@ -195,6 +202,14 @@ export function useGlobalHotkeys(): void {
         case "switch-episode":
           event.preventDefault();
           window.dispatchEvent(new CustomEvent("tripcut:open-episode-switcher"));
+          return;
+        case "undo":
+          // 模态开着(输入框改名等)让给那一层;工作区里 ⌘Z 弹栈顶一条,空栈说一句。
+          if (isAnyModalOpen()) return;
+          event.preventDefault();
+          void runUndo()
+            .then((entry) => showToast(entry ? undoneToast(entry.label) : NOTHING_TO_UNDO_TOAST, { tone: entry ? "success" : "neutral" }))
+            .catch((error) => showToast(failureText("撤销", error), { tone: "danger" }));
           return;
         case "command-palette":
           // ⌘K 由 CommandPalette 自己听(它要 toggle 自己的本地 open 状态)。

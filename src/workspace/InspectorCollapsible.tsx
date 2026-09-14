@@ -6,6 +6,7 @@ import { SimilarGroupsPanel } from "../SimilarGroupsPanel";
 import { TechCheckPanel } from "../TechCheckPanel";
 import { INSPECTOR_SECTIONS, isQuietSection, sectionStatusText, type InspectorSectionId, type InspectorStatusContext } from "./Inspector";
 import { AiDescriptionSection } from "./inspectorFields";
+import { InspectorRetryAnalysis } from "./InspectorRetryAnalysis";
 import { CollapsibleSection, DimensionsGrid } from "./InspectorSections";
 import { openSettings } from "./openSettings";
 import { Icon, type IconName } from "./ui";
@@ -45,6 +46,8 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
         <CollapsibleSection key="techcheck" id="techcheck" icon={sectionIcon("techcheck")} title="技术检查" status={sectionStatusText("techcheck", ctx)}>
           <>
             <AnalysisBadges clip={clip} compact />
+            {/* R16 P2-4:分析卡在「失败」时这里能重跑。 */}
+            <InspectorRetryAnalysis clip={clip} />
             <div className="inspector-techcheck-scope">
               <TechCheckPanel clip={clip} readOnly={false} hideTitle />
             </div>

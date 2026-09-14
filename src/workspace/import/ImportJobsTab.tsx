@@ -1,10 +1,12 @@
-import { useEffect, useRef, type JSX } from "react";
+import type { JSX } from "react";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
 import { batchStatusLabel, decodeQueueHint, lastPathSegment, ownedElsewhereLines, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
+import { RemovalConfirm } from "./RemovalConfirm";
+import { ImportRunningJobs } from "./ImportRunningJobs";
 import { useImportJobs } from "./useImportJobs";
 import { dispatchWorkspace } from "../WorkspaceStore";
 import { IMPORT_PROGRESS_LABEL } from "../copy";
@@ -44,14 +46,6 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
   // Z-13:「重复 n」里属于别的集的那几条要说清在哪一集。
   const elsewhere = ownedElsewhereLines(clips);
   const hint = decodeQueueHint(progress, segments);
-  // 确认框接在批次列表之后,列表一长就在视口外;弹出时滚到它并把焦点交给它(alertdialog)。
-  const confirmRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!confirmation) return;
-    const node = confirmRef.current;
-    node?.scrollIntoView?.({ block: "nearest" });
-    node?.focus();
-  }, [confirmation]);
 
   return (
     <div className="import-tab import-jobs">
@@ -72,6 +66,9 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
           </p>
         ) : null}
       </section>
+
+      {/* R16 P1-6:正在跑的任务逐行可取消。 */}
+      <ImportRunningJobs jobs={jobs.runningJobs} busy={busy} onCancel={(id) => void jobs.cancelRunningJob(id)} />
 
       <section className="import-section" aria-label="最近导入批次">
         <SectionHeader
@@ -141,19 +138,13 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
       </section>
 
       {confirmation ? (
-        <Card ref={confirmRef} tabIndex={-1} level="raised" padding={4} className="import-confirm" role="alertdialog" aria-label="确认移除素材">
-          <strong className="import-confirm-title">
-            {confirmation.request.all ? "清空当前集并重新选择素材" : confirmation.request.batch_id ? "撤销这次导入" : "从当前集移除选中素材"}
-          </strong>
-          <p>将移除 {confirmation.preview.clips} 条素材、{confirmation.preview.favorites} 条评分记录、{confirmation.preview.selections} 个精选段和 {confirmation.preview.cache_entries} 项缓存记录。相关筛选与故事引用也会清除。</p>
-          <p>磁盘原视频不会删除。先停止相关任务并保存数据库快照；相关文件夹自动同步会暂停。进行中的批次会先停止，最终数量可能增加。</p>
-          <div className="import-confirm-actions">
-            <Button disabled={busy} onClick={() => jobs.cancelConfirmation()}>取消</Button>
-            <Button variant="primary" tone="danger" busy={busy} onClick={() => void jobs.confirmRemoval()}>
-              {busy ? "正在停止任务并清理…" : "确认移除，保留原视频"}
-            </Button>
-          </div>
-        </Card>
+        <RemovalConfirm
+          request={confirmation.request}
+          preview={confirmation.preview}
+          busy={busy}
+          onCancel={() => jobs.cancelConfirmation()}
+          onConfirm={() => void jobs.confirmRemoval()}
+        />
       ) : null}
       {notice ? (
         <p className="import-note" role="status">

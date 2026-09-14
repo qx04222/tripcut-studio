@@ -11,7 +11,7 @@ for TOOL_DIR in /opt/homebrew/opt/rustup/bin "$HOME/.cargo/bin" /opt/homebrew/bi
 done
 export PATH
 command -v cargo >/dev/null || { echo "ERROR: PATH 里找不到 cargo"; exit 1; }
-for REQUIRED_COMMAND in npm python3 otool dylibbundler codesign hdiutil shasum file dwarfdump rg brew; do
+for REQUIRED_COMMAND in npm python3 otool dylibbundler codesign hdiutil shasum file dwarfdump rg; do
   command -v "$REQUIRED_COMMAND" >/dev/null || {
     echo "ERROR: PATH 里找不到 $REQUIRED_COMMAND"
     exit 1
@@ -92,12 +92,19 @@ fi
 LGPL_MPV="${LGPL_MPV:-/tmp/mpv-lgpl/out}"
 LGPL_FFMPEG="${LGPL_FFMPEG:-/tmp/ffmpeg-lgpl/out}"
 LIBPLACEBO_OUT="${LIBPLACEBO_OUT:-/tmp/libplacebo-tripcut/out-v7.360.1-opengl}"
+# 字幕渲染链(libass/freetype/fribidi/harfbuzz/libunibreak)已静态链进 libmpv
+# (scripts/build-mpv-deps.sh),这里只取它的许可证物料与构建清单。
+MPV_DEPS_OUT="${MPV_DEPS_OUT:-$HOME/Library/Caches/tripcut-build/native/mpv-deps/out}"
 MPV_TAG="${MPV_TAG:-v0.41.0}"
 FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.5}"
 MPV_SOURCE_ROOT="${MPV_SOURCE_ROOT:-$(dirname "$LGPL_MPV")/mpv}"
 FFMPEG_SOURCE_ROOT="${FFMPEG_SOURCE_ROOT:-$(dirname "$LGPL_FFMPEG")/ffmpeg-$FFMPEG_VERSION}"
 FFMPEG_SOURCE_ARCHIVE="${FFMPEG_SOURCE_ARCHIVE:-$(dirname "$LGPL_FFMPEG")/ffmpeg.tar.xz}"
 [ -f "$LGPL_MPV/lib/libmpv.2.dylib" ] || { echo "ERROR: 缺少 libmpv：$LGPL_MPV/lib/libmpv.2.dylib"; exit 1; }
+[ -s "$MPV_DEPS_OUT/build-manifest.txt" ] || { echo "ERROR: 缺少字幕链构建清单：$MPV_DEPS_OUT/build-manifest.txt(先跑 scripts/build-mpv-deps.sh)"; exit 1; }
+if otool -L "$LGPL_MPV/lib/libmpv.2.dylib" | grep -qE '/opt/homebrew|/usr/local'; then
+  echo "ERROR: $LGPL_MPV 的 libmpv 仍链接 Homebrew 动态库(字幕链应已静态链入),拒绝打包"; exit 1
+fi
 [ -f "$LIBPLACEBO_OUT/lib/libplacebo.360.dylib" ] || { echo "ERROR: 缺少 TripCut 专用 libplacebo：$LIBPLACEBO_OUT"; exit 1; }
 for REQUIRED in "$LGPL_FFMPEG/bin/ffmpeg" "$LGPL_FFMPEG/bin/ffprobe"; do
   [ -f "$REQUIRED" ] && [ -x "$REQUIRED" ] || {
@@ -216,43 +223,17 @@ cp "$LIBPLACEBO_OUT/build-manifest.txt" "$LEGAL_DIR/libplacebo/build-manifest.tx
 # ships alongside the other bundled third-party materials.
 cp "$ROOT/docs/third_party/SourceHanSans-OFL.txt" "$LEGAL_DIR/source-han-sans/LICENSE"
 
-# Homebrew 提供每个 bottle 的 SPDX 文件；同时复制所选许可证全文/署名材料。
-# 未知新增 dylib 会在下方 native-sbom 生成时直接红灯，不能靠黑名单静默放行。
-python3 - "$LEGAL_DIR/native" "$FFMPEG_SOURCE_ROOT/COPYING.LGPLv2.1" <<'PY'
-import pathlib, shutil, sys
-target, lgpl = map(pathlib.Path, sys.argv[1:])
-components = {
-    "libass": ["COPYING"],
-    "freetype": ["LICENSE.TXT"],
-    "fribidi": ["COPYING", "AUTHORS"],
-    "glib": ["LGPL-2.1-or-later.txt"],
-    "graphite2": ["LICENSE", "COPYING"],
-    "harfbuzz": ["COPYING", "AUTHORS"],
-    "gettext": ["COPYING", "AUTHORS"],
-    "jpeg-turbo": ["LICENSE.md", "share/doc/libjpeg-turbo/README.ijg"],
-    "little-cms2": ["LICENSE", "AUTHORS"],
-    "pcre2": ["LICENCE.md", "AUTHORS.md"],
-    "libpng": ["LICENSE", "AUTHORS"],
-    "uchardet": ["COPYING", "AUTHORS"],
-    "libunibreak": ["LICENCE", "AUTHORS"],
-}
-for formula, files in components.items():
-    source = pathlib.Path("/opt/homebrew/opt") / formula
-    destination = target / formula
-    destination.mkdir(parents=True, exist_ok=True)
-    sbom = source / "sbom.spdx.json"
-    if not sbom.is_file():
-        raise SystemExit(f"missing Homebrew SPDX SBOM: {sbom}")
-    shutil.copy2(sbom, destination / "homebrew-sbom.spdx.json")
-    for relative in files:
-        evidence = source / relative
-        if not evidence.is_file():
-            raise SystemExit(f"missing license evidence: {evidence}")
-        shutil.copy2(evidence, destination / pathlib.Path(relative).name)
-# libintl is LGPL; Homebrew's top-level gettext COPYING is GPL for its tools.
-# Preserve both upstream package evidence and the exact LGPL text elected for libintl.
-shutil.copy2(lgpl, target / "gettext" / "COPYING.LIB")
-PY
+# 静态链进 libmpv 的字幕链:许可证物料来自源码树(build-mpv-deps.sh 复制到 out/legal),
+# 一起带上构建清单(版本 + deployment target)。未知新增 dylib 会在下方 native-sbom
+# 生成时直接红灯,不能靠黑名单静默放行。
+for COMPONENT in libass freetype fribidi harfbuzz libunibreak; do
+  [ -d "$MPV_DEPS_OUT/legal/$COMPONENT" ] || { echo "ERROR: 缺少许可证物料：$MPV_DEPS_OUT/legal/$COMPONENT"; exit 1; }
+  mkdir -p "$LEGAL_DIR/native/$COMPONENT"
+  cp "$MPV_DEPS_OUT/legal/$COMPONENT"/* "$LEGAL_DIR/native/$COMPONENT/"
+done
+cp "$MPV_DEPS_OUT/build-manifest.txt" "$LEGAL_DIR/native/build-manifest.txt"
+# fast_float(仅头文件,编进 libplacebo)
+cp "$LIBPLACEBO_OUT/LICENSE-fast_float" "$LEGAL_DIR/libplacebo/LICENSE-fast_float"
 
 # LGPL libmpv:Homebrew 的 libmpv 链接 GPL 版 libavcodec,会把 x264/x265 拖进包里。
 # 自编版链到 /tmp/ffmpeg-lgpl,依赖树零 GPL(见 scripts/build-lgpl-mpv.sh)。
@@ -271,7 +252,7 @@ dylibbundler -od -b \
   "${BUNDLE_TARGETS[@]}" \
   -d "$FRAMEWORKS" \
   -p '@executable_path/../Frameworks/' \
-  -s "$MPV_SEARCH_PATH" -s "$LGPL_FFMPEG/lib" -s "$LIBPLACEBO_OUT/lib" -s /opt/homebrew/lib \
+  -s "$MPV_SEARCH_PATH" -s "$LGPL_FFMPEG/lib" -s "$LIBPLACEBO_OUT/lib" \
   -i /usr/lib > "$BUNDLE_LOG" 2>&1 || {
     echo "ERROR: dylibbundler 失败：$BUNDLE_LOG"
     tail -10 "$BUNDLE_LOG"
@@ -387,21 +368,23 @@ components = [
     ("mpv", "LGPL-2.1-or-later", ["libmpv."], ["mpv/LICENSE.LGPL", "mpv/Copyright"]),
     ("whisper.cpp", "MIT", ["whisper-cli"], ["whisper.cpp/LICENSE"]),
     ("sidecar-ocr", "Apache-2.0", ["sidecar-ocr"], ["sidecar-ocr/main.swift", "sidecar-ocr/build-manifest.json"]),
-    ("libplacebo", "LGPL-2.1-or-later", ["libplacebo."], ["libplacebo/LICENSE", "libplacebo/build-manifest.txt"]),
-    ("libass", "ISC", ["libass."], ["native/libass/COPYING", "native/libass/homebrew-sbom.spdx.json"]),
-    ("FreeType", "FTL", ["libfreetype."], ["native/freetype/LICENSE.TXT", "native/freetype/homebrew-sbom.spdx.json"]),
-    ("FriBidi library", "LGPL-2.1-or-later", ["libfribidi."], ["native/fribidi/COPYING", "native/fribidi/homebrew-sbom.spdx.json"]),
-    ("GLib", "LGPL-2.1-or-later", ["libglib-"], ["native/glib/LGPL-2.1-or-later.txt", "native/glib/homebrew-sbom.spdx.json"]),
-    ("Graphite2", "MIT", ["libgraphite2."], ["native/graphite2/LICENSE", "native/graphite2/homebrew-sbom.spdx.json"]),
-    ("HarfBuzz", "MIT", ["libharfbuzz."], ["native/harfbuzz/COPYING", "native/harfbuzz/homebrew-sbom.spdx.json"]),
-    ("GNU libintl", "LGPL-2.1-or-later", ["libintl."], ["native/gettext/COPYING.LIB", "native/gettext/homebrew-sbom.spdx.json"]),
-    ("libjpeg-turbo", "IJG AND Zlib AND BSD-3-Clause", ["libjpeg."], ["native/jpeg-turbo/LICENSE.md", "native/jpeg-turbo/README.ijg", "native/jpeg-turbo/homebrew-sbom.spdx.json"]),
-    ("Little CMS", "MIT", ["liblcms2."], ["native/little-cms2/LICENSE", "native/little-cms2/homebrew-sbom.spdx.json"]),
-    ("PCRE2", "BSD-3-Clause WITH PCRE2-exception", ["libpcre2-"], ["native/pcre2/LICENCE.md", "native/pcre2/homebrew-sbom.spdx.json"]),
-    ("libpng", "libpng-2.0", ["libpng"], ["native/libpng/LICENSE", "native/libpng/homebrew-sbom.spdx.json"]),
-    ("uchardet", "MPL-1.1", ["libuchardet."], ["native/uchardet/COPYING", "native/uchardet/homebrew-sbom.spdx.json"]),
-    ("libunibreak", "Zlib", ["libunibreak."], ["native/libunibreak/LICENCE", "native/libunibreak/homebrew-sbom.spdx.json"]),
+    ("libplacebo", "LGPL-2.1-or-later", ["libplacebo."], ["libplacebo/LICENSE", "libplacebo/build-manifest.txt", "libplacebo/LICENSE-fast_float"]),
 ]
+
+# 静态链进某个 Mach-O 的第三方组件(没有自己的文件,但许可证义务不变):
+# 键是文件名前缀,值是 (组件, SPDX, 证据) 列表。R16 车道 D 起字幕链静态链进 libmpv。
+embedded = {
+    "libmpv.": [
+        ("libass", "ISC", ["native/libass/COPYING", "native/build-manifest.txt"]),
+        ("FreeType", "FTL", ["native/freetype/LICENSE.TXT", "native/freetype/FTL.TXT", "native/build-manifest.txt"]),
+        ("FriBidi library", "LGPL-2.1-or-later", ["native/fribidi/COPYING", "native/fribidi/AUTHORS", "native/build-manifest.txt"]),
+        ("HarfBuzz", "MIT", ["native/harfbuzz/COPYING", "native/harfbuzz/AUTHORS", "native/build-manifest.txt"]),
+        ("libunibreak", "Zlib", ["native/libunibreak/LICENCE", "native/libunibreak/AUTHORS", "native/build-manifest.txt"]),
+    ],
+    "libplacebo.": [
+        ("fast_float", "Apache-2.0 OR MIT OR BSL-1.0", ["libplacebo/LICENSE-fast_float"]),
+    ],
+}
 
 files = [macos / name for name in ["tripcut-studio", "ffmpeg", "ffprobe", "whisper-cli", "sidecar-ocr"]]
 files += sorted(frameworks.glob("*.dylib"))
@@ -413,7 +396,11 @@ for path in files:
         unknown.append(name)
         continue
     component, license_expression, _, evidence = matches[0]
-    for relative in evidence:
+    embedded_components = [
+        {"component": c, "licenseConcluded": l, "licenseEvidence": e}
+        for prefix, items in embedded.items() if name.startswith(prefix) for (c, l, e) in items
+    ]
+    for relative in evidence + [r for item in embedded_components for r in item["licenseEvidence"]]:
         if not (app / "Contents/Resources/legal" / relative).is_file():
             raise SystemExit(f"missing license evidence for {name}: {relative}")
     entries.append({
@@ -426,10 +413,11 @@ for path in files:
         "component": component,
         "licenseConcluded": license_expression,
         "licenseEvidence": evidence,
+        "embeddedComponents": embedded_components,
     })
 if unknown:
     raise SystemExit("unmapped native payloads: " + ", ".join(unknown))
-payload = {"schemaVersion": 1, "hashScope": "nested-payloads-before-outer-app-signing; main executable externally audited", "relationship": "FILE CONTAINED_BY COMPONENT", "files": entries}
+payload = {"schemaVersion": 1, "hashScope": "nested-payloads-before-outer-app-signing; main executable externally audited", "relationship": "FILE CONTAINED_BY COMPONENT; embeddedComponents STATIC_LINK_OF FILE", "files": entries}
 output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 PY
 if [ "$SIGNING_IDENTITY" = "-" ]; then
