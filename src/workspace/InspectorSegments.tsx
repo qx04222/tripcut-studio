@@ -75,8 +75,8 @@ export function SelectSegmentsSection({
     async (segment: SelectSegment) => {
       const inSeconds = segmentSeconds(segment.in_ticks, segment.tb_num, segment.tb_den);
       try {
-        await playerCommand({ type: "seek_abs", seconds: inSeconds });
-        await playerCommand({ type: "play" });
+        await playerCommand({ type: "seek_abs", seconds: inSeconds }, clipId);
+        await playerCommand({ type: "play" }, clipId);
         setNotice(null);
       } catch (error) {
         setNotice(failureText("复播", error));

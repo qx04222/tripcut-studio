@@ -320,7 +320,8 @@ export function patchClipInFeed(clipId: number, patch: Partial<ClipListItem>): v
   const allClips = feed.allClips.map((clip) => (clip.id === clipId ? next : clip));
   feed = {
     ...feed,
-    clips: feed.clips.map((clip) => (clip.id === clipId ? next : clip)),
+    // R17 epmove:补丁改了归属(移到其他集)就按集重新裁一遍,媒体池里那条立刻消失 / 回来;别的补丁原位替换。
+    clips: "episode_id" in patch ? scopeClips(allClips, feed.episode) : feed.clips.map((clip) => (clip.id === clipId ? next : clip)),
     allClips,
     clipsById,
   };

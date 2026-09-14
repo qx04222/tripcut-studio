@@ -38,6 +38,8 @@ export interface ImportJobs {
   quality: AnalysisProgress;
   motion: AnalysisProgress;
   refreshError: string | null;
+  /** A16-01:第一拍数据已经回来过。没回来之前界面不能把初始空状态冒充成「还没有素材 / 批次」。 */
+  loaded: boolean;
   batches: readonly ImportBatch[];
   busy: boolean;
   notice: string | null;
@@ -64,6 +66,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
   const [progress, setProgress] = useState<ImportProgress>(EMPTY_PROGRESS);
   const [clips, setClips] = useState<ClipListItem[]>([]);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [batches, setBatches] = useState<ImportBatch[]>([]);
   const [runningJobs, setRunningJobs] = useState<RunningJob[]>([]);
   const [busy, setBusy] = useState(false);
@@ -97,6 +100,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
       setProgress(nextProgress);
       setBatches(nextBatches);
       setRunningJobs(nextRunning);
+      setLoaded(true);
       return;
     }
 
@@ -112,6 +116,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
     setClips(nextClips.filter((clip) => clip.episode_id === currentEpisode.id));
     setBatches(nextBatches);
     setRunningJobs(nextRunning);
+    setLoaded(true);
     lastClipsRevision.current = nextRevision;
   }, []);
 
@@ -120,8 +125,11 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
     let timer: number | undefined;
     let inFlight = false;
     const pageVisible = () => document.visibilityState !== "hidden";
-    const poll = async () => {
-      if (!active || inFlight || !pageVisible()) return;
+    // A16-01:第一拍不看 visibilityState —— WKWebView 在窗口被遮 / 锁屏后可能一直报 hidden,
+    // 那样这一页会永远停在初始空状态(0 / 0 / 0、「还没有导入批次」)而池里明明有素材。
+    // 停表只管定时器那条。
+    const poll = async (force = false) => {
+      if (!active || inFlight || (!force && !pageVisible())) return;
       inFlight = true;
       try {
         await refresh(() => active);
@@ -138,7 +146,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
       if (pageVisible()) void poll();
     };
     document.addEventListener("visibilitychange", onVisibility);
-    void poll();
+    void poll(true);
     return () => {
       active = false;
       document.removeEventListener("visibilitychange", onVisibility);
@@ -224,7 +232,7 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
   const motion = useMemo(() => analysisProgress(readyClips, "motion"), [readyClips]);
 
   return {
-    progress, clips, readyClips, quality, motion, refreshError, batches, busy, notice, confirmation,
+    progress, clips, readyClips, quality, motion, refreshError, loaded, batches, busy, notice, confirmation,
     refresh: () => refresh(), arm, confirmRemoval, cancelConfirmation, cancelBatch, dismissNotices,
     runningJobs, cancelRunningJob,
   };

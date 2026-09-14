@@ -151,16 +151,16 @@ describe("R-01:监视器栏聚焦后的打点/播放键", () => {
     press(region, "i", "KeyI");
     expect(await screen.findByText("已设置入点")).toBeTruthy();
     fireEvent.keyDown(region, { key: "ArrowRight", code: "ArrowRight", altKey: true });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 13.5 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 13.5 }, expect.anything());
     // V-04:这里的假播放器 seek 永远不落地(状态一直报 12.5)。← 要从「刚才要去的 13.5」退一秒,
     // 不是从旧读数 12.5 —— 否则真机上就是 3.1 ↔ 8.1 来回跳。
     fireEvent.keyDown(region, { key: "ArrowLeft", code: "ArrowLeft", altKey: true });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 12.5 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 12.5 }, expect.anything());
     press(region, "o", "KeyO");
     expect(await screen.findByText("已设置出点")).toBeTruthy();
     apiMocks.playerCommand.mockClear();
     press(region, " ", "Space");
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" }, expect.anything());
   });
 
   it("J/K/L:J 暂停进入倒退,K 暂停并回 ×1,L 以 ×1 播放(R12 §5 原生真变速)", async () => {
@@ -173,13 +173,13 @@ describe("R-01:监视器栏聚焦后的打点/播放键", () => {
     expect(apiMocks.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([{ type: "pause" }]);
     apiMocks.playerCommand.mockClear();
     press(region, "k", "KeyK");
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" }, expect.anything());
     await flush();
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "set_speed", speed: 1 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "set_speed", speed: 1 }, expect.anything());
     apiMocks.playerCommand.mockClear();
     press(region, "l", "KeyL");
     await flush();
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" }, expect.anything());
   });
 
   it("焦点在栏内的按钮上照样接管 I;空格留给按钮自己;输入框里一个键都不接", async () => {

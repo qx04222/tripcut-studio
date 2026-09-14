@@ -26,7 +26,6 @@ import {
   type SettingsStatus,
 } from "../../api";
 import { DEFAULT_SETTINGS, applyAppearanceSettings } from "../../appearance";
-import { WORKSPACE_FLAG_KEY, readUiBool } from "../uiSettings";
 import type { SettingsForm } from "./settingsFormTypes";
 import { bytesLabel } from "./settingsModel";
 import { useGenerationSettings } from "./useGenerationSettings";
@@ -180,9 +179,6 @@ export function useSettingsForm(): SettingsForm {
       active = false;
     };
   }, [applyGenerationLoaded]);
-
-  // 开关的方向由设置表里的实际值决定,不由"进来时是哪个壳"决定。
-  const workspaceV2 = readUiBool(settings, WORKSPACE_FLAG_KEY);
 
   /**
    * 返回值是"这次写入落盘了没有"(R8 终审 M3)。界面开关必须先等到 true 才敢换壳——
@@ -345,20 +341,6 @@ export function useSettingsForm(): SettingsForm {
     }
   }, [clockDrafts, refreshDeviceClocks]);
 
-  // 这一行是个真开关,不是单向门(R8 终审 M2):写入值由当前 ui.workspace_v2 决定——
-  // 旧壳里点它才有路回到新壳。先落盘再换壳(R8 终审 M3):写失败时 save() 已经把
-  // 「保存失败：…」摆在 notice 里,这里就不换壳了。
-  const toggleWorkspaceFlag = useCallback(async () => {
-    const next = !workspaceV2;
-    const saved = await save(WORKSPACE_FLAG_KEY, next ? "true" : "false");
-    if (!saved) return;
-    // App.tsx 的 workspaceV2 状态只在启动时读一次 settings——不广播这个事件
-    // 就只能等下次重启才换壳,不满足"当场换壳,不要求重启"。
-    window.dispatchEvent(
-      new CustomEvent("tripcut:workspace-flag-changed", { detail: { workspaceV2: next } }),
-    );
-  }, [workspaceV2, save]);
-
   return {
     settings,
     settingsLoaded,
@@ -375,7 +357,6 @@ export function useSettingsForm(): SettingsForm {
     clockDrafts,
     setClockDraft,
     cacheConfirm,
-    workspaceV2,
     setDraft,
     save,
     savePath,
@@ -388,7 +369,6 @@ export function useSettingsForm(): SettingsForm {
     openLogs,
     clearCache,
     rollbackTool,
-    toggleWorkspaceFlag,
     refreshStatus,
     refreshLlm,
   };

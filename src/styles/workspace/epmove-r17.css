@@ -1,0 +1,18 @@
+/*
+ * R17 车道 epmove:素材「移到其他集…」的目标集菜单。菜单本体复用 ui-menu(portal 到 body),
+ * 这里只给宿主与禁用行(当前集)一点区分:当前集那一行灰、带斜体后缀,其它行照常。
+ * 颜色一律用 styles.css 顶部已有的 token,不新增字面量。
+ */
+.epmove-menu-host {
+  display: contents;
+}
+
+/* 目标集菜单里的行比素材菜单长(集名 + 进度 + 素材数),给个最小宽度免得换行。 */
+.ui-menu[aria-label="选择目标集"] {
+  min-width: 220px;
+}
+
+.ui-menu[aria-label="选择目标集"] .ui-menu-item[disabled] {
+  color: var(--text-muted);
+  font-style: italic;
+}

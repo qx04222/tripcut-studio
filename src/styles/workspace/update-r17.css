@@ -109,3 +109,26 @@
 .settings-sheet .update-r17-notes p {
   margin: 0;
 }
+
+/* ---------- 4. 顶栏「新版本」提醒(设置齿轮左侧;只在有新版本 / 下载中 / 已下载时出现) ---------- */
+
+.workspace-shell .workspace-topbar .update-r17-topchip {
+  white-space: nowrap;
+  margin-right: 4px;
+}
+
+.workspace-shell .workspace-topbar .update-r17-topchip[data-update-phase="available"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.workspace-shell .workspace-topbar .update-r17-topchip--busy {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--surface-muted, rgba(0, 0, 0, 0.05));
+  color: var(--text-secondary);
+  font-size: 12px;
+}

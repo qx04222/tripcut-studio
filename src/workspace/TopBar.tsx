@@ -8,6 +8,7 @@ import { pipelineGapLabel, pipelineNextLabel } from "./pipelineModel";
 import { ActionKbd } from "./KeymapKbd";
 import { Button, Icon } from "./ui";
 import { usePipeline } from "./usePipeline";
+import { UpdateTopChip } from "./update/UpdateTopChip";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
 /**
@@ -95,6 +96,7 @@ export function TopBar(): JSX.Element {
         >
           {nextLabel}
         </Button>
+        <UpdateTopChip />
         <Button
           variant="icon"
           icon="settings"

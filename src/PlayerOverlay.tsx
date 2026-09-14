@@ -12,6 +12,7 @@ import {
   listSelectSegments,
   playerClose,
   playerCommand,
+  STALE_CLIP_COMMAND,
   playerOpen,
   playerSetViewport,
   playerStatus,
@@ -25,6 +26,11 @@ import { useFocusTrap } from "./useFocusTrap";
 import { rectToPlayerViewport, visibleSurfaceRect } from "./playerViewport";
 import { PLAYER_VIEWPORT_REFRESH_EVENT } from "./workspace/usePlayerOcclusion";
 import "./PlayerOverlay.css";
+
+function isStaleClipCommand(reason: unknown): boolean {
+  const text = reason instanceof Error ? reason.message : String(reason ?? "");
+  return text.includes(STALE_CLIP_COMMAND);
+}
 
 export const STATUS_INTERVAL_MS = 80;
 
@@ -207,6 +213,11 @@ export function PlayerOverlay({
   // 嵌入模式不是模态 —— 它只是中上区的一块画面,抢焦点会把媒体池的键盘操作打断。
   useFocusTrap(overlayRef, !embedded);
 
+  // R17 playfix:通道只属于「已经 player_open 成功的那条素材」。Rust 侧 player_command 排在
+  // PlayerManager::open 的 operation 锁后面,换素材期间发出的命令会等 B 的新实例起来再落到
+  // B 上 —— A 的 seek_abs 就这样变成 B 的起播位置。这里记「哪条素材已打开」,批次里逐条核对。
+  const openedClipId = useRef<number | null>(null);
+
   // 卸载与「换素材」要分开:换素材只 playerOpen,绝不 playerClose 重建实例。
   // 这条 effect 声明在开流 effect 之前,卸载时它的清理先跑,旗子才来得及立。
   const unmountingRef = useRef(false);
@@ -256,6 +267,7 @@ export function PlayerOverlay({
         if (viewport) await playerSetViewport(viewport);
         const initial = await playerOpen(clip.id as number);
         if (!active) return;
+        openedClipId.current = clip.id as number;
         setStatus(initial);
         setOpening(initial.phase !== "ready");
         timer = window.setInterval(() => {
@@ -284,6 +296,7 @@ export function PlayerOverlay({
     void start();
     return () => {
       active = false;
+      openedClipId.current = null;
       if (timer !== undefined) window.clearInterval(timer);
       // 嵌入模式换素材时这条 effect 也会重跑,但那是「同一个实例换源」,
       // 只有真的卸载才关播放器 —— 否则每换一条素材就重建一次 mpv。
@@ -414,10 +427,20 @@ export function PlayerOverlay({
 
   const sendCommands = useCallback(
     async (commands: PlayerCommand[]) => {
+      // 这批命令属于现在已打开的这条素材;B 的 player_open 还没回来时一条都不发,
+      // 发到一半换了素材就停在那里(剩下的不发、也不为这批补读状态)。
+      const owner = openedClipId.current;
+      if (owner === null) return;
       const before = statusRef.current?.phase === "ready" ? statusRef.current.pos : null;
       try {
-        for (const command of commands) await playerCommand(command);
+        for (const command of commands) {
+          if (openedClipId.current !== owner) return;
+          await playerCommand(command, owner);
+        }
+        if (openedClipId.current !== owner) return;
       } catch (reason) {
+        // 后端按归属拒掉的旧素材命令不是故障:换源窗口里的正常淘汰,静默。
+        if (isStaleClipCommand(reason)) return;
         await reportFailure(reason);
         return;
       }

@@ -31,33 +31,33 @@ export interface ClipSuggestionsState {
  * 热力条不画、状态行不出现,监视器其它功能不受影响(§4:时刻分失败不影响既有链路)。
  * 换素材立即清空,当前建议回到第 1 条。
  */
+const NO_MOMENTS: readonly ClipMoment[] = [];
+const NO_SUGGESTIONS: readonly SegmentSuggestion[] = [];
+
 export function useClipSuggestions(clip: ClipListItem | null, durationSeconds: number): ClipSuggestionsState {
   const clipId = clip?.id ?? null;
-  const [moments, setMoments] = useState<readonly ClipMoment[]>([]);
-  const [suggestions, setSuggestions] = useState<readonly SegmentSuggestion[]>([]);
-  const [index, setIndex] = useState(-1);
-  const [momentsLoaded, setMomentsLoaded] = useState(false);
+  // R17 playfix:每份 state 都带着「是哪条素材的」。换素材的第一拍 effect 还没清零,
+  // 若把 A 的时刻分 / 「已到齐」报给 B,监视器可能把 B seek 到 A 的最高分处。
+  const [momentsFor, setMomentsFor] = useState<{ clipId: number | null; items: readonly ClipMoment[]; loaded: boolean }>({ clipId: null, items: [], loaded: false });
+  const [suggestionsFor, setSuggestionsFor] = useState<{ clipId: number | null; items: readonly SegmentSuggestion[]; index: number }>({ clipId: null, items: [], index: -1 });
+  const moments = momentsFor.clipId === clipId ? momentsFor.items : NO_MOMENTS;
+  const momentsLoaded = momentsFor.clipId === clipId && momentsFor.loaded;
+  const suggestions = suggestionsFor.clipId === clipId ? suggestionsFor.items : NO_SUGGESTIONS;
+  const index = suggestionsFor.clipId === clipId ? suggestionsFor.index : -1;
 
   useEffect(() => {
-    setMoments([]);
-    setSuggestions([]);
-    setIndex(-1);
-    setMomentsLoaded(false);
     if (clipId === null) return;
     let active = true;
     void getClipMoments(clipId)
       .then((items) => {
-        if (active) setMoments(items);
+        if (active) setMomentsFor({ clipId, items, loaded: true });
       })
-      .catch(() => undefined)
-      .finally(() => {
-        if (active) setMomentsLoaded(true);
+      .catch(() => {
+        if (active) setMomentsFor({ clipId, items: [], loaded: true });
       });
     void suggestSegments(clipId)
       .then((items) => {
-        if (!active) return;
-        setSuggestions(items);
-        setIndex(items.length > 0 ? 0 : -1);
+        if (active) setSuggestionsFor({ clipId, items, index: items.length > 0 ? 0 : -1 });
       })
       .catch(() => undefined);
     return () => {
@@ -74,10 +74,10 @@ export function useClipSuggestions(clip: ClipListItem | null, durationSeconds: n
   const step = useCallback(
     (direction: 1 | -1): SuggestionRange | null => {
       const next = stepSuggestionIndex(safeIndex, ranges.length, direction);
-      setIndex(next);
+      setSuggestionsFor({ clipId, items: suggestions, index: next });
       return next >= 0 ? (ranges[next] ?? null) : null;
     },
-    [ranges, safeIndex],
+    [ranges, safeIndex, clipId, suggestions],
   );
 
   return {

@@ -115,7 +115,7 @@ export interface SettingsStatus {
     proxy_bytes?: number;
     proxy_limit_bytes?: number;
   };
-  /** R10 U-22:首启引导已跳过/完成(settings `onboarding.first_run_done`)。FirstRunGuide 只看这一位。 */
+  /** R10 U-22:首启引导已跳过/完成(settings `onboarding.first_run_done`)。 */
   first_run_done?: boolean;
 }
 
@@ -1060,8 +1060,8 @@ export function mergeChapters(sourceChapterId: number, targetChapterId: number):
   return invoke<void>("merge_chapters", { sourceChapterId, targetChapterId });
 }
 
-export function undoStoryChange(): Promise<void> {
-  return invoke<void>("undo_story_change");
+export function undoStoryChange(): Promise<UndoStoryOutcome> {
+  return invoke<UndoStoryOutcome>("undo_story_change");
 }
 
 export function pickExportFolder(): Promise<string | null> {
@@ -1161,8 +1161,12 @@ export function playerClose(): Promise<void> {
   return invoke<void>("player_close");
 }
 
-export function playerCommand(cmd: PlayerCommand): Promise<void> {
-  return invoke<void>("player_command", { cmd });
+/** R17 playfix:错误文本与 Rust `player::STALE_CLIP_COMMAND` 一致;命中即静默,不算播放器故障。 */
+export const STALE_CLIP_COMMAND = "命令属于已换掉的素材";
+
+/** `clipId` 是这条命令所属的素材;换源窗口里排到新实例上的旧素材命令会被后端拒掉。 */
+export function playerCommand(cmd: PlayerCommand, clipId?: number | null): Promise<void> {
+  return invoke<void>("player_command", { cmd, clipId: clipId ?? null });
 }
 
 export function playerStatus(): Promise<PlayerStatus> {
@@ -1712,7 +1716,7 @@ export function getFirstRunDone(): Promise<boolean> {
   return invoke<boolean>("get_first_run_done");
 }
 
-/** 用户点「暂时进入」或走完向导时调一次;之后 FirstRunGuide 不再弹,切换新旧界面 / 恢复页也不重放。 */
+/** 用户点「暂时进入」或走完引导时调一次;之后首启引导不再弹,恢复页也不重放。 */
 export function setFirstRunDone(done = true): Promise<void> {
   return invoke<void>("set_first_run_done", { done });
 }
@@ -2209,4 +2213,23 @@ export const UPDATE_RELEASE_PAGE_URL = "https://github.com/qx04222/tripcut-studi
  */
 export function openExternalUrl(url: string): Promise<void> {
   return invoke<void>("open_url", { url });
+}
+
+/**
+ * R17 车道 epmove:素材跨集移动。`from` 是每条素材的旧归属 `(clip_id, old_episode_id)`,撤销时按旧集分组反向再调。
+ * 已封存的历史集也能作目标;只读窗口调用会被后端拒绝(白话错误)。
+ */
+export interface MoveOutcome {
+  moved: number;
+  skipped_missing: number;
+  from: Array<[number, number]>;
+}
+
+export async function moveClipsToEpisode(clipIds: readonly number[], episodeId: number): Promise<MoveOutcome> {
+  return invoke<MoveOutcome>("move_clips_to_episode", { clipIds: [...clipIds], episodeId });
+}
+
+/** R17 车道 epmove:`undo_story_change` 的结果 —— `skipped_moved` = 快照里已被移到别的集、这次没放回镜头带的镜数。 */
+export interface UndoStoryOutcome {
+  skipped_moved: number;
 }

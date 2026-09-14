@@ -24,6 +24,7 @@ pub mod jianying;
 pub mod journey;
 pub mod llm;
 pub mod media_server;
+pub mod media_tools;
 pub mod media_source;
 pub mod memory_profile;
 pub mod thermal;

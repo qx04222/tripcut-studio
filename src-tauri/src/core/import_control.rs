@@ -251,6 +251,27 @@ mod tests {
         assert!(removal_ids(&c,&RemovalRequest{batch_id:Some(second),clip_ids:vec![],all:false}).unwrap().is_empty());
     }
 
+    /// A16-01(0.8.0 真机):「全部暂停」态 = 任务全是 pending、没有 running。这种批次必须仍按
+    /// queued 列出、进度总数照旧 —— 这两条读取都不许按「有没有在跑」把它过滤成空。
+    #[test]
+    fn queued_batch_with_only_pending_jobs_is_still_listed_and_counted() {
+        let directory=TestDirectory::new(); let mut c=db::open_project(&directory.db_path()).unwrap();
+        let batch=create_batch(&c,"/walk-media").unwrap();
+        c.execute("UPDATE import_batches SET status='queued' WHERE id=?1",[batch]).unwrap();
+        c.execute("INSERT INTO volumes(uuid) VALUES ('fixture')",[]).unwrap();
+        for id in 1..=3 {
+            c.execute("INSERT INTO clips(id,volume_uuid,rel_path,episode_id,import_batch_id) VALUES (?1,'fixture',?2,1,?3)",params![id,format!("/walk-media/{id}.mp4"),batch]).unwrap();
+            let job=super::super::jobs::enqueue(&mut c,"import_probe",&format!(r#"{{"episode_id":1,"clip_id":{id}}}"#),&format!("probe-{id}")).unwrap();
+            c.execute("UPDATE jobs SET import_batch_id=?1 WHERE id=?2",params![batch,job]).unwrap();
+        }
+        let listed=list_batches(&c).unwrap();
+        assert_eq!(listed.len(),1,"pending 任务的批次仍要列出");
+        assert_eq!(listed[0].status,"queued");
+        assert_eq!((listed[0].total,listed[0].done,listed[0].imported),(3,0,3));
+        let progress=super::super::import::get_import_progress(&c).unwrap();
+        assert_eq!((progress.total,progress.done,progress.running),(3,0,0),"暂停态总数照旧,只是没在跑");
+    }
+
     #[test]
     fn undo_preserves_other_batches_original_files_and_cascades_selections() {
         let directory=TestDirectory::new();

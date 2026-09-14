@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  clampMinimaxBudgetInput as legacyClamp,
-  generationLedgerStatusLabel as legacyGenerationLabel,
-  llmLedgerPurposeLabel as legacyPurposeLabel,
-  llmLedgerStatusLabel as legacyStatusLabel,
-  SETTINGS_SECTIONS,
-} from "../../SettingsPage";
 import { ICON_NAMES } from "../ui/icons";
 import {
   bytesLabel,
@@ -22,24 +15,39 @@ import {
   deviceClockLibraryState,
 } from "./settingsModel";
 
-describe("settingsModel:与旧 SettingsPage 的纯函数逐字对等", () => {
-  it("clampMinimaxBudgetInput 与旧实现同值同上限", () => {
-    for (const raw of ["10", "999999", "-5", "not-a-number", "", "500", "500.5"]) {
-      expect(clampMinimaxBudgetInput(raw)).toEqual(legacyClamp(raw));
-    }
+// R17:旧壳 `src/SettingsPage.tsx` 已删除。这里原来对着它的导出做"逐字对等"
+// 双跑,现在改成钉死这些纯函数自己的期望值——断言内容不变(迁移,不是删除)。
+describe("settingsModel 纯函数", () => {
+  it("clampMinimaxBudgetInput 按上下限夹紧,非法输入夹到 0", () => {
+    expect(clampMinimaxBudgetInput("10")).toEqual({ value: 10, clamped: false });
+    expect(clampMinimaxBudgetInput("999999")).toEqual({ value: 500, clamped: true });
+    expect(clampMinimaxBudgetInput("-5")).toEqual({ value: 0, clamped: true });
+    expect(clampMinimaxBudgetInput("not-a-number")).toEqual({ value: 0, clamped: true });
+    expect(clampMinimaxBudgetInput("")).toEqual({ value: 0, clamped: true });
+    expect(clampMinimaxBudgetInput("500")).toEqual({ value: 500, clamped: false });
+    expect(clampMinimaxBudgetInput("500.5")).toEqual({ value: 500, clamped: true });
     expect(MINIMAX_MONTHLY_BUDGET_MAX).toBe(500);
   });
 
-  it("三张标签表与旧实现一字不差", () => {
-    for (const status of ["running", "succeeded", "failed", "parse_failed"] as const) {
-      expect(llmLedgerStatusLabel(status)).toBe(legacyStatusLabel(status));
-    }
-    for (const status of ["draft", "submitted", "queued", "succeeded", "failed", "cancelled", "imported", "zzz"]) {
-      expect(generationLedgerStatusLabel(status)).toBe(legacyGenerationLabel(status));
-    }
-    for (const purpose of ["ai_description", "director_qa", "narrate_episode", "other"]) {
-      expect(llmLedgerPurposeLabel(purpose)).toBe(legacyPurposeLabel(purpose));
-    }
+  it("三张标签表文案固定", () => {
+    expect(llmLedgerStatusLabel("running")).toBe("调用中");
+    expect(llmLedgerStatusLabel("succeeded")).toBe("已成功");
+    expect(llmLedgerStatusLabel("failed")).toBe("调用失败");
+    expect(llmLedgerStatusLabel("parse_failed")).toBe("解析失败");
+
+    expect(generationLedgerStatusLabel("draft")).toBe("草稿");
+    expect(generationLedgerStatusLabel("submitted")).toBe("已提交");
+    expect(generationLedgerStatusLabel("queued")).toBe("排队中");
+    expect(generationLedgerStatusLabel("succeeded")).toBe("生成成功");
+    expect(generationLedgerStatusLabel("failed")).toBe("失败");
+    expect(generationLedgerStatusLabel("cancelled")).toBe("已取消");
+    expect(generationLedgerStatusLabel("imported")).toBe("已入库");
+    expect(generationLedgerStatusLabel("zzz")).toBe("zzz");
+
+    expect(llmLedgerPurposeLabel("ai_description")).toBe("AI 描述");
+    expect(llmLedgerPurposeLabel("director_qa")).toBe("导演问答");
+    expect(llmLedgerPurposeLabel("narrate_episode")).toBe("叙事编排");
+    expect(llmLedgerPurposeLabel("other")).toBe("other");
   });
 
   it("clockSourceLabel / bytesLabel", () => {
@@ -52,11 +60,11 @@ describe("settingsModel:与旧 SettingsPage 的纯函数逐字对等", () => {
     expect(bytesLabel(200 * 1_048_576)).toBe("200 MB");
   });
 
-  it("九个分区 tab 与 SETTINGS_SECTIONS 同序同文案,图标都在套件里,只有「缓存与重建」是 danger 且靠底", () => {
-    expect(SETTINGS_TABS.map((tab) => tab.id)).toEqual(SETTINGS_SECTIONS.map((section) => section.id));
-    SETTINGS_TABS.forEach((tab, index) => {
-      expect(tab.label).toBe(SETTINGS_SECTIONS[index]!.label);
-      expect(tab.description).toBe(SETTINGS_SECTIONS[index]!.description);
+  it("九个分区 tab 顺序与文案固定,图标都在套件里,只有「缓存与重建」是 danger 且靠底", () => {
+    expect(SETTINGS_TABS.map((tab) => tab.id)).toEqual([
+      "appearance", "performance", "timeline", "tools", "analysis", "generation", "privacy", "about", "cache",
+    ]);
+    SETTINGS_TABS.forEach((tab) => {
       expect(ICON_NAMES).toContain(tab.icon);
       expect("eyebrow" in tab).toBe(false);
     });

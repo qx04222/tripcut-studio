@@ -1,16 +1,29 @@
 import { applyBatchRating } from "./batchRating";
 import type { RatingAction } from "../SelectPage";
 import { reorderStoryItem, storyOrderRefs } from "../Storyboard";
-import { getStoryboard, rateClip, revealClip, setStoryOrder, undoStoryChange } from "../api";
-import { CLIP_MENU, menuAriaLabel, menuLabelWithCount, type ClipMenuId } from "./copy";
+import { getStoryboard, moveClipsToEpisode, rateClip, revealClip, setStoryOrder, type EpisodeSummary } from "../api";
+import {
+  CLIP_MENU,
+  EPISODE_MOVE_NEEDS_ANOTHER_EPISODE,
+  EPISODE_MOVE_NOTHING_MOVED_TOAST,
+  EPISODES_UPDATED_EVENT,
+  episodeMoveUndoneToast,
+  episodeMovedToast,
+  menuAriaLabel,
+  menuLabelWithCount,
+  type ClipMenuId,
+} from "./copy";
 import { requestQuickExport } from "./deliver/quickExportModel";
 import { failureText } from "./errorText";
 import { clipRemovalTitleFor, requestClipRemoval } from "./clipRemoval";
 import type { MenuItem } from "./ui/Menu";
+import { noteStoryUndoSkipped, undoStoryChangeNoticing } from "./storyUndo";
 import { showToast } from "./ui/toastStore";
+import { pushUndo as pushUndoBridge } from "./undoBridge";
 import { pushUndo } from "./undoStack";
 import { needsFavoriteBeforeInsert } from "./useBandDrag";
 import { getClipsFeedSnapshot, patchClipInFeed, refreshClipsFeed } from "./useClipsFeed";
+import { dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 /**
  * R16 §1 / P1-1(车道 A):素材卡菜单的「项目表」与「动作表」—— 媒体池右键与检查器头部「···」
@@ -18,22 +31,84 @@ import { getClipsFeedSnapshot, patchClipInFeed, refreshClipsFeed } from "./useCl
  * 「在 Finder 中显示」走车道 C 的 `reveal_clip`(默认接好,`canReveal: false` 才不出这一项);它只显示一条——
  * 多选时是右键点中的那一张(`revealClipId`),所以这一项不带「(n 条)」。
  */
-export const CLIP_MENU_ORDER: readonly ClipMenuId[] = ["favorite", "reject", "clear", "addToBand", "export", "reveal", "remove"];
+export const CLIP_MENU_ORDER: readonly ClipMenuId[] = ["favorite", "reject", "clear", "addToBand", "moveToEpisode", "export", "reveal", "remove"];
 
-export function clipMenuItems(count: number, options: { readOnly?: boolean; canReveal?: boolean } = {}): MenuItem[] {
+export interface ClipMenuOptions {
+  readOnly?: boolean;
+  canReveal?: boolean;
+  /** R17 epmove:库里一共几集。恰好一集时「移到其他集…」禁用并说明先去首页新建一集;不传 / 读不到(0)按「有别的集」处理。 */
+  episodeCount?: number;
+}
+
+export function clipMenuItems(count: number, options: ClipMenuOptions = {}): MenuItem[] {
   const items: MenuItem[] = [];
   for (const id of CLIP_MENU_ORDER) {
     if (id === "reveal" && options.canReveal === false) continue;
     const label = CLIP_MENU[id];
     const mutating = id !== "export" && id !== "reveal";
+    const alone = id === "moveToEpisode" && options.episodeCount === 1;
     items.push({
       id,
-      label: id === "reveal" ? label : menuLabelWithCount(label, count),
+      label: alone ? `${menuLabelWithCount(label, count)}(${EPISODE_MOVE_NEEDS_ANOTHER_EPISODE})` : id === "reveal" ? label : menuLabelWithCount(label, count),
       ariaLabel: menuAriaLabel(label),
-      disabled: mutating && options.readOnly === true,
+      disabled: (mutating && options.readOnly === true) || alone,
     });
   }
   return items;
+}
+
+/**
+ * R17 epmove:把整组素材移到 `target` 集。一次 `move_clips_to_episode` IPC;成功后媒体池里那几条立刻消失
+ * (feed 按集裁,改 `episode_id` 即可)、指向它们的选择清掉、集卡计数事件派发;toast「已把 n 条移到「集名」」
+ * 带「撤销」5 秒,同一闭包进 ⌘Z 栈 —— 撤销按每条的旧归属分组反向再调(一次移动可能来自多个集)。失败 toast,不推栈。
+ */
+export async function moveClipsToOtherEpisode(clipIds: readonly number[], target: EpisodeSummary): Promise<void> {
+  if (clipIds.length === 0) return;
+  let outcome;
+  try {
+    outcome = await moveClipsToEpisode(clipIds, target.id);
+  } catch (error) {
+    showToast(failureText(menuAriaLabel(CLIP_MENU.moveToEpisode), error), { tone: "danger" });
+    return;
+  }
+  if (outcome.from.length === 0) {
+    showToast(EPISODE_MOVE_NOTHING_MOVED_TOAST, { tone: "neutral" });
+    return;
+  }
+  const movedIds = outcome.from.map(([clipId]) => clipId);
+  const rehome = (ids: readonly number[], episodeId: number) => {
+    for (const id of ids) patchClipInFeed(id, { episode_id: episodeId });
+    const { selection, multiSelection } = getWorkspaceSnapshot();
+    if ((selection?.kind === "clip" && ids.includes(selection.clipId)) || multiSelection.some((id) => ids.includes(id))) {
+      dispatchWorkspace({ type: "clear-selection" });
+    }
+    window.dispatchEvent(new CustomEvent(EPISODES_UPDATED_EVENT));
+  };
+  rehome(movedIds, target.id);
+  let undone = false;
+  const undo = async () => {
+    if (undone) return;
+    undone = true;
+    const byOrigin = new Map<number, number[]>();
+    for (const [clipId, origin] of outcome.from) byOrigin.set(origin, [...(byOrigin.get(origin) ?? []), clipId]);
+    try {
+      for (const [origin, ids] of byOrigin) {
+        await moveClipsToEpisode(ids, origin);
+        rehome(ids, origin);
+      }
+      showToast(episodeMoveUndoneToast(movedIds.length), { tone: "neutral" });
+    } catch (error) {
+      showToast(failureText("撤销", error), { tone: "danger" });
+    }
+    await refreshClipsFeed(true);
+  };
+  showToast(episodeMovedToast(movedIds.length, target.title), {
+    tone: "success",
+    durationMs: 5_000,
+    action: { label: "撤销", onClick: () => void undo() },
+  });
+  pushUndoBridge(`${menuAriaLabel(CLIP_MENU.moveToEpisode)}(${movedIds.length} 条)`, undo);
+  await refreshClipsFeed(true);
 }
 
 
@@ -87,6 +162,8 @@ export interface ClipMenuContext {
   revealClipId?: number;
   /** 缺失页传「移除这个盘上的素材」这类标题;不传按默认。 */
   removalTitle?: string;
+  /** R17 epmove:「移到其他集…」要弹目标集菜单,由入口(ClipMenu)接管;不传就没有后半步。 */
+  onMoveToEpisode?: (clipIds: readonly number[]) => void;
 }
 
 /** 菜单项 → 动作。所有失败都 toast,不抛。 */
@@ -106,7 +183,10 @@ export async function runClipMenuAction(id: string, clipIds: readonly number[], 
           pushUndo({
             label: `加入镜头带${count > 1 ? `(${added} 条)` : ""}`,
             undo: async () => {
-              for (let index = 0; index < added; index += 1) await undoStoryChange();
+              let skipped = 0;
+              for (let index = 0; index < added; index += 1) skipped += await undoStoryChangeNoticing();
+              // 逐条撤时每次都会覆盖后缀,最后按总数留一份。
+              if (skipped > 0) noteStoryUndoSkipped(skipped);
               await refreshClipsFeed(true);
             },
           });
@@ -117,6 +197,9 @@ export async function runClipMenuAction(id: string, clipIds: readonly number[], 
         });
         return;
       }
+      case "moveToEpisode":
+        context.onMoveToEpisode?.(clipIds);
+        return;
       case "export":
         requestQuickExport({ clip_ids: [...clipIds] });
         return;

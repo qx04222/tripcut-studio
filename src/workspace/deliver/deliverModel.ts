@@ -1,4 +1,4 @@
-import type { ExportStatus, JianyingDraftResult, PlatformPreset, RoughCutTargetSeconds, SettingsMap, TargetPlatform } from "../../api";
+import type { ExportItemStatus, ExportStatus, JianyingDraftResult, PlatformPreset, RoughCutTargetSeconds, SettingsMap, TargetPlatform } from "../../api";
 import { readUiBool, readUiSetting } from "../uiSettings";
 
 /** 交付表单的纯常量与纯函数(R9 Task 6a):从 `DeliverPage` 移入,那里 re-export。 */
@@ -83,6 +83,26 @@ export const STAGE_LABELS: Record<ExportStatus["stage"], string> = {
   complete: "交付完成",
   failed: "交付失败",
 };
+
+/** R17 exportfix ⑤:失败行说明 ffmpeg 不认编码器 / 选项(那份 ffmpeg 没有 VideoToolbox)时的一行白话建议。 */
+export const FFMPEG_TOOL_HINT = "设置 › 工具与模型 里看看 ffmpeg 用的是哪一份;清空自定义路径就会用软件自带的。";
+
+const FFMPEG_TOOL_NOTE_PATTERN = /Unrecognized option|Unknown encoder/;
+
+/** note 提到 `Unrecognized option` / `Unknown encoder` 才给建议;别的失败原因返回 null。 */
+export function ffmpegToolHint(note: string | null | undefined): string | null {
+  return note && FFMPEG_TOOL_NOTE_PATTERN.test(note) ? FFMPEG_TOOL_HINT : null;
+}
+
+/** 失败项里任一条命中即给一次建议(不按条重复)。 */
+export function ffmpegToolHintForItems(items: ExportItemStatus[]): string | null {
+  for (const item of items) {
+    if (item.status !== "failed") continue;
+    const hint = ffmpegToolHint(item.note);
+    if (hint) return hint;
+  }
+  return null;
+}
 
 export function isExportActive(status: ExportStatus): boolean {
   return status.status === "pending" || status.status === "running";

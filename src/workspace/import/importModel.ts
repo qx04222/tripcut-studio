@@ -154,6 +154,15 @@ export function decodeQueueHint(progress: ImportProgress, segments: readonly Pip
 }
 
 /**
+ * A16-01:「全部暂停」态下任务页自己也要说一句 —— 数字照旧,只是没人在领新任务;
+ * 状态条那句「后台已暂停」在抽屉盖住底栏时看不见。
+ */
+export function pausedByUserHint(progress: ImportProgress): string | null {
+  if (progress.paused_reason !== "user") return null;
+  return "后台已暂停:数字照旧,只是暂时不领新任务;按底栏「继续后台任务」就接着分析。";
+}
+
+/**
  * Z-13:登记判定「已属于另一集」的文件,按集名归堆成一句「这 n 个文件已在「EP01」里,可在那一集里找到」。
  * 数据来自 listClips 的占位项(id 为空、status duplicate),后端把那一句放在 error 里;
  * 普通重复(同一集里已有)不在这里说。

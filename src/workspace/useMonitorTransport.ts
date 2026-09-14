@@ -88,8 +88,16 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   const clipId = clip?.id ?? null;
   const ready = status?.phase === "ready" && status.clip_id === clipId;
 
-  const latest = useRef({ status, send, inPoint, outPoint, looping, rate, rewinding });
-  latest.current = { status, send, inPoint, outPoint, looping, rate, rewinding };
+  const latest = useRef({ status, send, inPoint, outPoint, looping, rate, rewinding, clipId });
+  latest.current = { status, send, inPoint, outPoint, looping, rate, rewinding, clipId };
+  // R17 playfix:每条命令都只能打在「状态里就是这条素材」的播放器上。换素材那一拍 clip 已经是
+  // B、status 还是 A 的(位置是 A 停住的地方)——按位置算的 seek 若这时发出去,会穿过 Rust 侧
+  // player_command 的 operation 锁落到 B 的新实例上,B 就从 A 停住的位置开始播。
+  const readyStatus = useCallback((): (PlayerStatus & { phase: "ready" }) | null => {
+    const current = latest.current.status;
+    if (!current || current.phase !== "ready" || current.clip_id !== latest.current.clipId) return null;
+    return current as PlayerStatus & { phase: "ready" };
+  }, []);
   // mpv 的 `speed` 属性跨 loadfile 保留:记住最后一次发给它的值,换素材就绪时不是 1 就补发。
   const mpvRate = useRef<PlaybackRate>(1);
 
@@ -103,10 +111,10 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     if (!status.paused || Math.abs(status.pos - anchor.current) <= 1 / fps / 2 + 1e-6) anchor.current = null;
   }, [status, fps]);
   const position = useCallback((): number | null => {
-    const current = latest.current.status;
-    if (!current || current.phase !== "ready") return null;
+    const current = readyStatus();
+    if (!current) return null;
     return anchor.current !== null && current.paused ? anchor.current : current.pos;
-  }, []);
+  }, [readyStatus]);
   // send 在 seek 落地(或等够了)之后才 resolve —— 那时状态就是真位置,锚点可以放掉;
   // 期间又发了新 seek 的话锚点已换成新目标,不动它。
   const sendAnchored = useCallback((commands: PlayerCommand[], target: number) => {
@@ -117,12 +125,12 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   }, []);
   const seekTo = useCallback(
     (seconds: number) => {
-      const current = latest.current.status;
-      if (!current || current.phase !== "ready") return;
+      const current = readyStatus();
+      if (!current) return;
       const target = Math.min(current.duration, Math.max(0, seconds));
       sendAnchored([{ type: "seek_abs", seconds: target }], target);
     },
-    [sendAnchored],
+    [sendAnchored, readyStatus],
   );
 
   // 换素材:速度标签、倒退、循环、位置锚点归零(入出点由监视器自己清);mpv 侧的 speed 在就绪时补发。
@@ -137,8 +145,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   useEffect(() => {
     if (!rewinding) return;
     const timer = window.setInterval(() => {
-      const current = latest.current.status;
-      if (!current || current.phase !== "ready") return;
+      const current = readyStatus();
+      if (!current) return;
       if (current.pos <= 1 / fps / 2 + 1e-6) {
         setRewinding(false);
         return;
@@ -146,12 +154,12 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       void latest.current.send([{ type: "step_back" }]);
     }, REWIND_TICK_MS);
     return () => window.clearInterval(timer);
-  }, [rewinding, fps]);
+  }, [rewinding, fps, readyStatus]);
 
   /** 设速度并(暂停时)开播:L 与速度菜单共用。播完再开播从头放(U-09)。 */
   const playAt = useCallback((next: PlaybackRate) => {
-    const current = latest.current.status;
-    if (!current || current.phase !== "ready") return;
+    const current = readyStatus();
+    if (!current) return;
     setRewinding(false);
     setRateState(next);
     mpvRate.current = next;
@@ -161,12 +169,12 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       commands.push({ type: "play" });
     }
     void latest.current.send(commands);
-  }, []);
+  }, [readyStatus]);
 
   const shuttle = useCallback(
     (key: "j" | "k" | "l") => {
-      const current = latest.current.status;
-      if (!current || current.phase !== "ready") return;
+      const current = readyStatus();
+      if (!current) return;
       const { rate: currentRate, rewinding: isRewinding } = latest.current;
       if (key === "l") {
         // 暂停 / 倒退中按 L = 从 ×1 开播;播放中 = 下一档(×1 → ×2 → ×4 → ×1)。
@@ -185,7 +193,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       anchor.current = null;
       void latest.current.send([{ type: "pause" }]);
     },
-    [playAt],
+    [playAt, readyStatus],
   );
 
   const setRate = useCallback((next: PlaybackRate) => playAt(next), [playAt]);
@@ -193,12 +201,11 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 逐帧走原生 frame-step / frame-back-step:mpv 自己暂停、自己算下一帧的位置,不再按
   // pos ± 1/fps 发 seek(V-04 的算错位置从根上没了);读数由通道等到位置变了再交出去。
   const frame = useCallback((direction: 1 | -1) => {
-    const current = latest.current.status;
-    if (!current || current.phase !== "ready") return;
+    if (!readyStatus()) return;
     setRewinding(false);
     anchor.current = null;
     void latest.current.send([{ type: direction > 0 ? "step_fwd" : "step_back" }]);
-  }, []);
+  }, [readyStatus]);
 
   const nudge = useCallback(
     (seconds: number) => {
@@ -224,19 +231,19 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     [],
   );
   useEffect(() => {
-    if (!looping || !status || status.phase !== "ready" || status.paused || inPoint === null || outPoint === null || outPoint <= inPoint) return;
+    if (!looping || !ready || status.paused || inPoint === null || outPoint === null || outPoint <= inPoint) return;
     if (status.pos >= outPoint || status.pos < inPoint - 0.5) wrapToIn(inPoint);
-  }, [looping, status, inPoint, outPoint, wrapToIn]);
+  }, [looping, ready, status, inPoint, outPoint, wrapToIn]);
 
   const toggleLoop = useCallback(() => {
-    const { inPoint: currentIn, outPoint: currentOut, status: current, looping: on } = latest.current;
-    if (currentIn === null || currentOut === null || currentOut <= currentIn || !current || current.phase !== "ready") return;
+    const { inPoint: currentIn, outPoint: currentOut, looping: on } = latest.current;
+    if (currentIn === null || currentOut === null || currentOut <= currentIn || !readyStatus()) return;
     if (!on) {
       setRewinding(false);
       wrapToIn(currentIn);
     }
     setLooping(!on);
-  }, [wrapToIn]);
+  }, [wrapToIn, readyStatus]);
   const stopLoop = useCallback(() => setLooping(false), []);
 
   // 播完自动下一条:同一条素材的「到尾」只处理一次。
@@ -279,6 +286,15 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // R12 §5:点卡片 = 预览。mpv 载入即播(player_open 把 pause 翻成 false),素材一就绪
   // 先把它停住 —— 不等时刻分,等一拍画面就跑起来了;静音记忆也在这一拍补发。
   const pausedFor = useRef<number | null>(null);
+  const preparedFor = useRef<number | null>(null);
+  // R17 playfix:「每条素材只做一次」按的是一次 player_open,不是 clipId —— 全屏来回会把同一条
+  // 素材再开一个新实例(从 0 开始、载入即播)。播放器一离开这条的就绪态(换源 / 重开 / 出错)
+  // 就把两枚旗子放掉,下次就绪再暂停、再停到最精彩处。
+  useEffect(() => {
+    if (ready) return;
+    pausedFor.current = null;
+    preparedFor.current = null;
+  }, [ready]);
   useEffect(() => {
     if (!ready || clipId === null || pausedFor.current === clipId) return;
     pausedFor.current = clipId;
@@ -293,7 +309,6 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
 
   // 「从最精彩处」:时刻分到齐后把预览帧停在最高分时刻(每条素材只做一次);
   // 拉失败的素材 bestStart 是 null,停在首帧。开播仍由用户按空格 / 点播放。
-  const preparedFor = useRef<number | null>(null);
   useEffect(() => {
     if (!ready || clipId === null || preparedFor.current === clipId) return;
     if (!prefs.startAtBest) return;

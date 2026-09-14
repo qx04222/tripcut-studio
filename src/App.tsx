@@ -1,42 +1,26 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CommandPalette } from "./CommandPalette";
-import { FirstRunGuide } from "./FirstRunGuide";
 import { RecoveryPage } from "./RecoveryPage";
 import { applyAppearanceSettings } from "./appearance";
 import { getDoctorReport, getSettings, type DoctorReport, type SettingsMap } from "./api";
-import { NAVIGATION, documentTitleForRoute, routeFromHash, type RoutePath } from "./routes";
+import { documentTitleForRoute, routeFromHash, type RoutePath } from "./routes";
 import { WorkspaceShell } from "./workspace/WorkspaceShell";
 import { dispatchWorkspace, type BandMode } from "./workspace/WorkspaceStore";
-import { WORKSPACE_FLAG_KEY, readUiBool } from "./workspace/uiSettings";
 
-export { NAVIGATION, documentTitleForRoute };
+export { documentTitleForRoute };
 export type { RoutePath };
 
-/**
- * 旧四页壳整体懒加载。此前 App.tsx 静态 import 了 ImportPage/DeliverPage/
- * SettingsPage 给旧壳用,rolldown 于是把 `WorkspaceShell` 里那三个 `lazy()` 的
- * 目标一起提升进首屏 chunk——产物里一条 dynamic import 都没有(R8 终审 M1)。
- * 现在旧壳自己也是一个 `lazy()` 目标,两个壳各自成块;**不要**从本文件静态
- * 引用 `./LegacyShell` 里的任何符号。
- */
-const LazyLegacyShell = lazy(() =>
-  import("./LegacyShell").then((module) => ({ default: module.AppShell })),
-);
-
 const BAND_MODES: readonly BandMode[] = ["story", "music", "journey", "destination", "template"];
-
-/** 车道 B(U-22)落盘的「首启引导已完成 / 已跳过」键;未合入前按普通设置键读,缺省 false。 */
-export const FIRST_RUN_DONE_KEY = "onboarding.first_run_done";
 
 function isBandMode(value: string): value is BandMode {
   return (BAND_MODES as readonly string[]).includes(value);
 }
 
 /**
- * 新壳下 `CommandPalette` 的 `onNavigate` 目标——命令集本身(§ CommandPalette.tsx)
- * 已经是面向新 IA 的动作字符串(`open-*`/`band-*`),这里只负责把它们翻译成
- * `dispatchWorkspace` 调用,不复用旧壳按 hash 路由的 `onNavigate`。
+ * `CommandPalette` 的 `onNavigate` 目标——命令集(§ CommandPalette.tsx)发的是
+ * 面向新 IA 的动作字符串(`open-*`/`band-*`),这里只负责把它们翻译成
+ * `dispatchWorkspace` 调用。
  */
 function navigateWorkspace(action: string): void {
   if (action === "open-import") {
@@ -62,6 +46,12 @@ function navigateWorkspace(action: string): void {
   }
 }
 
+/**
+ * R17:旧四页壳(`ui.workspace_v2 === false`)整个删除,`WorkspaceShell` 是唯一
+ * 主路径。这里只留文档标题跟着 hash 走这一件事——真正的旧 hash(`#/import`、
+ * `#/deliver`、`#/settings`、`#/review`)转接到抽屉/sheet 由
+ * `workspace/WorkspaceShell.tsx` 的 `drawerForLegacyHash` 自己处理。
+ */
 function useHashRoute(): RoutePath {
   const [route, setRoute] = useState<RoutePath>(() =>
     typeof window === "undefined" ? "/import" : routeFromHash(window.location.hash),
@@ -70,8 +60,6 @@ function useHashRoute(): RoutePath {
   useEffect(() => {
     const syncRoute = () => setRoute(routeFromHash(window.location.hash));
     window.addEventListener("hashchange", syncRoute);
-    // 空 hash 落到 `#/`:新壳把它当工作区本体(不弹任何抽屉);旧壳的 routeFromHash
-    // 对未知路径本就回落到 /import,两边都不需要 `#/import` 这个会弹导入抽屉的默认值。
     if (!window.location.hash) {
       window.history.replaceState(null, "", "#/");
     }
@@ -86,27 +74,9 @@ export default function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [doctorError, setDoctorError] = useState<string | undefined>();
   const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
-  // R10 U-23:恢复页之后不再叠首启弹窗——kill -9 后要连过「恢复页 → FIRST RUN」两道门。
-  // 恢复页真的出现过(自检报告到了但工作台还不能进)就记一笔;首启引导本次启动让位。
-  // `onboarding.first_run_done`(车道 B 的键,缺省当 false)为 true 时也不再弹。
-  const [recoveryShown, setRecoveryShown] = useState(false);
-  const [firstRunDone, setFirstRunDone] = useState(false);
-  const [workspaceV2, setWorkspaceV2] = useState(true);
-  // 旗的取值在 getSettings() 落地前一律不算数(R8 终审 L4):此前默认 true 会先渲染
-  // 一帧新壳,旗其实是 false 的用户于是每次启动都看见新壳闪一下再被换掉。落地前
-  // 渲染一块中性骨架——两个壳的专属元素一个都不出现。
+  // 旗的取值在 getSettings() 落地前一律不算数(R8 终审 L4):落地前渲染一块
+  // 中性骨架,不让任何"哪个壳"的线索先出现。
   const [settingsLoaded, setSettingsLoaded] = useState(false);
-
-  useEffect(() => {
-    // 设置 sheet 里的界面开关写完 ui.workspace_v2 后广播这个事件,让旗状态当场
-    // 更新——不这样做就得等下次重启才生效,不满足"不要求重启"。
-    const onFlagChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ workspaceV2: boolean }>).detail;
-      setWorkspaceV2(detail.workspaceV2);
-    };
-    window.addEventListener("tripcut:workspace-flag-changed", onFlagChanged);
-    return () => window.removeEventListener("tripcut:workspace-flag-changed", onFlagChanged);
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -129,19 +99,13 @@ export default function App() {
       && (!doctorReport.abnormal_exit || recoveryAcknowledged),
   );
 
-  useEffect(() => {
-    if (doctorReport && !workbenchReady) setRecoveryShown(true);
-  }, [doctorReport, workbenchReady]);
-
-  // 同一份 getSettings 结果既喂外观又判旗,不为了读一个键多发一次请求。
+  // 同一份 getSettings 结果既喂外观又喂 store 初始化,不为了读一个键多发一次请求。
   useEffect(() => {
     if (!workbenchReady) return;
     let active = true;
     const apply = (settings: SettingsMap) => {
       applyAppearanceSettings(settings);
       if (!active) return;
-      setWorkspaceV2(readUiBool(settings, WORKSPACE_FLAG_KEY));
-      setFirstRunDone(readUiBool(settings, FIRST_RUN_DONE_KEY));
       dispatchWorkspace({ type: "hydrate", settings });
       // 读失败也算"落地"——回落到前端默认值,总比一直卡在骨架上强。
       setSettingsLoaded(true);
@@ -170,7 +134,6 @@ export default function App() {
   }
 
   if (!settingsLoaded) {
-    // 中性骨架:没有顶栏、没有四步导航、没有媒体池——任何"哪个壳"的线索都不给。
     return (
       <div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台">
         正在准备工作台…
@@ -178,24 +141,10 @@ export default function App() {
     );
   }
 
-  // 旗默认开(ui.workspace_v2 不在 Rust defaults() 里,没写过就是前端默认值 "true",
-  // 见 UI_SETTING_DEFAULTS)。设置 sheet 的界面开关写回显式 "false" 才落到旧四页壳。
-  // R10 U-22:关过一次(暂时进入 / 向导 / 无事可讲)就把 App 级状态翻成 true,切壳不会让它再挂回来。
-  // R12 §1:新壳没有工具链弹窗了 —— 必需组件缺失只在顶栏下出横幅(WorkspaceShell 里的 ToolchainBanner);
-  // 弹窗只剩旧四页壳还在用。
-  const firstRunGuide = firstRunDone || recoveryShown ? null : <FirstRunGuide onDismiss={() => setFirstRunDone(true)} />;
-  if (workspaceV2) {
-    return (
-      <>
-        <WorkspaceShell />
-        <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
-      </>
-    );
-  }
   return (
-    <Suspense fallback={<div className="app-boot-skeleton" role="status" aria-busy="true" aria-label="正在载入工作台">正在准备工作台…</div>}>
-      <LazyLegacyShell route={route} />
-      {firstRunGuide}
-    </Suspense>
+    <>
+      <WorkspaceShell />
+      <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
+    </>
   );
 }

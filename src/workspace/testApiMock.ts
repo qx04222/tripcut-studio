@@ -121,3 +121,5 @@ export async function createTestApiMock(
 // R17 车道 B:自动升级——壳一挂载 UpdateHost 就桥接进度事件(要回解除函数);检查更新默认「已是最新」。
 SHELL_DEFAULTS.bridgeUpdateProgressEvents = () => () => undefined;
 SHELL_DEFAULTS.checkForUpdate = () => ({ available: false, version: "0.0.0", notes: "", pub_date: "" });
+// R17 车道 epmove:移到其他集——默认「一条也没动」;测试按需 mockImplementation 回旧归属。
+SHELL_DEFAULTS.moveClipsToEpisode = () => ({ moved: 0, skipped_missing: 0, from: [] });

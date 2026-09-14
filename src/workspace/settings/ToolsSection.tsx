@@ -16,6 +16,9 @@ const TOOL_PATHS = [
   { key: "tools.whisper_path", componentId: "whisper-cli", title: "转写组件的位置", help: "负责本地语音转写；留空时自动检测。", placeholder: "自动检测", readout: "转写组件" },
 ] as const;
 
+/** 排队命令本该毫秒级返回;超过这个时长还没回,先说一声,免得像没按到。 */
+export const RERUN_WATCHDOG_MS = 2_500;
+
 export function ToolsSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { settings, status, componentStatuses, busy, rollbackNotice } = form;
@@ -23,15 +26,22 @@ export function ToolsSection(): JSX.Element {
     readout === "视频处理组件" ? status?.ffmpeg : readout === "媒体信息组件" ? status?.ffprobe : status?.whisper.binary;
   const component = (id: string) => componentStatuses.find((entry) => entry.id === id);
   // R16 P2-5:换了更好的模型之后整集重算 —— 两条排队命令,耗时在文案里说清,结果 toast 说排了几条。
+  // A16-04(0.8.0 真机):按下没反应。任何一次按下都要有一条 toast:排了 n 条 / 没有要算的 /
+  // 失败白话 / 后端过时不回也说一声;两个按钮只在自己在跑时禁用,不再跟着别的操作的 busy 一起灰掉。
   const [rerunning, setRerunning] = useState<"moments" | "ocr" | null>(null);
   const rerun = async (kind: "moments" | "ocr") => {
+    const verb = kind === "moments" ? "计算" : "识别";
+    const what = kind === "moments" ? "时刻分" : "画面文字";
+    const title = kind === "moments" ? SETTINGS_ACTIONS.recomputeMoments : SETTINGS_ACTIONS.rerunOcr;
     setRerunning(kind);
+    const watchdog = setTimeout(() => showToast(`「${title}」还没回话,后台可能正忙;稍后看导入抽屉的「任务」页`, { tone: "neutral" }), RERUN_WATCHDOG_MS);
     try {
       const count = kind === "moments" ? await enqueueMomentsBackfill() : await enqueueOcrForEpisode();
-      const what = kind === "moments" ? "时刻分" : "画面文字";
-      showToast(count > 0 ? `已排队 ${count} 条素材重新${kind === "moments" ? "计算" : "识别"}${what},后台慢慢跑,不用等` : `没有需要重新${kind === "moments" ? "计算" : "识别"}的素材`, { tone: count > 0 ? "success" : "neutral" });
+      clearTimeout(watchdog);
+      showToast(count > 0 ? `已排队 ${count} 条素材重新${verb}${what},后台慢慢跑,不用等` : `没有需要重新${verb}的素材:每条素材都已有${what}`, { tone: count > 0 ? "success" : "neutral" });
     } catch (error) {
-      showToast(failureText(kind === "moments" ? SETTINGS_ACTIONS.recomputeMoments : SETTINGS_ACTIONS.rerunOcr, error), { tone: "danger" });
+      clearTimeout(watchdog);
+      showToast(failureText(title, error), { tone: "danger" });
     } finally {
       setRerunning(null);
     }
@@ -122,10 +132,10 @@ export function ToolsSection(): JSX.Element {
         </SettingsRow>
         <SettingsRow title="整集重算" help="换了更好的模型、或觉得之前算得不准时用;会把本集每条素材重新排队,几十条要跑几分钟到十几分钟,后台进行,不影响继续筛片。" className="settings-sheet-row--stack">
           <div className="settings-sheet-actions">
-            <Button size="sm" busy={rerunning === "moments"} disabled={busy || rerunning !== null} onClick={() => void rerun("moments")}>
+            <Button size="sm" busy={rerunning === "moments"} disabled={rerunning !== null} onClick={() => void rerun("moments")}>
               {SETTINGS_ACTIONS.recomputeMoments}
             </Button>
-            <Button size="sm" busy={rerunning === "ocr"} disabled={busy || rerunning !== null} onClick={() => void rerun("ocr")}>
+            <Button size="sm" busy={rerunning === "ocr"} disabled={rerunning !== null} onClick={() => void rerun("ocr")}>
               {SETTINGS_ACTIONS.rerunOcr}
             </Button>
           </div>

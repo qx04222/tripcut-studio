@@ -48,6 +48,16 @@ export function MonitorSeekBar({ status, inPoint, outPoint, onSeek }: MonitorSee
       if (box.timer !== null) window.clearTimeout(box.timer);
     };
   }, []);
+  // R17 playfix:拖动中的本地值只属于当前这条素材。播放器一离开就绪态(换素材 / 重开)就放掉,
+  // 还没发出去的节流 seek 也丢掉 —— 否则拇指停在 A 的 12.3 s,B 就绪后画的还是上一条的位置。
+  useEffect(() => {
+    if (ready) return;
+    const box = throttle.current;
+    if (box.timer !== null) window.clearTimeout(box.timer);
+    box.timer = null;
+    box.pending = null;
+    setScrubbing(null);
+  }, [ready]);
 
   const flush = useCallback(() => {
     const box = throttle.current;

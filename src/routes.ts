@@ -1,7 +1,10 @@
 /**
- * 旧四页壳的路由常量。单独成文件,好让 `App.tsx` 引用它们时**不必**静态引用
- * `LegacyShell.tsx`——后者是 `React.lazy()` 的目标,任何一条静态引用都会把整个
- * 旧壳(以及它拖着的 ImportPage/SelectPage/DeliverPage/SettingsPage)拉回首屏 chunk。
+ * R17 删除旧四页壳之后,这里只剩两件还在用的事:`routeFromHash`/`documentTitleForRoute`
+ * 让浏览器标签标题继续跟 `#/import`、`#/review`、`#/deliver`、`#/settings` 这几个旧 hash
+ * 走(`App.tsx` 用);真正的"打开哪个抽屉/sheet"转接逻辑不依赖本文件,由
+ * `workspace/WorkspaceShell.tsx` 自己的 `drawerForLegacyHash` 处理并把 hash 收回 `#/`。
+ * `NAVIGATION` 是旧壳侧边导航用过的文案表,旧壳删除后没有运行时引用了,留着是因为
+ * 上面两个函数的文案(`documentTitleForRoute`)与它保持同源,拆开容易漂移。
  */
 export type RoutePath = "/import" | "/review" | "/deliver" | "/settings";
 

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { deleteChapter, mergeChapters, renameChapter, undoStoryChange } from "../api";
+import { deleteChapter, mergeChapters, renameChapter } from "../api";
+import { takeStoryUndoSuffix, undoStoryChangeNoticing } from "./storyUndo";
 import type { ChapterActions } from "./BandChapterHeadActions";
 import type { BandChapter } from "./shotBandModel";
 import { failureText } from "./errorText";
@@ -94,8 +95,8 @@ export function useChapterActions({ chapters, readOnly }: { chapters: readonly B
         if (undone) return;
         undone = true;
         try {
-          await undoStoryChange();
-          showToast("已撤销并入", { tone: "neutral" });
+          await undoStoryChangeNoticing();
+          showToast(`已撤销并入${takeStoryUndoSuffix()}`, { tone: "neutral" });
         } catch (error) {
           showToast(failureText("撤销", error), { tone: "danger" });
         }

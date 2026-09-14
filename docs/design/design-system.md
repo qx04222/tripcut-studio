@@ -166,7 +166,35 @@ R9 从头到尾**没有改**下列 AX 名（`src/workspace/axNames.test.tsx` 与
 
 **新增的一处改名**（有意为之，记在这里免得被当成漏改）：缺失素材面板的按钮从旧壳的
 `选择新位置` 改成 `重新定位`（`ImportMissingTab`，规格 §4.1 明确要求；旧壳
-`MissingMediaPanel` 本体不受影响，仍叫旧名，等 R10 删旧壳时一起消失）。
+`MissingMediaPanel` 本体已随 R17 旧壳删除一起清理，见下一节）。
+
+## 6a. R17 旧壳删除:删了什么、`ui.workspace_v2` 现在的语义
+
+R12/R13 起新壳（PipelineRail / HomeScreen / SettingsSheet…）已是唯一主路径，旧壳
+只靠「设置 → 性能 →「切回旧界面」」热切换保留。R17 把旧壳整体删除：
+
+- **删除的文件**:`src/LegacyShell.tsx`（旧四页壳本体）、`src/FirstRunGuide.tsx`
+  （四页首启弹窗）、`src/SettingsPage.tsx`（旧设置页;纯逻辑早已复制进
+  `src/workspace/settings/settingsModel.ts`，新壳从未依赖这份原件）、
+  `src/ImportPage.tsx`、`src/DeliverPage.tsx`、`src/SidebarSearch.tsx`、
+  `src/SetupWizard.tsx`、`src/MissingMediaPanel.tsx`（只被 `ImportPage` 引用），
+  以及它们各自的专属测试。`src/Storyboard.tsx` 里镜头卡的「上移/下移」按钮
+  一并删除（章内排序保留拖拽,`moveStoryItemWithinChapter` 纯函数仍被
+  `workspace/useBandDrag.ts` 复用）。`CommandPalette` 的 `"legacy"` 变体
+  （旧壳专用的四条 hash 命令）与设置 → 性能分区的「切回旧界面」开关一并删除。
+- **保留但改变语义的键**:`ui.workspace_v2` 仍在 `UI_SETTING_DEFAULTS` 白名单里
+  （旧库里写过 `"false"` 的值读不出错），但不再被任何分支逻辑读取——`App.tsx`
+  永远渲染 `WorkspaceShell`。
+- **旧 hash 路由不受影响**:`#/import`、`#/deliver`、`#/settings`、`#/review`
+  继续转接到新壳对应的抽屉/sheet，这条逻辑本来就在
+  `src/workspace/WorkspaceShell.tsx`（`drawerForLegacyHash`/`isLegacyHash`）里
+  自成一体，从未依赖被删除的旧壳文件；`src/routes.ts` 保留下来，现在只负责
+  浏览器标签标题跟着 hash 走。
+- **未拆分的遗留**:`src/SelectPage.tsx` 里的 `SelectPage()` 组件本体不再有任何
+  运行时引用（原来唯一的调用点 `LegacyShell.tsx` 已删），但该文件同时导出
+  `RatingAction` 类型与多个纯函数，被 `workspace/*` 以 `import type`/直接引用的
+  方式复用，故整份文件本轮未拆分——`SelectPage()` 本体作为死代码留在文件里，
+  交由后续车道决定是否单独拆出共享逻辑再删。
 
 ### R16 冻结的实体交互规则（规格 §1，`docs/superpowers/specs/2026-09-14-r16-human-ui-lowspec-design.md`）
 
@@ -277,7 +305,7 @@ R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道�
 | `PipelineRail` | `src/workspace/PipelineRail.tsx` | `step: PipelineStep`，`stepCounts`，`onStepClick(step)` | 顶栏中央集切换器右侧四步导航：`nav「流水线」`，四颗 `button「第 n 步 导入/挑选/排列/导出」`（计数不进 AX 名），`aria-current="step"` 标记当前步，完成打勾，1280px 以下只留数字与勾。点击调 `pipelineActions.focusPipelineStep`（导入抽屉 / 聚焦媒体池 / 聚焦镜头带 / 导出抽屉）。数据来自 `usePipeline.ts`（`pipelineModel.ts` 纯函数 `derivePipeline`），与首启四步卡、空态提示同一份推导。 |
 | `PipelineHint` | `src/workspace/PipelineHint.tsx` | `step`，`seen: boolean`，`onDismiss()` | 导航条下方每步首次进入时出现的一条可关提示（`status「第 n 步提示」` + `button「知道了」`），写 `pipeline.hint_seen.n`（Rust `ONBOARDING_FLAG_KEYS` 白名单）。 |
 | `ToolchainBanner` | `src/workspace/ToolchainBanner.tsx` | `requiredToolsMissing: boolean`，`onInstall()`，`onDismiss()` | 替代旧「本机准备」工具链模态：只在 ffmpeg/ffprobe 缺失时顶栏下出现一条非模态横幅（`region「视频处理组件缺失」` + `button「去安装」「关闭提示」`），关闭只对本次启动生效。 |
-| `Toast` / `toastStore` | `src/workspace/ui/Toast.tsx`、`src/workspace/ui/toastStore.ts` | `message`，`tone: "status"\|"danger"`，`action?: {label, onClick}`，`durationMs`（3–5 s） | 套件新增的顶部居中提示条，最多同时 1 条，`role=status`（danger 时 `role=alert`）；自动挑选结果、撤销、拖排、忽略缺口、排入完成、导出完成/失败全部改走它，替代镜头带底部原来的小字提示。 |
+| `Toast` / `toastStore` | `src/workspace/ui/Toast.tsx`、`src/workspace/ui/toastStore.ts` | `message`，`tone: "status"\|"danger"`，`action?: {label, onClick}`，`actions?: ToastAction[]`（R17：主动作之外的次级按钮，≤2 个），`sticky?: boolean`（R17：不自动消失，只能点按钮或 × 关），`durationMs`（3–5 s，sticky 时忽略） | 套件新增的顶部居中提示条，最多同时 1 条，`role=status`（danger 时 `role=alert`）；自动挑选结果、撤销、拖排、忽略缺口、排入完成、导出完成/失败全部改走它，替代镜头带底部原来的小字提示。 |
 | `arrangeSelectedSegments` / `undoArrange` / `skipChapter`（`useBandArrange.ts`） | `src/workspace/useBandArrange.ts` + Rust `core::arrange.rs` | — | 「一键排入」把本集精选段按章节（有章按章、无章按拍摄时间）排成 `story_order`，只写既有列、可撤销；「这章够了」把 0 镜章标记跳过，不算缺口。自动挑选完成后默认已排入。 |
 | `MonitorControls` 「连播」开关 | `src/workspace/MonitorControls.tsx` | `autoAdvance: boolean`，`onToggle()` | 工具条 Spacer 之后、全屏之前，`switch「连播」`（新名），写 `ui.player.auto_advance`，**默认改为 false**（R11 默认是自动播完接力，本轮改为需要显式打开）。 |
 | 「播放速度」菜单 | `src/workspace/MonitorControls.tsx` + `ui/Menu` | — | 点「×1」按钮弹 `menu「播放速度」`，`menuitem「速度 ×0.5」「速度 ×1」「速度 ×2」「速度 ×4」`（新名），选中即调原生 `player_set_speed`；按钮加 `aria-haspopup="menu"`/`aria-expanded`。 |
@@ -370,6 +398,7 @@ R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道�
 | 检查器标签段 | `src/workspace/InspectorTags.tsx` | button「删除标签 <文本>」（仅 user 标签）；textbox「新标签」；button「确认添加标签」 | 用户 chip 带 ×，AI chip 无 ×；AI 标签不可删——删除请求返回一句解释（见 §3 P2-10 限制）。 |
 | 设置 › 播放与导出补全 | `src/workspace/settings/PlaybackSection.tsx` | button「清除」（aria-label「清除导出文件夹」）；button「恢复默认布局」 | 「清除」记过才出现；「恢复默认布局」写 `ui.pane.*` 五键默认，换 key 重挂三栏。 |
 | 设置 › 关于补全 | `src/workspace/settings/AboutSection.tsx` | button「重置新手引导」；button「复制诊断信息」 | 「重置新手引导」连四步提示一起清；「复制诊断信息」不含任何绝对路径（`stripPaths` 白名单前缀）。 |
+| 素材菜单「移到其他集…」+ 目标集菜单（R17 车道 epmove） | `src/workspace/clipMenuModel.ts`、`EpisodeMoveMenu.tsx`、`src/styles/workspace/epmove-r17.css` | menuitem「移到其他集」（可见文案多选「移到其他集(n 条)…」）；menu「选择目标集」；每行 menuitem AX 名 = 集标题 | 「加入镜头带」之后一项；点开小菜单列出库里的集：「集名 · 第 n 步 / 还没开始 · m 条素材」，素材现在所在的集灰掉并标「当前集」；选中即移动（一次 `move_clips_to_episode`），toast「已把 n 条移到「集名」」+「撤销」5 秒，同一闭包进 ⌘Z 栈（标签「移到其他集(n 条)」）；只有一集时菜单项禁用、文案带「(先在首页新建一集)」；只读历史集里禁用。预览截图 `34-move-to-episode`。 |
 | 设置 › 性能新控件（车道 perf） | `src/workspace/settings/PerformanceSection.tsx` | combobox「省电 / 低配模式」（自动 / 开 / 关）；combobox「预览小文件最多占」（5/10/20/50/100 GB）；switch「只在我不用电脑时做后台工作」 | 已有名（「后台同时处理几条」「预览用小文件」「内存档位」「切回旧界面」）未动。 |
 
 ### R16 新增 AX 名一览（冻结名一个未动）
@@ -399,3 +428,19 @@ R9 §6、R10 §8 的冻结清单本轮未变；以下是 R11 三条功能车道�
 **未改的冻结名**：本轮三条前端车道（wire/chapters/perf）新增控件均为新增，未修改 §6 冻结清单与
 R10–R14 各节记录的任何既有 AX 名，仅有一处车道内部改名（P1-6「继续」→「继续后台任务」，`a4488c7`，
 理由见上表状态条一行）。
+
+## 16. R17 自动更新（车道 updater/updateui）
+
+> 依据：`docs/superpowers/specs/2026-09-14-r16-human-ui-lowspec-design.md` R17 入口与 `.superpowers/sdd/r17/lane-common.md`。
+> 默认开启（业主 2026-09-14：「希望默认开启自动更新」）。
+
+| 组件 / 位置 | 文件 | AX 名 / 文案 | 行为 |
+|---|---|---|---|
+| 更新宿主（无 UI 壳） | `src/workspace/update/UpdateHost.tsx`、`updateStore.ts`、`updateModel.ts` | toast：「有新版本 x · 现在更新 / 稍后 / 跳过这个版本」（仅「先问我再下载」开着时）；「更新已下载 x · 重启完成更新 / 稍后 / 跳过这个版本」；「更新没成功：<白话原因> · 打开下载页」 | 启动 30 s 后检查一次、每天最多一次；后台静默下载；三条 toast 都 `sticky` 且不挡操作；离线静默（`offline` 结果不当作「已是最新」）。 |
+| 顶栏「新版本」提醒(齿轮左侧) | `src/workspace/update/UpdateTopChip.tsx` | button「新版本 x」(点击开始下载)/ status「正在下载更新 n%」/ button「重启完成更新」 | 业主 2026-09-14:顶栏最右、设置旁要有新版本提醒;平时不渲染。设置图标同日由「小太阳」改为齿轮(`icons.tsx` `settings`)。 |
+| 状态条更新短语 | `src/workspace/update/UpdateStatusChip.tsx` | 「正在下载更新 42%」（进度底色，不可点）；button「更新已下载 · 重启完成更新」 | 用户点「稍后」后 toast 收起，状态条留一枚可点的短语。 |
+| 设置 › 关于 › 应用更新 | `src/workspace/settings/AboutUpdate.tsx` | switch「自动更新」（默认开）；switch「有新版本时先问我再下载」；button「检查更新」（结果内联：「已是最新 · 上次检查 x」/「正在检查更新…」）；button「查看更新说明」；region aria-label「更新说明」；button「打开下载页」 | 设置键 `updater.auto_update` / `updater.ask_before_download` / `updater.last_check` / `updater.skipped_version`。 |
+| 白话失败原因 | `updateModel.ts` | 「网络连不上更新服务器」「更新包没通过安全校验，已拒绝安装」「磁盘空间不够或没有写入权限」「遇到了意外错误」 | 替换前一定先校验签名；失败永远给「打开下载页」。 |
+
+- Rust 侧：`src-tauri/src/update_flow.rs`，命令 `check_for_update` / `download_update` / `download_and_install` / `install_staged_update` / `restart_to_update` / `get_auto_update_plan` / `get_update_status`；事件 `tripcut:update-progress`；替换在 `RunEvent::Exit` 时完成。
+- 实验室：`TRIPCUT_UPDATER_ENDPOINT`（允许 loopback http）+ `TRIPCUT_UPDATER_SELFTEST=1`。

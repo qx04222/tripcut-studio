@@ -194,8 +194,8 @@ describe("U-11:检查器「精选段」区", () => {
     await act(async () => {
       fireEvent.click(within(card).getByRole("button", { name: "复播精选段 1" }));
     });
-    await waitFor(() => expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 1.5 }));
-    expect(apiMocks.playerCommand).toHaveBeenLastCalledWith({ type: "play" });
+    await waitFor(() => expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 1.5 }, expect.anything()));
+    expect(apiMocks.playerCommand).toHaveBeenLastCalledWith({ type: "play" }, expect.anything());
 
     apiMocks.listSelectSegments.mockResolvedValue([]);
     await act(async () => {

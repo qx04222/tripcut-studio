@@ -1,0 +1,7 @@
+/* R17 车道 exportfix ⑤:交付结果卡里的 ffmpeg 建议行(只在失败 note 说 ffmpeg 不认编码器 / 选项时出现)。 */
+.deliver-result .deliver-result-tool-hint {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}

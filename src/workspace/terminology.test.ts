@@ -11,7 +11,7 @@ import { TERMINOLOGY_EXCEPTIONS } from "./terminology.allowlist";
  * 起头的片段),注释行跳过;例外逐条写在 `terminology.allowlist.ts` 里并注明理由。
  */
 // R13 真机 Y-11:切集弹层的集列表与封存控件来自 src/EpisodePanel.tsx(EpisodeSwitcher 复用),一并扫。
-const ROOTS = ["src/workspace", "src/EpisodePanel.tsx", "src/TechCheckPanel.tsx", "src/AnalysisPanel.tsx", "src/helpContent.ts", "src/toolchainSteps.ts", "src/FirstRunGuide.tsx"];
+const ROOTS = ["src/workspace", "src/EpisodePanel.tsx", "src/TechCheckPanel.tsx", "src/AnalysisPanel.tsx", "src/helpContent.ts", "src/toolchainSteps.ts"];
 const JARGON = new RegExp(
   [
     // R11 那批

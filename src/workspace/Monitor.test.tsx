@@ -215,7 +215,7 @@ describe("Monitor", () => {
     await act(async () => {
       fireEvent.change(screen.getByRole("slider", { name: "播放位置" }), { target: { value: "30" } });
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 }, expect.anything());
     expect(apiMocks.playerOpen).toHaveBeenCalledTimes(1);
   });
 
@@ -227,7 +227,7 @@ describe("Monitor", () => {
     await act(async () => {
       window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" }, expect.anything());
     // 状态翻成播放中后再来一次 → pause。
     apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, paused: false });
     await act(async () => {
@@ -238,7 +238,7 @@ describe("Monitor", () => {
     await act(async () => {
       window.dispatchEvent(new CustomEvent("tripcut:toggle-playback"));
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "pause" }, expect.anything());
     // 播到尾:先 seek 0 再 play。
     apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, pos: 60, duration: 60, paused: true });
     await act(async () => {
@@ -263,7 +263,7 @@ describe("Monitor", () => {
     await act(async () => {
       window.dispatchEvent(new CustomEvent("tripcut:seek-ratio", { detail: { ratio: 0.5 } }));
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 }, expect.anything());
     apiMocks.playerCommand.mockClear();
     await act(async () => {
       window.dispatchEvent(new CustomEvent("tripcut:seek-ratio", { detail: { ratio: "x" } }));
@@ -291,7 +291,7 @@ describe("Monitor", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "播放" }));
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" }, expect.anything());
     expect(apiMocks.playerOpen).toHaveBeenCalledTimes(1);
   });
 

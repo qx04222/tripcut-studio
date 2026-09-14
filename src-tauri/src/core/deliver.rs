@@ -16,6 +16,7 @@ use serde_json::Value;
 use super::contact_sheet;
 use super::error::{CoreError, Result};
 use super::jobs::{self, Job};
+use super::media_tools::{self, H264Encoder};
 use super::platform;
 
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
@@ -1230,12 +1231,8 @@ pub(crate) fn export_completion_notice(
 }
 
 pub fn run_export_package(connection: &mut Connection, job: &Job) -> Result<()> {
-    let ffmpeg = super::settings::configured_executable(
-        connection,
-        super::settings::FFMPEG_PATH_KEY,
-        "FFMPEG_PATH",
-        "ffmpeg",
-    )?;
+    // R17 exportfix:配置的 ffmpeg 缺 VideoToolbox 时改用包内那份(见 settings::export_ffmpeg)。
+    let ffmpeg = super::settings::export_ffmpeg(connection)?;
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
     run_export_package_with(connection, job, &ffmpeg, &ffprobe)
 }
@@ -2329,18 +2326,156 @@ fn export_clip(
             Err(error) if cancellation.load(Ordering::SeqCst) => Err(error),
             Err(remux_error) if clip.is_vfr => {
                 remove_file_if_exists(output_path)?;
-                transcode_whole_vfr(ffmpeg, clip, output_path, cancellation).map(|()| {
-                    Some(format!(
-                        "VFR 原样封装失败，已转码保留时间轴：{remux_error}"
-                    ))
+                transcode_whole_vfr(ffmpeg, clip, output_path, cancellation).map(|fallback_note| {
+                    join_notes(
+                        Some(format!("VFR 原样封装失败，已转码保留时间轴：{remux_error}")),
+                        fallback_note,
+                    )
                 })
             }
             Err(error) => Err(error),
         };
     }
 
-    transcode_select_segment(ffmpeg, clip, output_path, cancellation)?;
-    verify_segment_pts(ffmpeg, ffprobe, clip, output_path, cancellation)
+    // R17 exportfix ④:入点正好落在关键帧上的精选段先试 `-c copy` 帧精确 remux(和整条收藏
+    // 一样不重编码),回读 PTS / 首尾帧指纹仍由 verify_segment_pts 把关;对不上就删掉重来,
+    // 走转码。B 帧源的尾部常常会因为参考帧被 `-t` 截掉而过不了指纹,那就是「必须转码」的情形。
+    if keyframe_aligned_in_point(ffprobe, clip, cancellation)? {
+        let remuxed = remux_select_segment(ffmpeg, clip, output_path, cancellation)
+            .and_then(|()| verify_segment_pts(ffmpeg, ffprobe, clip, output_path, cancellation));
+        match remuxed {
+            Ok(note) => return Ok(note),
+            Err(error) if cancellation.load(Ordering::SeqCst) => return Err(error),
+            Err(error) => {
+                tracing::info!(segment_id = ?clip.segment_id, %error, "keyframe-aligned remux rejected; transcoding instead");
+                remove_file_if_exists(output_path)?;
+            }
+        }
+    }
+    let fallback_note = transcode_select_segment(ffmpeg, clip, output_path, cancellation)?;
+    let pts_note = verify_segment_pts(ffmpeg, ffprobe, clip, output_path, cancellation)?;
+    Ok(join_notes(fallback_note, pts_note))
+}
+
+/// 入点是否正好是源片的一个关键帧:`-skip_frame nokey` 只解关键帧,区间从入点前一点读到
+/// 入点后两帧,任一关键帧的 best_effort_timestamp == in_ticks 即算对齐。探测失败按「不对齐」
+/// 处理(走原来的转码路,不让探测本身拦住导出)。
+fn keyframe_aligned_in_point(
+    ffprobe: &OsStr,
+    clip: &ExportClip,
+    cancellation: &AtomicBool,
+) -> Result<bool> {
+    let Some(in_ticks) = clip.in_ticks else {
+        return Ok(false);
+    };
+    let start = clip_start_seconds(clip)?;
+    let frame = clip_frame_seconds(clip);
+    let args = [
+        OsString::from("-v"),
+        OsString::from("error"),
+        OsString::from("-select_streams"),
+        OsString::from("v:0"),
+        OsString::from("-skip_frame"),
+        OsString::from("nokey"),
+        OsString::from("-read_intervals"),
+        OsString::from(source_probe_interval((start - 0.5).max(0.0), start + frame * 2.0)),
+        OsString::from("-show_entries"),
+        OsString::from("frame=best_effort_timestamp,key_frame"),
+        OsString::from("-of"),
+        OsString::from("json"),
+        OsString::from(&clip.source_path),
+    ];
+    let output = execute_with_cancel(ffprobe, &args, TOOL_TIMEOUT, cancellation)
+        .map_err(command_io_error)?;
+    if !output.success {
+        return Ok(false);
+    }
+    Ok(parse_keyframe_alignment(&output.stdout, in_ticks))
+}
+
+fn parse_keyframe_alignment(bytes: &[u8], in_ticks: i64) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    value
+        .get("frames")
+        .and_then(Value::as_array)
+        .is_some_and(|frames| {
+            frames.iter().any(|frame| {
+                json_i64(frame.get("best_effort_timestamp")) == Some(in_ticks)
+                    && json_i64(frame.get("key_frame")).unwrap_or(1) == 1
+            })
+        })
+}
+
+/// 关键帧对齐的精选段 remux 参数:`-ss` 在 `-i` 前(按关键帧 seek,入点本身就是关键帧)、
+/// `-t` 截到出点、`-c copy`;不带任何编码器参数。
+fn select_segment_copy_args(clip: &ExportClip, output_path: &Path) -> Result<Vec<OsString>> {
+    let start = clip_start_seconds(clip)?;
+    let duration = clip_duration_seconds(clip);
+    if duration <= 0.0 {
+        return Err(CoreError::Export(format!(
+            "精选段 {} 时长无效",
+            clip.segment_id.unwrap_or_default()
+        )));
+    }
+    let mut args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-loglevel"),
+        OsString::from("error"),
+        OsString::from("-nostdin"),
+        OsString::from("-ss"),
+        OsString::from(format!("{start:.9}")),
+        OsString::from("-i"),
+        OsString::from(&clip.source_path),
+        OsString::from("-t"),
+        OsString::from(format!("{duration:.9}")),
+        OsString::from("-map"),
+        OsString::from("0:v:0"),
+        OsString::from("-map"),
+        OsString::from("0:a:0?"),
+        OsString::from("-c"),
+        OsString::from("copy"),
+    ];
+    if clip
+        .codec
+        .as_deref()
+        .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"))
+    {
+        args.extend([OsString::from("-tag:v"), OsString::from("hvc1")]);
+    }
+    args.extend([
+        OsString::from("-fps_mode"),
+        OsString::from("passthrough"),
+        OsString::from("-avoid_negative_ts"),
+        OsString::from("make_zero"),
+        OsString::from("-movflags"),
+        OsString::from("+faststart"),
+        OsString::from("-f"),
+        OsString::from("mp4"),
+        OsString::from("-y"),
+        output_path.as_os_str().to_owned(),
+    ]);
+    Ok(args)
+}
+
+fn remux_select_segment(
+    ffmpeg: &OsStr,
+    clip: &ExportClip,
+    output_path: &Path,
+    cancellation: &AtomicBool,
+) -> Result<()> {
+    let args = select_segment_copy_args(clip, output_path)?;
+    run_media_command(ffmpeg, &args, EXPORT_TIMEOUT, cancellation, "精选段关键帧 remux")?;
+    validate_nonempty(output_path, "精选段")
+}
+
+fn join_notes(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first};{second}")),
+        (first, None) => first,
+        (None, second) => second,
+    }
 }
 
 fn transcode_whole_vfr(
@@ -2348,26 +2483,24 @@ fn transcode_whole_vfr(
     clip: &ExportClip,
     output_path: &Path,
     cancellation: &AtomicBool,
-) -> Result<()> {
-    let args = whole_vfr_args(clip, output_path);
-    run_media_command(
-        ffmpeg,
-        &args,
-        EXPORT_TIMEOUT,
-        cancellation,
-        "VFR 整条 VideoToolbox 转码",
-    )?;
+) -> Result<Option<String>> {
+    let encoder = media_tools::encoder_caps(ffmpeg).h264_encoder();
+    let args = whole_vfr_args(clip, output_path, encoder);
+    let label = format!("VFR 整条 {} 转码", encoder.label());
+    run_media_command(ffmpeg, &args, EXPORT_TIMEOUT, cancellation, &label)?;
     validate_nonempty(output_path, "VFR 精选片段")
     .map_err(|error| {
         CoreError::Export(format!(
-            "VFR 整条 VideoToolbox 转码失败（已允许系统软件编码）：{error}"
+            "{label}失败（已允许系统软件编码）：{error}"
         ))
-    })
+    })?;
+    Ok(encoder.fallback_note())
 }
 
 fn whole_vfr_args(
     clip: &ExportClip,
     output_path: &Path,
+    encoder: H264Encoder,
 ) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-hide_banner"),
@@ -2380,13 +2513,11 @@ fn whole_vfr_args(
         OsString::from("0:v:0"),
         OsString::from("-map"),
         OsString::from("0:a:0?"),
-        OsString::from("-c:v"),
-        OsString::from("h264_videotoolbox"),
-        OsString::from("-allow_sw"),
-        OsString::from("1"),
-        OsString::from("-b:v"),
-        OsString::from(export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS)),
     ];
+    args.extend(media_tools::h264_encoder_args(
+        encoder,
+        &export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS),
+    ));
     args.extend([
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
@@ -2411,7 +2542,11 @@ fn whole_vfr_args(
 /// Pure arg builder for the frame-accurate select-segment transcode, pulled
 /// out of `transcode_select_segment` so the negative LUT assertion (and any
 /// other arg-shape test) doesn't need to spawn a real ffmpeg.
-fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<Vec<OsString>> {
+fn select_segment_ffmpeg_args(
+    clip: &ExportClip,
+    output_path: &Path,
+    encoder: H264Encoder,
+) -> Result<Vec<OsString>> {
     let start = clip_start_seconds(clip)?;
     let duration = clip_duration_seconds(clip);
     if duration <= 0.0 {
@@ -2420,7 +2555,7 @@ fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<V
             clip.segment_id.unwrap_or_default()
         )));
     }
-    Ok(vec![
+    let mut args = vec![
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
         OsString::from("error"),
@@ -2436,12 +2571,12 @@ fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<V
         OsString::from("0:v:0"),
         OsString::from("-map"),
         OsString::from("0:a:0?"),
-        OsString::from("-c:v"),
-        OsString::from("h264_videotoolbox"),
-        OsString::from("-allow_sw"),
-        OsString::from("1"),
-        OsString::from("-b:v"),
-        OsString::from(export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS)),
+    ];
+    args.extend(media_tools::h264_encoder_args(
+        encoder,
+        &export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS),
+    ));
+    args.extend([
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-c:a"),
@@ -2458,16 +2593,19 @@ fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<V
         OsString::from("mp4"),
         OsString::from("-y"),
         output_path.as_os_str().to_owned(),
-    ])
+    ]);
+    Ok(args)
 }
 
+/// 帧精确转码;返回值是给用户看的 note(只有兼容编码兜底时才有)。
 fn transcode_select_segment(
     ffmpeg: &OsStr,
     clip: &ExportClip,
     output_path: &Path,
     cancellation: &AtomicBool,
-) -> Result<()> {
-    let args = select_segment_ffmpeg_args(clip, output_path)?;
+) -> Result<Option<String>> {
+    let encoder = media_tools::encoder_caps(ffmpeg).h264_encoder();
+    let args = select_segment_ffmpeg_args(clip, output_path, encoder)?;
     run_media_command(
         ffmpeg,
         &args,
@@ -2475,7 +2613,8 @@ fn transcode_select_segment(
         cancellation,
         "精选段帧精确转码",
     )?;
-    validate_nonempty(output_path, "精选段")
+    validate_nonempty(output_path, "精选段")?;
+    Ok(encoder.fallback_note())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2557,7 +2696,7 @@ fn verify_segment_pts(
     let output = execute_with_cancel(ffprobe, &args, TOOL_TIMEOUT, cancellation)
         .map_err(command_io_error)?;
     if !output.success {
-        return Err(command_failure("ffprobe 精选段 PTS 回读", &output));
+        return Err(command_failure("ffprobe 精选段 PTS 回读", ffprobe, &output));
     }
     let frame_seconds = clip_frame_seconds(clip);
     let bounds = parse_pts_bounds(&output.stdout, frame_seconds)?;
@@ -2606,7 +2745,7 @@ fn probe_source_tick_bounds(
     let source_output = execute_with_cancel(ffprobe, &source_args, TOOL_TIMEOUT, cancellation)
         .map_err(command_io_error)?;
     if !source_output.success {
-        return Err(command_failure("ffprobe 源片 PTS 边界回读", &source_output));
+        return Err(command_failure("ffprobe 源片 PTS 边界回读", ffprobe, &source_output));
     }
     parse_tick_bounds(&source_output.stdout, requested_in, requested_out)
 }
@@ -2800,7 +2939,7 @@ fn probe_boundary_fingerprint(
     let output = execute_with_cancel(ffmpeg, &args, TOOL_TIMEOUT, cancellation)
         .map_err(command_io_error)?;
     if !output.success {
-        return Err(command_failure(&format!("{label}内容指纹提取"), &output));
+        return Err(command_failure(&format!("{label}内容指纹提取"), ffmpeg, &output));
     }
     if output.stdout.len() != 9 * 8 {
         return Err(CoreError::Export(format!(
@@ -3154,17 +3293,16 @@ fn transcode_rough_cut(
             None => probe_has_audio(ffprobe, &item.path, cancellation),
         })
         .collect::<Result<Vec<_>>>()?;
-    let args = rough_cut_args(clips, &audio_presence, output_path, canvas);
-    run_media_command(
-        ffmpeg,
-        &args,
-        EXPORT_TIMEOUT,
-        cancellation,
-        "参考粗剪 VideoToolbox 转码",
-    )
+    let encoder = media_tools::encoder_caps(ffmpeg).h264_encoder();
+    if let Some(note) = encoder.fallback_note() {
+        tracing::warn!(%note, "rough cut falls back to a software encoder");
+    }
+    let args = rough_cut_args(clips, &audio_presence, output_path, canvas, encoder);
+    let label = format!("参考粗剪 {} 转码", encoder.label());
+    run_media_command(ffmpeg, &args, EXPORT_TIMEOUT, cancellation, &label)
     .map_err(|error| {
         CoreError::Export(format!(
-            "参考粗剪 VideoToolbox 转码失败（已允许系统软件编码）：{error}"
+            "{label}失败（已允许系统软件编码）：{error}"
         ))
     })?;
     validate_nonempty(output_path, "参考粗剪")
@@ -3190,6 +3328,7 @@ fn rough_cut_args(
     audio_presence: &[bool],
     output_path: &Path,
     canvas: &ExportCanvas,
+    encoder: H264Encoder,
 ) -> Vec<OsString> {
     // R10 R-03:画布来自本次交付解析出的 `ExportCanvas`(竖版 1080×1920 等),
     // 不再写死 1920×1080——否则竖版交付的参考粗剪会变成横片两侧黑边。
@@ -3256,15 +3395,15 @@ fn rough_cut_args(
         OsString::from("[vout]"),
         OsString::from("-map"),
         OsString::from("[aout]"),
-        OsString::from("-c:v"),
-        OsString::from("h264_videotoolbox"),
-        OsString::from("-allow_sw"),
-        OsString::from("1"),
-        OsString::from("-b:v"),
-        OsString::from(export_video_bitrate(
+    ]);
+    args.extend(media_tools::h264_encoder_args(
+        encoder,
+        &export_video_bitrate(
             &clips.iter().map(|item| &item.clip).collect::<Vec<_>>(),
             ROUGH_CUT_BITRATE_CEILING_BPS,
-        )),
+        ),
+    ));
+    args.extend([
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-c:a"),
@@ -3296,7 +3435,7 @@ fn probe_has_audio(ffprobe: &OsStr, path: &Path, cancellation: &AtomicBool) -> R
     let output = execute_with_cancel(ffprobe, &args, TOOL_TIMEOUT, cancellation)
         .map_err(command_io_error)?;
     if !output.success {
-        return Err(command_failure("ffprobe 音轨探测", &output));
+        return Err(command_failure("ffprobe 音轨探测", ffprobe, &output));
     }
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
@@ -3311,7 +3450,7 @@ fn run_media_command(
     let output = execute_with_cancel(executable, args, timeout, cancellation)
         .map_err(command_io_error)?;
     if !output.success {
-        return Err(command_failure(label, &output));
+        return Err(command_failure(label, executable, &output));
     }
     Ok(())
 }
@@ -3391,13 +3530,16 @@ fn command_io_error(error: CommandError) -> CoreError {
     }
 }
 
-fn command_failure(label: &str, output: &CommandOutput) -> CoreError {
+/// 「<label>失败(退出码 n,ffmpeg 7.1.5 (…/MacOS/ffmpeg)):…」—— 带上是哪份工具
+/// (只留父目录名 + 文件名,不泄露全路径),下次截图就能看出解析到了哪份 ffmpeg(R17 exportfix)。
+fn command_failure(label: &str, executable: &OsStr, output: &CommandOutput) -> CoreError {
     CoreError::Export(format!(
-        "{label}失败（退出码 {}）：{}",
+        "{label}失败（退出码 {}，{}）：{}",
         output
             .code
             .map(|code| code.to_string())
             .unwrap_or_else(|| "signal".to_owned()),
+        media_tools::describe_tool(executable),
         stderr_summary(&output.stderr)
     ))
 }
@@ -4531,7 +4673,7 @@ mod tests {
             path: PathBuf::from("selected.mp4"),
         }];
         let canvas = ExportCanvas::from(&douyin_portrait_platform_info());
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &canvas);
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &canvas, H264Encoder::VideoToolbox);
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5553,6 +5695,7 @@ mod tests {
             &fake_ffmpeg,
             r#"#!/bin/sh
 case " $* " in
+  *" -encoders "*) echo " V....D h264_videotoolbox    VideoToolbox H.264 Encoder"; exit 0 ;;
   *" -c copy "*) exit 9 ;;
   *" h264_videotoolbox "*) exit 8 ;;
   *) exit 7 ;;
@@ -5583,17 +5726,60 @@ esac
         assert!(!output.exists());
     }
 
+    /// R17 exportfix:失败 note 带上是哪份 ffmpeg(版本 + 父目录名/文件名),全路径不进文案。
+    #[cfg(unix)]
+    #[test]
+    fn command_failure_names_the_ffmpeg_build_without_leaking_the_full_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let macos = directory.path().join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let fake_ffmpeg = macos.join("ffmpeg");
+        std::fs::write(
+            &fake_ffmpeg,
+            r#"#!/bin/sh
+case " $* " in
+  *" -version "*) echo "ffmpeg version 7.1.5 Copyright (c) 2000-2026 the FFmpeg developers"; exit 0 ;;
+  *" -encoders "*) exit 0 ;;
+  *) echo "Unrecognized option 'allow_sw'. Error splitting the argument list: Option not found" >&2; exit 8 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_ffmpeg).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_ffmpeg, permissions).unwrap();
+        let clip = export_clip_fixture("dji.mp4", 0, 3_000, 1, 1_000);
+
+        let error = run_media_command(
+            fake_ffmpeg.as_os_str(),
+            &select_segment_ffmpeg_args(&clip, Path::new("out.mp4"), H264Encoder::VideoToolbox).unwrap(),
+            EXPORT_TIMEOUT,
+            &AtomicBool::new(false),
+            "精选段帧精确转码",
+        )
+        .unwrap_err();
+
+        let note = failure_note(&error);
+        assert!(
+            note.starts_with("精选段帧精确转码失败（退出码 8，ffmpeg 7.1.5 (…/MacOS/ffmpeg)）：Unrecognized option 'allow_sw'"),
+            "{note}"
+        );
+        assert!(!note.contains(&directory.path().to_string_lossy().into_owned()), "{note}");
+    }
+
     #[test]
     fn delivery_transcodes_match_the_bundled_videotoolbox_quality_contract() {
         // Z-02:高码率源(3 s × 40 Mbps)仍顶到原来的 16M / 12M 档位。
         let mut clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
         clip.byte_size = 15_000_000;
-        let whole = whole_vfr_args(&clip, Path::new("whole.mp4"));
+        let whole = whole_vfr_args(&clip, Path::new("whole.mp4"), H264Encoder::VideoToolbox);
         let successful = [SuccessfulClip {
             clip,
             path: PathBuf::from("selected.mp4"),
         }];
-        let rough = rough_cut_args(&successful, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let rough = rough_cut_args(&successful, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let whole = whole
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5610,6 +5796,69 @@ esac
         assert!(!rough.contains("libx264"));
     }
 
+    /// R17 exportfix:三处 H.264 参数按 ffmpeg 编码器能力选 —— VT 可用照旧;没 VT 有 libx264
+    /// 走 crf(绝不带 `-allow_sw`,那份 ffmpeg 不认这个选项名);都没有走 mpeg4 并带 warning note。
+    #[test]
+    fn h264_args_follow_encoder_caps_for_segment_whole_and_rough_cut() {
+        let clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
+        let successful = [SuccessfulClip { clip: clip.clone(), path: PathBuf::from("selected.mp4") }];
+        let all_three = |encoder: H264Encoder| -> Vec<String> {
+            [
+                select_segment_ffmpeg_args(&clip, Path::new("segment.mp4"), encoder).unwrap(),
+                whole_vfr_args(&clip, Path::new("whole.mp4"), encoder),
+                rough_cut_args(&successful, &[true], Path::new("rough.mp4"), &landscape_canvas(), encoder),
+            ]
+            .iter()
+            .map(|args| args.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>().join(" "))
+            .collect()
+        };
+        for args in all_three(H264Encoder::VideoToolbox) {
+            assert!(args.contains("-c:v h264_videotoolbox -allow_sw 1 -b:v "), "{args}");
+        }
+        for args in all_three(H264Encoder::X264) {
+            assert!(args.contains("-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p"), "{args}");
+            assert!(!args.contains("allow_sw") && !args.contains("-b:v"), "{args}");
+        }
+        for args in all_three(H264Encoder::Mpeg4Fallback) {
+            assert!(args.contains("-c:v mpeg4 -q:v 2 -pix_fmt yuv420p"), "{args}");
+            assert!(!args.contains("allow_sw") && !args.contains("videotoolbox"), "{args}");
+        }
+        assert_eq!(H264Encoder::Mpeg4Fallback.fallback_note().as_deref(), Some(media_tools::SOFTWARE_FALLBACK_NOTE));
+    }
+
+    /// 没有任何 VT 编码器的 ffmpeg(业主另一台 Mac 的情形):精选段转码不能再发 `-allow_sw`,
+    /// 走 mpeg4 兜底并把 warning 写进 note。
+    #[cfg(unix)]
+    #[test]
+    fn segment_transcode_without_videotoolbox_uses_fallback_and_notes_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let fake_ffmpeg = directory.path().join("no-vt-ffmpeg");
+        std::fs::write(
+            &fake_ffmpeg,
+            r#"#!/bin/sh
+case " $* " in
+  *" -encoders "*) echo " V.S... mpeg4    MPEG-4 part 2"; exit 0 ;;
+  *" -allow_sw "*) echo "Unrecognized option 'allow_sw'." >&2; exit 8 ;;
+  *" mpeg4 "*) for a in "$@"; do out="$a"; done; printf 'x' > "$out"; exit 0 ;;
+  *) exit 7 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_ffmpeg).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_ffmpeg, permissions).unwrap();
+        let output = directory.path().join("segment.tmp");
+        let clip = export_clip_fixture("dji.mp4", 0, 3_000, 1, 1_000);
+
+        let note = transcode_select_segment(fake_ffmpeg.as_os_str(), &clip, &output, &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(note.as_deref(), Some("当前 ffmpeg 不支持硬件 H.264,已用兼容编码"));
+        assert!(output.is_file());
+    }
+
     /// Z-02(R13 压测):396×720 / 1.6 Mbps 的源导成了 10.9 Mbps(7× 源)。目标码率按源 × 1.5,
     /// 下限 2 Mbps、上限原档位;源码率未知(时长 0)时退回上限。
     #[test]
@@ -5618,7 +5867,7 @@ esac
         let mut low = export_clip_fixture("low.mp4", 0, 8_000, 1, 1_000);
         low.byte_size = 1_600_000;
         assert_eq!(export_video_bitrate(&[&low], SEGMENT_BITRATE_CEILING_BPS), "2400k");
-        let segment = select_segment_ffmpeg_args(&low, Path::new("low-out.mp4")).unwrap();
+        let segment = select_segment_ffmpeg_args(&low, Path::new("low-out.mp4"), H264Encoder::VideoToolbox).unwrap();
         let segment = segment.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>().join(" ");
         assert!(segment.contains("-b:v 2400k"), "{segment}");
         assert!(!segment.contains("16M"), "{segment}");
@@ -5656,7 +5905,7 @@ esac
         rotated.clip.manual_rotation = Some(90);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5675,7 +5924,7 @@ esac
         rotated.clip.manual_rotation = Some(180);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5694,7 +5943,7 @@ esac
         rotated.clip.manual_rotation = Some(270);
         let clips = [rotated];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5716,7 +5965,7 @@ esac
         assert_eq!(clip.clip.manual_rotation, None);
         let clips = [clip];
 
-        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let args = rough_cut_args(&clips, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let joined = args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5847,7 +6096,7 @@ esac
     #[test]
     fn deliver_export_paths_never_carry_the_preview_display_lut() {
         let whole_clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
-        let whole = whole_vfr_args(&whole_clip, Path::new("whole.mp4"));
+        let whole = whole_vfr_args(&whole_clip, Path::new("whole.mp4"), H264Encoder::VideoToolbox);
         let whole_joined = whole
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5857,7 +6106,7 @@ esac
         assert!(!whole_joined.contains("tripcut-lut"));
 
         let select_clip = export_clip_fixture("select.mov", 0, 3_000, 1, 1_000);
-        let select_args = select_segment_ffmpeg_args(&select_clip, Path::new("select.mp4")).unwrap();
+        let select_args = select_segment_ffmpeg_args(&select_clip, Path::new("select.mp4"), H264Encoder::VideoToolbox).unwrap();
         let select_joined = select_args
             .iter()
             .map(|value| value.to_string_lossy())
@@ -5870,7 +6119,7 @@ esac
             clip: export_clip_fixture("rough.mov", 0, 3_000, 1, 1_000),
             path: PathBuf::from("selected.mp4"),
         }];
-        let rough = rough_cut_args(&rough_clips, &[true], Path::new("rough.mp4"), &landscape_canvas());
+        let rough = rough_cut_args(&rough_clips, &[true], Path::new("rough.mp4"), &landscape_canvas(), H264Encoder::VideoToolbox);
         let rough_joined = rough
             .iter()
             .map(|value| value.to_string_lossy())
@@ -6510,6 +6759,99 @@ esac
 
         let output = directory.path().join("segment.mp4");
         transcode_select_segment(&ffmpeg, &clip, &output, &cancel).unwrap();
+        verify_segment_pts(&ffmpeg, &ffprobe, &clip, &output, &cancel).unwrap();
+    }
+
+    #[test]
+    fn keyframe_alignment_is_read_from_ffprobe_key_frames_only() {
+        let json = br#"{"frames":[{"key_frame":1,"best_effort_timestamp":0},{"key_frame":1,"best_effort_timestamp":1000},{"key_frame":0,"best_effort_timestamp":1040}]}"#;
+        assert!(parse_keyframe_alignment(json, 1000));
+        assert!(!parse_keyframe_alignment(json, 1040), "非关键帧不算对齐");
+        assert!(!parse_keyframe_alignment(json, 1020));
+        assert!(!parse_keyframe_alignment(b"not json", 0));
+        assert!(!parse_keyframe_alignment(br#"{"frames":[]}"#, 0));
+    }
+
+    #[test]
+    fn keyframe_aligned_segment_copy_args_carry_no_encoder() {
+        let mut clip = export_clip_fixture("src.mov", 30_000, 90_000, 1, 30_000);
+        clip.codec = Some("hevc".to_owned());
+        let args = select_segment_copy_args(&clip, Path::new("seg.mp4")).unwrap();
+        let args = args.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        assert!(args.starts_with("-hide_banner -loglevel error -nostdin -ss 1.000000000 -i src.mov -t 2.000000000 -map 0:v:0 -map 0:a:0? -c copy -tag:v hvc1"), "{args}");
+        assert!(args.contains("-avoid_negative_ts make_zero"), "{args}");
+        assert!(!args.contains("-c:v") && !args.contains("videotoolbox") && !args.contains("allow_sw"), "{args}");
+        let zero_length = export_clip_fixture("src.mov", 30_000, 30_000, 1, 30_000);
+        assert!(select_segment_copy_args(&zero_length, Path::new("seg.mp4")).is_err());
+    }
+
+    /// R17 exportfix ④:入点正好在关键帧上的精选段走 `-c copy`(输出仍是源的 mpeg4 流),
+    /// 入点不在关键帧上的才转码(输出变成 H.264)。剪映素材包 / 快速导出 / 交付包同一条
+    /// export_clip 路。
+    #[test]
+    fn keyframe_aligned_select_segment_is_remuxed_and_off_keyframe_is_transcoded() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("gop.mp4");
+        let generated = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=4", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4", "-shortest", "-c:v", "mpeg4", "-q:v", "3", "-g", "25", "-bf", "0", "-c:a", "aac"])
+            .arg(&source)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !generated {
+            eprintln!("skipping keyframe remux fixture: encoder unavailable");
+            return;
+        }
+        let meta = crate::core::import::probe_media(&source).unwrap();
+        let per_sec = meta.tb_den / meta.tb_num;
+        let cancel = AtomicBool::new(false);
+        let codec_of = |path: &Path| -> String {
+            let out = Command::new(&ffprobe)
+                .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+
+        // 入点 = 1 s,正好是第 2 个 GOP 的关键帧。
+        let mut aligned = export_clip_fixture("gop.mp4", per_sec, per_sec * 3, meta.tb_num, meta.tb_den);
+        aligned.source_path = source.to_string_lossy().into_owned();
+        aligned.codec = Some("mpeg4".to_owned());
+        assert!(keyframe_aligned_in_point(&ffprobe, &aligned, &cancel).unwrap());
+        let aligned_out = directory.path().join("aligned.mp4");
+        export_clip(&ffmpeg, &ffprobe, &aligned, &aligned_out, &cancel).unwrap();
+        assert_eq!(codec_of(&aligned_out), "mpeg4", "关键帧对齐的段应当原样 remux");
+
+        // 入点 = 1.2 s,不在关键帧上 → 转码。
+        let mut off = aligned.clone();
+        off.in_ticks = Some(per_sec + per_sec / 5);
+        assert!(!keyframe_aligned_in_point(&ffprobe, &off, &cancel).unwrap());
+        let off_out = directory.path().join("off.mp4");
+        export_clip(&ffmpeg, &ffprobe, &off, &off_out, &cancel).unwrap();
+        assert_ne!(codec_of(&off_out), "mpeg4", "不对齐的段必须转码");
+    }
+
+    /// B 帧源(libx264 bf=3)入点落在关键帧上:remux 要么通过回读校验,要么被拒后转码 ——
+    /// 两条路都必须交出通过 verify_segment_pts 的文件,不能因为 remux 被拒就整段失败。
+    #[test]
+    fn keyframe_aligned_b_frame_segment_still_exports_when_copy_is_rejected() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let source = directory.path().join("bframes.mp4");
+        if !generate_b_frame_fixture(&ffmpeg, &source) {
+            eprintln!("skipping b-frame keyframe fixture: libx264 unavailable");
+            return;
+        }
+        let meta = crate::core::import::probe_media(&source).unwrap();
+        let per_sec = meta.tb_den / meta.tb_num;
+        let cancel = AtomicBool::new(false);
+        // GOP 50 帧 @25p = 2 s;入点 2 s 是关键帧,出点 3.5 s 落在 GOP 中间。
+        let mut clip = export_clip_fixture("bframes.mp4", per_sec * 2, per_sec * 7 / 2, meta.tb_num, meta.tb_den);
+        clip.source_path = source.to_string_lossy().into_owned();
+        assert!(keyframe_aligned_in_point(&ffprobe, &clip, &cancel).unwrap());
+        let output = directory.path().join("segment.mp4");
+        export_clip(&ffmpeg, &ffprobe, &clip, &output, &cancel).unwrap();
         verify_segment_pts(&ffmpeg, &ffprobe, &clip, &output, &cancel).unwrap();
     }
 

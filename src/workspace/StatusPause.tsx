@@ -51,7 +51,7 @@ export function StatusPause(): JSX.Element {
         title={paused ? "继续领取新的后台任务" : "不再领取新的后台任务;正在跑的会跑完"}
         onClick={toggle}
       >
-        {paused ? "继续" : "全部暂停"}
+        {paused ? "继续后台任务" : "全部暂停"}
       </Button>
       {paused ? (
         <span className="workspace-status-phrase workspace-status-paused" role="status">

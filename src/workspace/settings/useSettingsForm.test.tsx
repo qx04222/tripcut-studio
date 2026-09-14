@@ -169,21 +169,6 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
     expect(apiMock.setDeviceClockOffset).toHaveBeenCalledWith("DJI Pocket 4", 1500);
   });
 
-  it("切换界面旗:先落盘再广播;写失败不广播", async () => {
-    const seen: unknown[] = [];
-    window.addEventListener("tripcut:workspace-flag-changed", (e) => seen.push((e as CustomEvent).detail));
-    apiMock.getSettings.mockResolvedValue({ "ui.workspace_v2": "true" });
-    apiMock.setSetting.mockRejectedValueOnce(new Error("x")).mockResolvedValue(undefined);
-    const { result } = renderHook(() => useSettingsForm());
-    await waitFor(() => expect(result.current.settingsLoaded).toBe(true));
-    expect(result.current.workspaceV2).toBe(true);
-    await act(async () => { await result.current.toggleWorkspaceFlag(); });
-    expect(seen).toEqual([]);
-    await act(async () => { await result.current.toggleWorkspaceFlag(); });
-    expect(seen).toEqual([{ workspaceV2: false }]);
-    expect(apiMock.setSetting).toHaveBeenLastCalledWith("ui.workspace_v2", "false");
-  });
-
   it("MiniMax key:保存后草稿清空、hasKey 重读,key 本身不留在状态里", async () => {
     apiMock.hasMinimaxKey.mockResolvedValueOnce(false).mockResolvedValue(true);
     const { result } = renderHook(() => useSettingsForm());

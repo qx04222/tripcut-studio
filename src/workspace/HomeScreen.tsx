@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type JSX } from "react";
 
 import { createEpisode, deleteEpisode, listEpisodes, setSetting, type EpisodeSummary } from "../api";
 import { episodeErrorMessage } from "../EpisodePanel";
+import { EPISODES_UPDATED_EVENT } from "./copy";
 import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
 import { EpisodeMenu, EpisodeRenameInline, type EpisodeMenuState } from "./EpisodeMenu";
 import { EpisodeCard, TemplateCard } from "./HomeCards";
@@ -45,7 +46,12 @@ export function HomeScreen(): JSX.Element {
   useEffect(() => {
     refresh();
     window.addEventListener("tripcut:episode-changed", refresh);
-    return () => window.removeEventListener("tripcut:episode-changed", refresh);
+    // R17 epmove:素材移到其他集后集卡计数要跟着动(那条事件不重置导出表单,所以单独一条)。
+    window.addEventListener(EPISODES_UPDATED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("tripcut:episode-changed", refresh);
+      window.removeEventListener(EPISODES_UPDATED_EVENT, refresh);
+    };
   }, [refresh]);
 
   const startJourney = () => {

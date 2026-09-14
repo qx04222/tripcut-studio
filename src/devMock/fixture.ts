@@ -1295,6 +1295,7 @@ const HANDLERS: Record<string, Handler> = {
   },
   undo_story_change: () => {
     state.undoStack = Math.max(0, state.undoStack - 1);
+    return { skipped_moved: 0 };
   },
   get_narrative_revision: () => state.narrativeRevision,
   apply_narrative_op: ({ op }) => {
@@ -2314,3 +2315,31 @@ HANDLERS.download_and_install = async () => {
 HANDLERS.restart_to_update = noop;
 HANDLERS.open_url = noop;
 (MOCK_COMMANDS as string[]).push("check_for_update", "download_and_install", "restart_to_update", "open_url");
+// ---------------------------------------------------------------------------
+// R17 车道 epmove:素材跨集移动。假后端改 `episode_id`、把它从镜头带 / 章里拿掉、集卡计数跟着动;
+// 回旧归属供撤销反向再调。不存在的素材计入 skipped_missing;已在目标集的不算移动。
+// ---------------------------------------------------------------------------
+HANDLERS.move_clips_to_episode = ({ clipIds, episodeId }) => {
+  const target = num(episodeId, "episodeId");
+  const targetEpisode = state.episodes.find((item) => item.id === target);
+  if (!targetEpisode) throw new Error("目标集已不存在,回首页重新选一集");
+  const from: Array<[number, number]> = [];
+  let skippedMissing = 0;
+  for (const raw of clipIds as number[]) {
+    const clip = state.clips.find((candidate) => candidate.id === Number(raw));
+    if (!clip) {
+      skippedMissing += 1;
+      continue;
+    }
+    const origin = clip.episode_id ?? EPISODE_ID;
+    if (origin === target) continue;
+    from.push([clip.id as number, origin]);
+    clip.episode_id = target;
+    const originEpisode = state.episodes.find((item) => item.id === origin);
+    if (originEpisode) originEpisode.clip_count = Math.max(0, originEpisode.clip_count - 1);
+    targetEpisode.clip_count += 1;
+  }
+  bump(state);
+  return { moved: from.length, skipped_missing: skippedMissing, from };
+};
+(MOCK_COMMANDS as string[]).push("move_clips_to_episode");

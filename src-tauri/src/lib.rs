@@ -133,6 +133,7 @@ async fn restore_latest_snapshot(
             .into_iter()
             .next()
             .ok_or_else(|| CoreError::BackgroundTask("没有可恢复的数据库快照".to_owned()))?;
+        tracing::warn!(snapshot = %snapshot.display(), "command restore_latest_snapshot: replacing project.db with a snapshot (original kept as pre-restore backup)");
         let restore = || core::db::restore_snapshot(&db_path, &snapshot);
         let backup = restore()?;
         let mut refreshed = core::doctor::run_preflight(&root, &db_path, &cache_root, false);
@@ -243,7 +244,13 @@ fn reset_library_blocking(
     db_path: &std::path::Path,
     cache_root: &std::path::Path,
     control: Option<&core::jobs::WorkerControl>,
+    source: &'static str,
 ) -> Result<core::settings::ResetLibraryResult> {
+    // A16-02:每条清库路径都留一条带来源的 warn —— 下次「重启后库被清空」能在日志里对上是谁干的。
+    if let Ok(connection) = core::db::open_project(db_path) {
+        let census = core::db::library_census(&connection, &db_path.parent().unwrap_or(db_path).join("snapshots"));
+        tracing::warn!(source, ?census, "library reset requested: wiping every table except settings");
+    }
     let prepare = || {
         let mut connection = core::db::open_project(db_path)?;
         core::jobs::cancel_all_jobs(&mut connection)?;
@@ -284,7 +291,7 @@ async fn reset_recovery_library(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    tauri::async_runtime::spawn_blocking(move || reset_library_blocking(&db_path, &cache_root, control.as_ref()))
+    tauri::async_runtime::spawn_blocking(move || reset_library_blocking(&db_path, &cache_root, control.as_ref(), "command reset_recovery_library (recovery page)"))
         .await
         .map_err(|error| format!("重置项目库任务异常结束：{error}"))?
         .map_err(|error| error.to_string())
@@ -719,6 +726,30 @@ fn rename_episode(
     core::episode::rename_episode(&mut connection, episode_id, &title, &theme).map_err(|error| error.to_string())
 }
 
+/// R17 epmove:把素材挪到另一集(媒体池 / 检查器菜单「移到其他集…」)。返回旧归属供撤销反向再调。
+#[tauri::command]
+fn move_clips_to_episode(
+    clip_ids: Vec<i64>,
+    episode_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::episode::MoveOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能移动素材,请回到主窗口操作".to_owned());
+    }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let outcome = core::episode::move_clips_to_episode(&mut connection, &clip_ids, episode_id)
+        .map_err(|error| error.to_string())?;
+    tracing::warn!(
+        episode_id,
+        requested = clip_ids.len(),
+        moved = outcome.moved,
+        skipped_missing = outcome.skipped_missing,
+        from = ?outcome.from,
+        "command move_clips_to_episode: rehoming clips to another episode"
+    );
+    Ok(outcome)
+}
+
 #[tauri::command]
 fn archive_current_episode(
     next_title: Option<String>,
@@ -782,6 +813,7 @@ async fn delete_episode(
                 let ids = core::episode::prepare_delete(&mut c, episode_id)?;
                 core::import_control::wait_for_related_jobs(&c, &ids, std::time::Duration::from_secs(5))?;
                 core::db::create_snapshot(&c, &path.parent().unwrap().join("snapshots"))?;
+                tracing::warn!(episode_id, clips = ids.len(), "command delete_episode: deleting episode with its clips and import batches");
                 core::episode::delete_episode(&mut c, episode_id)
             },
         )?;
@@ -1088,7 +1120,7 @@ async fn reset_project_library(
         let gate = core::import::import_gate(&connection);
         drop(connection);
         let _import_guard = gate.lock().unwrap_or_else(|error| error.into_inner());
-        reset_library_blocking(&db_path, &cache_root, Some(&worker_control))
+        reset_library_blocking(&db_path, &cache_root, Some(&worker_control), "command reset_project_library (settings sheet)")
     })
     .await
     .map_err(|error| format!("重置项目库任务异常结束：{error}"))?
@@ -1255,6 +1287,7 @@ async fn remove_imported_material(request: core::import_control::RemovalRequest,
                 let ids=core::import_control::removal_ids(&c,&request)?;
                 core::import_control::wait_for_related_jobs(&c,&ids,std::time::Duration::from_secs(5))?;
                 core::db::create_snapshot(&c,&path.parent().unwrap().join("snapshots"))?;
+                tracing::warn!(all = request.all, batch_id = ?request.batch_id, requested = request.clip_ids.len(), clips = ids.len(), "command remove_imported_material: deleting clips");
                 core::import_control::remove_records(&mut c,&request)
             }
         )?;
@@ -2049,7 +2082,7 @@ fn delete_chapter(
 #[tauri::command]
 fn undo_story_change(
     state: tauri::State<'_, RuntimeState>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<core::story::UndoOutcome, String> {
     let mut connection =
         core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::story::undo_latest(&mut connection).map_err(|error| error.to_string())
@@ -2568,10 +2601,12 @@ async fn player_close(
 #[tauri::command]
 async fn player_command(
     cmd: PlayerCommand,
+    clip_id: Option<i64>,
     player: tauri::State<'_, PlayerManager>,
 ) -> std::result::Result<(), String> {
     let player = player.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || player.command(cmd))
+    // R17 playfix:前端把命令归属的素材一起带来,换源窗口里排队的旧素材命令在这里被拒。
+    tauri::async_runtime::spawn_blocking(move || player.command_for(cmd, clip_id))
         .await
         .map_err(|error| format!("播放器命令任务异常结束：{error}"))?
 }
@@ -2634,6 +2669,7 @@ async fn switch_library(id: String, app: tauri::AppHandle, state: tauri::State<'
         control.with_maintenance(|| Ok(()), || {
             let connection = core::db::open_project(&db_path)?;
             core::db::create_snapshot(&connection, &db_path.parent().unwrap().join("snapshots"))?;
+            tracing::warn!(library = %id, "command switch_library: switching active library and restarting (current library kept on disk)");
             let _guard = LIBRARY_REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             libraries::select(&libraries::base()?, &id)?;
             // This closure runs on spawn_blocking, never the main thread.
@@ -2954,6 +2990,18 @@ pub fn run() {
                 tracing::info!(shot_stack_count, "rebuilt semantic shot stacks");
 
                 let snapshots_root = root.join("snapshots");
+                // A16-02:启动时数一遍主表与快照。库空而最新快照非空 = 上一程有东西把库清了,
+                // 这里用 warn 把两边的数字钉进日志(正常清库的路径各自也有带来源的 warn)。
+                match core::db::library_census(&connection, &snapshots_root) {
+                    Ok(census) => {
+                        if census.clips == 0 && census.latest_snapshot_clips.unwrap_or(0) > 0 {
+                            tracing::warn!(abnormal_exit, ?census, "startup: library is empty but the latest snapshot still holds clips");
+                        } else {
+                            tracing::info!(abnormal_exit, ?census, "startup library census");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "startup library census failed"),
+                }
                 let snapshot = core::db::create_snapshot(&connection, &snapshots_root);
                 report
                     .lock()
@@ -3218,6 +3266,7 @@ pub fn run() {
             get_current_episode,
             rename_current_episode,
             rename_episode,
+            move_clips_to_episode,
             archive_current_episode,
             create_episode,
             delete_episode,

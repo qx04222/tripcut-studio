@@ -183,7 +183,7 @@ describe("PlayerOverlay a11y", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 11 });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 11 }, clip.id);
   });
 
   it("keeps the existing global frame-step binding when focus is elsewhere", async () => {
@@ -195,7 +195,7 @@ describe("PlayerOverlay a11y", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "step_fwd" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "step_fwd" }, clip.id);
   });
 });
 
@@ -349,7 +349,7 @@ describe("PlayerOverlay 嵌入模式", () => {
     await act(async () => {
       await controlsRef.current?.send([{ type: "play" }]);
     });
-    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" }, clip.id);
   });
 });
 

@@ -38,9 +38,9 @@ describe("卡片菜单「在 Finder 中显示」", () => {
     );
     fireEvent.contextMenu(screen.getByRole("gridcell", { name: "九" }), { clientX: 40, clientY: 50 });
     const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["收藏", "拒绝", "清除评级", "加入镜头带", "导出所选", REVEAL_IN_FINDER_LABEL, "移除素材"]);
+    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["收藏", "拒绝", "清除评级", "加入镜头带", "移到其他集", "导出所选", REVEAL_IN_FINDER_LABEL, "移除素材"]);
     await act(async () => {
-      items[5]!.click();
+      items[6]!.click();
       await Promise.resolve();
     });
     await waitFor(() => expect(apiMock.revealClip).toHaveBeenCalledWith(9));

@@ -792,7 +792,7 @@ async function workspaceScript(page, context, viteUrl) {
       const poolMenu = p.getByRole("menu", { name: "素材操作" });
       await poolMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
       const poolItems = await poolMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
-      if (poolItems.join("|") !== "收藏|拒绝|清除评级|加入镜头带|导出所选|在 Finder 中显示|移除素材") failures.push(`29-entity-menus: 媒体池菜单 ${poolItems.join("|")}`);
+      if (poolItems.join("|") !== "收藏|拒绝|清除评级|加入镜头带|移到其他集|导出所选|在 Finder 中显示|移除素材") failures.push(`29-entity-menus: 媒体池菜单 ${poolItems.join("|")}`);
       await p.keyboard.press("Escape");
       await poolMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
 
@@ -870,6 +870,9 @@ async function workspaceScript(page, context, viteUrl) {
   await shot(page, "32-update-toast", {
     locate: (p) => p.getByRole("status").filter({ hasText: "有新版本 0.8.0" }),
     act: async (toast, p) => {
+      // 业主:顶栏最右、齿轮旁要有「新版本」提醒,可点。
+      const topbar = p.getByRole("banner");
+      if ((await topbar.getByRole("button", { name: "新版本 0.8.0" }).count()) !== 1) failures.push("32-update-toast: 顶栏没有「新版本 0.8.0」提醒");
       if ((await toast.getAttribute("aria-modal")) !== null) failures.push("32-update-toast: 提示不该是 aria-modal");
       const buttons = await toast.getByRole("button").allInnerTexts();
       if (buttons.join("|") !== "现在更新|稍后|跳过这个版本|") failures.push(`32-update-toast: 按钮 ${buttons.join("|")}`);
@@ -888,9 +891,10 @@ async function workspaceScript(page, context, viteUrl) {
   });
   await shot(page, "32-update-ready", {
     locate: (p) => p.getByRole("status").filter({ hasText: "更新已下载 0.8.0" }),
-    act: async (toast) => {
+    act: async (toast, p) => {
       const buttons = await toast.getByRole("button").allInnerTexts();
       if (buttons.join("|") !== "重启完成更新|稍后|跳过这个版本|") failures.push(`32-update-ready: 按钮 ${buttons.join("|")}`);
+      if ((await p.getByRole("banner").getByRole("button", { name: "重启完成更新" }).count()) !== 1) failures.push("32-update-ready: 顶栏没有「重启完成更新」");
     },
     settle: 400,
   });
@@ -917,6 +921,51 @@ async function workspaceScript(page, context, viteUrl) {
     settle: 600,
   });
   await page.keyboard.press("Escape");
+
+  // R17 车道 epmove:素材菜单「移到其他集…」→ 目标集菜单「选择目标集」(集名 · 进度 · 素材数,当前集灰)。
+  // 上一段装了 Playwright 时钟,这里开一页干净的;硬断言:菜单项 AX 名、当前集那行禁用、选中后 toast
+  // 带「撤销」且撤销后那条回到池里。
+  {
+    const fresh = await context.newPage();
+    fresh.setDefaultTimeout(STEP_TIMEOUT_MS);
+    await fresh.goto(viteUrl, { waitUntil: "domcontentloaded" });
+    await fresh.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+    let movedName = "";
+    await shot(fresh, "34-move-to-episode", {
+      locate: (p) => p.getByRole("region", { name: "媒体池" }).getByRole("gridcell"),
+      act: async (cell, p) => {
+        movedName = (await cell.getAttribute("aria-label")) ?? "";
+        await cell.click();
+        await cell.click({ button: "right" });
+        const poolMenu = p.getByRole("menu", { name: "素材操作" });
+        await poolMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
+        const item = poolMenu.getByRole("menuitem", { name: "移到其他集" });
+        if ((await item.count()) !== 1) failures.push("34-move-to-episode: 素材菜单缺「移到其他集」");
+        if (await item.isDisabled()) failures.push("34-move-to-episode: 假后端有两集,「移到其他集」却是禁用的");
+        await item.click();
+        const picker = p.getByRole("menu", { name: "选择目标集" });
+        await picker.waitFor({ timeout: STEP_TIMEOUT_MS });
+        const rows = await picker.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => `${node.textContent}${node.disabled ? "(禁用)" : ""}`));
+        if (rows.length < 2) failures.push(`34-move-to-episode: 目标集菜单只有 ${rows.length} 行: ${rows.join("|")}`);
+        if (!rows.some((row) => row.includes("当前集") && row.endsWith("(禁用)"))) failures.push(`34-move-to-episode: 当前集那一行没有灰掉: ${rows.join("|")}`);
+        if (!rows.some((row) => /第 \d 步|还没开始/.test(row) && / \d+ 条素材/.test(row))) failures.push(`34-move-to-episode: 目标行缺进度 / 素材数: ${rows.join("|")}`);
+        if (rows.some((row) => /tick|VFR|remux|sidecar|L1|L3|hero|Stack/.test(row))) failures.push("34-move-to-episode: 目标集菜单出现内部术语");
+      },
+      settle: 500,
+    });
+    // 选中即移动:toast「已把 1 条移到「…」」+「撤销」;撤销后那条回到池里。
+    const target = fresh.getByRole("menu", { name: "选择目标集" }).locator("[role='menuitem']:not([disabled])").first();
+    await target.click().catch(() => failures.push("34-move-to-episode: 目标集菜单没有可点的行"));
+    const toast = fresh.getByRole("status").filter({ hasText: /已把 1 条移到「.+」/ });
+    await toast.waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("34-move-to-episode: 移动后没有「已把 1 条移到「集名」」toast"));
+    if ((await toast.count()) > 0) {
+      const gone = fresh.getByRole("region", { name: "媒体池" }).getByRole("gridcell", { name: movedName, exact: true });
+      if ((await gone.count()) !== 0) failures.push(`34-move-to-episode: 移走的「${movedName}」还留在媒体池里`);
+      await toast.getByRole("button", { name: "撤销" }).click().catch(() => failures.push("34-move-to-episode: toast 缺「撤销」"));
+      await gone.waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push(`34-move-to-episode: 撤销后「${movedName}」没有回到媒体池`));
+    }
+    await fresh.close();
+  }
 }
 
 async function main() {

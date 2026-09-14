@@ -33,7 +33,6 @@ export interface SettingsForm {
   clockDrafts: Record<string, string>;
   setClockDraft(model: string, value: string): void;
   cacheConfirm: boolean;
-  workspaceV2: boolean;
   /** 只改本地草稿(路径框 / 预算框逐字输入),不落盘。 */
   setDraft(key: string, value: string): void;
   /** 版本号 + 串行队列 + 失败回滚 + appearance 立即应用;返回"这次写入落盘了没有"。 */
@@ -54,7 +53,6 @@ export interface SettingsForm {
   openLogs(): Promise<void>;
   clearCache(): Promise<void>;
   rollbackTool(componentId: string): Promise<void>;
-  toggleWorkspaceFlag(): Promise<void>;
   refreshStatus(): Promise<void>;
   refreshLlm(): Promise<void>;
   refreshGeneration(): Promise<void>;

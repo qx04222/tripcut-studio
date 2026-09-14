@@ -516,12 +516,8 @@ pub fn run_proxy(connection: &mut Connection, job: &Job, cache_root: &Path) -> R
     if !super::settings::proxy_enabled(connection)? {
         return complete_direct(connection, job, &parse_payload(job)?);
     }
-    let ffmpeg = super::settings::configured_executable(
-        connection,
-        super::settings::FFMPEG_PATH_KEY,
-        "FFMPEG_PATH",
-        "ffmpeg",
-    )?;
+    // R17 exportfix:配置的 ffmpeg 缺 VideoToolbox 时改用包内那份(见 settings::export_ffmpeg)。
+    let ffmpeg = super::settings::export_ffmpeg(connection)?;
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
     let low_memory = super::memory_profile::resolve(connection)?.low_memory_proxy();
     run_proxy_with(
@@ -714,6 +710,8 @@ fn run_proxy_with(
     remove_if_exists(&temporary_path)?;
 
     let source_path = source.path.to_string_lossy();
+    // R17 exportfix:按这份 ffmpeg 的编码器能力选 H.264 编码器(没 VT 的 ffmpeg 不认 `-allow_sw`)。
+    let encoder = super::media_tools::encoder_caps(ffmpeg).h264_encoder();
     if let Err(error) = run_ffmpeg_file_with_fallback(
         ffmpeg,
         |hardware_decode| {
@@ -723,6 +721,7 @@ fn run_proxy_with(
                 hardware_decode,
                 low_memory,
                 source_bitrate_bps(source.byte_size, source.duration_seconds),
+                encoder,
             )
         },
         timeout,
@@ -1039,6 +1038,7 @@ fn proxy_args(
     hardware_decode: bool,
     low_memory: bool,
     source_bitrate: Option<f64>,
+    encoder: super::media_tools::H264Encoder,
 ) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-hide_banner"),
@@ -1060,17 +1060,24 @@ fn proxy_args(
         OsString::from("0:a:0?"),
         OsString::from("-vf"),
         OsString::from("scale=-2:540"),
-        OsString::from("-c:v"),
-        OsString::from("h264_videotoolbox"),
-        OsString::from("-allow_sw"),
-        OsString::from("1"),
     ]);
-    if low_memory {
-        args.extend([OsString::from("-realtime"), OsString::from("1")]);
+    let bitrate = proxy_bitrate(low_memory, source_bitrate);
+    if encoder == super::media_tools::H264Encoder::VideoToolbox {
+        args.extend([
+            OsString::from("-c:v"),
+            OsString::from("h264_videotoolbox"),
+            OsString::from("-allow_sw"),
+            OsString::from("1"),
+        ]);
+        if low_memory {
+            // `-realtime` 是 VT 私有选项,别的编码器不认。
+            args.extend([OsString::from("-realtime"), OsString::from("1")]);
+        }
+        args.extend([OsString::from("-b:v"), OsString::from(bitrate)]);
+    } else {
+        args.extend(super::media_tools::h264_encoder_args(encoder, &bitrate));
     }
     args.extend([
-        OsString::from("-b:v"),
-        OsString::from(proxy_bitrate(low_memory, source_bitrate)),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-fps_mode"),
@@ -1855,6 +1862,7 @@ fn snapshot_status(snapshot: Option<&JobSnapshot>, direct: bool) -> ArtifactStat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::media_tools::H264Encoder;
     use crate::core::{db, test_support::TestDirectory};
 
     fn test_ffmpeg() -> OsString {
@@ -2371,8 +2379,8 @@ mod tests {
 
     #[test]
     fn proxy_uses_cpu_decode_fallback_but_only_the_bundled_videotoolbox_encoder() {
-        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, None);
-        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, false, None);
+        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, None, H264Encoder::VideoToolbox);
+        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, false, None, H264Encoder::VideoToolbox);
         let hardware = hardware
             .iter()
             .map(|value| value.to_string_lossy())
@@ -2394,10 +2402,23 @@ mod tests {
         }
     }
 
+    /// R17 exportfix:代理转码同样按编码器能力选 —— 没 VT 的 ffmpeg 不发 `-allow_sw` / `-realtime`。
+    #[test]
+    fn proxy_args_follow_encoder_caps_without_videotoolbox_private_options() {
+        let x264 = proxy_args("source.mov", Path::new("proxy.mp4"), false, true, None, H264Encoder::X264);
+        let x264 = x264.iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        assert!(x264.contains("-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p"), "{x264}");
+        assert!(!x264.contains("allow_sw") && !x264.contains("-realtime") && !x264.contains("-b:v"), "{x264}");
+        let mpeg4 = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, None, H264Encoder::Mpeg4Fallback);
+        let mpeg4 = mpeg4.iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        assert!(mpeg4.contains("-c:v mpeg4 -q:v 2 -pix_fmt yuv420p"), "{mpeg4}");
+        assert!(!mpeg4.contains("videotoolbox -allow_sw"), "{mpeg4}");
+    }
+
     #[test]
     fn proxy_args_low_memory_caps_bitrate_and_forces_realtime() {
-        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, true, None);
-        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, true, None);
+        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, true, None, H264Encoder::VideoToolbox);
+        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, true, None, H264Encoder::VideoToolbox);
         let hardware = hardware
             .iter()
             .map(|value| value.to_string_lossy())
@@ -2432,7 +2453,7 @@ mod tests {
         // 未知:原值
         assert_eq!(source_bitrate_bps(0, 30.0), None);
         assert_eq!(proxy_bitrate(false, None), "4000k");
-        let args = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, low)
+        let args = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, low, H264Encoder::VideoToolbox)
             .iter()
             .map(|value| value.to_string_lossy())
             .collect::<Vec<_>>()
@@ -2448,7 +2469,7 @@ mod tests {
     fn proxy_args_never_carries_the_preview_display_lut() {
         for hardware_decode in [true, false] {
             for low_memory in [true, false] {
-                let args = proxy_args("source.mov", Path::new("proxy.mp4"), hardware_decode, low_memory, None);
+                let args = proxy_args("source.mov", Path::new("proxy.mp4"), hardware_decode, low_memory, None, H264Encoder::VideoToolbox);
                 let joined = args
                     .iter()
                     .map(|value| value.to_string_lossy())
@@ -2626,8 +2647,8 @@ mod tests {
         // itself must never bake in a rotation. `proxy_args` simply has no
         // rotation parameter, which makes this structurally true; this test
         // pins that its output is identical across calls (nothing snuck in).
-        let first = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None);
-        let second = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None);
+        let first = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None, H264Encoder::VideoToolbox);
+        let second = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None, H264Encoder::VideoToolbox);
         assert_eq!(first, second);
         assert!(!first.iter().any(|a| a.to_string_lossy().contains("transpose")));
     }

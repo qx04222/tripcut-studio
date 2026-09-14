@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
 import { clipMenuItems, runClipMenuAction, type ClipMenuContext } from "./clipMenuModel";
 import { CLIP_MENU_LABEL, MORE_BUTTON_LABEL } from "./copy";
+import { EpisodeMoveMenu, useEpisodeCount } from "./EpisodeMoveMenu";
 import { Button, Menu } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 
@@ -28,9 +29,12 @@ function clipIdFromTarget(target: EventTarget | null): number | null {
 export function PoolClipContextMenu({ multiSelection, context }: { multiSelection: readonly number[]; context?: ClipMenuContext }): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; clipIds: number[]; clicked: number } | null>(null);
+  // R17 epmove:「移到其他集…」的后半步(目标集菜单)开在同一个点。
+  const [moveMenu, setMoveMenu] = useState<{ x: number; y: number; clipIds: number[] } | null>(null);
   const selectionRef = useRef(multiSelection);
   selectionRef.current = multiSelection;
   const readOnly = useReadOnly();
+  const episodeCount = useEpisodeCount(menu !== null);
 
   useEffect(() => {
     const grid = hostRef.current?.parentElement?.querySelector<HTMLElement>("[role='grid']");
@@ -47,6 +51,7 @@ export function PoolClipContextMenu({ multiSelection, context }: { multiSelectio
   }, []);
 
   const close = useCallback(() => setMenu(null), []);
+  const closeMove = useCallback(() => setMoveMenu(null), []);
   return (
     <div ref={hostRef} className="pool-context-menu-host">
       {menu ? (
@@ -54,11 +59,19 @@ export function PoolClipContextMenu({ multiSelection, context }: { multiSelectio
           x={menu.x}
           y={menu.y}
           ariaLabel={CLIP_MENU_LABEL}
-          items={clipMenuItems(menu.clipIds.length, { readOnly, canReveal: context?.canReveal })}
-          onSelect={(id) => void runClipMenuAction(id, menu.clipIds, { ...context, readOnly, revealClipId: menu.clicked })}
+          items={clipMenuItems(menu.clipIds.length, { readOnly, canReveal: context?.canReveal, episodeCount })}
+          onSelect={(id) =>
+            void runClipMenuAction(id, menu.clipIds, {
+              ...context,
+              readOnly,
+              revealClipId: menu.clicked,
+              onMoveToEpisode: (clipIds) => setMoveMenu({ x: menu.x, y: menu.y, clipIds: [...clipIds] }),
+            })
+          }
           onClose={close}
         />
       ) : null}
+      {moveMenu ? <EpisodeMoveMenu x={moveMenu.x} y={moveMenu.y} clipIds={moveMenu.clipIds} onClose={closeMove} /> : null}
     </div>
   );
 }
@@ -66,8 +79,11 @@ export function PoolClipContextMenu({ multiSelection, context }: { multiSelectio
 /** 检查器头部的「···」:同一张项目表,作用于当前这条(它在多选里时作用于整组)。 */
 export function ClipMoreButton({ clipId, multiSelection = [], context }: { clipId: number; multiSelection?: readonly number[]; context?: ClipMenuContext }): JSX.Element {
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [moveAnchor, setMoveAnchor] = useState<{ x: number; y: number; clipIds: number[] } | null>(null);
   const close = useCallback(() => setAnchor(null), []);
+  const closeMove = useCallback(() => setMoveAnchor(null), []);
   const readOnly = useReadOnly();
+  const episodeCount = useEpisodeCount(anchor !== null);
   const clipIds = multiSelection.includes(clipId) ? [...multiSelection] : [clipId];
   return (
     <>
@@ -89,11 +105,19 @@ export function ClipMoreButton({ clipId, multiSelection = [], context }: { clipI
           x={anchor.x}
           y={anchor.y}
           ariaLabel={CLIP_MENU_LABEL}
-          items={clipMenuItems(clipIds.length, { readOnly, canReveal: context?.canReveal })}
-          onSelect={(id) => void runClipMenuAction(id, clipIds, { ...context, readOnly, revealClipId: clipId })}
+          items={clipMenuItems(clipIds.length, { readOnly, canReveal: context?.canReveal, episodeCount })}
+          onSelect={(id) =>
+            void runClipMenuAction(id, clipIds, {
+              ...context,
+              readOnly,
+              revealClipId: clipId,
+              onMoveToEpisode: (ids) => setMoveAnchor({ x: anchor.x, y: anchor.y, clipIds: [...ids] }),
+            })
+          }
           onClose={close}
         />
       ) : null}
+      {moveAnchor ? <EpisodeMoveMenu x={moveAnchor.x} y={moveAnchor.y} clipIds={moveAnchor.clipIds} onClose={closeMove} /> : null}
     </>
   );
 }

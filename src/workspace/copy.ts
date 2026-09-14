@@ -84,6 +84,7 @@ export const CLIP_MENU = {
   reject: "拒绝",
   clear: "清除评级",
   addToBand: "加入镜头带",
+  moveToEpisode: "移到其他集…",
   export: "导出所选…",
   reveal: "在 Finder 中显示",
   remove: "移除素材…",
@@ -142,3 +143,26 @@ export const SETTINGS_ACTIONS = {
 } as const;
 /** R16 §1 车道 C:素材卡菜单项「在 Finder 中显示」(P2-7)——与 `CLIP_MENU.reveal` 同一份字。 */
 export const REVEAL_IN_FINDER_LABEL = CLIP_MENU.reveal;
+
+/* -------------------------------------------------------------------------------------------
+ * R17 车道 epmove:素材「移到其他集…」(菜单项 AX 名「移到其他集」,与 `CLIP_MENU.moveToEpisode` 同一份字)。
+ * ------------------------------------------------------------------------------------------- */
+/** 目标集菜单容器的 AX 名。 */
+export const EPISODE_MOVE_MENU_LABEL = "选择目标集";
+/** 只有一集时菜单项禁用,旁边说明现在怎么办。 */
+export const EPISODE_MOVE_NEEDS_ANOTHER_EPISODE = "先在首页新建一集";
+/** 目标集菜单里当前集那一行的后缀(灰掉不可选)。 */
+export const EPISODE_MOVE_CURRENT_SUFFIX = "当前集";
+/** 目标集菜单里每一集的进度:第 n 步;一步都没走到就是「还没开始」。 */
+export const episodeMoveProgressLabel = (doneSteps: number): string => (doneSteps === 0 ? "还没开始" : `第 ${doneSteps} 步`);
+/** 目标集菜单里每一集的一行:「京都三日 · 第 2 步 · 3 条素材」。 */
+export const episodeMoveTargetLabel = (title: string, doneSteps: number, clipCount: number): string =>
+  `${title} · ${episodeMoveProgressLabel(doneSteps)} · ${clipCount} 条素材`;
+/** 移动成功 toast(带「撤销」5 秒)。 */
+export const episodeMovedToast = (count: number, title: string): string => `已把 ${count} 条移到「${title}」`;
+export const episodeMoveUndoneToast = (count: number): string => `已撤销 · ${count} 条已回到原来的集`;
+export const EPISODE_MOVE_NOTHING_MOVED_TOAST = "这些素材已经在那一集里了";
+/** 集卡计数变了(移动之后)—— 首页 / 切集弹层据此重读集列表;不同于 `tripcut:episode-changed`(那条会重置导出表单)。 */
+export const EPISODES_UPDATED_EVENT = "tripcut:episodes-updated";
+/** 撤销排片时后端跳过了已移到别的集的镜:追加在撤销 toast / 提示末尾。 */
+export const undoSkippedMovedSuffix = (count: number): string => `(${count} 条已移到别的集,没有放回)`;

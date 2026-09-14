@@ -2,7 +2,7 @@ import { useState, type JSX } from "react";
 import { JIANYING_BUNDLE_ID, openApp, type ExportStatus, type JianyingDraftResult } from "../../api";
 import { describeError, failureText } from "../errorText";
 import { Button, Card, Icon, showToast } from "../ui";
-import { draftContentLine, STAGE_LABELS } from "./deliverModel";
+import { draftContentLine, ffmpegToolHintForItems, STAGE_LABELS } from "./deliverModel";
 import { DeliverItemList } from "./DeliverProgressCard";
 import { submitJianyingHumanCheck } from "./jianyingHumanCheck";
 
@@ -13,6 +13,12 @@ export interface DeliverResultCardProps {
 
 /** 完成 / 失败的结果卡(规格 §4.2 第 5 条):ok tint 带「打开文件夹」;danger tint 带错误原文。 */
 export function DeliverResultCard({ status, onReveal }: DeliverResultCardProps): JSX.Element | null {
+  const settled = status.status === "done" || status.status === "failed" || status.status === "blocked";
+  if (!settled) return null;
+  const failedItems = status.items.filter((item) => item.status === "failed");
+  // R17 exportfix ⑤:失败原因是 ffmpeg 不认编码器 / 选项时,多一行「去哪儿看、怎么办」。
+  const toolHint = ffmpegToolHintForItems(failedItems);
+  const toolHintLine = toolHint ? <p className="deliver-result-tool-hint">{toolHint}</p> : null;
   if (status.status === "done") {
     return (
       <Card className="deliver-result deliver-result--ok" padding={4}>
@@ -25,36 +31,35 @@ export function DeliverResultCard({ status, onReveal }: DeliverResultCardProps):
             {status.completed_items} 项已写入{status.failed_items > 0 ? ` · ${status.failed_items} 项未成功` : ""}
           </p>
           {status.output_path ? <code className="deliver-result-path">{status.output_path}</code> : null}
+          {toolHintLine}
         </div>
         {status.job_id !== null ? (
           <Button variant="secondary" size="sm" onClick={onReveal}>
             打开文件夹
           </Button>
         ) : null}
-        <DeliverItemList items={status.items.filter((item) => item.status === "failed")} />
+        <DeliverItemList items={failedItems} />
       </Card>
     );
   }
-  if (status.status === "failed" || status.status === "blocked") {
-    return (
-      <Card className="deliver-result deliver-result--danger" padding={4}>
-        <span className="deliver-result-icon">
-          <Icon name="warning" size={16} />
-        </span>
-        <div className="deliver-result-copy">
-          <p className="deliver-result-title">{STAGE_LABELS.failed}</p>
-          {status.error ? (
-            <p className="deliver-result-meta" role="alert">
-              {describeError(status.error)}
-            </p>
-          ) : null}
-          {status.output_path ? <code className="deliver-result-path">{status.output_path}</code> : null}
-        </div>
-        <DeliverItemList items={status.items.filter((item) => item.status === "failed")} />
-      </Card>
-    );
-  }
-  return null;
+  return (
+    <Card className="deliver-result deliver-result--danger" padding={4}>
+      <span className="deliver-result-icon">
+        <Icon name="warning" size={16} />
+      </span>
+      <div className="deliver-result-copy">
+        <p className="deliver-result-title">{STAGE_LABELS.failed}</p>
+        {status.error ? (
+          <p className="deliver-result-meta" role="alert">
+            {describeError(status.error)}
+          </p>
+        ) : null}
+        {status.output_path ? <code className="deliver-result-path">{status.output_path}</code> : null}
+        {toolHintLine}
+      </div>
+      <DeliverItemList items={failedItems} />
+    </Card>
+  );
 }
 
 /** 剪映草稿已生成:草稿名 + 回读自检信息 + 路径。不声称已打开剪映。试验草稿(R14 §9 A)另给三步 + 两个裁定按钮。 */

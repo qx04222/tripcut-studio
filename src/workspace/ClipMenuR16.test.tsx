@@ -59,19 +59,19 @@ const tick = () =>
   });
 
 describe("R16 §1 / P1-1:素材卡菜单", () => {
-  it("项目表按规格顺序(七项,含「在 Finder 中显示」),AX 名是基名;多选带「(n 条)」(只显示一张的「在 Finder 中显示」不带);只读时改数据的项禁用、导出照常;canReveal:false 才不出「在 Finder 中显示」", () => {
+  it("项目表按规格顺序(八项,含「在 Finder 中显示」与 R17 的「移到其他集…」),AX 名是基名;多选带「(n 条)」(只显示一张的「在 Finder 中显示」不带);只读时改数据的项禁用、导出照常;canReveal:false 才不出「在 Finder 中显示」", () => {
     const single = clipMenuItems(1);
-    expect(single.map((item) => item.ariaLabel)).toEqual(["收藏", "拒绝", "清除评级", "加入镜头带", "导出所选", "在 Finder 中显示", "移除素材"]);
+    expect(single.map((item) => item.ariaLabel)).toEqual(["收藏", "拒绝", "清除评级", "加入镜头带", "移到其他集", "导出所选", "在 Finder 中显示", "移除素材"]);
     expect(single.map((item) => item.label)).toEqual(Object.values(CLIP_MENU));
     const noReveal = clipMenuItems(1, { canReveal: false });
     expect(noReveal.map((item) => item.label)).toEqual(Object.values(CLIP_MENU).filter((label) => label !== CLIP_MENU.reveal));
     const multi = clipMenuItems(3, { canReveal: true });
-    expect(multi.map((item) => item.label)).toEqual(["收藏(3 条)", "拒绝(3 条)", "清除评级(3 条)", "加入镜头带(3 条)", "导出所选(3 条)…", "在 Finder 中显示", "移除素材(3 条)…"]);
+    expect(multi.map((item) => item.label)).toEqual(["收藏(3 条)", "拒绝(3 条)", "清除评级(3 条)", "加入镜头带(3 条)", "移到其他集(3 条)…", "导出所选(3 条)…", "在 Finder 中显示", "移除素材(3 条)…"]);
     const readOnly = clipMenuItems(1, { readOnly: true });
-    expect(readOnly.filter((item) => item.disabled).map((item) => item.id)).toEqual(["favorite", "reject", "clear", "addToBand", "remove"]);
+    expect(readOnly.filter((item) => item.disabled).map((item) => item.id)).toEqual(["favorite", "reject", "clear", "addToBand", "moveToEpisode", "remove"]);
   });
 
-  it("媒体池右键:菜单「素材操作」列全七项;「移除素材…」→ 预览 → 确认卡列后果数字 → 确认后调命令、本地拿掉、清选择、toast", async () => {
+  it("媒体池右键:菜单「素材操作」列全八项;「移除素材…」→ 预览 → 确认卡列后果数字 → 确认后调命令、本地拿掉、清选择、toast", async () => {
     render(
       <>
         <MediaPool />
@@ -86,7 +86,7 @@ describe("R16 §1 / P1-1:素材卡菜单", () => {
     fireEvent.contextMenu(screen.getByRole("gridcell", { name: /clip-3/ }), { clientX: 10, clientY: 10 });
     const menu = await screen.findByRole("menu", { name: "素材操作" });
     expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.textContent)).toEqual([
-      "收藏(2 条)", "拒绝(2 条)", "清除评级(2 条)", "加入镜头带(2 条)", "导出所选(2 条)…", "在 Finder 中显示", "移除素材(2 条)…",
+      "收藏(2 条)", "拒绝(2 条)", "清除评级(2 条)", "加入镜头带(2 条)", "移到其他集(2 条)…", "导出所选(2 条)…", "在 Finder 中显示", "移除素材(2 条)…",
     ]);
     fireEvent.click(screen.getByRole("menuitem", { name: "移除素材" }));
     const dialog = await screen.findByRole("alertdialog", { name: REMOVAL_CONFIRM_LABEL });

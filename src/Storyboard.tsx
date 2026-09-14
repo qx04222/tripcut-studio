@@ -25,7 +25,6 @@ import {
   setDestinationCardVerified,
   setStoryOrder,
   setShotStackUserState,
-  undoStoryChange,
   updateDestinationCard,
   type Chapter,
   type DestinationCard,
@@ -59,6 +58,7 @@ import {
   type GenerationRequestSummary,
   type GenerationAvailability,
 } from "./api";
+import { takeStoryUndoSuffix, undoStoryChangeNoticing } from "./workspace/storyUndo";
 
 const UNCHAPTERED = "unassigned";
 
@@ -210,9 +210,6 @@ function StoryItemCard({
   onDropBefore,
   onAdd,
   onRemove,
-  onMove,
-  canMoveEarlier = false,
-  canMoveLater = false,
   disabled = false,
   onStackState,
 }: {
@@ -226,9 +223,6 @@ function StoryItemCard({
   onDropBefore?: (item: StoryItem) => void;
   onAdd?: (item: StoryItem) => void;
   onRemove?: (item: StoryItem) => void;
-  onMove?: (item: StoryItem, direction: -1 | 1) => void;
-  canMoveEarlier?: boolean;
-  canMoveLater?: boolean;
   disabled?: boolean;
   onStackState?: (
     stack: ShotStack,
@@ -297,18 +291,6 @@ function StoryItemCard({
         <button type="button" disabled={disabled} onClick={() => onAdd?.(item)}>加入</button>
       ) : (
         <div className="story-item-actions">
-          <button
-            type="button"
-            aria-label={`${item.file_name} 上移`}
-            disabled={disabled || !canMoveEarlier}
-            onClick={() => onMove?.(item, -1)}
-          >上移</button>
-          <button
-            type="button"
-            aria-label={`${item.file_name} 下移`}
-            disabled={disabled || !canMoveLater}
-            onClick={() => onMove?.(item, 1)}
-          >下移</button>
           <button type="button" disabled={disabled} onClick={() => onRemove?.(item)}>移回候选</button>
         </div>
       )}
@@ -1043,13 +1025,6 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
     void persistOrder(next, "已移回候选区，可撤销");
   };
 
-  const moveWithinChapter = (item: StoryItem, direction: -1 | 1) => {
-    if (!board || busy) return;
-    const next = moveStoryItemWithinChapter(board.chapters, board.items, item.key, direction);
-    if (next === board.items) return;
-    void persistOrder(next, direction < 0 ? "镜头已上移，可撤销" : "镜头已下移，可撤销");
-  };
-
   const saveChapterTitle = async (chapter: Chapter) => {
     const title = (titleDrafts[chapter.id] ?? chapter.title).trim();
     if (!title) {
@@ -1093,9 +1068,9 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
     if (!board?.can_undo || busy) return;
     setBusy(true);
     try {
-      await undoStoryChange();
+      await undoStoryChangeNoticing();
       await refresh();
-      setNotice("已撤销上一步故事板操作");
+      setNotice(`已撤销上一步故事板操作${takeStoryUndoSuffix()}`);
     } catch (error) {
       setNotice(`未能撤销：${String(error)}`);
     } finally {
@@ -1189,7 +1164,7 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
             dropAtChapterEnd(chapterId);
           }}
         >
-          {chapterItems.map((item, itemIndex) => (
+          {chapterItems.map((item) => (
             <StoryItemCard
               item={item}
               stack={stackByClipId.get(item.clip_id)?.stack}
@@ -1199,9 +1174,6 @@ export function StoryboardView({ readOnly = false }: { readOnly?: boolean } = {}
               onDragEnd={() => setDragged(null)}
               onDropBefore={dropBefore}
               onRemove={removeFromStory}
-              onMove={moveWithinChapter}
-              canMoveEarlier={itemIndex > 0}
-              canMoveLater={itemIndex < chapterItems.length - 1}
               disabled={busy}
               onStackState={(stack, member, state) => void persistStackState(stack, member, state)}
               key={item.key}

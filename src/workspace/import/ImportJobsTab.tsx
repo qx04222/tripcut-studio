@@ -4,7 +4,7 @@ import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
-import { batchStatusLabel, decodeQueueHint, lastPathSegment, ownedElsewhereLines, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
+import { batchStatusLabel, decodeQueueHint, lastPathSegment, ownedElsewhereLines, pausedByUserHint, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
 import { RemovalConfirm } from "./RemovalConfirm";
 import { ImportRunningJobs } from "./ImportRunningJobs";
 import { useImportJobs } from "./useImportJobs";
@@ -41,24 +41,31 @@ function PipelineTile({ segment }: { segment: PipelineSegment }): JSX.Element {
 /** 任务分页(规格 §4.1):进度卡(三段式:索引 / 画质 / 运镜)、批次卡、批量操作行、确认框。 */
 export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Element {
   const jobs = useImportJobs({ onChanged });
-  const { progress, clips, readyClips, quality, motion, batches, busy, notice, confirmation, refreshError } = jobs;
+  const { progress, clips, readyClips, quality, motion, batches, busy, notice, confirmation, refreshError, loaded } = jobs;
   const segments = pipelineSegments(progress, readyClips.length, quality, motion);
   // Z-13:「重复 n」里属于别的集的那几条要说清在哪一集。
   const elsewhere = ownedElsewhereLines(clips);
   const hint = decodeQueueHint(progress, segments);
+  const pausedHint = pausedByUserHint(progress);
 
   return (
     <div className="import-tab import-jobs">
       <section className="import-section" aria-label={IMPORT_PROGRESS_LABEL}>
-        <SectionHeader title={IMPORT_PROGRESS_LABEL} meta={pipelineHeadline(segments)} />
+        <SectionHeader title={IMPORT_PROGRESS_LABEL} meta={loaded ? pipelineHeadline(segments) : "正在读取…"} />
         <Card className="import-index import-index--pipeline" aria-live="polite">
-          <ul className="import-pipeline" aria-label="流水线三阶段">
-            {segments.map((segment) => (
-              <PipelineTile key={segment.id} segment={segment} />
-            ))}
-          </ul>
+          {/* A16-01:第一拍没回来之前不画 0 / 0 —— 那副样子和「真的没素材」一模一样。 */}
+          {loaded ? (
+            <ul className="import-pipeline" aria-label="流水线三阶段">
+              {segments.map((segment) => (
+                <PipelineTile key={segment.id} segment={segment} />
+              ))}
+            </ul>
+          ) : (
+            <p className="import-index-note">正在读取任务进度…</p>
+          )}
+          {pausedHint ? <p className="import-index-hint import-index-hint--paused" role="status">{pausedHint}</p> : null}
           {hint ? <p className="import-index-hint">{hint}</p> : null}
-          <p className="import-index-note">{`${readyClips.length} 条可用素材。封面出现后即可筛片；分析在后台继续，失败原因可在检查器里查看。`}</p>
+          {loaded ? <p className="import-index-note">{`${readyClips.length} 条可用素材。封面出现后即可筛片；分析在后台继续，失败原因可在检查器里查看。`}</p> : null}
         </Card>
         {refreshError ? (
           <p className="import-note import-note--error" role="status">
@@ -85,7 +92,11 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
             </>
           }
         />
-        {batches.length === 0 ? (
+        {!loaded ? (
+          <Card className="import-jobs-empty">
+            <p className="import-recent-empty">正在读取…</p>
+          </Card>
+        ) : batches.length === 0 ? (
           <Card className="import-jobs-empty">
             <EmptyState
               size="inline"

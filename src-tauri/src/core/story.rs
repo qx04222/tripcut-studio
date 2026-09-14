@@ -789,7 +789,13 @@ pub fn delete_chapter(connection: &mut Connection, chapter_id: i64) -> Result<i6
     Ok(target_id)
 }
 
-pub fn undo_latest(connection: &mut Connection) -> Result<()> {
+/// `undo_latest` 的结果:`skipped_moved` = 快照里已被移到别的集、这次没有放回镜头带的镜数(R17 epmove)。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct UndoOutcome {
+    pub skipped_moved: usize,
+}
+
+pub fn undo_latest(connection: &mut Connection) -> Result<UndoOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let episode_id = active_episode_id(&transaction)?;
     let latest = transaction
@@ -804,7 +810,7 @@ pub fn undo_latest(connection: &mut Connection) -> Result<()> {
         .ok_or_else(|| CoreError::Story("当前没有可撤销的故事板操作".to_owned()))?;
     let snapshot: StorySnapshot = serde_json::from_str(&latest.1)
         .map_err(|error| CoreError::Story(format!("撤销快照无效：{error}")))?;
-    restore_snapshot(&transaction, episode_id, &snapshot)?;
+    let skipped_moved = restore_snapshot(&transaction, episode_id, &snapshot)?;
     transaction.execute(
         "UPDATE story_history
          SET undone_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -812,7 +818,7 @@ pub fn undo_latest(connection: &mut Connection) -> Result<()> {
         [latest.0],
     )?;
     transaction.commit()?;
-    Ok(())
+    Ok(UndoOutcome { skipped_moved })
 }
 
 fn validate_order_ref(item: &StoryOrderRef) -> Result<()> {
@@ -1016,11 +1022,12 @@ pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Resu
     })
 }
 
+/// 回放一份快照;返回因素材已移到别的集而没有回排的镜数(R17 epmove)。
 fn restore_snapshot(
     connection: &Connection,
     episode_id: i64,
     snapshot: &StorySnapshot,
-) -> Result<()> {
+) -> Result<usize> {
     connection.execute(
         "UPDATE chapters SET tombstone = 1 WHERE episode_id = ?1",
         [episode_id],
@@ -1061,7 +1068,18 @@ fn restore_snapshot(
          WHERE episode_id = ?1 AND tombstone = 0",
         [episode_id],
     )?;
+    let mut skipped_moved = 0usize;
     for item in &snapshot.order {
+        // R17 epmove:快照里的素材如今属于别的集(被「移到其他集」挪走了)—— 不回排、也不报错:
+        // `story_order_whole_unique_idx` 按 clip 全局唯一,硬插会撞索引把整次撤销打死;镜头带是按集的,
+        // 别的集的素材本来也不该出现在这一集的带上。跳过数带回给前端提示。
+        let owner: Option<Option<i64>> = connection
+            .query_row("SELECT episode_id FROM clips WHERE id = ?1", [item.clip_id], |row| row.get(0))
+            .optional()?;
+        if matches!(owner, Some(Some(other)) if other != episode_id) {
+            skipped_moved += 1;
+            continue;
+        }
         upsert_story_order(
             connection,
             &StoryOrderRef {
@@ -1073,7 +1091,7 @@ fn restore_snapshot(
             item.position,
         )?;
     }
-    Ok(())
+    Ok(skipped_moved)
 }
 
 /// 镜头带上的一个镜(V14-01 的「唯一顺序真相」):键与 [`StoryItem::key`] 同一份。
@@ -1570,6 +1588,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM story_order", [], |row| row.get(0))
             .unwrap();
         assert_eq!(stored_rows, 2);
+    }
+
+    /// R17 epmove:素材被移到别的集之后,原集撤更早的排片 —— 那条镜不回排(跳过计数 1)、其余镜正常回排、不报错
+    /// (以前会撞 `story_order_whole_unique_idx`)。
+    #[test]
+    fn undo_skips_shots_whose_clip_moved_to_another_episode() {
+        let (_directory, mut connection) = setup();
+        let first = insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, true);
+        let second = insert_clip(&connection, "b.mov", "2026-08-31T10:01:00Z", None, true);
+        let third = insert_clip(&connection, "c.mov", "2026-08-31T10:02:00Z", None, true);
+        let refs = |ids: &[i64]| {
+            ids.iter()
+                .map(|clip_id| StoryOrderRef { item_kind: "whole".to_owned(), clip_id: *clip_id, segment_id: None })
+                .collect::<Vec<_>>()
+        };
+        set_story_order(&mut connection, &refs(&[first, second, third])).unwrap();
+        set_story_order(&mut connection, &refs(&[third, second, first])).unwrap();
+        let origin = active_episode_id(&connection).unwrap();
+        connection.execute("UPDATE clips SET episode_id = ?1", [origin]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO episodes(title, theme, created_at, status, episode_number, memory_id, target_platform, canvas_orientation)
+                 SELECT 'EP02', '', created_at, 'archived', 2, lower(hex(randomblob(16))), target_platform, canvas_orientation
+                   FROM episodes WHERE id = ?1",
+                [origin],
+            )
+            .unwrap();
+        let other = connection.last_insert_rowid();
+        // 把 second 挪到另一集,再在原集撤销更早的排片。
+        let moved = crate::core::episode::move_clips_to_episode(&mut connection, &[second], other).unwrap();
+        assert_eq!(moved.moved, 1);
+        let outcome = undo_latest(&mut connection).unwrap();
+        assert_eq!(outcome.skipped_moved, 1);
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert_eq!(storyboard.items.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![first, third]);
+        let owner: i64 = connection.query_row("SELECT episode_id FROM clips WHERE id = ?1", [second], |r| r.get(0)).unwrap();
+        assert_eq!(owner, other, "撤销排片不改素材归属");
+        let live_for_moved: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE clip_id = ?1 AND tombstone = 0", [second], |r| r.get(0))
+            .unwrap();
+        assert_eq!(live_for_moved, 0);
     }
 
     #[test]

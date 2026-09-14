@@ -1,6 +1,6 @@
 import type { JSX } from "react";
 
-import { Button, SectionHeader, Select, Toggle } from "../ui";
+import { SectionHeader, Select, Toggle } from "../ui";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 import { bytesLabel } from "./settingsModel";
@@ -10,7 +10,7 @@ export const PROXY_CACHE_LIMIT_OPTIONS_GB = [5, 10, 20, 50, 100] as const;
 
 export function PerformanceSection(): JSX.Element {
   const form = useSettingsFormContext();
-  const { settings, workspaceV2, status } = form;
+  const { settings, status } = form;
   const proxyLimitGb = settings["performance.proxy_cache_limit_gb"] ?? "10";
   const proxyBytes = status?.cache.proxy_bytes;
   const proxyLimitBytes = status?.cache.proxy_limit_bytes ?? Number(proxyLimitGb) * 1024 ** 3;
@@ -95,21 +95,6 @@ export function PerformanceSection(): JSX.Element {
             <option value="standard">标准</option>
             <option value="low">省内存</option>
           </Select>
-        </SettingsRow>
-        {/* R11 简化专项 #2:「切回旧界面」从外观搬到高级(性能)—— 新手不该在常用里看见它。
-            这一行是个真开关,不是单向门(R8 终审 M2):文案与写入值都由当前 ui.workspace_v2 决定。 */}
-        <SettingsRow
-          title="界面"
-          help={
-            workspaceV2
-              ? "旅剪工作台是当前默认界面;需要时可以随时切回旧版四步页面。"
-              : "当前是旧版四步页面;随时可以切回旅剪工作台。"
-          }
-          align="end"
-        >
-          <Button onClick={() => void form.toggleWorkspaceFlag()}>
-            {workspaceV2 ? "切回旧界面" : "切换到新界面"}
-          </Button>
         </SettingsRow>
       </div>
     </>

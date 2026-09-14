@@ -11,12 +11,12 @@ import {
   getStoryboard,
   rateClip,
   setStoryOrder,
-  undoStoryChange,
   type Chapter,
   type ClipListItem,
   type StoryItem,
   type Storyboard,
 } from "../api";
+import { takeStoryUndoSuffix, undoStoryChangeNoticing } from "./storyUndo";
 import { getClipsFeedSnapshot, refreshClipsFeed } from "./useClipsFeed";
 import { failureText } from "./errorText";
 import { SHOT_REMOVED_TOAST } from "./copy";
@@ -33,7 +33,7 @@ export function pushStoryUndo(label: string): number {
   const id = pushUndo({
     label,
     undo: async () => {
-      await undoStoryChange();
+      await undoStoryChangeNoticing();
       await refreshClipsFeed(true);
     },
   });
@@ -235,12 +235,12 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
         const id = lastStoryUndoId;
         lastStoryUndoId = null;
         if (id === null || !(await runUndoById(id))) {
-          await undoStoryChange();
+          await undoStoryChangeNoticing();
           await refreshClipsFeed(true);
         }
         setOptimisticItems(null);
         setUndoable(false);
-        setNotice("已撤销最近一次顺序调整");
+        setNotice(`已撤销最近一次顺序调整${takeStoryUndoSuffix()}`);
       } catch (error) {
         setNotice(failureText("撤销", error));
       }

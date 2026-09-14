@@ -29,6 +29,10 @@
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
 @import "./workspace/chrome.css";
+/* R17 车道 exportfix(交付结果卡的 ffmpeg 建议行),同样只能在头部 @import。 */
+@import "./workspace/exportfix-r17.css";
+/* R17 车道 epmove(素材「移到其他集…」的目标集菜单),同样只能在头部 @import。 */
+@import "./workspace/epmove-r17.css";
 /* R17 车道 B(应用内自动升级:更新 toast 次要动作 / 状态条下载进度 / 设置 › 关于 更新区块),同样只能在头部 @import。 */
 @import "./workspace/update-r17.css";
 /* R16 车道 B(章节与批量:章头改名 / 章操作菜单 / 删章确认 / 集改名),同样只能在头部 @import。 */

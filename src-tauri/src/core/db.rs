@@ -187,6 +187,41 @@ fn create_snapshot_at(
     Ok(target)
 }
 
+/// A16-02:启动 / 清库路径的取证快照 —— 几张主表各多少行、快照几份、最新一份里有几条素材。
+/// 库空而快照非空时启动日志据此发 warn,下次再出现「重启后库被清空」就有线索可循。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryCensus {
+    pub clips: i64,
+    pub import_batches: i64,
+    pub watched_folders: i64,
+    pub episodes: i64,
+    pub snapshots: usize,
+    pub latest_snapshot: Option<PathBuf>,
+    pub latest_snapshot_clips: Option<i64>,
+}
+
+pub fn library_census(connection: &Connection, snapshots_root: &Path) -> Result<LibraryCensus> {
+    let count = |table: &str| -> Result<i64> {
+        Ok(connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?)
+    };
+    let snapshots = list_snapshots(snapshots_root)?;
+    let latest_snapshot = snapshots.first().cloned();
+    let latest_snapshot_clips = latest_snapshot.as_deref().and_then(|path| {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()
+            .and_then(|snapshot| snapshot.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get::<_, i64>(0)).ok())
+    });
+    Ok(LibraryCensus {
+        clips: count("clips")?,
+        import_batches: count("import_batches")?,
+        watched_folders: count("watched_folders")?,
+        episodes: count("episodes")?,
+        snapshots: snapshots.len(),
+        latest_snapshot,
+        latest_snapshot_clips,
+    })
+}
+
 pub fn list_snapshots(snapshots_root: &Path) -> Result<Vec<PathBuf>> {
     if !snapshots_root.exists() {
         return Ok(Vec::new());
@@ -1049,6 +1084,59 @@ mod tests {
 
         assert_eq!(restored_label, "snapshot");
         assert_eq!(displaced_label, "changed");
+    }
+
+    /// A16-02(0.8.0 真机,库被清空一次未复现):快照恢复失败时原库一个字节不能动 ——
+    /// 坏掉的快照(已登记但内容损坏)必须在换文件之前被拒绝,原表照旧、不留半截。
+    #[test]
+    fn restore_failure_leaves_the_original_database_untouched() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let connection = open_project(&db_path).unwrap();
+        connection
+            .execute("INSERT INTO volumes(uuid, label) VALUES ('keep', 'original')", [])
+            .unwrap();
+        let snapshots = directory.path().join("snapshots");
+        let snapshot = create_snapshot_at(&connection, &snapshots, "001").unwrap();
+        drop(connection);
+        // 快照登记在册,但内容被写坏。
+        std::fs::write(&snapshot, b"this is not a sqlite database").unwrap();
+
+        let error = restore_snapshot(&db_path, &snapshot).unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let original = open_project_read_only(&db_path).unwrap();
+        let label: String = original
+            .query_row("SELECT label FROM volumes WHERE uuid='keep'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(label, "original", "恢复失败后原表必须原样");
+        let leftovers: Vec<String> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("restore"))
+            .collect();
+        assert!(leftovers.is_empty(), "不该留下 staged / pre-restore 半成品:{leftovers:?}");
+    }
+
+    /// A16-02:恢复只走「整库换文件」,不存在「先清空再回填」的路径 —— 快照里的表原样回来,
+    /// 原库整个搬到 pre-restore 备份,两边都是完整库。
+    #[test]
+    fn library_census_reports_row_counts_and_latest_snapshot_clips() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let connection = open_project(&db_path).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('fixture')", []).unwrap();
+        connection
+            .execute("INSERT INTO clips(id, volume_uuid, rel_path, episode_id) VALUES (1, 'fixture', '/a.mp4', 1)", [])
+            .unwrap();
+        let snapshots = directory.path().join("snapshots");
+        create_snapshot_at(&connection, &snapshots, "001").unwrap();
+        connection.execute("DELETE FROM clips", []).unwrap();
+        let census = library_census(&connection, &snapshots).unwrap();
+        assert_eq!(census.clips, 0);
+        assert_eq!(census.episodes, 1);
+        assert_eq!(census.snapshots, 1);
+        assert_eq!(census.latest_snapshot_clips, Some(1), "最新快照里的素材数要读出来,启动时空库才有话可说");
     }
 
     #[test]

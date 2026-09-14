@@ -209,6 +209,17 @@ fn apply_mpv_call(mpv: &Mpv, call: MpvCall) -> Result<(), String> {
     }
 }
 
+/// `command_for` 拒绝跨素材命令时的错误文本;前端据此静默(不是播放器故障)。
+pub const STALE_CLIP_COMMAND: &str = "命令属于已换掉的素材";
+
+/// 纯判定:命令声明的归属 `expected` 与当前会话的 `current` 不一致即拒;未声明归属(`None`)放行。
+fn command_owner_check(current: Option<i64>, expected: Option<i64>) -> Result<(), String> {
+    match expected {
+        Some(expected) if current != Some(expected) => Err(STALE_CLIP_COMMAND.to_owned()),
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlayerStatus {
     pub phase: String,
@@ -448,6 +459,13 @@ impl PlayerManager {
     }
 
     pub fn command(&self, command: PlayerCommand) -> Result<(), String> {
+        self.command_for(command, None)
+    }
+
+    /// R17 playfix:命令只打在它所属的那条素材上。`open()` 持 `operation` 锁期间排队的
+    /// 旧素材命令(A 的 `seek_abs 12.3` / `play`)以前会在锁一放后落到 B 的新实例上,
+    /// 让 B 从 A 停住的位置开播。带 `clip_id` 的调用方在这里被比对;`None` 保持旧语义。
+    pub fn command_for(&self, command: PlayerCommand, clip_id: Option<i64>) -> Result<(), String> {
         if let PlayerCommand::SeekAbs { seconds } = &command {
             if !seconds.is_finite() || *seconds < 0.0 {
                 return Err("seek_abs 需要非负有限秒数".to_owned());
@@ -455,11 +473,13 @@ impl PlayerManager {
         }
 
         let _operation = lock(&self.operation);
-        let sender = lock(&self.state)
-            .session
-            .as_ref()
-            .map(|session| session.sender.clone())
-            .ok_or_else(|| "播放器尚未打开".to_owned())?;
+        let sender = {
+            let state = lock(&self.state);
+            let session = state.session.as_ref().ok_or_else(|| "播放器尚未打开".to_owned())?;
+            let current = lock(&session.status).clip_id;
+            command_owner_check(current, clip_id)?;
+            session.sender.clone()
+        };
         let (reply_sender, reply_receiver) = mpsc::channel();
         sender
             .send(WorkerMessage::Command(command, reply_sender))
@@ -1358,6 +1378,15 @@ mod tests {
         assert_eq!(status.clip_id, None);
         assert!(status.paused);
         assert_eq!(status.pos, 0.0);
+    }
+
+    #[test]
+    fn stale_clip_commands_are_rejected_before_reaching_the_session() {
+        // R17 playfix:A 在 open(B) 的锁后排队的 seek/play 不能落到 B 的实例上。
+        assert_eq!(command_owner_check(Some(2), Some(1)), Err(STALE_CLIP_COMMAND.to_owned()));
+        assert_eq!(command_owner_check(None, Some(1)), Err(STALE_CLIP_COMMAND.to_owned()));
+        assert_eq!(command_owner_check(Some(2), Some(2)), Ok(()));
+        assert_eq!(command_owner_check(Some(2), None), Ok(()), "旧调用方不带归属时保持原语义");
     }
 
     #[test]

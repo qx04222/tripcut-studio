@@ -490,12 +490,86 @@ pub fn configured_executable(
     fallback: &str,
 ) -> Result<OsString> {
     let configured = string_value(connection, setting_key, "")?;
-    if !configured.trim().is_empty() {
-        return Ok(OsString::from(configured));
+    Ok(configured_executable_with(
+        &configured,
+        std::env::var_os(environment_key).as_deref(),
+        fallback,
+        resolve_executable,
+    ))
+}
+
+/// 设置 > 环境变量 > 默认名;裸名(如 `"ffmpeg"`)经 `resolve` 落到包内 / 托管 / Homebrew
+/// 的绝对路径 —— 以前直接把裸名交给 `Command::new`,那是按进程 PATH 找的,Finder 启动的
+/// 应用 PATH 里没有包内目录,shell 启动的又会被 PATH 上任何一份 ffmpeg 抢先(R17 exportfix)。
+/// 解析不到就原样返回,错误文案(找不到媒体工具)保持不变。
+fn configured_executable_with(
+    configured: &str,
+    environment: Option<&OsStr>,
+    fallback: &str,
+    resolve: impl Fn(&OsStr) -> Option<PathBuf>,
+) -> OsString {
+    let candidate = if !configured.trim().is_empty() {
+        OsString::from(configured)
+    } else if let Some(environment) = environment.filter(|value| !value.is_empty()) {
+        environment.to_owned()
+    } else {
+        OsString::from(fallback)
+    };
+    match resolve(&candidate) {
+        Some(resolved) => resolved.into_os_string(),
+        None => candidate,
     }
-    Ok(std::env::var_os(environment_key)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| OsString::from(fallback)))
+}
+
+/// 导出 / 代理用的 ffmpeg:配置的那份没有 VideoToolbox 而包内 sibling 有,就改用包内的
+/// (`warn!` 留痕)。设置页仍显示用户配置的路径,`ToolStatus.note` 里说明会改用哪份。
+pub fn export_ffmpeg(connection: &Connection) -> Result<OsString> {
+    let configured = configured_executable(connection, FFMPEG_PATH_KEY, "FFMPEG_PATH", "ffmpeg")?;
+    Ok(prefer_videotoolbox_ffmpeg_in(configured, bundled_sibling("ffmpeg"), |path| {
+        super::media_tools::encoder_caps(path).h264_videotoolbox
+    }))
+}
+
+/// 随包捆绑的同名工具(`current_exe().parent()/<name>`),存在才算。
+pub(crate) fn bundled_sibling(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+fn prefer_videotoolbox_ffmpeg_in(
+    resolved: OsString,
+    bundled: Option<PathBuf>,
+    has_videotoolbox: impl Fn(&OsStr) -> bool,
+) -> OsString {
+    let Some(bundled) = bundled else {
+        return resolved;
+    };
+    if bundled.as_os_str() == resolved.as_os_str() || has_videotoolbox(&resolved) {
+        return resolved;
+    }
+    if !has_videotoolbox(bundled.as_os_str()) {
+        return resolved;
+    }
+    tracing::warn!(
+        configured = %resolved.to_string_lossy(),
+        bundled = %bundled.display(),
+        "用户配置的 ffmpeg 缺 VideoToolbox,改用包内"
+    );
+    bundled.into_os_string()
+}
+
+/// 设置页给用户的白话:这份 ffmpeg 没有硬件 H.264 时会怎样。`bundled_has_videotoolbox`
+/// 为 `None` 表示没有包内 sibling(开发构建)。
+fn videotoolbox_note(has_videotoolbox: bool, bundled_has_videotoolbox: Option<bool>) -> Option<String> {
+    if has_videotoolbox {
+        return None;
+    }
+    Some(if bundled_has_videotoolbox == Some(true) {
+        "这份 ffmpeg 不支持硬件 H.264 编码,导出和预览会自动改用软件自带的那份;清空自定义路径就会一直用自带的。".to_owned()
+    } else {
+        "这份 ffmpeg 不支持硬件 H.264 编码,导出会改用兼容编码,速度和画质会差一些;清空自定义路径可换回软件自带的。".to_owned()
+    })
 }
 
 pub fn configured_ffprobe(connection: &Connection, ffmpeg: &OsStr) -> Result<OsString> {
@@ -561,11 +635,19 @@ pub fn save_window_state(connection: &mut Connection, state: WindowState) -> Res
 
 pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStatus> {
     let configured_ffmpeg = string_value(connection, FFMPEG_PATH_KEY, "")?;
-    let ffmpeg = executable_status(
+    let mut ffmpeg = executable_status(
         &configured_ffmpeg,
         std::env::var_os("FFMPEG_PATH").as_deref(),
         "ffmpeg",
     );
+    if ffmpeg.available && ffmpeg.note.is_none() {
+        let has_vt = |path: &OsStr| super::media_tools::encoder_caps(path).h264_videotoolbox;
+        let bundled = bundled_sibling("ffmpeg").filter(|path| path.as_os_str() != OsStr::new(&ffmpeg.resolved_path));
+        ffmpeg.note = videotoolbox_note(
+            has_vt(OsStr::new(&ffmpeg.resolved_path)),
+            bundled.map(|path| has_vt(path.as_os_str())),
+        );
+    }
     let configured_ffprobe = string_value(connection, FFPROBE_PATH_KEY, "")?;
     let ffprobe_fallback = sibling_ffprobe(&ffmpeg.resolved_path);
     let ffprobe = executable_status(
@@ -916,6 +998,7 @@ pub fn reset_project_library(connection: &mut Connection, cache_root: &Path) -> 
     transaction.execute_batch("PRAGMA defer_foreign_keys = ON")?;
     let removed_clips: i64 = transaction.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
     let removed_episodes: i64 = transaction.query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))?;
+    tracing::warn!(removed_clips, removed_episodes, cache_root = %cache_root.display(), "reset_project_library: deleting every table except settings / schema_version / platform_presets / llm_ledger");
     let tables = {
         let mut statement = transaction.prepare(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -1413,6 +1496,70 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved, OsString::from("/opt/tripcut/bin/ffmpeg"));
+    }
+
+    /// R17 exportfix:裸名不再直接交给 Command(按进程 PATH 找),而是经解析器落到绝对路径;
+    /// 解析不到保持裸名;设置里写了绝对路径的照旧。
+    #[test]
+    fn bare_tool_names_are_resolved_before_reaching_command() {
+        let resolver = |candidate: &OsStr| {
+            (candidate == OsStr::new("ffmpeg")).then(|| PathBuf::from("/App.app/Contents/MacOS/ffmpeg"))
+        };
+        assert_eq!(
+            configured_executable_with("", None, "ffmpeg", resolver),
+            OsString::from("/App.app/Contents/MacOS/ffmpeg")
+        );
+        assert_eq!(
+            configured_executable_with("", Some(OsStr::new("ffmpeg")), "ffprobe", resolver),
+            OsString::from("/App.app/Contents/MacOS/ffmpeg")
+        );
+        // 解析不到:原样返回,错误文案沿用「找不到媒体工具」。
+        assert_eq!(configured_executable_with("", None, "whisper-cli", resolver), OsString::from("whisper-cli"));
+        // 绝对路径不存在时同样原样返回(不静默换成别的)。
+        assert_eq!(
+            configured_executable_with("/nope/ffmpeg", None, "ffmpeg", resolver),
+            OsString::from("/nope/ffmpeg")
+        );
+    }
+
+    /// R17 exportfix:配置的 ffmpeg 没有 VideoToolbox、包内那份有 → 导出改用包内;
+    /// 配置的有 VT、或包内也没有、或根本没有包内 sibling → 尊重配置。
+    #[test]
+    fn export_ffmpeg_falls_back_to_the_bundled_copy_only_when_it_has_videotoolbox() {
+        let bundled = PathBuf::from("/App.app/Contents/MacOS/ffmpeg");
+        let vt_only_in_bundle = |path: &OsStr| path == bundled.as_os_str();
+        assert_eq!(
+            prefer_videotoolbox_ffmpeg_in(OsString::from("/opt/conda/bin/ffmpeg"), Some(bundled.clone()), vt_only_in_bundle),
+            bundled.clone().into_os_string()
+        );
+        assert_eq!(
+            prefer_videotoolbox_ffmpeg_in(OsString::from("/opt/homebrew/bin/ffmpeg"), Some(bundled.clone()), |_| true),
+            OsString::from("/opt/homebrew/bin/ffmpeg")
+        );
+        assert_eq!(
+            prefer_videotoolbox_ffmpeg_in(OsString::from("/opt/conda/bin/ffmpeg"), Some(bundled.clone()), |_| false),
+            OsString::from("/opt/conda/bin/ffmpeg")
+        );
+        assert_eq!(
+            prefer_videotoolbox_ffmpeg_in(OsString::from("/opt/conda/bin/ffmpeg"), None, |_| false),
+            OsString::from("/opt/conda/bin/ffmpeg")
+        );
+        // 已经是包内那份:不重复探测、原样返回。
+        assert_eq!(
+            prefer_videotoolbox_ffmpeg_in(bundled.clone().into_os_string(), Some(bundled.clone()), |_| panic!("不该探测")),
+            bundled.into_os_string()
+        );
+    }
+
+    #[test]
+    fn tool_status_note_explains_missing_videotoolbox_in_plain_words() {
+        assert_eq!(videotoolbox_note(true, Some(true)), None);
+        let will_switch = videotoolbox_note(false, Some(true)).unwrap();
+        assert!(will_switch.contains("自动改用软件自带的那份"), "{will_switch}");
+        assert!(will_switch.contains("清空自定义路径"), "{will_switch}");
+        let no_bundle = videotoolbox_note(false, None).unwrap();
+        assert!(no_bundle.contains("兼容编码"), "{no_bundle}");
+        assert_eq!(videotoolbox_note(false, Some(false)), videotoolbox_note(false, None));
     }
 
     #[test]

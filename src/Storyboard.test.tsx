@@ -495,3 +495,47 @@ describe("story gap polling", () => {
     expect(clearIntervalSpy).toHaveBeenCalled();
   });
 });
+
+describe("R17 车道 legacy:故事板镜头卡不再有「上移/下移」按钮", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.mocked(getStoryboard).mockResolvedValue({
+      ...emptyBoard(),
+      chapters,
+      items: [item("whole:1", 1, 0), item("whole:2", 1, 1)],
+    });
+    vi.mocked(listShotStacks).mockResolvedValue([]);
+    vi.mocked(listStoryTemplates).mockResolvedValue([]);
+    vi.mocked(getNarrativeRevision).mockResolvedValue(null as never);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("镜头卡还在(「移回候选」可见),但「上移」「下移」都不再出现", async () => {
+    await act(async () => {
+      root.render(<StoryboardView />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 先证明这条镜头卡确实渲染了,负断言才有意义(不是选择器写错导致的假绿)。
+    const moveBackButtons = Array.from(container.querySelectorAll("button")).filter(
+      (button) => button.textContent === "移回候选",
+    );
+    expect(moveBackButtons.length).toBe(2);
+    expect(container.querySelector('[aria-label$=" 上移"]')).toBeNull();
+    expect(container.querySelector('[aria-label$=" 下移"]')).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).map((b) => b.textContent)).not.toContain("上移");
+    expect(Array.from(container.querySelectorAll("button")).map((b) => b.textContent)).not.toContain("下移");
+  });
+});

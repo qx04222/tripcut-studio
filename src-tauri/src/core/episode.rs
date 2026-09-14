@@ -405,6 +405,102 @@ pub fn delete_episode(connection: &mut Connection, episode_id: i64) -> Result<De
     Ok(DeleteEpisodeOutcome { deleted, active, created_fresh, removed_clips: clip_ids.len() })
 }
 
+/// R17 epmove:一次「移到其他集」的结果。`from` 记每条素材的旧归属,前端撤销时反向再调一次。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MoveOutcome {
+    pub moved: usize,
+    pub skipped_missing: usize,
+    /// `(clip_id, old_episode_id)`,只含真正换了集的素材。
+    pub from: Vec<(i64, i64)>,
+}
+
+/// R17 epmove:把素材挪到另一集(当前集或已封存的历史集都可以作目标)。单事务:
+/// - `clips.episode_id` 改成目标集,`chapter_id` 清空(章是按集的);
+/// - 原集镜头带上这些素材的镜(整条 / 精选段)移出:`story_order` 行跟到目标集并置 tombstone
+///   (`story_order_whole_unique_idx` 是按 clip 全局唯一的,删掉或留在原集都会挡住之后在新集
+///   「加入镜头带」);
+/// - 场景镜堆按集(`clip_episode_with_stack_guard` 触发器禁止带着成员换集):先退出镜堆;
+/// - 叙事节拍 / 边界信号 / Routine 裁量是按集的:节拍与边界信号删掉,Routine 裁量跟到目标集;
+/// - 精选段、评级、标签、分析结果、缓存都挂在素材上,跟着走不动。
+///
+/// 不存在的素材计入 `skipped_missing`;已在目标集的不算移动。
+pub fn move_clips_to_episode(
+    connection: &mut Connection,
+    clip_ids: &[i64],
+    target_episode_id: i64,
+) -> Result<MoveOutcome> {
+    if clip_ids.is_empty() {
+        return Err(CoreError::Story("没有选中要移动的素材".to_owned()));
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let target_exists: i64 = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM episodes WHERE id = ?1)",
+        [target_episode_id],
+        |row| row.get(0),
+    )?;
+    if target_exists != 1 {
+        return Err(CoreError::Story("目标集已不存在,回首页重新选一集".to_owned()));
+    }
+    let mut from = Vec::new();
+    let mut skipped_missing = 0usize;
+    for &clip_id in clip_ids {
+        let owner: Option<Option<i64>> = transaction
+            .query_row("SELECT episode_id FROM clips WHERE id = ?1", [clip_id], |row| row.get(0))
+            .optional()?;
+        match owner {
+            None => skipped_missing += 1,
+            Some(Some(old)) if old == target_episode_id => {}
+            Some(old) => {
+                // episode_id 为空的旧数据按「当前集」记旧归属,撤销时才有地方回。
+                let old = match old {
+                    Some(id) => id,
+                    None => transaction.query_row(
+                        "SELECT id FROM episodes WHERE status = 'active'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                };
+                from.push((clip_id, old));
+            }
+        }
+    }
+    let moving: Vec<i64> = from.iter().map(|(clip_id, _)| *clip_id).collect();
+    let json = super::import_control::ids_json(&moving);
+    transaction.execute(
+        "DELETE FROM shot_stack_members WHERE clip_id IN (SELECT value FROM json_each(?1))",
+        [&json],
+    )?;
+    transaction.execute(
+        "DELETE FROM narrative_beats WHERE clip_id IN (SELECT value FROM json_each(?1))",
+        [&json],
+    )?;
+    transaction.execute(
+        "DELETE FROM narrative_boundary_signals
+          WHERE episode_id != ?2
+            AND (before_clip_id IN (SELECT value FROM json_each(?1))
+              OR after_clip_id IN (SELECT value FROM json_each(?1)))",
+        params![json, target_episode_id],
+    )?;
+    transaction.execute(
+        "UPDATE OR REPLACE routine_overrides SET episode_id = ?2
+          WHERE clip_id IN (SELECT value FROM json_each(?1)) AND episode_id != ?2",
+        params![json, target_episode_id],
+    )?;
+    transaction.execute(
+        "UPDATE story_order
+            SET episode_id = ?2, tombstone = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE clip_id IN (SELECT value FROM json_each(?1))",
+        params![json, target_episode_id],
+    )?;
+    transaction.execute(
+        "UPDATE clips SET episode_id = ?2, chapter_id = NULL
+          WHERE id IN (SELECT value FROM json_each(?1))",
+        params![json, target_episode_id],
+    )?;
+    transaction.commit()?;
+    Ok(MoveOutcome { moved: from.len(), skipped_missing, from })
+}
+
 /// 写操作守卫:素材必须属于当前进行中的集。
 /// 历史集是只读档案——UI 会禁用写控件,但**后端必须独立校验**,
 /// 不能把界面禁用当权限边界(回归测试覆盖该缺口)。
@@ -857,6 +953,115 @@ mod tests {
             .query_row("SELECT episode_id FROM clips WHERE id=?1", [clip], |r| r.get(0))
             .unwrap();
         assert_eq!(owner, before.id);
+    }
+
+    /// R17 epmove:把素材挪到另一集 —— `episode_id` 改、原集镜头带上的镜(整条 / 精选段)移出、
+    /// 评级与精选段跟着素材不动、章归属清空;再反向调一次就回到原集(撤销)。
+    #[test]
+    fn move_clips_to_episode_rehomes_clip_and_clears_band_but_keeps_ratings() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        let clip = insert_clip(&connection, "a.mp4");
+        let stay = insert_clip(&connection, "stay.mp4");
+        let segment = crate::core::ratings::create_select_segment(&mut connection, clip, 0.1, 0.2).unwrap();
+        crate::core::ratings::rate_clip(&mut connection, clip, "star", 4).unwrap();
+        connection
+            .execute(
+                "INSERT INTO chapters(id, title, start_at, end_at, episode_id) VALUES (7, '第一天', 'a', 'b', ?1)",
+                [first.id],
+            )
+            .unwrap();
+        connection.execute("UPDATE clips SET chapter_id = 7 WHERE id = ?1", [clip]).unwrap();
+        for (position, (kind, clip_id, segment_id)) in
+            [("whole", clip, None), ("segment", clip, Some(segment.id)), ("whole", stay, None)].iter().enumerate()
+        {
+            connection
+                .execute(
+                    "INSERT INTO story_order(item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id)
+                     VALUES (?1, ?2, ?3, ?4, 0, 'now', 'now', ?5)",
+                    params![kind, clip_id, segment_id, position as i64, first.id],
+                )
+                .unwrap();
+        }
+        let second = archive_current(&mut connection, Some("EP02")).unwrap().next;
+
+        let outcome = move_clips_to_episode(&mut connection, &[clip, 999_999], second.id).unwrap();
+        assert_eq!(outcome.moved, 1);
+        assert_eq!(outcome.skipped_missing, 1);
+        assert_eq!(outcome.from, vec![(clip, first.id)]);
+
+        let owner: i64 = connection.query_row("SELECT episode_id FROM clips WHERE id = ?1", [clip], |r| r.get(0)).unwrap();
+        assert_eq!(owner, second.id);
+        let chapter: Option<i64> = connection.query_row("SELECT chapter_id FROM clips WHERE id = ?1", [clip], |r| r.get(0)).unwrap();
+        assert_eq!(chapter, None, "章是按集的,挪走后清空");
+        let live_in_first: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE episode_id = ?1 AND tombstone = 0", [first.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(live_in_first, 1, "原集镜头带只剩没挪的那条");
+        let live_for_clip: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE clip_id = ?1 AND tombstone = 0", [clip], |r| r.get(0))
+            .unwrap();
+        assert_eq!(live_for_clip, 0, "挪过去的素材不自动进新集镜头带");
+        let segments: i64 = connection
+            .query_row("SELECT COUNT(*) FROM segments WHERE clip_id = ?1 AND kind = 'select' AND tombstone = 0", [clip], |r| r.get(0))
+            .unwrap();
+        assert_eq!(segments, 1, "精选段跟着素材走");
+        let star: i64 = connection
+            .query_row(
+                "SELECT r.value FROM ratings r JOIN segments s ON s.id = r.segment_id
+                 WHERE s.clip_id = ?1 AND r.rating_type = 'star' ORDER BY r.id DESC LIMIT 1",
+                [clip],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(star, 4, "评级跟着素材走");
+        assert_eq!(summary_by_id(&connection, first.id).unwrap().clip_count, 1);
+        assert_eq!(summary_by_id(&connection, second.id).unwrap().clip_count, 1);
+        let fk: i64 = connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 0);
+
+        // 撤销 = 反向再调一次。
+        let back = move_clips_to_episode(&mut connection, &[clip], first.id).unwrap();
+        assert_eq!(back.from, vec![(clip, second.id)]);
+        let owner: i64 = connection.query_row("SELECT episode_id FROM clips WHERE id = ?1", [clip], |r| r.get(0)).unwrap();
+        assert_eq!(owner, first.id);
+    }
+
+    /// R17 epmove:目标集不存在 / 目标就是当前归属 / 素材在场景镜堆里 —— 白话错误或不算移动。
+    #[test]
+    fn move_clips_to_episode_rejects_unknown_target_and_drops_stack_membership() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        let clip = insert_clip(&connection, "a.mp4");
+        let error = move_clips_to_episode(&mut connection, &[clip], 424_242).unwrap_err().to_string();
+        assert!(error.contains("目标集"), "{error}");
+        assert!(move_clips_to_episode(&mut connection, &[], first.id).unwrap_err().to_string().contains("没有"));
+        // 已经在目标集:不算移动,也不报错。
+        let same = move_clips_to_episode(&mut connection, &[clip], first.id).unwrap();
+        assert_eq!(same.moved, 0);
+        assert!(same.from.is_empty());
+
+        // 场景镜堆是按集的:触发器禁止带着镜堆成员换集,移动前要先退出镜堆。
+        connection
+            .execute("INSERT INTO scenes(id, episode_id, name, kind) VALUES (1, ?1, '未分配', 'unassigned')", [first.id])
+            .unwrap();
+        connection
+            .execute("INSERT INTO shot_stacks(id, scene_id, subject_label, function_label, created_at) VALUES (1, 1, 's', 'f', 'now')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shot_stack_members(stack_id, clip_id, segment_id, best_take_score, score_breakdown_json, user_state)
+                 VALUES (1, ?1, NULL, 0.5, '{}', 'auto')",
+                [clip],
+            )
+            .unwrap();
+        let second = archive_current(&mut connection, Some("EP02")).unwrap().next;
+        let outcome = move_clips_to_episode(&mut connection, &[clip], second.id).unwrap();
+        assert_eq!(outcome.moved, 1);
+        let members: i64 = connection
+            .query_row("SELECT COUNT(*) FROM shot_stack_members WHERE clip_id = ?1", [clip], |r| r.get(0))
+            .unwrap();
+        assert_eq!(members, 0);
     }
 
     /// R15:删历史集 —— 素材、片段、评分、任务、批次、封存快照一起没了,当前集不动,

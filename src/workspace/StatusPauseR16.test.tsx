@@ -39,6 +39,16 @@ describe("StatusPause", () => {
     await screen.findByRole("button", { name: "继续后台任务" });
   });
 
+  // A16-06(0.8.0 真机):按态可见文案只有「继续」两个字,业主看不出它是「继续后台任务」;
+  // 可见文案与 AX 名一致。「后台已暂停」那句仍在。
+  it("按态可见文案是「继续后台任务」,与 AX 名一致", async () => {
+    apiMocks.getJobsPaused.mockResolvedValue(true);
+    render(<StatusPause />);
+    const button = await screen.findByRole("button", { name: "继续后台任务" });
+    expect(button.textContent).toBe("继续后台任务");
+    expect(screen.getByText("后台已暂停")).toBeTruthy();
+  });
+
   it("状态条里主按钮旁就是它", async () => {
     render(<StatusStrip />);
     await screen.findByRole("button", { name: "全部暂停" });

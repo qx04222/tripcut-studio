@@ -3,9 +3,9 @@ import type { IconName } from "../ui/icons";
 import type { SettingsSectionId } from "../../settingsSections";
 
 /**
- * 设置 sheet 的纯逻辑与文案表。函数体逐字复制自 `src/SettingsPage.tsx`(旧壳 R10 删,
- * 本轮车道规则不许改它,所以这里是"复制 + 对等测试"而不是"搬走 + re-export";
- * `settingsModel.test.ts` 用旧文件的导出做对照,两边漂移即红)。
+ * 设置 sheet 的纯逻辑与文案表。函数体原本逐字复制自 `src/SettingsPage.tsx`;
+ * R17 删除旧壳后那份原件已经不在了,这里是唯一实现——`settingsModel.test.ts`
+ * 直接钉死这些函数自己的期望值。
  */
 
 /** 与后端 `settings::MINIMAX_MONTHLY_BUDGET_MAX` 保持一致——超出即被夹住。 */

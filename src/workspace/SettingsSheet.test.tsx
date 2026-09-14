@@ -166,9 +166,9 @@ describe("设置 sheet", () => {
     expect(within(project).getByRole("heading", { level: 3, name: "设备时钟校正" })).toBeTruthy();
   });
 
-  it("播放与导出分区:主题四段(R13 加剪映风格深色)、缩放四段、导出文件夹;界面开关(切回旧界面)在性能分区", async () => {
+  it("播放与导出分区:主题四段(R13 加剪映风格深色)、缩放四段、导出文件夹", async () => {
     // 壳里不止 sheet 一处读 getSettings(监视器的三步引导也读一次),Once 会被抢走 —— 用常驻值,末尾还原。
-    apiMocks.getSettings.mockResolvedValue({ "ui.workspace_v2": "true", "ui.export.last_dir": "/Volumes/T7/导出" });
+    apiMocks.getSettings.mockResolvedValue({ "ui.export.last_dir": "/Volumes/T7/导出" });
     const dialog = await openLoaded();
     await goTab(dialog, "播放与导出");
     expect(within(dialog).getByRole("heading", { level: 3, name: "播放与导出" })).toBeTruthy();
@@ -179,8 +179,10 @@ describe("设置 sheet", () => {
     expect(within(dialog).getByText("导出文件夹")).toBeTruthy();
     expect(within(dialog).getByText(/\/Volumes\/T7\/导出/)).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "更改…" })).toBeTruthy();
+    // R17:旧壳删除后「切回旧界面」按钮从性能分区消失(负断言,先证明分区本身可达)。
     const performance = await goSection(dialog, "performance");
-    expect(within(performance).getByRole("button", { name: "切回旧界面" })).toBeTruthy();
+    expect(within(performance).queryByRole("button", { name: "切回旧界面" })).toBeNull();
+    expect(within(performance).queryByRole("button", { name: "切换到新界面" })).toBeNull();
     apiMocks.getSettings.mockResolvedValue({});
     await goTab(dialog, "播放与导出");
     await act(async () => {

@@ -41,6 +41,12 @@ export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: 
 
   const onBand = useMemo(() => selectedClipId !== null && spans.some((span) => span.clipId === selectedClipId), [spans, selectedClipId]);
 
+  // R17 playfix:待发的 seek 只对这一次选中有效 —— 选中换成别的素材就作废,免得几分钟后再选回
+  // 目标素材时,它一就绪就被定位到早已过期的位置。
+  useEffect(() => {
+    if (pending.current && pending.current.clipId !== selectedClipId) pending.current = null;
+  }, [selectedClipId]);
+
   useEffect(() => {
     if (!onBand) {
       setStatus(null);

@@ -104,6 +104,11 @@ export function Monitor(): JSX.Element {
     setNotice(null);
     setStatus(null);
   }, [selectedClipId]);
+  // R17 playfix:全屏来回 = 嵌入态的播放器卸了再挂(新实例)。沉浸态不往这里推状态,
+  // 留着的旧状态会让走带以为「还是刚才那份就绪」—— 重开后就不再暂停、不再停到最精彩处。
+  useEffect(() => {
+    setStatus(null);
+  }, [immersive]);
 
   const onStatusChange = useCallback((next: PlayerStatus | null) => {
     setStatus(next);

@@ -7,6 +7,7 @@ import { isAnyModalOpen } from "./modalStack";
 import { NOTHING_TO_UNDO_TOAST, undoneToast } from "./copy";
 import { failureText } from "./errorText";
 import { showToast } from "./ui/toastStore";
+import { takeStoryUndoSuffix } from "./storyUndo";
 import { runUndo } from "./undoStack";
 import {
   dispatchWorkspace,
@@ -208,7 +209,7 @@ export function useGlobalHotkeys(): void {
           if (isAnyModalOpen()) return;
           event.preventDefault();
           void runUndo()
-            .then((entry) => showToast(entry ? undoneToast(entry.label) : NOTHING_TO_UNDO_TOAST, { tone: entry ? "success" : "neutral" }))
+            .then((entry) => showToast(entry ? `${undoneToast(entry.label)}${takeStoryUndoSuffix()}` : NOTHING_TO_UNDO_TOAST, { tone: entry ? "success" : "neutral" }))
             .catch((error) => showToast(failureText("撤销", error), { tone: "danger" }));
           return;
         case "command-palette":
