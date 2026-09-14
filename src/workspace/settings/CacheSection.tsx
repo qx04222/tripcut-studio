@@ -14,6 +14,10 @@ export function CacheSection(): JSX.Element {
         <div><span>数据库记录</span><strong>{bytesLabel(status?.cache.database_bytes ?? 0)}</strong></div>
         <div><span>目录实测</span><strong>{bytesLabel(status?.cache.disk_bytes ?? 0)}</strong></div>
       </div>
+      {/* Z-18:说清缓存里最大的一块是什么、大概多大,磁盘紧张时知道能不能清。 */}
+      <p className="settings-sheet-note">
+        预览用小文件(每条素材一份)占用通常不超过原片大小;清掉后需要时会自动重建,不影响原片。
+      </p>
       <Card className="settings-sheet-danger" padding={4}>
         <div className="settings-sheet-danger-copy">
           <Icon name="settings-cache" size={20} />

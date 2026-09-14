@@ -19,6 +19,7 @@ import {
   PlayerOverlay,
   STATUS_INTERVAL_MS,
   VIEWPORT_DEBOUNCE_MS,
+  frameLabel,
   shouldPollStatus,
   type EmbeddedPlayerControls,
 } from "./PlayerOverlay";
@@ -349,5 +350,17 @@ describe("PlayerOverlay 嵌入模式", () => {
       await controlsRef.current?.send([{ type: "play" }]);
     });
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "play" });
+  });
+});
+
+describe("frameLabel(Z-17 帧号跟时间码同源)", () => {
+  it("由位置 × 帧率算,不依赖 mpv 的估算帧号", () => {
+    expect(frameLabel({ pos: 2.2, phase: "ready" }, 30)).toBe("第 66 帧");
+    expect(frameLabel({ pos: 2.2, phase: "ready" }, 0)).toBe("第 66 帧");
+    expect(frameLabel({ pos: 0, phase: "ready" }, 24)).toBe("第 0 帧");
+  });
+  it("没就绪就不显示", () => {
+    expect(frameLabel(null, 30)).toBe("");
+    expect(frameLabel({ pos: 3, phase: "loading" }, 30)).toBe("");
   });
 });

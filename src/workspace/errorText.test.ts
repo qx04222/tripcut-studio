@@ -44,4 +44,14 @@ describe("errorText(R11 简化专项 #5:错误一句话,不带内部代码)", ()
     expect(failureText("撤销", new Error("Error: 这批已经被改过"))).toBe("撤销没成功:这批已经被改过。再试一次");
     expect(failureText("自动挑选", "没有时刻分", "先等画面分析跑完")).toBe("自动挑选没成功:没有时刻分。先等画面分析跑完");
   });
+
+  it("Z-09 / Z-10:后端小写代码前缀、(os error N) 与英文系统原因都变成人话", () => {
+    expect(describeError("export failed: dest_unavailable: 上次的文件夹现在用不了 (/Volumes/s6-ro) : Permission denied (os error 13)"))
+      .toBe("上次的文件夹现在用不了 (/Volumes/s6-ro):没有写入权限");
+    expect(describeError("Error: export failed: 目标磁盘空间不足:预计需要 112.8 MiB,当前可用 29.2 MiB"))
+      .toBe("目标磁盘空间不足:预计需要 112.8 MiB,当前可用 29.2 MiB");
+    expect(describeError("No space left on device (os error 28)")).toBe("磁盘已满");
+    expect(describeError("写文件失败: Read-only file system (os error 30)")).toBe("写文件失败:这个磁盘是只读的");
+    expect(describeError("No such file or directory (os error 2)")).toBe("文件或文件夹不存在");
+  });
 });

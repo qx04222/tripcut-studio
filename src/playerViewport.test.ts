@@ -57,3 +57,43 @@ describe("fitWell", () => {
     expect(fitWell(0, 300)).toEqual({ width: 0, height: 0 });
   });
 });
+
+describe("visibleSurfaceRect · 沉浸态(Z-17)", () => {
+  function rect(el: Element, r: { left: number; top: number; width: number; height: number }): void {
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({
+      ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top, toJSON: () => undefined,
+    } as DOMRect);
+  }
+  const win = () => ({
+    innerWidth: 1512, innerHeight: 945, getComputedStyle: window.getComputedStyle.bind(window),
+  } as unknown as Window);
+
+  it("position:fixed 的沉浸层不被监视器栏的 overflow 裁切:画面是整个窗口减控件条", () => {
+    document.body.innerHTML = `<div id="pane" style="overflow:hidden"><div id="stage" style="overflow:hidden"><div id="overlay" style="position:fixed"><div id="surface"></div></div></div></div>`;
+    rect(document.getElementById("pane")!, { left: 430, top: 200, width: 650, height: 520 });
+    rect(document.getElementById("stage")!, { left: 430, top: 200, width: 650, height: 520 });
+    rect(document.getElementById("overlay")!, { left: 0, top: 0, width: 1512, height: 945 });
+    rect(document.getElementById("surface")!, { left: 0, top: 0, width: 1512, height: 869 });
+    expect(visibleSurfaceRect(document.getElementById("surface")!, win()))
+      .toEqual({ left: 0, top: 0, width: 1512, height: 869 });
+  });
+
+  it("fixed 层自己的 overflow:hidden 仍然裁切画面", () => {
+    document.body.innerHTML = `<div id="pane" style="overflow:hidden"><div id="overlay" style="position:fixed;overflow:hidden"><div id="surface"></div></div></div>`;
+    rect(document.getElementById("pane")!, { left: 430, top: 200, width: 650, height: 520 });
+    rect(document.getElementById("overlay")!, { left: 0, top: 0, width: 1512, height: 900 });
+    rect(document.getElementById("surface")!, { left: 0, top: 0, width: 1512, height: 945 });
+    expect(visibleSurfaceRect(document.getElementById("surface")!, win()))
+      .toEqual({ left: 0, top: 0, width: 1512, height: 900 });
+  });
+
+  it("带 transform 的祖先是 fixed 的包含块,它和它之上的裁切又算数", () => {
+    document.body.innerHTML = `<div id="outer" style="overflow:hidden"><div id="tf" style="transform:translateX(0px);overflow:hidden"><div id="overlay" style="position:fixed"><div id="surface"></div></div></div></div>`;
+    rect(document.getElementById("outer")!, { left: 0, top: 0, width: 800, height: 945 });
+    rect(document.getElementById("tf")!, { left: 0, top: 0, width: 1000, height: 945 });
+    rect(document.getElementById("overlay")!, { left: 0, top: 0, width: 1512, height: 945 });
+    rect(document.getElementById("surface")!, { left: 0, top: 0, width: 1512, height: 945 });
+    expect(visibleSurfaceRect(document.getElementById("surface")!, win()))
+      .toEqual({ left: 0, top: 0, width: 800, height: 945 });
+  });
+});

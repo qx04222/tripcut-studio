@@ -1,5 +1,6 @@
 import { QUICK_EXPORT_DEST_UNAVAILABLE, type ExportStatus, type QuickExportOutcome, type QuickExportSelection } from "../../api";
 import { dispatchWorkspace } from "../WorkspaceStore";
+import { failureText } from "../errorText";
 
 /**
  * R11 车道 E:快速导出的纯常量 / 纯函数,以及「导出所选…」入口与抽屉之间的一次性交接。
@@ -117,4 +118,13 @@ export function exportDoneToast(status: ExportStatus): string {
 /** R13 §5:抽屉决定默认模式时用 —— 「导出所选…」进来的抽屉要停在导出片段,不能被「剪映可用默认剪映」抢走。 */
 export function hasPendingQuickSelection(): boolean {
   return pendingSelection !== null;
+}
+
+/**
+ * Z-09 / Z-10:导出抽屉页脚的一句错误 —— 文件夹写不进去就直接说「换一个」,
+ * 其它错误走 errorText(剥 `export failed:` / `(os error 13)`,英文系统原因翻成中文)。
+ */
+export function exportErrorLine(failure: unknown): string {
+  if (isDestUnavailable(failure)) return "这个文件夹不能写入。点「更改文件夹…」换一个再导出。";
+  return failureText("导出", failure);
 }

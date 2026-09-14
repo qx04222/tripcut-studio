@@ -48,14 +48,39 @@ export function rectToPlayerViewport(rect: RectLike): PlayerViewportRect | null 
  */
 export function visibleSurfaceRect(surface: Element, win: Window = window): RectLike {
   let rect: RectLike = surface.getBoundingClientRect();
+  // Z-17:沉浸层是 position:fixed,它**不被**监视器栏 / 舞台的 overflow 裁切
+  // (fixed 只认视口,除非某个祖先用 transform / filter / contain 把自己变成了
+  // 包含块)。不看这一点就会把整窗的画面裁成监视器栏那 650×520 的小框。
+  let escaping = isFixed(win.getComputedStyle(surface));
   for (let node = surface.parentElement; node !== null; node = node.parentElement) {
     const style = win.getComputedStyle(node);
-    const clips = [style.overflow, style.overflowX, style.overflowY].some(
-      (value) => value !== "" && value !== "visible",
-    );
-    if (clips) rect = intersectRects(rect, node.getBoundingClientRect());
+    if (escaping && formsContainingBlockForFixed(style)) escaping = false;
+    if (!escaping && clipsDescendants(style)) rect = intersectRects(rect, node.getBoundingClientRect());
+    if (!escaping && isFixed(style)) escaping = true;
   }
   return intersectRects(rect, { left: 0, top: 0, width: win.innerWidth, height: win.innerHeight });
+}
+
+function isFixed(style: CSSStyleDeclaration): boolean {
+  return style.position === "fixed";
+}
+
+function clipsDescendants(style: CSSStyleDeclaration): boolean {
+  return [style.overflow, style.overflowX, style.overflowY].some(
+    (value) => value !== "" && value !== "visible",
+  );
+}
+
+/** transform / filter / perspective / contain 会让祖先成为 fixed 后代的包含块,裁切从那一层起重新算数。 */
+function formsContainingBlockForFixed(style: CSSStyleDeclaration): boolean {
+  const isSet = (value: string | undefined) => value !== undefined && value !== "" && value !== "none";
+  const contain = style.contain ?? "";
+  return isSet(style.transform)
+    || isSet(style.filter)
+    || isSet(style.perspective)
+    || isSet(style.backdropFilter)
+    || /transform|filter|perspective/.test(style.willChange ?? "")
+    || /paint|layout|strict|content/.test(contain);
 }
 
 /** 舞台内能放下的最大 16:9(或任意比例)井:宽高都不超过舞台内容盒。 */

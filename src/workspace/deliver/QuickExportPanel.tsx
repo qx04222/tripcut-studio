@@ -146,7 +146,10 @@ export function QuickExportFooter({ quick, status, onClose }: QuickExportFooterP
     : active
       ? { text: `${STAGE_LABELS[status.stage]} · ${processed} / ${status.selected_count}`, tone: "neutral", alert: false }
       : quick.done
-        ? { text: "导完了。可以继续挑片段再导一次。", tone: "neutral", alert: false }
+        ? status.failed_items > 0
+          // Z-10:有失败时页脚不说「导完了」——说清几个没导出来、现在怎么办。
+          ? { text: `${quickDoneLine(status)}。点「只重试失败的」再导一次。`, tone: "danger", alert: true }
+          : { text: "导完了。可以继续挑片段再导一次。", tone: "neutral", alert: false }
         : quick.lastDir
           ? { text: `导出到 ${quick.lastDir}`, tone: "neutral", alert: false }
           : { text: "第一次导出会让你选一个文件夹，之后记住。", tone: "neutral", alert: false };

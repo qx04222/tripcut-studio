@@ -15,7 +15,7 @@ import { failureText } from "../errorText";
 import { showToast } from "../ui/Toast";
 import { readUiSetting } from "../uiSettings";
 import { OPEN_JIANYING_ACTION, isKitDone, kitDoneLine } from "./kitExportModel";
-import { isDestUnavailable } from "./quickExportModel";
+import { exportErrorLine, isDestUnavailable } from "./quickExportModel";
 import type { ExportProgress } from "./useExportProgress";
 import { LAST_DIR_KEY } from "./useQuickExport";
 
@@ -127,7 +127,7 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
       });
     } else if (status.status === "failed" || status.status === "blocked") {
       announcedJob.current = startedJobId;
-      showToast(`导出没成功:${status.error ?? "没有写出任何文件"}。再试一次`, { tone: "danger" });
+      showToast(exportErrorLine(status.error ?? "没有写出任何文件"), { tone: "danger" });
     }
   }, [openJianying, startedJobId, status]);
 
@@ -157,7 +157,7 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
         await start(picked);
       }
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     } finally {
       setBusy(false);
     }
@@ -169,7 +169,7 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
       const picked = await pickExportFolder();
       if (picked) remember(picked);
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [remember]);
 
@@ -180,7 +180,7 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
       await cancelExport(status.job_id);
       await refresh();
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [refresh, status.job_id]);
 
@@ -190,7 +190,7 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
     try {
       await revealExport(status.job_id);
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [status.job_id]);
 

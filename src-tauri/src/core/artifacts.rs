@@ -78,6 +78,8 @@ struct CommandOutput {
 struct ClipSource {
     path: PathBuf,
     duration_seconds: f64,
+    /// Z-18:原片字节数,用来把代理码率压到不超过源码率。
+    byte_size: u64,
     duration_ticks: i64,
     tb_num: i64,
     tb_den: i64,
@@ -562,7 +564,15 @@ fn run_proxy_with(
     let source_path = source.path.to_string_lossy();
     if let Err(error) = run_ffmpeg_file_with_fallback(
         ffmpeg,
-        |hardware_decode| proxy_args(&source_path, &temporary_path, hardware_decode, low_memory),
+        |hardware_decode| {
+            proxy_args(
+                &source_path,
+                &temporary_path,
+                hardware_decode,
+                low_memory,
+                source_bitrate_bps(source.byte_size, source.duration_seconds),
+            )
+        },
         timeout,
         &temporary_path,
     ) {
@@ -808,7 +818,31 @@ fn keyframe_gaps_allow_skip_from(pts: &[f64], duration_seconds: f64, frame_count
     tail_gap <= slot
 }
 
-fn proxy_args(source: &str, output: &Path, hardware_decode: bool, low_memory: bool) -> Vec<OsString> {
+/// Z-18(R13 压测):213 条 1.3 GB 的 720p / 1.5 Mbps 源生成了 2.7 GB 缓存 —— 代理固定 4M,
+/// 比源还高两倍多。代理码率改成「不超过源码率」,下限 1 Mbps(再低画面糊到看不出运镜),
+/// 上限仍是原档位(4M / 省内存档 2.5M);源码率未知时保持原值。
+const PROXY_BITRATE_FLOOR_BPS: f64 = 1_000_000.0;
+
+fn source_bitrate_bps(byte_size: u64, duration_seconds: f64) -> Option<f64> {
+    (byte_size > 0 && duration_seconds > 0.0).then(|| byte_size as f64 * 8.0 / duration_seconds)
+}
+
+fn proxy_bitrate(low_memory: bool, source_bitrate: Option<f64>) -> String {
+    let ceiling = if low_memory { 2_500_000.0 } else { 4_000_000.0 };
+    let target = match source_bitrate {
+        Some(bps) => bps.max(PROXY_BITRATE_FLOOR_BPS).min(ceiling),
+        None => ceiling,
+    };
+    format!("{}k", (target / 1_000.0).round() as i64)
+}
+
+fn proxy_args(
+    source: &str,
+    output: &Path,
+    hardware_decode: bool,
+    low_memory: bool,
+    source_bitrate: Option<f64>,
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-hide_banner"),
         OsString::from("-loglevel"),
@@ -839,7 +873,7 @@ fn proxy_args(source: &str, output: &Path, hardware_decode: bool, low_memory: bo
     }
     args.extend([
         OsString::from("-b:v"),
-        OsString::from(if low_memory { "2500k" } else { "4M" }),
+        OsString::from(proxy_bitrate(low_memory, source_bitrate)),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-fps_mode"),
@@ -904,7 +938,7 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
 
     let source = connection
         .query_row(
-            "SELECT duration_ticks, tb_num, tb_den, height, manual_rotation
+            "SELECT duration_ticks, tb_num, tb_den, height, manual_rotation, byte_size
              FROM clips WHERE id = ?1 AND quick_hash = ?2",
             params![payload.clip_id, payload.source_hash],
             |row| {
@@ -914,6 +948,7 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
                 ))
             },
         )
@@ -933,6 +968,7 @@ fn validate_source(connection: &Connection, payload: &ArtifactJobPayload) -> Res
     Ok(ClipSource {
         path,
         duration_seconds: source.0 as f64 * source.1 as f64 / source.2 as f64,
+        byte_size: source.5.unwrap_or(0).max(0) as u64,
         duration_ticks: source.0,
         tb_num: source.1,
         tb_den: source.2,
@@ -1998,8 +2034,8 @@ mod tests {
 
     #[test]
     fn proxy_uses_cpu_decode_fallback_but_only_the_bundled_videotoolbox_encoder() {
-        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, false);
-        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, false);
+        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, None);
+        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, false, None);
         let hardware = hardware
             .iter()
             .map(|value| value.to_string_lossy())
@@ -2015,7 +2051,7 @@ mod tests {
         for args in [&hardware, &software] {
             assert!(args.contains("h264_videotoolbox"));
             assert!(args.contains("-allow_sw 1"));
-            assert!(args.contains("-b:v 4M"));
+            assert!(args.contains("-b:v 4000k"), "{args}");
             assert!(!args.contains("libx264"));
             assert!(!args.contains("-realtime"));
         }
@@ -2023,8 +2059,8 @@ mod tests {
 
     #[test]
     fn proxy_args_low_memory_caps_bitrate_and_forces_realtime() {
-        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, true);
-        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, true);
+        let hardware = proxy_args("source.mov", Path::new("proxy.mp4"), true, true, None);
+        let software = proxy_args("source.mov", Path::new("proxy.mp4"), false, true, None);
         let hardware = hardware
             .iter()
             .map(|value| value.to_string_lossy())
@@ -2036,12 +2072,35 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         for args in [&hardware, &software] {
-            assert!(args.contains("-b:v 2500k"));
+            assert!(args.contains("-b:v 2500k"), "{args}");
             assert!(args.contains("h264_videotoolbox -allow_sw 1 -realtime 1"));
         }
         // 软解 + 省内存档才限制 ffmpeg 自身线程数;硬解分支不需要。
         assert!(!hardware.contains("-threads 4"));
         assert!(software.contains("-threads 4 -i"));
+    }
+
+    /// Z-18(R13 压测):代理码率不超过源码率 —— 1.5 Mbps 的 720p 源不再生成 4M 的代理。
+    #[test]
+    fn proxy_bitrate_never_exceeds_the_source_bitrate() {
+        // 30 s × 1.5 Mbps = 5.625 MB
+        let low = source_bitrate_bps(5_625_000, 30.0);
+        assert_eq!(proxy_bitrate(false, low), "1500k");
+        assert_eq!(proxy_bitrate(true, low), "1500k");
+        // 很低的源:下限 1 Mbps
+        assert_eq!(proxy_bitrate(false, source_bitrate_bps(1_000_000, 30.0)), "1000k");
+        // 高码率源:顶到原档位
+        assert_eq!(proxy_bitrate(false, source_bitrate_bps(150_000_000, 30.0)), "4000k");
+        assert_eq!(proxy_bitrate(true, source_bitrate_bps(150_000_000, 30.0)), "2500k");
+        // 未知:原值
+        assert_eq!(source_bitrate_bps(0, 30.0), None);
+        assert_eq!(proxy_bitrate(false, None), "4000k");
+        let args = proxy_args("source.mov", Path::new("proxy.mp4"), true, false, low)
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(args.contains("-b:v 1500k"), "{args}");
     }
 
     /// 显示 LUT（`lut3d`）是播放器预览专用的 `vf` 滤镜(见
@@ -2052,7 +2111,7 @@ mod tests {
     fn proxy_args_never_carries_the_preview_display_lut() {
         for hardware_decode in [true, false] {
             for low_memory in [true, false] {
-                let args = proxy_args("source.mov", Path::new("proxy.mp4"), hardware_decode, low_memory);
+                let args = proxy_args("source.mov", Path::new("proxy.mp4"), hardware_decode, low_memory, None);
                 let joined = args
                     .iter()
                     .map(|value| value.to_string_lossy())
@@ -2170,8 +2229,8 @@ mod tests {
         // itself must never bake in a rotation. `proxy_args` simply has no
         // rotation parameter, which makes this structurally true; this test
         // pins that its output is identical across calls (nothing snuck in).
-        let first = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false);
-        let second = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false);
+        let first = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None);
+        let second = proxy_args("/x.mp4", Path::new("/tmp/p.mp4"), false, false, None);
         assert_eq!(first, second);
         assert!(!first.iter().any(|a| a.to_string_lossy().contains("transpose")));
     }

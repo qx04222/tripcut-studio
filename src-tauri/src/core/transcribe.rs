@@ -428,8 +428,12 @@ fn find_on_path(name: &str) -> Option<OsString> {
 
 fn missing_model_message(tier: &str) -> String {
     let model_file = super::settings::model_file_for_tier(tier);
+    // Z-19(R13 压测):目录按实际支持目录拼(设了 TRIPCUT_APP_SUPPORT_DIR 时不再写死 ~/Library/…)。
+    let models_dir = super::provisioning::models_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|_| "~/Library/Application Support/TripCutStudio/models".to_owned());
     format!(
-        "缺少转写模型；请到 设置 → 工具与模型 按提示下载 {model_file} 并导入，或放到 ~/Library/Application Support/TripCutStudio/models/。"
+        "缺少转写模型；请到 设置 → 工具与模型 按提示下载 {model_file} 并导入，或放到 {models_dir}/。"
     )
 }
 
@@ -1029,6 +1033,9 @@ mod tests {
         assert!(message.contains("工具与模型"));
         assert!(message.contains("ggml-large-v3-turbo.bin"));
         assert!(!message.contains("huggingface") && !message.contains("WHISPER_MODEL"), "{message}");
+        // Z-19:目录是实际支持目录,不是写死的 ~/Library/…。
+        let expected = super::super::provisioning::models_dir().unwrap().display().to_string();
+        assert!(message.contains(&format!("{expected}/")), "{message}");
     }
 
     #[test]

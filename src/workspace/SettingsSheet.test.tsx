@@ -159,6 +159,8 @@ describe("设置 sheet", () => {
     // 「项目与缓存」的头两段:缓存与设备时钟。
     const project = await goTab(dialog, "项目与缓存");
     expect(within(project).getByRole("heading", { level: 3, name: "缓存与重建" })).toBeTruthy();
+    // Z-18(R13 压测):说清预览用小文件大概占多大。
+    expect(within(project).getByText(/预览用小文件.*不超过原片大小/)).toBeTruthy();
     expect(within(project).getByRole("heading", { level: 3, name: "设备时钟校正" })).toBeTruthy();
   });
 

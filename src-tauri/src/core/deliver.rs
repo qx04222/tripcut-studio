@@ -536,6 +536,36 @@ fn cancellation_flags() -> &'static Mutex<CancellationMap> {
     CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Z-02(R13 压测):导出码率不再硬编码 16M / 12M —— 396×720 / 1.6 Mbps 的源被导成 10.9 Mbps,
+/// 25 段 282 MB(7× 源)。目标码率按**源码率 × 1.5** 取,下限 2 Mbps(别把低码率源压得更糊),
+/// 上限仍是原来的档位(4K / 高码率源不变)。源码率 = 所选那段的字节数 × 8 / 时长。
+const EXPORT_BITRATE_FLOOR_BPS: f64 = 2_000_000.0;
+const EXPORT_BITRATE_HEADROOM: f64 = 1.5;
+pub(crate) const SEGMENT_BITRATE_CEILING_BPS: f64 = 16_000_000.0;
+pub(crate) const ROUGH_CUT_BITRATE_CEILING_BPS: f64 = 12_000_000.0;
+
+fn source_bitrate_bps(clip: &ExportClip) -> Option<f64> {
+    let duration = clip_duration_seconds(clip);
+    if duration <= 0.0 || clip.byte_size == 0 {
+        return None;
+    }
+    Some(clip.byte_size as f64 * 8.0 / duration)
+}
+
+/// `-b:v` 的值(`2400k` 这种整 kbps);源码率未知时退回上限,行为与改前一致。
+pub(crate) fn export_video_bitrate(clips: &[&ExportClip], ceiling_bps: f64) -> String {
+    let wanted = clips
+        .iter()
+        .filter_map(|clip| source_bitrate_bps(clip))
+        .map(|bps| bps * EXPORT_BITRATE_HEADROOM)
+        .fold(None, |acc: Option<f64>, bps| Some(acc.map_or(bps, |a| a.max(bps))));
+    let target = match wanted {
+        Some(bps) => bps.max(EXPORT_BITRATE_FLOOR_BPS).min(ceiling_bps),
+        None => ceiling_bps,
+    };
+    format!("{}k", (target / 1_000.0).round() as i64)
+}
+
 fn clip_duration_seconds(clip: &ExportClip) -> f64 {
     match (clip.in_ticks, clip.out_ticks, clip.tb_num, clip.tb_den) {
         (Some(start), Some(end), Some(num), Some(den)) if end >= start && num > 0 && den > 0 => {
@@ -2356,7 +2386,7 @@ fn whole_vfr_args(
         OsString::from("-allow_sw"),
         OsString::from("1"),
         OsString::from("-b:v"),
-        OsString::from("16M"),
+        OsString::from(export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS)),
     ];
     args.extend([
         OsString::from("-pix_fmt"),
@@ -2412,7 +2442,7 @@ fn select_segment_ffmpeg_args(clip: &ExportClip, output_path: &Path) -> Result<V
         OsString::from("-allow_sw"),
         OsString::from("1"),
         OsString::from("-b:v"),
-        OsString::from("16M"),
+        OsString::from(export_video_bitrate(&[clip], SEGMENT_BITRATE_CEILING_BPS)),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-c:a"),
@@ -3232,7 +3262,10 @@ fn rough_cut_args(
         OsString::from("-allow_sw"),
         OsString::from("1"),
         OsString::from("-b:v"),
-        OsString::from("12M"),
+        OsString::from(export_video_bitrate(
+            &clips.iter().map(|item| &item.clip).collect::<Vec<_>>(),
+            ROUGH_CUT_BITRATE_CEILING_BPS,
+        )),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
         OsString::from("-c:a"),
@@ -5553,7 +5586,9 @@ esac
 
     #[test]
     fn delivery_transcodes_match_the_bundled_videotoolbox_quality_contract() {
-        let clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
+        // Z-02:高码率源(3 s × 40 Mbps)仍顶到原来的 16M / 12M 档位。
+        let mut clip = export_clip_fixture("source.mov", 0, 3_000, 1, 1_000);
+        clip.byte_size = 15_000_000;
         let whole = whole_vfr_args(&clip, Path::new("whole.mp4"));
         let successful = [SuccessfulClip {
             clip,
@@ -5570,10 +5605,41 @@ esac
             .map(|value| value.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(whole.contains("h264_videotoolbox -allow_sw 1 -b:v 16M"));
-        assert!(rough.contains("h264_videotoolbox -allow_sw 1 -b:v 12M"));
+        assert!(whole.contains("h264_videotoolbox -allow_sw 1 -b:v 16000k"), "{whole}");
+        assert!(rough.contains("h264_videotoolbox -allow_sw 1 -b:v 12000k"), "{rough}");
         assert!(!whole.contains("libx264"));
         assert!(!rough.contains("libx264"));
+    }
+
+    /// Z-02(R13 压测):396×720 / 1.6 Mbps 的源导成了 10.9 Mbps(7× 源)。目标码率按源 × 1.5,
+    /// 下限 2 Mbps、上限原档位;源码率未知(时长 0)时退回上限。
+    #[test]
+    fn export_bitrate_follows_the_source_instead_of_a_fixed_16m() {
+        // 8 s × 1.6 Mbps = 1.6 MB → 2.4 Mbps
+        let mut low = export_clip_fixture("low.mp4", 0, 8_000, 1, 1_000);
+        low.byte_size = 1_600_000;
+        assert_eq!(export_video_bitrate(&[&low], SEGMENT_BITRATE_CEILING_BPS), "2400k");
+        let segment = select_segment_ffmpeg_args(&low, Path::new("low-out.mp4")).unwrap();
+        let segment = segment.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        assert!(segment.contains("-b:v 2400k"), "{segment}");
+        assert!(!segment.contains("16M"), "{segment}");
+
+        // 8 s × 0.5 Mbps → 下限 2 Mbps
+        let mut tiny = export_clip_fixture("tiny.mp4", 0, 8_000, 1, 1_000);
+        tiny.byte_size = 500_000;
+        assert_eq!(export_video_bitrate(&[&tiny], SEGMENT_BITRATE_CEILING_BPS), "2000k");
+
+        // 粗剪取所有源里最高的那个,再受 12M 上限
+        let mut mid = export_clip_fixture("mid.mp4", 0, 8_000, 1, 1_000);
+        mid.byte_size = 6_000_000; // 6 Mbps → 9 Mbps
+        assert_eq!(export_video_bitrate(&[&low, &mid], ROUGH_CUT_BITRATE_CEILING_BPS), "9000k");
+        let mut big = export_clip_fixture("big.mp4", 0, 8_000, 1, 1_000);
+        big.byte_size = 40_000_000; // 40 Mbps → 顶到 12M
+        assert_eq!(export_video_bitrate(&[&low, &big], ROUGH_CUT_BITRATE_CEILING_BPS), "12000k");
+
+        // 时长未知:退回上限
+        let unknown = export_clip_fixture("unknown.mp4", 0, 0, 1, 1_000);
+        assert_eq!(export_video_bitrate(&[&unknown], SEGMENT_BITRATE_CEILING_BPS), "16000k");
     }
 
     fn successful_clip_fixture(name: &str, duration_seconds: i64) -> SuccessfulClip {

@@ -1,6 +1,6 @@
 import { useState, type JSX } from "react";
 import { JIANYING_BUNDLE_ID, openApp, type ExportStatus, type JianyingDraftResult } from "../../api";
-import { failureText } from "../errorText";
+import { describeError, failureText } from "../errorText";
 import { Button, Card, Icon, showToast } from "../ui";
 import { draftContentLine, STAGE_LABELS } from "./deliverModel";
 import { DeliverItemList } from "./DeliverProgressCard";
@@ -45,7 +45,7 @@ export function DeliverResultCard({ status, onReveal }: DeliverResultCardProps):
           <p className="deliver-result-title">{STAGE_LABELS.failed}</p>
           {status.error ? (
             <p className="deliver-result-meta" role="alert">
-              {status.error}
+              {describeError(status.error)}
             </p>
           ) : null}
           {status.output_path ? <code className="deliver-result-path">{status.output_path}</code> : null}

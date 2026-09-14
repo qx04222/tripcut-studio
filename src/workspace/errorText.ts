@@ -11,6 +11,17 @@ const INTERNAL_PATTERNS: readonly RegExp[] = [
   /\b(?:code|kind|status)\s*[=:]\s*[\w-]+/gi,
   /\s+at\s+\S+\s*\(.*\)$/gm, // 堆栈行
   /\((?:0x)?[0-9a-f]{6,}\)/gi, // 十六进制指针 / 哈希
+  /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*:\s*/, // Z-09:后端的小写错误代码前缀「dest_unavailable:」
+  /\s*\(os error \d+\)/gi, // Z-09:Rust io::Error 的括号尾巴
+];
+
+/** Z-09 / Z-10:系统层的英文原因 → 一句中文;整段替换,前后的「 : 」也顺手收成中文冒号。 */
+const OS_REASONS: ReadonlyArray<[RegExp, string]> = [
+  [/\s*:?\s*Permission denied\b/i, ":没有写入权限"],
+  [/\s*:?\s*No space left on device\b/i, ":磁盘已满"],
+  [/\s*:?\s*Read-only file system\b/i, ":这个磁盘是只读的"],
+  [/\s*:?\s*No such file or directory\b/i, ":文件或文件夹不存在"],
+  [/\s*:?\s*(?:Operation not permitted|Access is denied)\b/i, ":系统不允许这个操作"],
 ];
 
 /** 把一个错误值变成一句人能读的话;什么都不剩就退成「出了点问题」。 */
@@ -20,6 +31,7 @@ export function describeError(error: unknown): string {
   for (let previous = ""; previous !== text; ) {
     previous = text;
     for (const pattern of INTERNAL_PATTERNS) text = text.replace(pattern, "");
+    for (const [pattern, chinese] of OS_REASONS) text = text.replace(pattern, chinese);
   }
   text = text
     .split("\n")[0]!

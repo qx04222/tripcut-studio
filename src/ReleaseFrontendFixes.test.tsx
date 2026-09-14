@@ -513,7 +513,9 @@ describe("R1 lane C frontend release fixes", () => {
     expect(waiting.textContent).not.toContain("EXACT SEEK");
 
     const ready = await mount(<PlayerOverlay clip={clip} onExit={() => undefined} />);
-    expect(ready.textContent).toContain("第 128 帧");
+    // Z-17:帧号由位置 × 帧率算(12.5 s × 29.97 = 374),不再读 mpv 的 frame 字段(128)。
+    expect(ready.textContent).toContain("第 374 帧");
+    expect(ready.textContent).not.toContain("第 128 帧");
     expect(ready.textContent).toContain("精确定位 8 毫秒");
     expect(ready.textContent).not.toContain("FRAME");
     expect(ready.textContent).not.toContain("SEEK P95");

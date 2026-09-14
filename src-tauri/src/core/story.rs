@@ -358,6 +358,9 @@ fn chapterize_episode(
     Ok(())
 }
 
+/// Z-15(R13 压测):章名里的「14:40-14:40」此前是 UTC —— 多伦多 23:32 拍的写成 03:32。
+/// 时分按素材的 `tz_guess`(GPS / 文件里的时区,形如 `UTC-05:00`)换算;没有时退到本机时区
+/// (SQLite `localtime`,按拍摄日期算夏令时)。设备时钟校正(`journey_offset_ms`)照旧先加。
 fn load_clip_moments(connection: &Connection, episode_id: i64) -> Result<Vec<ClipMoment>> {
     let mut statement = connection.prepare(
         "SELECT c.id,
@@ -369,7 +372,13 @@ fn load_clip_moments(connection: &Connection, episode_id: i64) -> Result<Vec<Cli
                     + c.journey_offset_ms,
                 strftime(
                     '%H:%M', c.captured_at,
-                    printf('%+f seconds', c.journey_offset_ms / 1000.0)
+                    printf('%+f seconds', c.journey_offset_ms / 1000.0),
+                    CASE WHEN c.tz_guess LIKE 'UTC_%:%' THEN printf(
+                        '%+d seconds',
+                        (CAST(substr(c.tz_guess, 5, 2) AS INTEGER) * 3600
+                         + CAST(substr(c.tz_guess, 8, 2) AS INTEGER) * 60)
+                        * CASE WHEN substr(c.tz_guess, 4, 1) = '-' THEN -1 ELSE 1 END
+                    ) ELSE 'localtime' END
                 ),
                 c.gps_lat, c.gps_lon,
                 CASE WHEN chapter.manual = 1 AND chapter.tombstone = 0
@@ -1142,6 +1151,8 @@ mod tests {
         let (_directory, mut connection) = setup();
         insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, false);
         insert_clip(&connection, "b.mov", "2026-08-31T10:45:01Z", None, false);
+        // Z-15:章名时分按素材时区;这里钉成 UTC 让断言不随本机时区变。
+        connection.execute("UPDATE clips SET tz_guess = 'UTC+00:00'", []).unwrap();
         chapterize(&mut connection).unwrap();
 
         let titles = connection
@@ -1152,6 +1163,49 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(titles, vec!["第 1 章 · 10:00-10:00", "第 2 章 · 10:45-10:45"]);
+    }
+
+    /// Z-15(R13 压测):章名时分不再是 UTC —— 有 `tz_guess` 按它换算(含负时区与半小时时区),
+    /// 没有就按本机时区(与 SQLite `localtime` 同源,夏令时按拍摄日期算);设备时钟校正先加。
+    #[test]
+    fn chapter_title_uses_clip_timezone_or_local_time_instead_of_utc() {
+        let (_directory, mut connection) = setup();
+        let toronto = insert_clip(&connection, "a.mov", "2026-08-31T03:32:00Z", None, false);
+        let adelaide = insert_clip(&connection, "b.mov", "2026-08-31T10:00:00Z", None, false);
+        let unknown = insert_clip(&connection, "c.mov", "2026-08-31T20:00:00Z", None, false);
+        connection
+            .execute("UPDATE clips SET tz_guess = 'UTC-05:00' WHERE id = ?1", [toronto])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE clips SET tz_guess = 'UTC+09:30', journey_offset_ms = 600000 WHERE id = ?1",
+                [adelaide],
+            )
+            .unwrap();
+        chapterize(&mut connection).unwrap();
+        let titles = connection
+            .prepare("SELECT title FROM chapters WHERE tombstone = 0 ORDER BY start_at")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let local = connection
+            .query_row(
+                "SELECT strftime('%H:%M', '2026-08-31T20:00:00Z', 'localtime')",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let _ = unknown;
+        assert_eq!(
+            titles,
+            vec![
+                "第 1 章 · 22:32-22:32".to_owned(),
+                "第 2 章 · 19:40-19:40".to_owned(),
+                format!("第 3 章 · {local}-{local}"),
+            ]
+        );
     }
 
     #[test]
@@ -1415,8 +1469,9 @@ mod tests {
             None,
             false,
         );
+        // Z-15:章名时分按素材时区,这里钉成 UTC 让断言只看设备时钟校正那 1 小时。
         connection.execute(
-            "UPDATE clips SET journey_offset_ms = 3600000 WHERE id = ?1",
+            "UPDATE clips SET journey_offset_ms = 3600000, tz_guess = 'UTC+00:00' WHERE id = ?1",
             [clip_id],
         ).unwrap();
         chapterize(&mut connection).unwrap();

@@ -12,7 +12,7 @@ import {
 } from "../../api";
 import { showToast } from "../ui/Toast";
 import { readUiSetting } from "../uiSettings";
-import { exportDoneToast, failedClipIds, isDestUnavailable, isQuickDone, takePendingQuickSelection } from "./quickExportModel";
+import { exportDoneToast, exportErrorLine, failedClipIds, isDestUnavailable, isQuickDone, takePendingQuickSelection } from "./quickExportModel";
 import type { ExportProgress } from "./useExportProgress";
 
 export const LAST_DIR_KEY = "ui.export.last_dir";
@@ -140,7 +140,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
       });
     } else if (status.status === "failed" || status.status === "blocked") {
       announcedJob.current = startedJobId;
-      showToast(`导出没成功:${status.error ?? "没有写出任何文件"}。再试一次`, { tone: "danger" });
+      showToast(exportErrorLine(status.error ?? "没有写出任何文件"), { tone: "danger" });
     }
   }, [lastDir, startWith, startedJobId, status]);
 
@@ -171,7 +171,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
         await start(picked);
       }
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     } finally {
       setBusy(false);
     }
@@ -183,7 +183,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
       const picked = await pickQuickExportFolder();
       if (picked) remember(picked);
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [remember]);
 
@@ -194,7 +194,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
       await cancelExport(status.job_id);
       await refresh();
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [refresh, status.job_id]);
 
@@ -226,7 +226,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     try {
       await revealExport(status.job_id);
     } catch (failure) {
-      setError(String(failure));
+      setError(exportErrorLine(failure));
     }
   }, [status.job_id]);
 

@@ -139,7 +139,10 @@ export function JianyingKitFooter({ kit, status, onClose }: JianyingKitFooterPro
     : active
       ? { text: `${STAGE_LABELS[status.stage]} · ${processed} / ${status.selected_count}`, tone: "neutral", alert: false }
       : kit.done
-        ? { text: "导完了。打开剪映,把这些片段拖进时间线。", tone: "neutral", alert: false }
+        ? status.failed_items > 0
+          // Z-10:有失败时页脚不说「导完了」。
+          ? { text: `${kitDoneLine(status)}。腾出空间或换个文件夹后再导一次。`, tone: "danger", alert: true }
+          : { text: "导完了。打开剪映,把这些片段拖进时间线。", tone: "neutral", alert: false }
         : { text: kitFolderLine(kit.lastDir), tone: "neutral", alert: false };
 
   return (

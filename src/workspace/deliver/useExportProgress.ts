@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getExportStatus, type ExportStatus } from "../../api";
 import { EMPTY_STATUS, isExportActive } from "./deliverModel";
+import { failureText } from "../errorText";
 
 export interface ExportProgress {
   status: ExportStatus;
@@ -31,7 +32,7 @@ export function useExportProgress(): ExportProgress {
       if (next.job_id !== null && jobId === null) setJobId(next.job_id);
       setError(null);
     } catch (refreshError) {
-      setError(String(refreshError));
+      setError(failureText("读取导出进度", refreshError));
       throw refreshError;
     }
   }, [jobId]);

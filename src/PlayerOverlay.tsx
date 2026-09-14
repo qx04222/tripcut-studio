@@ -126,6 +126,16 @@ function clipFps(clip: ClipListItem): number {
   return clip.fps_num / clip.fps_den;
 }
 
+/**
+ * Z-17:帧号跟时间码同源 —— 由源时间位置 × 帧率算,不读 mpv 的 estimated-frame-number
+ * (代理链路下它停在 0,真机 2.2 s 时仍写「第 0 帧」)。
+ */
+export function frameLabel(status: Pick<PlayerStatus, "pos" | "phase"> | null, fps: number): string {
+  if (!status || status.phase !== "ready" || !Number.isFinite(status.pos)) return "";
+  const rate = Number.isFinite(fps) && fps > 0 ? fps : 30;
+  return `第 ${Math.floor(status.pos * rate + 1e-6)} 帧`;
+}
+
 const LAYOUT_FALLBACK_MS = 100;
 
 export function waitForLayout(): Promise<void> {
@@ -684,7 +694,7 @@ export function PlayerOverlay({
           <div className="player-clip-meta">
             <strong title={clip.file_name}>{clip.file_name}</strong>
             <span>
-              {status?.frame === null || status?.frame === undefined ? "" : `第 ${status.frame} 帧`}
+              {frameLabel(status, fps)}
               {status?.seek_p95_ms === null || status?.seek_p95_ms === undefined
                 ? ""
                 : ` · 精确定位 ${status.seek_p95_ms.toFixed(0)} 毫秒`}

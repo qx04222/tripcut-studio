@@ -26,6 +26,8 @@ const JARGON = new RegExp(
     "生成交付包", "整条收藏", "共用常量", "第\\d+段",
     // Y-11(R13 真机 0.7.0):切集弹层「封存本集 / 交付 1」、关于页「Schema / 当前 worker / 独占写入」
     "封存本集", "封存并开启", "无需封存", "· 交付", "交付 \\d", "Schema", "独占写入", "写锁",
+    // Z-09 / Z-10(R13 压测):导出失败的开发者字串
+    "os error", "Permission denied", "dest_unavailable", "No space left",
   ].join("|"),
 );
 
