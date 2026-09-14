@@ -865,6 +865,15 @@ mod tests {
         connection.execute_batch(MIGRATION_0005).unwrap();
         connection.execute_batch(MIGRATION_0013).unwrap();
         connection.execute_batch(MIGRATION_0032).unwrap();
+        // 0044 里 jobs 的那一段(认领 SQL 现在按 jobs.clip_id 找同素材的解码任务);
+        // 其余表这份手搭的库里没有,不能整段跑 0044。
+        connection
+            .execute_batch(
+                "ALTER TABLE jobs ADD COLUMN clip_id INTEGER
+                   GENERATED ALWAYS AS (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.clip_id') END) VIRTUAL;
+                 CREATE INDEX jobs_clip_idx ON jobs(clip_id);",
+            )
+            .unwrap();
         connection
     }
 

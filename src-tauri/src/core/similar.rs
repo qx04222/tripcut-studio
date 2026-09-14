@@ -323,9 +323,7 @@ fn load_current_embeddings(connection: &Connection) -> Result<Vec<EmbeddedClip>>
                 a.has_audio, a.focus_scores,
                 (
                     SELECT j.status FROM jobs j
-                    WHERE j.kind = 'analyze_l1'
-                      AND CAST(CASE WHEN json_valid(j.payload)
-                           THEN json_extract(j.payload, '$.clip_id') END AS INTEGER) = c.id
+                    WHERE j.kind = 'analyze_l1' AND j.clip_id = c.id
                     ORDER BY j.id DESC LIMIT 1
                 )
          FROM clip_embeddings e

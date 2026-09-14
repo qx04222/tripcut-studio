@@ -526,7 +526,7 @@ pub fn rebuild_cache_files(cache_root: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
-fn directory_bytes(root: &Path) -> Result<u64> {
+pub(crate) fn directory_bytes(root: &Path) -> Result<u64> {
     if !root.exists() {
         return Ok(0);
     }

@@ -116,6 +116,23 @@ describe("useImportJobs(迁自 ImportPageRuntime.test / ImportManagement.test)",
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("R15:清空当前集后本地素材立刻清空,不等下一轮轮询", async () => {
+    apiMock.listClips.mockResolvedValue([
+      { id: 11, episode_id: 1, status: "ready" } as never,
+      { id: 12, episode_id: 1, status: "ready" } as never,
+    ]);
+    apiMock.removeImportedMaterial.mockResolvedValue(2);
+    const { result } = renderHook(() => useImportJobs({ pollMs: 1500 }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.clips).toHaveLength(2);
+    await act(async () => { result.current.arm({ batch_id: null, clip_ids: [], all: true }); await vi.advanceTimersByTimeAsync(0); });
+    // 命令返回后、下一轮轮询之前,池里已经空了;文案说缓存在后台清理。
+    apiMock.listClips.mockClear();
+    await act(async () => { await result.current.confirmRemoval(); });
+    expect(result.current.clips).toHaveLength(0);
+    expect(result.current.notice).toContain("缓存文件在后台清理");
+  });
+
   it("清理重复/失败提示:文案沿用,onChanged 被调", async () => {
     const onChanged = vi.fn();
     const { result } = renderHook(() => useImportJobs({ onChanged }));

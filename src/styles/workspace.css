@@ -29,6 +29,8 @@
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
 @import "./workspace/chrome.css";
+/* R15(删除 / 重置):「···」菜单、删除集确认块、设置两项危险操作,同样只能在头部 @import。 */
+@import "./workspace/reset-r15.css";
 /* R14 车道 stress(压力测试修复:缺失素材 / 只读集 / 状态条),同样只能在头部 @import。 */
 @import "./workspace/stress-r14.css";
 /* R14 车道 A:剪映草稿试验开关与试验结果卡(同样只能在头部 @import)。 */

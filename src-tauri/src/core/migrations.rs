@@ -1362,6 +1362,29 @@ ALTER TABLE segments ADD COLUMN batch_id TEXT;
 CREATE INDEX segments_auto_batch_idx ON segments(batch_id) WHERE source = 'auto';
 "#;
 
+// R15:删除 / 重置路径的性能地基。只加索引和一个**虚拟生成列**,不改任何既有列:
+// - `jobs.clip_id`:此前仓库里 15 处按 `json_extract(payload,'$.clip_id')` 找任务,
+//   写法各异、没有一种能命中索引,每条素材都全表扫一遍 JSON(1 065 条素材 /
+//   10 865 任务时 `list_clips` 一次 2.7 s、`remove_records` 13.6 s,见
+//   `.superpowers/sdd/r15/analysis.md` §3)。生成列 + 索引之后所有按素材找任务的
+//   查询都走 `clip_id = ?`。`json_valid` 守着旧库里可能存在的坏 payload(测试夹具就有)。
+// - 外键索引:级联删除时每删一条父行都要在子表里找引用行,这几张表此前没有索引。
+pub const MIGRATION_0044: &str = r#"
+ALTER TABLE jobs ADD COLUMN clip_id INTEGER
+  GENERATED ALWAYS AS (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.clip_id') END) VIRTUAL;
+CREATE INDEX jobs_clip_idx ON jobs(clip_id);
+CREATE INDEX jobs_kind_clip_idx ON jobs(kind, clip_id, id);
+CREATE INDEX routine_overrides_clip_idx ON routine_overrides(clip_id);
+CREATE INDEX narrative_boundary_signals_before_clip_idx ON narrative_boundary_signals(before_clip_id);
+CREATE INDEX narrative_boundary_signals_after_clip_idx ON narrative_boundary_signals(after_clip_id);
+CREATE INDEX generation_requests_result_clip_idx ON generation_requests(result_clip_id);
+CREATE INDEX narrative_beats_segment_idx ON narrative_beats(segment_id);
+CREATE INDEX music_tracks_episode_idx ON music_tracks(episode_id);
+CREATE INDEX story_gaps_episode_idx ON story_gaps(episode_id);
+CREATE INDEX import_batches_episode_idx ON import_batches(episode_id);
+CREATE INDEX episode_archives_episode_idx ON episode_archives(episode_id);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1506,9 +1529,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 41, sql: MIGRATION_0041 },
     Migration { version: 42, sql: MIGRATION_0042 },
     Migration { version: 43, sql: MIGRATION_0043 },
+    Migration { version: 44, sql: MIGRATION_0044 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 43;
+pub const LATEST_SCHEMA_VERSION: i64 = 44;
 
 #[cfg(test)]
 mod tests {
@@ -1781,9 +1805,61 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_43() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 43);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 43);
+    fn schema_version_is_44() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 44);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 44);
+    }
+
+    #[test]
+    fn migration_0044_adds_jobs_clip_column_and_fk_indexes() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        // 生成列不在 table_info 里,只在 table_xinfo 里(hidden = 2)。
+        let hidden: i64 = connection
+            .query_row(
+                "SELECT hidden FROM pragma_table_xinfo('jobs') WHERE name = 'clip_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hidden, 2, "jobs.clip_id 必须是虚拟生成列");
+        for index in [
+            "jobs_clip_idx",
+            "jobs_kind_clip_idx",
+            "routine_overrides_clip_idx",
+            "narrative_boundary_signals_before_clip_idx",
+            "narrative_boundary_signals_after_clip_idx",
+            "generation_requests_result_clip_idx",
+            "narrative_beats_segment_idx",
+            "music_tracks_episode_idx",
+            "story_gaps_episode_idx",
+            "import_batches_episode_idx",
+            "episode_archives_episode_idx",
+        ] {
+            let found: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "0044 必须建索引 {index}");
+        }
+        // 坏 payload 不能让生成列炸掉(旧库里就有这样的行),按素材找任务要走索引。
+        crate::core::jobs::enqueue(&mut connection, "noop", "{", "malformed").unwrap();
+        crate::core::jobs::enqueue(&mut connection, "analyze_l1", r#"{"clip_id":7}"#, "seven").unwrap();
+        let found: i64 = connection
+            .query_row("SELECT COUNT(*) FROM jobs WHERE clip_id = 7", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(found, 1);
+        let plan: String = connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM jobs WHERE kind = 'analyze_l1' AND clip_id = 7 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("jobs_kind_clip_idx"), "按素材找任务必须走索引,实际计划:{plan}");
     }
 
     #[test]

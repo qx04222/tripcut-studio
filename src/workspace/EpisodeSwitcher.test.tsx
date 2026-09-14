@@ -150,7 +150,8 @@ describe("EpisodeSwitcher", () => {
     render(<EpisodeSwitcher />);
     await openSwitcher();
     await act(async () => {
-      screen.getByRole("button", { name: /EP01/ }).click();
+      // R15:每行多了「集操作 · EP01」按钮,选择器钉到以标题开头的那条行链接。
+      screen.getByRole("button", { name: /^EP01/ }).click();
     });
     expect(historyMock.returnToActiveEpisode).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog", { name: "切换集" })).toBeNull();
@@ -159,7 +160,8 @@ describe("EpisodeSwitcher", () => {
     __resetWorkspaceForTests();
     await openSwitcher();
     await act(async () => {
-      screen.getByRole("button", { name: /EP01/ }).click();
+      // R15:每行多了「集操作 · EP01」按钮,选择器钉到以标题开头的那条行链接。
+      screen.getByRole("button", { name: /^EP01/ }).click();
     });
     expect(historyMock.returnToActiveEpisode).not.toHaveBeenCalled();
   });

@@ -179,20 +179,7 @@ async fn rebuild_recovery_cache(
         .clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String> {
         if let Some(control) = control {
-            let prepare_path = db_path.clone();
-            let operation_path = db_path.clone();
-            let operation_cache = cache_root.clone();
-            let result = control.with_maintenance(
-                || {
-                    let mut connection = core::db::open_project(&prepare_path)?;
-                    core::jobs::cancel_cache_jobs(&mut connection)?;
-                    Ok(())
-                },
-                || {
-                    let mut connection = core::db::open_project(&operation_path)?;
-                    core::settings::clear_cache_and_rebuild(&mut connection, &operation_cache)
-                },
-            )?;
+            let result = rebuild_cache_blocking(&db_path, &cache_root, &control)?;
             return Ok(format!(
                 "已清理 {} 字节缓存并重置 {} 个任务",
                 result.removed_disk_bytes, result.reset_jobs
@@ -215,6 +202,88 @@ async fn rebuild_recovery_cache(
     .await
     .map_err(|error| format!("缓存恢复任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
+}
+
+/// R15:「清理缓存并重新分析」的共用主体 —— 取消正在跑的可再生成文件任务、只暂停认领
+/// (不等无关任务)、等这几种任务退出 ≤ 5 s、换目录 + 重排任务后立刻返回;旧目录由
+/// cache_gc 后台删。
+fn rebuild_cache_blocking(
+    db_path: &std::path::Path,
+    cache_root: &std::path::Path,
+    control: &core::jobs::WorkerControl,
+) -> Result<CacheRebuildResult> {
+    let result = control.with_claims_paused(
+        || {
+            let mut connection = core::db::open_project(db_path)?;
+            core::jobs::cancel_cache_jobs(&mut connection)?;
+            Ok(())
+        },
+        || {
+            let mut connection = core::db::open_project(db_path)?;
+            core::jobs::wait_until_no_running(
+                &connection,
+                &format!("kind IN {}", core::jobs::CACHE_JOB_KINDS_SQL),
+                &[],
+                std::time::Duration::from_secs(5),
+            )?;
+            core::settings::clear_cache_and_rebuild(&mut connection, cache_root)
+        },
+    )?;
+    control.wake_worker();
+    Ok(result)
+}
+
+/// R15:「重置项目库」的共用主体 —— 取消全部任务、暂停认领、等 running 退出 ≤ 8 s、
+/// 打快照(唯一的后悔药)、清库 + 换缓存目录。恢复页没有 worker 池时直接跑。
+fn reset_library_blocking(
+    db_path: &std::path::Path,
+    cache_root: &std::path::Path,
+    control: Option<&core::jobs::WorkerControl>,
+) -> Result<core::settings::ResetLibraryResult> {
+    let prepare = || {
+        let mut connection = core::db::open_project(db_path)?;
+        core::jobs::cancel_all_jobs(&mut connection)?;
+        Ok(())
+    };
+    let operation = || {
+        let mut connection = core::db::open_project(db_path)?;
+        core::jobs::wait_until_no_running(&connection, "1 = 1", &[], std::time::Duration::from_secs(8))?;
+        core::db::create_snapshot(&connection, &db_path.parent().unwrap_or(db_path).join("snapshots"))?;
+        core::settings::reset_project_library(&mut connection, cache_root)
+    };
+    let result = match control {
+        Some(control) => {
+            let result = control.with_claims_paused(prepare, operation)?;
+            control.wake_worker();
+            result
+        }
+        None => {
+            prepare()?;
+            operation()?
+        }
+    };
+    Ok(result)
+}
+
+/// R15:恢复页的「重置项目库」。
+#[tauri::command]
+async fn reset_recovery_library(
+    state: tauri::State<'_, DoctorRuntimeState>,
+) -> std::result::Result<core::settings::ResetLibraryResult, String> {
+    if !state.writable {
+        return Err("只读实例不能重置项目库".to_owned());
+    }
+    let db_path = state.db_path.clone();
+    let cache_root = state.cache_root.clone();
+    let control = state
+        .worker_control
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || reset_library_blocking(&db_path, &cache_root, control.as_ref()))
+        .await
+        .map_err(|error| format!("重置项目库任务异常结束：{error}"))?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -681,6 +750,45 @@ fn list_platform_presets(
     core::platform::list_platform_presets(&connection).map_err(|error| error.to_string())
 }
 
+/// R15:删除一集(历史集或当前集)。先取消这一集的任务、暂停认领、等相关任务退出
+/// (≤ 5 s)、打快照,再单事务删除;缓存目录交给 cache_gc 后台删。
+#[tauri::command]
+async fn delete_episode(
+    episode_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::episode::DeleteEpisodeOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能删除集".to_owned());
+    }
+    let control = state.worker_control.clone().ok_or("后台任务控制器不可用")?;
+    let path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<core::episode::DeleteEpisodeOutcome> {
+        let mut connection = core::db::open_project(&path)?;
+        core::episode::prepare_delete(&mut connection, episode_id)?;
+        let gate = core::import::import_gate(&connection);
+        drop(connection);
+        let _import_guard = gate.lock().unwrap_or_else(|error| error.into_inner());
+        let outcome = control.with_claims_paused(
+            || {
+                let mut c = core::db::open_project(&path)?;
+                core::episode::prepare_delete(&mut c, episode_id).map(|_| ())
+            },
+            || {
+                let mut c = core::db::open_project(&path)?;
+                let ids = core::episode::prepare_delete(&mut c, episode_id)?;
+                core::import_control::wait_for_related_jobs(&c, &ids, std::time::Duration::from_secs(5))?;
+                core::db::create_snapshot(&c, &path.parent().unwrap().join("snapshots"))?;
+                core::episode::delete_episode(&mut c, episode_id)
+            },
+        )?;
+        control.wake_worker();
+        Ok(outcome)
+    })
+    .await
+    .map_err(|error| format!("删除集任务异常结束:{error}"))?
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn set_episode_platform(
     episode_id: i64,
@@ -864,22 +972,36 @@ async fn clear_cache_and_rebuild(
         .worker_control
         .clone()
         .ok_or_else(|| "只读实例不能清理缓存".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || rebuild_cache_blocking(&db_path, &cache_root, &worker_control))
+        .await
+        .map_err(|error| format!("缓存重建任务异常结束：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// R15:设置页的「重置项目库」。清空整个项目库(素材 / 集 / 片段 / 收藏 / 任务 / 导入记录),
+/// 保留设置 / 键位 / 引导;先打快照。
+#[tauri::command]
+async fn reset_project_library(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::settings::ResetLibraryResult, String> {
+    if state.read_only {
+        return Err("只读窗口不能重置项目库".to_owned());
+    }
+    let db_path = state.db_path.clone();
+    let cache_root = state.cache_root.clone();
+    let worker_control = state
+        .worker_control
+        .clone()
+        .ok_or_else(|| "只读实例不能重置项目库".to_owned())?;
     tauri::async_runtime::spawn_blocking(move || {
-        let prepare_path = db_path.clone();
-        worker_control.with_maintenance(
-            || {
-                let mut connection = core::db::open_project(&prepare_path)?;
-                core::jobs::cancel_cache_jobs(&mut connection)?;
-                Ok(())
-            },
-            || {
-                let mut connection = core::db::open_project(&db_path)?;
-                core::settings::clear_cache_and_rebuild(&mut connection, &cache_root)
-            },
-        )
+        let connection = core::db::open_project(&db_path)?;
+        let gate = core::import::import_gate(&connection);
+        drop(connection);
+        let _import_guard = gate.lock().unwrap_or_else(|error| error.into_inner());
+        reset_library_blocking(&db_path, &cache_root, Some(&worker_control))
     })
     .await
-    .map_err(|error| format!("缓存重建任务异常结束：{error}"))?
+    .map_err(|error| format!("重置项目库任务异常结束：{error}"))?
     .map_err(|error| error.to_string())
 }
 
@@ -1026,7 +1148,6 @@ async fn remove_imported_material(request: core::import_control::RemovalRequest,
     if state.read_only { return Err("只读窗口不能移除素材".into()); }
     let control = state.worker_control.clone().ok_or("后台任务控制器不可用")?;
     let path = state.db_path.clone();
-    let cache = state.cache_root.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<usize> {
         let mut connection=core::db::open_project(&path)?;
         // Stop scans before waiting for their gate, so a large NAS traversal
@@ -1035,22 +1156,20 @@ async fn remove_imported_material(request: core::import_control::RemovalRequest,
         let gate=core::import::import_gate(&connection);
         drop(connection);
         let _import_guard=gate.lock().unwrap_or_else(|e|e.into_inner());
-        control.with_maintenance(
-            || { let mut c=core::db::open_project(&path)?; core::import_control::prepare_removal(&mut c,&request) },
+        // R15:只暂停认领,不等无关任务;本次范围内的任务已被取消,最多等它们几秒退出。
+        // 缓存目录交给 cache_gc 后台删,命令在数据库提交后立刻返回。
+        let count = control.with_claims_paused(
+            || { let mut c=core::db::open_project(&path)?; core::import_control::prepare_removal(&mut c,&request).map(|_| ()) },
             || {
                 let mut c=core::db::open_project(&path)?;
-                core::db::create_snapshot(&c,&path.parent().unwrap().join("snapshots"))?;
                 let ids=core::import_control::removal_ids(&c,&request)?;
-                let count=core::import_control::remove_records(&mut c,&request)?;
-                for id in ids {
-                    let directory=cache.join(id.to_string());
-                    if directory.exists() {
-                        if let Err(error)=std::fs::remove_dir_all(&directory) { tracing::warn!(%error, clip_id=id,"removed clip cache cleanup deferred"); }
-                    }
-                }
-                Ok(count)
+                core::import_control::wait_for_related_jobs(&c,&ids,std::time::Duration::from_secs(5))?;
+                core::db::create_snapshot(&c,&path.parent().unwrap().join("snapshots"))?;
+                core::import_control::remove_records(&mut c,&request)
             }
-        )
+        )?;
+        control.wake_worker();
+        Ok(count)
     }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
 }
 
@@ -2796,6 +2915,7 @@ pub fn run() {
             restore_latest_snapshot,
             export_decision_data,
             rebuild_recovery_cache,
+            reset_recovery_library,
             open_logs_directory,
             get_media_server_info,
             get_app_info,
@@ -2828,6 +2948,7 @@ pub fn run() {
             rename_current_episode,
             archive_current_episode,
             create_episode,
+            delete_episode,
             list_platform_presets,
             set_episode_platform,
             get_settings,
@@ -2846,6 +2967,7 @@ pub fn run() {
             ask_director,
             get_settings_status,
             clear_cache_and_rebuild,
+            reset_project_library,
             run_clip_self_check,
             pick_import_folder,
             pick_relink_folder,

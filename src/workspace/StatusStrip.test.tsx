@@ -39,6 +39,16 @@ describe("summaryPhrases", () => {
     expect(summaryPhrases({ analyzed: 500, analyzeTotal: 500, transcribing: 0, generating: 0, missing: 2 }))
       .toEqual(["分析完成 · 500 条", "缺失素材 2"]);
   });
+  it("R15:后台还在清理缓存文件时有一句「正在清理缓存文件」", () => {
+    expect(summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0, cleanup: 2 }))
+      .toEqual(["正在清理缓存文件"]);
+  });
+  it("R15:分析已完成、预览文件还在重新生成时报「正在重新生成预览 · 还剩 n 个」;分析中不重复报", () => {
+    expect(summaryPhrases({ analyzed: 5, analyzeTotal: 5, transcribing: 0, generating: 0, missing: 0, regenerating: 40 }))
+      .toEqual(["分析完成 · 5 条", "正在重新生成预览 · 还剩 40 个"]);
+    expect(summaryPhrases({ analyzed: 1, analyzeTotal: 5, transcribing: 0, generating: 0, missing: 0, regenerating: 40 }))
+      .toEqual(["正在分析 1/5"]);
+  });
   it("全空显示「后台空闲」单行", () => {
     expect(summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0 }))
       .toEqual(["后台空闲"]);
@@ -123,6 +133,27 @@ describe("R10 U-19 音乐分析计数", () => {
     expect(
       summaryPhrases({ analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0, musicDone: 3, musicTotal: 3, musicActive: 0 }),
     ).toEqual(["后台空闲"]);
+  });
+});
+
+describe("R15-perf 预览小文件进度", () => {
+  it("summaryPhrases:还有预览小文件在排队 / 生成时报「正在生成预览小文件 n/m」,排在音乐分析之后;全部生成完不占位", () => {
+    expect(
+      summaryPhrases({ analyzed: 2, analyzeTotal: 2, transcribing: 0, generating: 0, missing: 0, musicActive: 1, musicDone: 0, musicTotal: 1, proxyDone: 1, proxyTotal: 3, proxyActive: 2 }),
+    ).toEqual(["分析完成 · 2 条", "音乐分析 0/1", "正在生成预览小文件 1/3"]);
+    expect(
+      summaryPhrases({ analyzed: 2, analyzeTotal: 2, transcribing: 0, generating: 0, missing: 0, proxyDone: 3, proxyTotal: 3, proxyActive: 0 }),
+    ).toEqual(["分析完成 · 2 条"]);
+  });
+  it("状态条:后端报 proxy_total / proxy_pending 时显示预览小文件进度,且「分析完成」不等它", async () => {
+    apiMocks.getImportProgress.mockResolvedValue({
+      total: 2, done: 2, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false,
+      analysis_total: 2, analysis_done: 2, proxy_total: 2, proxy_pending: 1,
+    });
+    render(<StatusStrip />);
+    const strip = await screen.findByRole("status", { name: "后台状态" });
+    await screen.findByText("正在生成预览小文件 1/2");
+    expect(strip.textContent).toContain("分析完成 · 2 条");
   });
 });
 

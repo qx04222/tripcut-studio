@@ -625,7 +625,7 @@ pub fn run_moments_job(connection: &mut Connection, job: &Job) -> Result<()> {
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
     let scene_threshold = super::analysis::effective_scene_threshold(connection)?;
     let (windows, cuts, probed_audio) =
-        super::analysis::scan_windows(&path, tb_num, tb_den, &ffmpeg, &ffprobe, scene_threshold)?;
+        super::analysis::scan_windows(&path, tb_num, tb_den, duration_ticks, &ffmpeg, &ffprobe, scene_threshold)?;
     let cuts = cuts.into_iter().filter(|cut| *cut > 0 && *cut < duration_ticks).collect::<Vec<_>>();
     let source = MomentSource {
         clip_id: payload.clip_id,

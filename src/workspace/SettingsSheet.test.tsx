@@ -11,6 +11,7 @@ const apiMocks = await vi.hoisted(async () => {
 });
 vi.mock("../api", () => apiMocks);
 
+import { isHomePinned, pinHome } from "./homeStore";
 import { openSettings } from "./openSettings";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
@@ -140,7 +141,8 @@ describe("设置 sheet", () => {
       await Promise.resolve();
     });
     expect(within(tablist).getByRole("tab", { name: "项目与缓存" }).getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).getByRole("button", { name: "清空缓存并重建" }).closest(".settings-sheet-danger")).toBeTruthy();
+    // R15:「清空缓存并重建」改名「清理缓存并重新分析」,旁边多了「重置项目库」。
+    expect(within(dialog).getByRole("button", { name: "清理缓存并重新分析" }).closest(".settings-sheet-danger")).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "关闭设置" })).toBeTruthy();
   });
 
@@ -354,20 +356,46 @@ describe("设置 sheet", () => {
   it("缓存与重建:两次点击才执行,第一次提示确认;危险动作在独立卡里", async () => {
     const dialog = await openLoaded();
     const panel = await goSection(dialog, "cache");
-    const button = within(panel).getByRole("button", { name: "清空缓存并重建" });
+    // R15:改名「清理缓存并重新分析」/「再点一次确认清理」,文案说清留什么、删什么。
+    const button = within(panel).getByRole("button", { name: "清理缓存并重新分析" });
     expect(button.closest(".settings-sheet-danger")).toBeTruthy();
     await act(async () => {
       button.click();
       await Promise.resolve();
     });
     expect(apiMocks.clearCacheAndRebuild).not.toHaveBeenCalled();
-    expect(within(dialog).getByRole("status").textContent).toContain("请再次点击确认");
+    expect(within(dialog).getByRole("status").textContent).toContain("请再点一次确认");
     await act(async () => {
-      within(panel).getByRole("button", { name: "再次点击确认清空" }).click();
+      within(panel).getByRole("button", { name: "再点一次确认清理" }).click();
       await Promise.resolve();
     });
     await waitFor(() => expect(apiMocks.clearCacheAndRebuild).toHaveBeenCalled());
-    expect(panel.textContent).toContain("评级、片段和原始素材不会被删除");
+    expect(panel.textContent).toContain("素材、评分和片段都会留着,原片不会被删");
+  });
+
+  it("R15:重置项目库要先打「确认」两个字;成功后回首页、收起设置、派发切集事件", async () => {
+    apiMocks.resetProjectLibrary.mockResolvedValue({ removed_clips: 213, removed_episodes: 2, removed_disk_bytes: 0 });
+    pinHome(false);
+    const changed = vi.fn();
+    window.addEventListener("tripcut:episode-changed", changed);
+    const dialog = await openLoaded();
+    const panel = await goSection(dialog, "cache");
+    const button = within(panel).getByRole("button", { name: "重置项目库" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(panel.textContent).toContain("主题、快捷键和引导会留着");
+    const input = within(panel).getByRole("textbox", { name: "重置确认" });
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "确认" } });
+    });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(apiMocks.resetProjectLibrary).toHaveBeenCalled());
+    expect(changed).toHaveBeenCalled();
+    expect(isHomePinned()).toBe(true);
+    window.removeEventListener("tripcut:episode-changed", changed);
   });
 
   it("sheet 里没有任何英文 kicker / 序号水印(十个分区段逐个看)", async () => {

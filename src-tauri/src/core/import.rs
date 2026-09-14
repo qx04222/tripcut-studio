@@ -65,6 +65,20 @@ pub struct ImportProgress {
     /// 状态条要把它们算作「已处理」,否则分母永远追不平。
     #[serde(default)]
     pub duplicate: u64,
+    /// R15-perf:当前集里排过「预览小文件」任务的素材数,与其中还在排队 / 进行中的数。
+    /// 预览小文件是分析之后的后台活(不挡「分析完成」),状态条单独说「正在生成预览小文件 n/m」。
+    #[serde(default)]
+    pub proxy_total: u64,
+    #[serde(default)]
+    pub proxy_pending: u64,
+    /// R15:还没做完的缓存文件清理任务数(删素材 / 删集 / 清缓存后台删目录),状态条据此
+    /// 显示「正在清理缓存文件」。
+    #[serde(default)]
+    pub cleanup_pending: u64,
+    /// R15:还没生成完的预览文件任务数(封面 / 胶片条 / 波形 / 预览小文件 / 向量)——
+    /// 「清理缓存并重新分析」之后状态条据此报「正在重新生成预览 · 还剩 n 个」。
+    #[serde(default)]
+    pub derived_pending: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1305,7 +1319,7 @@ pub(crate) fn batch_analysis_completion_notice(
     }
     let clip_id: Option<i64> = connection
         .query_row(
-            "SELECT CAST(json_extract(payload, '$.clip_id') AS INTEGER) FROM jobs WHERE id = ?1",
+            "SELECT clip_id FROM jobs WHERE id = ?1",
             [job.id],
             |row| row.get(0),
         )
@@ -1334,8 +1348,7 @@ pub(crate) fn batch_analysis_completion_notice(
             "SELECT COUNT(*) FROM jobs
              WHERE status IN ('pending', 'running')
                AND kind IN ({kinds_list})
-               AND json_valid(payload)
-               AND CAST(json_extract(payload, '$.clip_id') AS INTEGER) IN (
+               AND clip_id IN (
                      SELECT clip_id FROM import_batch_clips WHERE batch_id = ?1
                    )"
         ),
@@ -1376,13 +1389,12 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
         "SELECT
             (SELECT COUNT(*) FROM clips c
               WHERE c.episode_id = (SELECT id FROM episodes WHERE status = 'active')),
-            (SELECT COUNT(DISTINCT CAST(json_extract(j.payload, '$.clip_id') AS INTEGER))
+            (SELECT COUNT(DISTINCT j.clip_id)
                FROM jobs j
               WHERE j.kind IN ('analyze_l1', 'analyze_motion')
                 AND j.status IN ('pending', 'running')
                 AND j.cancel_requested = 0
-                AND json_valid(j.payload)
-                AND CAST(json_extract(j.payload, '$.clip_id') AS INTEGER) IN (
+                AND j.clip_id IN (
                     SELECT id FROM clips
                      WHERE episode_id = (SELECT id FROM episodes WHERE status = 'active')))",
         [],
@@ -1390,6 +1402,31 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
     )?;
     let analysis_total = analysis_total.max(0) as u64;
     let analysis_done = analysis_total.saturating_sub(analysis_busy.max(0) as u64);
+    let (proxy_total, proxy_pending): (i64, i64) = connection.query_row(
+        "SELECT
+            COUNT(DISTINCT CAST(json_extract(j.payload, '$.clip_id') AS INTEGER)),
+            COUNT(DISTINCT CASE WHEN j.status IN ('pending', 'running')
+                                THEN CAST(json_extract(j.payload, '$.clip_id') AS INTEGER) END)
+           FROM jobs j
+          WHERE j.kind = 'proxy'
+            AND j.cancel_requested = 0
+            AND json_valid(j.payload)
+            AND CAST(json_extract(j.payload, '$.clip_id') AS INTEGER) IN (
+                SELECT id FROM clips
+                 WHERE episode_id = (SELECT id FROM episodes WHERE status = 'active'))",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let cleanup_pending = super::cache_gc::pending_count(connection)?.max(0) as u64;
+    let derived_pending: i64 = connection.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'running') AND cancel_requested = 0 AND kind IN {}",
+            super::jobs::CACHE_JOB_KINDS_SQL
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    let derived_pending = derived_pending.max(0) as u64;
     connection
         .query_row(
             "SELECT
@@ -1416,6 +1453,10 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
                     analysis_total,
                     analysis_done,
                     duplicate: row.get::<_, i64>(4)?.max(0) as u64,
+                    proxy_total: proxy_total.max(0) as u64,
+                    proxy_pending: proxy_pending.max(0) as u64,
+                    cleanup_pending,
+                    derived_pending,
                 })
             },
         )
@@ -1431,8 +1472,7 @@ pub fn pending_decode_count(connection: &Connection) -> Result<u64> {
         "SELECT COUNT(*) FROM jobs
          WHERE status = 'pending' AND cancel_requested = 0
            AND kind IN {}
-           AND json_valid(payload)
-           AND CAST(json_extract(payload, '$.clip_id') AS INTEGER) IN (
+           AND clip_id IN (
                  SELECT id FROM clips
                  WHERE episode_id = (SELECT id FROM episodes WHERE status = 'active')
                )",
@@ -1597,16 +1637,12 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
          LEFT JOIN clip_motion m ON m.clip_id = c.id
          LEFT JOIN jobs aj ON aj.id = (
              SELECT candidate.id FROM jobs candidate
-             WHERE candidate.kind = 'analyze_l1'
-               AND CAST(CASE WHEN json_valid(candidate.payload)
-                    THEN json_extract(candidate.payload, '$.clip_id') END AS INTEGER) = c.id
+             WHERE candidate.kind = 'analyze_l1' AND candidate.clip_id = c.id
              ORDER BY candidate.id DESC LIMIT 1
          )
          LEFT JOIN jobs mj ON mj.id = (
              SELECT candidate.id FROM jobs candidate
-             WHERE candidate.kind = 'analyze_motion'
-               AND CAST(CASE WHEN json_valid(candidate.payload)
-                    THEN json_extract(candidate.payload, '$.clip_id') END AS INTEGER) = c.id
+             WHERE candidate.kind = 'analyze_motion' AND candidate.clip_id = c.id
              ORDER BY candidate.id DESC LIMIT 1
          )
          ORDER BY c.imported_at DESC, c.id DESC",
@@ -2800,8 +2836,41 @@ mod tests {
                 analysis_total: 0,
                 analysis_done: 0,
                 duplicate: 0,
+                proxy_total: 0,
+                proxy_pending: 0,
+                cleanup_pending: 0,
+                derived_pending: 0,
             }
         );
+    }
+
+    /// R15-perf:预览小文件的进度单独计——只看当前集素材的 proxy 任务,不影响 analysis_* 。
+    #[test]
+    fn progress_counts_proxy_jobs_separately_and_only_for_the_active_episode() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        // 新库自带 id=1 的活动集;9 号是归档集,它的代理任务不算。
+        connection
+            .execute_batch(
+                "INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id) VALUES (1, 'a.mp4', 'h', 1, 1);
+                 INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id) VALUES (2, 'b.mp4', 'h', 1, 1);
+                 INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id) VALUES (3, 'c.mp4', 'h', 1, 1);
+                 INSERT INTO episodes(id, title, theme, created_at, status, archived_at)
+                 VALUES (9, 'old', '', '2026-01-01T00:00:00Z', 'archived', '2026-01-02T00:00:00Z');
+                 INSERT INTO clips(id, rel_path, quick_hash, byte_size, episode_id) VALUES (9, 'z.mp4', 'h', 1, 9);",
+            )
+            .unwrap();
+        let done = jobs::enqueue(&mut connection, "proxy", r#"{"clip_id":1}"#, "p1").unwrap();
+        jobs::enqueue(&mut connection, "proxy", r#"{"clip_id":2}"#, "p2").unwrap();
+        let running = jobs::enqueue(&mut connection, "proxy", r#"{"clip_id":3}"#, "p3").unwrap();
+        jobs::enqueue(&mut connection, "proxy", r#"{"clip_id":9}"#, "p9").unwrap();
+        connection.execute("UPDATE jobs SET status = 'done' WHERE id = ?1", [done]).unwrap();
+        connection.execute("UPDATE jobs SET status = 'running' WHERE id = ?1", [running]).unwrap();
+
+        let progress = get_import_progress(&connection).unwrap();
+        assert_eq!((progress.proxy_total, progress.proxy_pending), (3, 2));
+        assert_eq!(progress.analysis_total, 3, "分析计数不受代理任务影响");
+        assert_eq!(progress.analysis_done, 3, "没有分析任务在跑 → 分析完成,不等代理");
     }
 
     /// Z-01:登记全完成后素材还在画质 / 运镜分析 → analysis_done < analysis_total;

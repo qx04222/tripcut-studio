@@ -82,7 +82,9 @@ fn main() {
     let runner = Arc::new(core::jobs::JobRunner::new(db.clone(), workers).with_decode_limit(decode_permits));
 
     let stop = Arc::new(AtomicBool::new(false));
-    let timings: Arc<Mutex<Vec<(String, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    // R15-perf:每条任务记 (kind, 距开跑的起点 ms, 耗时 ms),result.json 里多一份 `timeline`,
+    // 单文件夹具跑时能直接读出每个阶段的先后与首个封面/首条分析到位的时刻。
+    let timings: Arc<Mutex<Vec<(String, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
 
     // 内存压力轮询线程:与生产 `JobRunner::run()` 里的 `watch_memory_pressure`
@@ -104,11 +106,13 @@ fn main() {
         let runner = runner.clone();
         let stop = stop.clone();
         let timings = timings.clone();
+        let run_started = started;
         handles.push(thread::spawn(move || loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
             let t = Instant::now();
+            let start_ms = t.duration_since(run_started).as_millis() as u64;
             // 直接拿 `run_one_step_with_kind` 带出来的 kind,不再另开一条
             // 连接去查"最近完成的是哪条"——那条全局 `ORDER BY finished_at
             // DESC LIMIT 1` 在多个 worker 几毫秒内先后收尾时会撞车,把
@@ -117,7 +121,7 @@ fn main() {
             match runner.run_one_step_with_kind() {
                 Ok(Some(kind)) => {
                     let ms = t.elapsed().as_millis() as u64;
-                    timings.lock().unwrap().push((kind, ms));
+                    timings.lock().unwrap().push((kind, start_ms, ms));
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(200)),
                 Err(e) => {
@@ -178,9 +182,15 @@ fn main() {
     };
     samples.sort_unstable();
     let mut by_kind: HashMap<String, Vec<u64>> = HashMap::new();
-    for (k, ms) in timings.lock().unwrap().iter() {
+    let mut timeline: Vec<(String, u64, u64)> = timings.lock().unwrap().clone();
+    timeline.sort_by_key(|(_, start, _)| *start);
+    for (k, _, ms) in timeline.iter() {
         by_kind.entry(k.clone()).or_default().push(*ms);
     }
+    let timeline: Vec<serde_json::Value> = timeline
+        .into_iter()
+        .map(|(kind, start_ms, ms)| json!({"kind": kind, "start_ms": start_ms, "ms": ms}))
+        .collect();
     let stages: serde_json::Map<String, serde_json::Value> = by_kind
         .into_iter()
         .map(|(k, mut v)| {
@@ -196,6 +206,7 @@ fn main() {
         "first_screen_cover_ms": first_screen_ms, "all_cover_ms": all_cover_ms,
         "total_ms": started.elapsed().as_millis() as u64,
         "stages": stages,
+        "timeline": timeline,
         "jobs": {"done": count("done"), "failed": count("failed"), "blocked": count("blocked")},
         "excluded": {"clip_embed_blocked": clip_embed_blocked},
     });

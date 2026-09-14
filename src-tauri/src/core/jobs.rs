@@ -155,6 +155,29 @@ pub fn enqueue(
     Ok(id)
 }
 
+/// R15:在调用方已经开着的事务里登记一条任务(与删素材 / 删集 / 重置同一次提交)。
+/// 与 `enqueue` 同一条 INSERT,只是不自己开事务。
+pub fn enqueue_within(
+    connection: &Connection,
+    kind: &str,
+    payload: &str,
+    payload_hash: &str,
+) -> Result<i64> {
+    connection.execute(
+        "INSERT INTO jobs(
+            kind, payload, payload_hash, status, attempt,
+            next_attempt_at, created_at, updated_at
+         ) VALUES (
+            ?1, ?2, ?3, 'pending', 0,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         )",
+        params![kind, payload, payload_hash],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
 pub fn enqueue_idempotent(
     connection: &mut Connection,
     kind: &str,
@@ -301,15 +324,17 @@ pub fn claim_next_for_owner_excluding(
                AND (?2 = 0 OR kind NOT IN {HEAVY_KINDS_SQL})
                AND NOT (
                      kind IN {DECODE_KINDS_SQL}
-                     AND json_valid(jobs.payload)
+                     AND jobs.clip_id IS NOT NULL
                      AND EXISTS (
                        SELECT 1 FROM jobs running_decode
                        WHERE running_decode.status = 'running'
                          AND running_decode.kind IN {DECODE_KINDS_SQL}
-                         AND json_valid(running_decode.payload)
-                         AND json_extract(running_decode.payload, '$.clip_id')
-                             = json_extract(jobs.payload, '$.clip_id')))
+                         AND running_decode.clip_id = jobs.clip_id))
              ORDER BY CASE kind
+                        -- R15-perf:full_hash 从 58 降到 8。quick_hash 已经是素材身份,完整哈希只在
+                        -- 「以后再遇到同一个文件」时才被判重用到;排在缩略图 / 分析前面会让 100 条
+                        -- 4K 素材先把 200 GB 全读一遍才出第一张封面。判重语义不变:
+                        -- `import::confirmed_duplicate` 疑似重复时仍会当场算完整哈希。
                         WHEN 'export_package' THEN 100
                         WHEN 'import_probe' THEN 60
                         WHEN 'metadata_backfill' THEN 57
@@ -325,8 +350,10 @@ pub fn claim_next_for_owner_excluding(
                         WHEN 'waveform' THEN 20
                         WHEN 'transcribe' THEN 15
                         WHEN 'proxy' THEN 10
+                        WHEN 'full_hash' THEN 8
                         WHEN 'similar_cluster' THEN 5
-                        WHEN 'full_hash' THEN 58
+                        -- R15:后台缓存清理紧跟导入探测之后跑,删掉的东西尽快腾出磁盘。
+                        WHEN 'cache_gc' THEN 59
                         ELSE 0
                       END DESC,
                       created_at, id
@@ -650,11 +677,59 @@ pub fn request_cancel(connection: &mut Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// R15:等 `predicate_sql`(一段 WHERE 片段,只看 `status='running'` 的行)数到 0,
+/// 最多等 `timeout`;超时不报错——相关任务已被标 cancel,晚到的完成写不进任何行。
+pub fn wait_until_no_running(
+    connection: &Connection,
+    predicate_sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let sql = format!("SELECT COUNT(*) FROM jobs WHERE status = 'running' AND ({predicate_sql})");
+    let started = std::time::Instant::now();
+    loop {
+        let running: i64 = connection.query_row(&sql, params, |row| row.get(0))?;
+        if running == 0 {
+            return Ok(true);
+        }
+        if started.elapsed() >= timeout {
+            tracing::warn!(running, "等待相关任务结束超时,继续执行");
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// R15:重置项目库前把**所有**没跑完的任务取消:pending 一条 UPDATE,running 逐个设标志。
+pub fn cancel_all_jobs(connection: &mut Connection) -> Result<usize> {
+    connection.execute(
+        "UPDATE jobs SET status='failed', cancel_requested=1, blocked_summary='用户已取消',
+                owner_id=NULL, lease_expires_at=NULL,
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                finished_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE status='pending'",
+        [],
+    )?;
+    let ids = {
+        let mut statement = connection.prepare("SELECT id FROM jobs WHERE status='running' AND cancel_requested=0")?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for id in &ids {
+        request_cancel(connection, *id)?;
+    }
+    Ok(ids.len())
+}
+
+/// 清理缓存前取消正在跑的「可再生成文件」任务(与 `settings::clear_cache_and_rebuild`
+/// 重置的五种一致;R15 补上此前漏掉的 strip)。
+pub const CACHE_JOB_KINDS_SQL: &str = "('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')";
+
 pub fn cancel_cache_jobs(connection: &mut Connection) -> Result<usize> {
     let mut statement = connection.prepare(
         "SELECT id FROM jobs
          WHERE status='running'
-           AND kind IN ('thumbnail', 'waveform', 'proxy', 'clip_embed')",
+           AND kind IN ('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')",
     )?;
     let ids = statement
         .query_map([], |row| row.get::<_, i64>(0))?
@@ -697,6 +772,84 @@ fn fail_or_retry(connection: &mut Connection, job: &Job, summary: &str) -> Resul
     )?;
     transaction.commit()?;
     Ok(status)
+}
+
+/// R15-perf:当前 worker 线程的取消标志——分段并行解码的子线程用 `adopt_cancellation_flag`
+/// 接过去,`execute_with_timeout` 里的取消检查才对子进程同样生效。
+pub fn current_cancellation_flag() -> Option<Arc<AtomicBool>> {
+    CURRENT_CANCELLATION.with(|current| current.borrow().clone())
+}
+
+/// 子线程接过父 worker 的取消标志(`None` 表示父线程本来就没有)。
+pub fn adopt_cancellation_flag(flag: Option<Arc<AtomicBool>>) {
+    CURRENT_CANCELLATION.with(|current| *current.borrow_mut() = flag);
+}
+
+thread_local! {
+    /// 正在执行任务的 worker 线程所属的协调器;`borrow_spare_decode_slots` 靠它读许可。
+    static CURRENT_COORDINATOR: RefCell<Option<std::sync::Weak<WorkerPoolCoordinator>>> =
+        const { RefCell::new(None) };
+}
+
+struct CoordinatorScope;
+
+impl CoordinatorScope {
+    fn enter(coordinator: &Arc<WorkerPoolCoordinator>) -> Self {
+        CURRENT_COORDINATOR.with(|current| *current.borrow_mut() = Some(Arc::downgrade(coordinator)));
+        Self
+    }
+}
+
+impl Drop for CoordinatorScope {
+    fn drop(&mut self) {
+        CURRENT_COORDINATOR.with(|current| *current.borrow_mut() = None);
+    }
+}
+
+/// R15-perf:一条解码类任务借走的额外解码许可。VideoToolbox 硬解在 ffmpeg 里是逐帧同步的
+/// (延迟决定吞吐,4K H.264 单进程只有 ~150 fps),多开几个进程各解一段几乎线性加速——
+/// 但每个进程都是一份 4K 解码器与像素缓冲,所以只能借**此刻空着**的许可,借走的算进
+/// `active_decode`,其它 worker 认领解码任务时就看得见;guard 掉了自动归还。
+/// 没在 worker 线程里(单测 / 直接调用)时借不到,`count()` 为 0,调用方走单进程。
+pub struct DecodeSlotLoan {
+    coordinator: Option<Arc<WorkerPoolCoordinator>>,
+    count: usize,
+}
+
+impl DecodeSlotLoan {
+    /// 借到的额外许可数(不含任务自己那一份)。
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl Drop for DecodeSlotLoan {
+    fn drop(&mut self) {
+        let Some(coordinator) = self.coordinator.take() else {
+            return;
+        };
+        if self.count == 0 {
+            return;
+        }
+        let mut state = coordinator.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.active_decode = state.active_decode.saturating_sub(self.count);
+        drop(state);
+        coordinator.state_changed.notify_all();
+    }
+}
+
+/// 借走至多 `max` 个此刻空着的解码许可(见 `DecodeSlotLoan`)。
+pub fn borrow_spare_decode_slots(max: usize) -> DecodeSlotLoan {
+    let coordinator = CURRENT_COORDINATOR.with(|current| current.borrow().as_ref().and_then(std::sync::Weak::upgrade));
+    let Some(coordinator) = coordinator else {
+        return DecodeSlotLoan { coordinator: None, count: 0 };
+    };
+    let mut state = coordinator.state.lock().unwrap_or_else(|error| error.into_inner());
+    let spare = if state.paused_for_memory { 0 } else { state.decode_limit.saturating_sub(state.active_decode) };
+    let count = spare.min(max);
+    state.active_decode += count;
+    drop(state);
+    DecodeSlotLoan { coordinator: Some(coordinator), count }
 }
 
 pub fn current_cancellation_requested() -> bool {
@@ -1011,6 +1164,33 @@ impl WorkerControl {
         result
     }
 
+    /// R15:只挡住新的认领、**不等**正在跑的任务结束(与 `with_maintenance` 的差别)。
+    /// 删素材 / 删集 / 清缓存都用它:相关任务已在 `prepare` 里被取消(ffmpeg 20 ms 内
+    /// 被 kill),不相关的任务没理由让用户等它跑完。调用方要等谁,自己按 DB 里的
+    /// running 行等(`wait_until_no_running`)。
+    pub fn with_claims_paused<T>(
+        &self,
+        prepare: impl FnOnce() -> Result<()>,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _claim_guard = self
+            .coordinator
+            .claim_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        {
+            let mut state = self
+                .coordinator
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.maintenance_active = true;
+        }
+        let result = prepare().and_then(|()| operation());
+        self.finish_maintenance();
+        result
+    }
+
     /// 解码许可数(由内存档位决定),启动接线时设置一次。
     pub fn set_decode_limit(&self, limit: usize) {
         let mut state = self
@@ -1302,6 +1482,7 @@ impl JobRunner {
         };
         let _cancellation = CancellationRegistration::register(&connection, claimed.job.id)?;
         let _lease = LeaseHeartbeat::start(db_path, &claimed.job, owner_id);
+        let _coordinator_scope = CoordinatorScope::enter(coordinator);
         let kind = claimed.job.kind.clone();
         Self::fire_first_job_hook(coordinator);
         execute(db_path, &mut connection, &claimed.job)?;
@@ -1611,6 +1792,16 @@ impl JobRunner {
                     }
                 }
             }
+            // R15:缓存文件的后台删除。目录不在 = 成功,可重跑。
+            "cache_gc" => match super::cache_gc::run(job, &cache_root) {
+                Ok(bytes) => {
+                    tracing::info!(job_id = job.id, bytes, "cache_gc 清理完成");
+                    mark_done(connection, job.id, job.attempt)?;
+                }
+                Err(error) => {
+                    fail_or_retry(connection, job, &error.to_string())?;
+                }
+            },
             "ocr_scan" => match super::ocr::run_ocr_scan(connection, job, &cache_root) {
                 Ok(()) => {}
                 Err(error) => {
@@ -2500,31 +2691,58 @@ mod tests {
         assert_eq!(get(&connection, id).unwrap().status, JobStatus::Done);
     }
 
+    /// R15-perf:完整哈希只服务于「以后再遇到同一个文件」的判重,`quick_hash` 已经是身份;
+    /// 它曾排在缩略图 / 分析之前(58),100 条 4K 素材要先把 200 GB 全部读一遍才出第一张封面。
+    /// 现在它排在代理之后——登记 → 封面 → 分析 → 代理 → 完整哈希。
     #[test]
-    fn full_hash_waits_for_import_probe_but_precedes_analysis() {
+    fn full_hash_waits_for_import_probe_and_runs_after_analysis() {
         let directory = TestDirectory::new();
         let mut connection = db::open_project(&directory.db_path()).unwrap();
         let hash_id = enqueue(&mut connection, "full_hash", "{}", "hash-before-analysis").unwrap();
         let import_id = enqueue(&mut connection, "import_probe", "{}", "import-first").unwrap();
-        enqueue(&mut connection, "analyze_l1", "{}", "analysis-after-hash").unwrap();
+        let analysis_id = enqueue(&mut connection, "analyze_l1", "{}", "analysis-after-hash").unwrap();
 
         let first = claim_next(&mut connection).unwrap().unwrap();
         assert_eq!(first.id, import_id);
         mark_done(&mut connection, first.id, first.attempt).unwrap();
         let second = claim_next(&mut connection).unwrap().unwrap();
-        assert_eq!(second.id, hash_id);
-        assert_eq!(second.kind, "full_hash");
+        assert_eq!(second.id, analysis_id);
+        mark_done(&mut connection, second.id, second.attempt).unwrap();
+        let third = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(third.id, hash_id);
+        assert_eq!(third.kind, "full_hash");
     }
 
     #[test]
-    fn full_hash_is_claimed_before_analyze_l1() {
+    fn analyze_l1_and_thumbnail_are_claimed_before_full_hash() {
         let directory = TestDirectory::new();
         let mut connection = db::open_project(&directory.db_path()).unwrap();
         enqueue(&mut connection, "full_hash", "{}", "hash-last").unwrap();
-        enqueue(&mut connection, "analyze_l1", "{}", "analysis-second").unwrap();
+        enqueue(&mut connection, "analyze_l1", r#"{"clip_id":1}"#, "analysis-second").unwrap();
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":2}"#, "thumbnail-first").unwrap();
 
-        let claimed = claim_next(&mut connection).unwrap().unwrap();
-        assert_eq!(claimed.kind, "full_hash");
+        let first = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(first.kind, "thumbnail");
+        let second = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(second.kind, "analyze_l1");
+        let third = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(third.kind, "full_hash");
+    }
+
+    #[test]
+    fn full_hash_is_claimed_after_proxy_but_before_similar_cluster() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "similar_cluster", "{}", "cluster-last").unwrap();
+        enqueue(&mut connection, "full_hash", "{}", "hash-middle").unwrap();
+        enqueue(&mut connection, "proxy", "{}", "proxy-first").unwrap();
+
+        let first = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(first.kind, "proxy");
+        let second = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(second.kind, "full_hash");
+        let third = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(third.kind, "similar_cluster");
     }
 
     #[test]
@@ -2748,11 +2966,20 @@ mod tests {
             "{trimmed}, CHECK (NOT (payload_hash = 'poison-hash' AND status = 'pending')))",
             trimmed = &create_sql.trim_end()[..create_sql.trim_end().len() - 1]
         );
+        // 0044 之后 jobs 有一个生成列(clip_id),`SELECT *` 会把它带上而生成列不能被
+        // INSERT;按 table_info(不含生成列)点名搬列。
+        let columns: String = connection
+            .query_row(
+                "SELECT group_concat(name, ',') FROM pragma_table_info('jobs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         connection
             .execute_batch(&format!(
                 "ALTER TABLE jobs RENAME TO jobs_old;
                  {augmented_sql};
-                 INSERT INTO jobs SELECT * FROM jobs_old;
+                 INSERT INTO jobs({columns}) SELECT {columns} FROM jobs_old;
                  DROP TABLE jobs_old;"
             ))
             .unwrap();
@@ -3086,6 +3313,81 @@ mod tests {
     #[test]
     fn four_threads_never_exceed_a_decode_limit_of_one() {
         assert_eq!(observed_decode_peak(1, 8), 1);
+    }
+
+    /// R15-perf:任务内借走的空闲解码许可要算进 `active_decode`,其它 worker 认领解码任务时
+    /// 看得见;任务外(没有协调器的线程)借不到;guard 掉了就归还。
+    #[test]
+    fn borrowed_decode_slots_count_against_the_limit_and_return_on_drop() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        {
+            let mut connection = db::open_project(&db_path).unwrap();
+            enqueue(&mut connection, "analyze_l1", r#"{"clip_id":1}"#, "loan-l1").unwrap();
+            enqueue(&mut connection, "thumbnail", r#"{"clip_id":2}"#, "loan-thumb").unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(3);
+
+        // 没在 worker 线程里:借不到。
+        assert_eq!(borrow_spare_decode_slots(4).count(), 0);
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let thread_observed = observed.clone();
+        let thread_control = control.clone();
+        let (release_sender, release_receiver) = mpsc::channel::<()>();
+        let (started_sender, started_receiver) = mpsc::channel::<()>();
+        let thread_path = db_path.clone();
+        let thread_coordinator = coordinator.clone();
+        let worker = std::thread::spawn(move || {
+            JobRunner::run_one_with_executor(
+                &thread_path,
+                &thread_coordinator,
+                "loan-worker",
+                |_db_path, connection, job| {
+                    let loan = borrow_spare_decode_slots(4);
+                    // 上限 3,自己占 1,最多借 2。
+                    thread_observed.lock().unwrap().push(("borrowed", loan.count()));
+                    thread_observed.lock().unwrap().push(("active_while_borrowed", thread_control.active_decode()));
+                    started_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    drop(loan);
+                    thread_observed.lock().unwrap().push(("active_after_return", thread_control.active_decode()));
+                    mark_done(connection, job.id, job.attempt)
+                },
+            )
+            .unwrap()
+        });
+        started_receiver.recv().unwrap();
+        // 许可被借满:另一条解码任务此刻认领不到。
+        let mut connection = db::open_project(&db_path).unwrap();
+        let claimed_while_saturated = coordinator.claim_for_owner(&mut connection, "other").unwrap();
+        assert!(claimed_while_saturated.is_none(), "借满许可时另一条解码任务不该被认领");
+        release_sender.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        let observed = observed.lock().unwrap().clone();
+        assert_eq!(observed, vec![("borrowed", 2), ("active_while_borrowed", 3), ("active_after_return", 1)]);
+        // 归还之后剩下那条解码任务能认领了(worker 按优先级先拿走的是 thumbnail)。
+        let claimed_after = coordinator.claim_for_owner(&mut connection, "other").unwrap();
+        assert_eq!(claimed_after.map(|claimed| claimed.job.kind), Some("analyze_l1".to_owned()));
+    }
+
+    #[test]
+    fn child_threads_adopt_the_workers_cancellation_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        CURRENT_CANCELLATION.with(|current| *current.borrow_mut() = Some(flag.clone()));
+        let inherited = current_cancellation_flag();
+        let child = std::thread::spawn(move || {
+            adopt_cancellation_flag(inherited);
+            let before = current_cancellation_requested();
+            std::thread::sleep(Duration::from_millis(30));
+            (before, current_cancellation_requested())
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        flag.store(true, Ordering::SeqCst);
+        assert_eq!(child.join().unwrap(), (false, true));
+        CURRENT_CANCELLATION.with(|current| *current.borrow_mut() = None);
     }
 
     #[test]

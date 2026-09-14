@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { useCallback, useEffect, useState, type JSX, type ReactNode } from "react";
 
 import {
   archiveCurrentEpisode,
@@ -48,14 +48,17 @@ export function episodeErrorMessage(error: unknown): string {
 export function EpisodeList({
   episodes,
   onSelectEpisode,
+  renderActions,
 }: {
   episodes: EpisodeSummary[];
   onSelectEpisode: (episode: EpisodeSummary) => void;
+  /** R15:每行右侧的操作(切集弹层放「···」菜单);不传就和以前一样。 */
+  renderActions?: (episode: EpisodeSummary) => ReactNode;
 }): JSX.Element {
   return (
     <ul className="episode-list" aria-label="集列表">
       {episodes.map((episode) => (
-        <li key={episode.id} data-status={episode.status}>
+        <li key={episode.id} data-status={episode.status} className={renderActions ? "episode-row-with-actions" : undefined}>
           <button
             type="button"
             className="episode-view-link"
@@ -71,6 +74,7 @@ export function EpisodeList({
               {episode.clip_count} 条素材 · 已导出 {episode.export_count} 次
             </small>
           </button>
+          {renderActions ? renderActions(episode) : null}
         </li>
       ))}
     </ul>

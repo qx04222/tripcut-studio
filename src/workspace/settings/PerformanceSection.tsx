@@ -11,7 +11,7 @@ export function PerformanceSection(): JSX.Element {
     <>
       <SectionHeader title="性能" description="控制后台处理速度与预览小文件的占用;原片始终保持只读。" />
       <div className="settings-sheet-group">
-        <SettingsRow title="后台同时处理几条" help="可选 1–8;保存后在下次重启时生效。" htmlFor="settings-worker-count">
+        <SettingsRow title="后台同时处理几条" help="可选 1–8,默认 4 就好:视频解码器大约 4 路并行到顶,再多不会更快;只导一条大文件时也会自动把空闲的几路用上。保存后在下次重启时生效。" htmlFor="settings-worker-count">
           <Select
             id="settings-worker-count"
             value={settings["performance.worker_count"]}

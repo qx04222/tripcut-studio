@@ -208,11 +208,12 @@ describe("useSettingsForm(逐字迁自 SettingsPage 的保存队列 / 回滚 / �
     await act(async () => { await result.current.clearCache(); });
     expect(apiMock.clearCacheAndRebuild).not.toHaveBeenCalled();
     expect(result.current.cacheConfirm).toBe(true);
-    expect(result.current.notice).toBe("请再次点击确认；评级、片段和原始素材不会被删除");
+    // R15:文案改成新手能懂的话(留什么、删什么、进度在哪)。
+    expect(result.current.notice).toBe("请再点一次确认;素材、评分和片段都会留着,原片不会被删");
     await act(async () => { await result.current.clearCache(); });
     expect(apiMock.clearCacheAndRebuild).toHaveBeenCalledTimes(1);
     expect(result.current.cacheConfirm).toBe(false);
-    expect(result.current.notice).toBe("已释放 2.00 KB，清理 3 条缓存记录，重置 1 个重建任务");
+    expect(result.current.notice).toBe("已清理 2.00 KB 缓存文件,后台正在重新生成 1 个预览文件;进度看底栏");
   });
 
   it("回滚提示独立于 notice(R6 终审 P2)", async () => {

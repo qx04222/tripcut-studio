@@ -16,10 +16,11 @@ describe("icons", () => {
       expect(ICON_NAMES).toContain(`settings-${s}`);
     }
     // 任务书数 33 = 24(volume/volume-off 算一对)+ 9;按名字数是 25 + 9 = 34,R9 加 film = 35,R13 加 settings-keymap = 36,
-    // X-03 加 arrow-left / arrow-right(镜块「往前 / 往后」)= 38。
+    // X-03 加 arrow-left / arrow-right(镜块「往前 / 往后」)= 38;R15 加 more(「···」集操作菜单)= 39。
     expect(ICON_NAMES).toContain("arrow-left");
     expect(ICON_NAMES).toContain("arrow-right");
-    expect(ICON_NAMES.length).toBe(38);
+    expect(ICON_NAMES).toContain("more");
+    expect(ICON_NAMES.length).toBe(39);
   });
   it("每个图标 16px 视窗、1.5 描边、currentColor、aria-hidden", () => {
     for (const name of ICON_NAMES) {

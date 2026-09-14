@@ -12,7 +12,8 @@ export type IconName =
   | "settings-appearance" | "settings-performance" | "settings-timeline" | "settings-tools"
   | "settings-analysis" | "settings-generation" | "settings-privacy" | "settings-about" | "settings-cache"
   | "settings-keymap"
-  | "arrow-left" | "arrow-right";
+  | "arrow-left" | "arrow-right"
+  | "more";
 
 export type IconSize = 12 | 16 | 20 | 32;
 
@@ -63,6 +64,8 @@ const SHAPES: Record<IconName, readonly Shape[]> = {
     { circle: [6, 12, 0.75] }, { circle: [10, 12, 0.75] },
   ],
   plus: [{ d: "M8 3v10M3 8h10" }],
+  // R15:「···」更多操作(集卡片 / 集列表的每行菜单)。
+  more: [{ circle: [3.5, 8, 0.9] }, { circle: [8, 8, 0.9] }, { circle: [12.5, 8, 0.9] }],
   close: [{ circle: [8, 8, 6.25] }, { d: "M5.75 5.75l4.5 4.5M10.25 5.75l-4.5 4.5" }],
   info: [{ circle: [8, 8, 6.25] }, { d: "M8 7.25v4" }, { circle: [8, 5, 0.4] }],
   warning: [{ d: "M8 2.25l6.25 11H1.75z" }, { d: "M8 6.5v3.25" }, { circle: [8, 11.6, 0.4] }],

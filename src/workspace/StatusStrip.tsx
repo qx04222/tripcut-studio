@@ -25,6 +25,14 @@ export interface BackgroundSummary {
   musicDone?: number;
   musicTotal?: number;
   musicActive?: number;
+  /** R15-perf:预览小文件是分析之后的后台活,单独报「正在生成预览小文件 n/m」,不挡「分析完成」。 */
+  proxyDone?: number;
+  proxyTotal?: number;
+  proxyActive?: number;
+  /** R15:还没做完的缓存文件清理任务数(删素材 / 删集 / 清缓存后台删目录);可选:旧调用方不传。 */
+  cleanup?: number;
+  /** R15:还没生成完的预览文件任务数;分析短语不在场时(清理缓存后重新生成)报出来。可选。 */
+  regenerating?: number;
 }
 
 const EMPTY_SUMMARY: BackgroundSummary = {
@@ -36,6 +44,9 @@ const EMPTY_SUMMARY: BackgroundSummary = {
   musicDone: 0,
   musicTotal: 0,
   musicActive: 0,
+  proxyDone: 0,
+  proxyTotal: 0,
+  proxyActive: 0,
 };
 
 const POLL_INTERVAL_MS = 3_000;
@@ -113,9 +124,15 @@ export function summaryPhrases(summary: BackgroundSummary, eta: string | null = 
   if (summary.analyzeTotal > 0) phrases.push(analysisPhrase(summary.analyzed, summary.analyzeTotal, eta, summary.analyzeFailed ?? 0));
   // 音乐分析只在还有轨排队 / 进行中时报数;全部落终态就不占位(失败的在音乐面板里看)。
   if ((summary.musicActive ?? 0) > 0) phrases.push(`音乐分析 ${summary.musicDone ?? 0}/${summary.musicTotal ?? 0}`);
+  // R15-perf:预览小文件排在分析之后单独报数;全部生成完就不占位。
+  if ((summary.proxyActive ?? 0) > 0) phrases.push(`正在生成预览小文件 ${summary.proxyDone ?? 0}/${summary.proxyTotal ?? 0}`);
   if (summary.transcribing > 0) phrases.push(`转写 ${summary.transcribing}`);
   if (summary.generating > 0) phrases.push(`云端生成 ${summary.generating} 排队`);
   if (summary.missing > 0) phrases.push(`缺失素材 ${summary.missing}`);
+  // 清理缓存之后:分析早就完成、状态条本来会说「后台空闲」,预览文件却在重新生成 —— 这时报进度。
+  const analysing = summary.analyzeTotal > 0 && summary.analyzed < summary.analyzeTotal;
+  if (!analysing && (summary.regenerating ?? 0) > 0) phrases.push(`正在重新生成预览 · 还剩 ${summary.regenerating} 个`);
+  if ((summary.cleanup ?? 0) > 0) phrases.push("正在清理缓存文件");
   return phrases.length > 0 ? phrases : ["后台空闲"];
 }
 
@@ -185,6 +202,15 @@ function useBackgroundSummary(): { summary: BackgroundSummary; eta: string | nul
         musicTotal: music.status === "fulfilled" && music.value ? music.value.total : previous.musicTotal,
         musicActive:
           music.status === "fulfilled" && music.value ? music.value.running + music.value.pending : previous.musicActive,
+        proxyDone:
+          progress.status === "fulfilled" && typeof progress.value.proxy_total === "number"
+            ? progress.value.proxy_total - (progress.value.proxy_pending ?? 0)
+            : previous.proxyDone,
+        proxyTotal: progress.status === "fulfilled" && typeof progress.value.proxy_total === "number" ? progress.value.proxy_total : previous.proxyTotal,
+        proxyActive:
+          progress.status === "fulfilled" && typeof progress.value.proxy_pending === "number" ? progress.value.proxy_pending : previous.proxyActive,
+        cleanup: progress.status === "fulfilled" ? (progress.value.cleanup_pending ?? 0) : previous.cleanup,
+        regenerating: progress.status === "fulfilled" ? (progress.value.derived_pending ?? 0) : previous.regenerating,
       }));
     };
 

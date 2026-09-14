@@ -1,0 +1,189 @@
+//! R15:缓存文件的后台删除任务(`cache_gc`)。
+//!
+//! 删素材 / 删集 / 清理缓存 / 重置项目库都会产生一堆要删的目录。此前它们在命令
+//! 里同步 `remove_dir_all`,用户就得盯着按钮转圈等磁盘;现在数据库那一步只登记
+//! 「这些目录可以删了」,真正的 unlink 交给 worker 池,状态条显示「正在清理缓存文件」。
+//!
+//! 两种载荷:
+//! - `{"dirs":["12","13"]}`:`cache_root/<id>/` 下按素材 id 命名的目录;
+//! - `{"retired":"/abs/.cache.retired-<uuid>"}`:整个缓存目录改名后的旧目录。
+//!
+//! 只删这两种形状的路径(素材 id 目录必须在 cache_root 里,退役目录必须与
+//! cache_root 同父目录且名字以 `.cache` 开头),载荷被改坏也删不到别处。
+//! 目录已不存在 = 成功(任务可重跑、可在崩溃后由恢复流程续跑)。
+
+use std::path::{Path, PathBuf};
+
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+
+use super::error::{CoreError, Result};
+use super::jobs::Job;
+
+pub const KIND: &str = "cache_gc";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Payload {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retired: Option<String>,
+}
+
+/// 登记「这些素材的缓存目录可以删了」。在调用方的事务里写,与删除素材同一次提交。
+pub fn enqueue_clip_dirs(connection: &Connection, clip_ids: &[i64]) -> Result<Option<i64>> {
+    if clip_ids.is_empty() {
+        return Ok(None);
+    }
+    let payload = Payload {
+        dirs: clip_ids.iter().map(|id| id.to_string()).collect(),
+        retired: None,
+    };
+    let payload = serde_json::to_string(&payload)
+        .map_err(|error| CoreError::BackgroundTask(format!("缓存清理任务载荷序列化失败:{error}")))?;
+    let hash = format!(
+        "cache_gc:clips:{}:{}:{}",
+        clip_ids.first().copied().unwrap_or_default(),
+        clip_ids.last().copied().unwrap_or_default(),
+        uuid::Uuid::new_v4().simple()
+    );
+    super::jobs::enqueue_within(connection, KIND, &payload, &hash).map(Some)
+}
+
+/// 登记「整个退役缓存目录可以删了」。
+pub fn enqueue_retired_dir(connection: &Connection, retired: &Path) -> Result<i64> {
+    let payload = Payload {
+        dirs: Vec::new(),
+        retired: Some(retired.to_string_lossy().into_owned()),
+    };
+    let payload = serde_json::to_string(&payload)
+        .map_err(|error| CoreError::BackgroundTask(format!("缓存清理任务载荷序列化失败:{error}")))?;
+    let hash = format!("cache_gc:retired:{}", uuid::Uuid::new_v4().simple());
+    super::jobs::enqueue_within(connection, KIND, &payload, &hash)
+}
+
+/// 还有多少清理任务没做完(状态条用)。
+pub fn pending_count(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE kind = ?1 AND status IN ('pending', 'running')",
+        [KIND],
+        |row| row.get(0),
+    )?)
+}
+
+fn is_clip_dir_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// 退役目录必须与 cache_root 同父、名字以 `.cache` 开头(`settings::clear_cache_and_rebuild`
+/// 与 `doctor::rebuild_cache_files` 就是这么起名的)。
+fn is_retired_dir(cache_root: &Path, candidate: &Path) -> bool {
+    let same_parent = candidate.parent().is_some_and(|parent| Some(parent) == cache_root.parent());
+    let name_ok = candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".cache"));
+    same_parent && name_ok && candidate != cache_root
+}
+
+fn remove_if_present(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let bytes = super::doctor::directory_bytes(path).unwrap_or(0);
+    std::fs::remove_dir_all(path)?;
+    Ok(bytes)
+}
+
+/// 执行一条清理任务。返回删掉的字节数(只作日志)。
+pub fn run(job: &Job, cache_root: &Path) -> Result<u64> {
+    let payload: Payload = serde_json::from_str(&job.payload)
+        .map_err(|error| CoreError::BackgroundTask(format!("缓存清理任务载荷无效:{error}")))?;
+    let mut removed = 0_u64;
+    for dir in &payload.dirs {
+        if super::jobs::current_cancellation_requested() {
+            return Err(CoreError::BackgroundTask("用户已取消".to_owned()));
+        }
+        if !is_clip_dir_name(dir) {
+            tracing::warn!(dir, "cache_gc 跳过不像素材目录的名字");
+            continue;
+        }
+        removed += remove_if_present(&cache_root.join(dir))?;
+    }
+    if let Some(retired) = payload.retired.as_deref().map(PathBuf::from) {
+        if is_retired_dir(cache_root, &retired) {
+            removed += remove_if_present(&retired)?;
+        } else {
+            tracing::warn!(path = %retired.display(), "cache_gc 拒绝删除不在缓存目录旁边的路径");
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{db, jobs, test_support::TestDirectory};
+
+    fn job_with(payload: &str) -> Job {
+        Job {
+            id: 1,
+            kind: KIND.to_owned(),
+            payload: payload.to_owned(),
+            status: jobs::JobStatus::Running,
+            attempt: 1,
+            blocked_summary: None,
+            result_path: None,
+        }
+    }
+
+    #[test]
+    fn removes_clip_dirs_and_retired_dir_but_nothing_else() {
+        let directory = TestDirectory::new();
+        let cache_root = directory.path().join("cache");
+        std::fs::create_dir_all(cache_root.join("12")).unwrap();
+        std::fs::write(cache_root.join("12/proxy.mp4"), b"xx").unwrap();
+        std::fs::create_dir_all(cache_root.join("13")).unwrap();
+        std::fs::create_dir_all(cache_root.join("keep")).unwrap();
+        let retired = directory.path().join(".cache.retired-abc");
+        std::fs::create_dir_all(retired.join("1")).unwrap();
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let payload = format!(
+            r#"{{"dirs":["12","13","keep","../elsewhere"],"retired":"{}"}}"#,
+            retired.display()
+        );
+        run(&job_with(&payload), &cache_root).unwrap();
+        assert!(!cache_root.join("12").exists());
+        assert!(!cache_root.join("13").exists());
+        assert!(cache_root.join("keep").exists(), "非数字目录名不是素材目录,不能删");
+        assert!(elsewhere.exists(), "../ 逃出缓存目录的名字不能删");
+        assert!(!retired.exists());
+
+        // 退役目录必须在缓存目录旁边:别处的同名目录不删。
+        let stray = directory.path().join("sub/.cache.retired-x");
+        std::fs::create_dir_all(&stray).unwrap();
+        let payload = format!(r#"{{"retired":"{}"}}"#, stray.display());
+        run(&job_with(&payload), &cache_root).unwrap();
+        assert!(stray.exists());
+
+        // 目录已经不在 = 成功(可重跑)。
+        run(&job_with(r#"{"dirs":["12"]}"#), &cache_root).unwrap();
+    }
+
+    #[test]
+    fn enqueue_records_a_pending_job_counted_by_pending_count() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        assert_eq!(pending_count(&connection).unwrap(), 0);
+        assert_eq!(enqueue_clip_dirs(&connection, &[]).unwrap(), None);
+        enqueue_clip_dirs(&connection, &[3, 4]).unwrap().unwrap();
+        enqueue_retired_dir(&connection, Path::new("/tmp/.cache.retired-x")).unwrap();
+        assert_eq!(pending_count(&connection).unwrap(), 2);
+        let payload: String = connection
+            .query_row("SELECT payload FROM jobs WHERE kind = 'cache_gc' ORDER BY id LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(payload, r#"{"dirs":["3","4"]}"#);
+    }
+}

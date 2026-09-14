@@ -266,6 +266,137 @@ pub fn create_episode(connection: &mut Connection, title: &str) -> Result<Create
     })
 }
 
+/// R15:「删除这一集」的结果。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DeleteEpisodeOutcome {
+    /// 被删掉的集(删除前的快照)。
+    pub deleted: EpisodeSummary,
+    /// 删完之后进行中的集:删的是历史集则原样;删的是当前集则回退到最近剩下的一集,
+    /// 一集都不剩就新种一个空集。
+    pub active: EpisodeSummary,
+    /// `active` 是这次新种出来的空集。
+    pub created_fresh: bool,
+    /// 随集一起删掉的素材条数(原片不动)。
+    pub removed_clips: usize,
+}
+
+fn episode_clip_ids(connection: &Connection, episode_id: i64) -> Result<Vec<i64>> {
+    let mut statement = connection.prepare("SELECT id FROM clips WHERE episode_id = ?1 ORDER BY id")?;
+    let rows = statement.query_map([episode_id], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// R15:删集前先把这一集还没跑完的任务取消(pending 一条 UPDATE、running 设标志),
+/// 返回这一集的素材 id。调用方随后暂停认领、等这些任务退出,再 `delete_episode`。
+pub fn prepare_delete(connection: &mut Connection, episode_id: i64) -> Result<Vec<i64>> {
+    summary_by_id(connection, episode_id)?;
+    let exports: i64 = connection.query_row(
+        "SELECT count(*) FROM jobs WHERE kind = 'export_package' AND status IN ('pending', 'running')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exports > 0 {
+        return Err(CoreError::Story("有导出还没结束,等它完成或取消后再删这一集".to_owned()));
+    }
+    let ids = episode_clip_ids(connection, episode_id)?;
+    let json = super::import_control::ids_json(&ids);
+    let paths = super::import_control::clip_paths(connection, &json)?;
+    super::import_control::cancel_related_jobs(
+        connection,
+        &json,
+        &super::import_control::strings_json(&paths),
+        Some(episode_id),
+    )?;
+    Ok(ids)
+}
+
+/// R15:删除一集 —— 历史集或当前集都行。单事务:这一集的素材(外键级联到片段 /
+/// 评分 / 缓存记录 / 时刻分 / 向量 / 排片 …)、导入批次、封存快照、任务行一起删;
+/// 集自己的表(章节 / 顺序 / 场景 / 叙事 / 音乐 …)由外键级联。缓存目录交给 `cache_gc`
+/// 后台删。删的是当前集时,最近剩下的一集重新成为当前集;一集都不剩就种一个空集。
+/// 调用方负责先 `prepare_delete`、暂停认领并打快照。
+pub fn delete_episode(connection: &mut Connection, episode_id: i64) -> Result<DeleteEpisodeOutcome> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let deleted = summary_by_id(&transaction, episode_id)?;
+    let was_active = deleted.status == "active";
+    let clip_ids = episode_clip_ids(&transaction, episode_id)?;
+    let json = super::import_control::ids_json(&clip_ids);
+
+    transaction.execute(
+        "DELETE FROM jobs
+          WHERE clip_id IN (SELECT value FROM json_each(?1))
+             OR import_batch_id IN (SELECT id FROM import_batches WHERE episode_id = ?2)
+             OR (kind = 'import_probe' AND json_valid(payload)
+                 AND json_extract(payload, '$.episode_id') = ?2)",
+        params![json, episode_id],
+    )?;
+    // 素材 id 不回收:缓存目录和历史 JSON 都按 id 认(与 import_control::remove_records 同一条规矩)。
+    let maximum: i64 = transaction.query_row("SELECT coalesce(max(id), 0) FROM clips", [], |row| row.get(0))?;
+    transaction.execute(
+        "INSERT INTO settings(key, value, updated_at)
+         VALUES ('removed_clip_high_water', ?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET value = max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
+        [maximum.to_string()],
+    )?;
+    transaction.execute(
+        "INSERT INTO settings(key, value, updated_at)
+         VALUES ('import_generation', '1', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        [],
+    )?;
+    transaction.execute("DELETE FROM clips WHERE id IN (SELECT value FROM json_each(?1))", [&json])?;
+    transaction.execute(
+        "DELETE FROM import_batch_clips WHERE batch_id IN (SELECT id FROM import_batches WHERE episode_id = ?1)",
+        [episode_id],
+    )?;
+    transaction.execute("DELETE FROM import_batches WHERE episode_id = ?1", [episode_id])?;
+    transaction.execute("DELETE FROM episode_archives WHERE episode_id = ?1", [episode_id])?;
+    transaction.execute("DELETE FROM episodes WHERE id = ?1", [episode_id])?;
+
+    let mut created_fresh = false;
+    let active_id: i64 = if was_active {
+        let fallback: Option<i64> = transaction
+            .query_row("SELECT id FROM episodes ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+            .optional()?;
+        match fallback {
+            Some(id) => {
+                transaction.execute(
+                    "UPDATE episodes SET status = 'active', archived_at = NULL WHERE id = ?1",
+                    [id],
+                )?;
+                id
+            }
+            None => {
+                created_fresh = true;
+                let next_number: i64 = transaction.query_row(
+                    "SELECT COALESCE(MAX(episode_number), 0) + 1 FROM episodes",
+                    [],
+                    |row| row.get(0),
+                )?;
+                transaction.execute(
+                    "INSERT INTO episodes(title, theme, created_at, status, episode_number, memory_id,
+                                           target_platform, canvas_orientation)
+                     VALUES (?1, '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'active', ?2,
+                             lower(hex(randomblob(16))), ?3, ?4)",
+                    params![
+                        format!("EP{next_number:02}"),
+                        next_number,
+                        deleted.target_platform,
+                        deleted.canvas_orientation
+                    ],
+                )?;
+                transaction.last_insert_rowid()
+            }
+        }
+    } else {
+        transaction.query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0))?
+    };
+    super::cache_gc::enqueue_clip_dirs(&transaction, &clip_ids)?;
+    let active = summary_by_id(&transaction, active_id)?;
+    transaction.commit()?;
+    Ok(DeleteEpisodeOutcome { deleted, active, created_fresh, removed_clips: clip_ids.len() })
+}
+
 /// 写操作守卫:素材必须属于当前进行中的集。
 /// 历史集是只读档案——UI 会禁用写控件,但**后端必须独立校验**,
 /// 不能把界面禁用当权限边界(回归测试覆盖该缺口)。
@@ -702,5 +833,101 @@ mod tests {
             .query_row("SELECT episode_id FROM clips WHERE id=?1", [clip], |r| r.get(0))
             .unwrap();
         assert_eq!(owner, before.id);
+    }
+
+    /// R15:删历史集 —— 素材、片段、评分、任务、批次、封存快照一起没了,当前集不动,
+    /// 缓存目录登记给 cache_gc。
+    #[test]
+    fn delete_archived_episode_cascades_everything_and_keeps_active() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        let clip = insert_clip(&connection, "a.mp4");
+        connection
+            .execute("INSERT INTO segments(id, clip_id, in_ticks, out_ticks, kind, tombstone) VALUES (1, ?1, 0, 10, 'select', 0)", [clip])
+            .unwrap();
+        connection
+            .execute("INSERT INTO ratings(segment_id, rating_type, value, rated_at) VALUES (1, 'binary', 1, 'now')", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO import_batches(episode_id, source) VALUES (?1, '/card')", [first.id])
+            .unwrap();
+        let batch = connection.last_insert_rowid();
+        connection
+            .execute("INSERT INTO import_batch_clips(batch_id, clip_id) VALUES (?1, ?2)", params![batch, clip])
+            .unwrap();
+        let outcome = archive_current(&mut connection, Some("EP02")).unwrap();
+        let second = outcome.next;
+        insert_clip(&connection, "b.mp4");
+        // 历史集遗留的任务行(分析 / 登记)也要跟着走。
+        crate::core::jobs::enqueue(&mut connection, "analyze_l1", &format!(r#"{{"clip_id":{clip}}}"#), "a1").unwrap();
+        crate::core::jobs::enqueue(&mut connection, "import_probe", &format!(r#"{{"episode_id":{},"path":"/card/a.mp4"}}"#, first.id), "p1").unwrap();
+
+        let ids = prepare_delete(&mut connection, first.id).unwrap();
+        assert_eq!(ids, vec![clip]);
+        let result = delete_episode(&mut connection, first.id).unwrap();
+        assert_eq!(result.deleted.id, first.id);
+        assert_eq!(result.active.id, second.id);
+        assert!(!result.created_fresh);
+        assert_eq!(result.removed_clips, 1);
+
+        let count = |sql: &str| connection.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT COUNT(*) FROM episodes"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM clips"), 1, "别的集的素材不动");
+        assert_eq!(count("SELECT COUNT(*) FROM segments"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM ratings"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM import_batches"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM episode_archives"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM jobs WHERE kind IN ('analyze_l1', 'import_probe')"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM jobs WHERE kind = 'cache_gc' AND status = 'pending'"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        assert_eq!(current_episode(&connection).unwrap().id, second.id);
+    }
+
+    /// R15:删当前集 —— 最近剩下的一集重新成为当前集(建错的 EP2 删掉就回到 EP1)。
+    #[test]
+    fn delete_active_episode_falls_back_to_the_latest_remaining_one() {
+        let (_dir, mut connection) = test_connection();
+        let first = current_episode(&connection).unwrap();
+        insert_clip(&connection, "a.mp4");
+        let second = archive_current(&mut connection, Some("建错的")).unwrap().next;
+        insert_clip(&connection, "b.mp4");
+
+        prepare_delete(&mut connection, second.id).unwrap();
+        let result = delete_episode(&mut connection, second.id).unwrap();
+        assert_eq!(result.deleted.id, second.id);
+        assert_eq!(result.active.id, first.id);
+        assert_eq!(result.active.status, "active");
+        assert!(result.active.archived_at.is_none());
+        assert!(!result.created_fresh);
+        assert_eq!(current_episode(&connection).unwrap().id, first.id);
+        assert_eq!(current_episode(&connection).unwrap().clip_count, 1);
+        // 恰好一个 active 的部分唯一索引仍然成立(能再封存一次)。
+        archive_current(&mut connection, None).unwrap();
+    }
+
+    /// R15:唯一的一集也能删 —— 删完种一个空集,应用不会没有当前集。
+    #[test]
+    fn delete_the_only_episode_seeds_a_fresh_empty_one() {
+        let (_dir, mut connection) = test_connection();
+        let only = current_episode(&connection).unwrap();
+        insert_clip(&connection, "a.mp4");
+        prepare_delete(&mut connection, only.id).unwrap();
+        let result = delete_episode(&mut connection, only.id).unwrap();
+        assert!(result.created_fresh);
+        assert_eq!(result.active.title, "EP01");
+        assert_eq!(result.active.clip_count, 0);
+        assert_eq!(result.active.status, "active");
+        assert_eq!(current_episode(&connection).unwrap().id, result.active.id);
+        assert!(delete_episode(&mut connection, 9_999).is_err(), "不存在的集要报错");
+    }
+
+    /// R15:导出还在跑时不删,先把话说清。
+    #[test]
+    fn delete_refuses_while_an_export_is_pending() {
+        let (_dir, mut connection) = test_connection();
+        let only = current_episode(&connection).unwrap();
+        crate::core::jobs::enqueue(&mut connection, "export_package", "{}", "export").unwrap();
+        let error = prepare_delete(&mut connection, only.id).unwrap_err();
+        assert!(error.to_string().contains("导出"));
     }
 }

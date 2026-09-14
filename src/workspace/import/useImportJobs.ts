@@ -17,6 +17,7 @@ import {
 } from "../../api";
 import { analysisProgress, type AnalysisProgress } from "./importModel";
 import { failureText } from "../errorText";
+import { refreshClipsFeed, removeClipsFromFeed } from "../useClipsFeed";
 
 export const EMPTY_PROGRESS: ImportProgress = {
   total: 0,
@@ -158,12 +159,25 @@ export function useImportJobs(options: { onChanged?: () => void; pollMs?: number
   const confirmRemoval = useCallback(async () => {
     if (!confirmation) return;
     await run(async () => {
-      const count = await removeImportedMaterial(confirmation.request);
+      const { request } = confirmation;
+      const count = await removeImportedMaterial(request);
       setConfirmation(null);
-      setNotice(`已移除 ${count} 条素材，原视频保留。现在可以重新选择文件夹。`);
+      // R15:后端已在数据库里删掉,不等下一轮 1.5 s 轮询 —— 本地立刻拿掉,再强制对齐一次。
+      // 「清空当前集」范围就是当前集全部;单条按 id;整批的成员前端不知道,只强制刷新。
+      if (request.all) {
+        const scope = new Set(clips.map((clip) => clip.id));
+        setClips([]);
+        removeClipsFromFeed((clip) => !scope.has(clip.id));
+      } else if (request.clip_ids.length > 0) {
+        const removed = new Set(request.clip_ids);
+        setClips((current) => current.filter((clip) => clip.id === null || !removed.has(clip.id)));
+        removeClipsFromFeed((clip) => clip.id === null || !removed.has(clip.id));
+      }
+      void refreshClipsFeed(true).catch(() => undefined);
+      setNotice(`已移除 ${count} 条素材，原视频保留。缓存文件在后台清理。现在可以重新选择文件夹。`);
       await changed();
     });
-  }, [changed, confirmation, run]);
+  }, [changed, clips, confirmation, run]);
 
   const cancelConfirmation = useCallback(() => setConfirmation(null), []);
 

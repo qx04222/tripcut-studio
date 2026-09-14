@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import {
   archiveCurrentEpisode,
   createEpisode,
+  deleteEpisode,
   getCurrentEpisode,
   listEpisodes,
   renameCurrentEpisode,
@@ -12,12 +13,13 @@ import {
   type TargetPlatform,
 } from "../api";
 import { EpisodeArchiveControls, EpisodeList, PLATFORM_LABELS, episodeErrorMessage } from "../EpisodePanel";
+import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
 import { WorkspaceEpisodeCreateForm, WorkspaceEpisodeRenameForm } from "./EpisodeForms";
 import { openHistoricalEpisode, returnToActiveEpisode } from "../historyView";
 import { LibraryPanel } from "../LibraryPanel";
 import { useFocusTrap } from "../useFocusTrap";
 import { isTopModal, popModal, pushModal } from "./modalStack";
-import { Button, Icon } from "./ui";
+import { Button, Icon, Menu } from "./ui";
 import { failureText } from "./errorText";
 import { useWorkspace } from "./WorkspaceStore";
 
@@ -36,6 +38,9 @@ export function EpisodeSwitcher(): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [archiveArmed, setArchiveArmed] = useState(false);
+  // R15:「···」菜单开在哪一集、哪个位置;「删除这一集」的确认块针对哪一集。
+  const [menu, setMenu] = useState<{ episode: EpisodeSummary; x: number; y: number } | null>(null);
+  const [deleting, setDeleting] = useState<EpisodeSummary | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftTheme, setDraftTheme] = useState("");
   const [draftPlatform, setDraftPlatform] = useState<TargetPlatform>("general");
@@ -179,6 +184,32 @@ export function EpisodeSwitcher(): JSX.Element {
     }
   };
 
+  // R15:删除一集。后端删完告诉我们现在哪一集在进行中;删的是当前集时媒体池 / 镜头带要换范围,
+  // 删的是正在只读查看的历史集时要回到当前集 —— 两种情况都派发 tripcut:episode-changed。
+  const remove = async (episode: EpisodeSummary) => {
+    setBusy(true);
+    try {
+      const outcome = await deleteEpisode(episode.id);
+      setDeleting(null);
+      setNotice(
+        outcome.created_fresh
+          ? `已删除「${outcome.deleted.title}」,新开了空集「${outcome.active.title}」;原片没有动。`
+          : `已删除「${outcome.deleted.title}」;现在在「${outcome.active.title}」;原片没有动。`,
+      );
+      if (episode.status === "active" || viewingEpisode?.id === episode.id) {
+        if (viewingEpisode?.id === episode.id) returnToActiveEpisode();
+        window.dispatchEvent(
+          new CustomEvent("tripcut:episode-changed", { detail: { id: outcome.active.id, title: outcome.active.title } }),
+        );
+      }
+      await refresh().catch(() => setCurrent(outcome.active));
+    } catch (error) {
+      setNotice(episodeErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const archiveUnavailable = current ? current.clip_count === 0 : true;
 
   return (
@@ -195,6 +226,8 @@ export function EpisodeSwitcher(): JSX.Element {
           setArchiveArmed(false);
           setEditing(false);
           setCreating(false);
+          setDeleting(null);
+          setMenu(null);
           setNotice(null);
         }}
       >
@@ -295,8 +328,36 @@ export function EpisodeSwitcher(): JSX.Element {
             )
           ) : null}
 
+          {deleting ? (
+            <EpisodeDeleteConfirm
+              episode={deleting}
+              busy={busy}
+              consequence={episodeDeleteConsequence(deleting, episodes)}
+              onConfirm={() => void remove(deleting)}
+              onCancel={() => {
+                setDeleting(null);
+                setNotice(null);
+              }}
+            />
+          ) : null}
+
           <EpisodeList
             episodes={episodes}
+            renderActions={(episode) => (
+              <Button
+                variant="icon"
+                size="sm"
+                icon="more"
+                className="episode-row-more"
+                aria-label={`集操作 · ${episode.title}`}
+                aria-haspopup="menu"
+                disabled={busy}
+                onClick={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setMenu({ episode, x: rect.left, y: rect.bottom + 4 });
+                }}
+              />
+            )}
             onSelectEpisode={(episode) => {
               if (episode.status !== "active") {
                 openHistoricalEpisode(episode.id, episode.title);
@@ -307,6 +368,25 @@ export function EpisodeSwitcher(): JSX.Element {
               setOpen(false);
             }}
           />
+
+          {menu ? (
+            <Menu
+              items={[{ id: "delete", label: "删除这一集", ariaLabel: "删除这一集" }]}
+              x={menu.x}
+              y={menu.y}
+              ariaLabel={`集操作 · ${menu.episode.title}`}
+              onSelect={(id) => {
+                if (id === "delete") {
+                  setDeleting(menu.episode);
+                  setArchiveArmed(false);
+                  setEditing(false);
+                  setCreating(false);
+                  setNotice(null);
+                }
+              }}
+              onClose={() => setMenu(null)}
+            />
+          ) : null}
 
           {notice ? <p className="episode-notice" role="status">{notice}</p> : null}
 

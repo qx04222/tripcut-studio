@@ -305,15 +305,16 @@ export function useSettingsForm(): SettingsForm {
   const clearCache = useCallback(async () => {
     if (!cacheConfirm) {
       setCacheConfirm(true);
-      setNotice("请再次点击确认；评级、片段和原始素材不会被删除");
+      setNotice("请再点一次确认;素材、评分和片段都会留着,原片不会被删");
       return;
     }
     setBusy(true);
     setCacheConfirm(false);
     try {
       const result = await clearCacheAndRebuild();
+      // R15:后端只换目录 + 重排任务就返回;旧文件由后台清理,预览由后台重新生成,进度在底栏。
       setNotice(
-        `已释放 ${bytesLabel(result.removed_disk_bytes)}，清理 ${result.removed_database_rows} 条缓存记录，重置 ${result.reset_jobs} 个重建任务`,
+        `已清理 ${bytesLabel(result.removed_disk_bytes)} 缓存文件,后台正在重新生成 ${result.reset_jobs} 个预览文件;进度看底栏`,
       );
       await refreshStatus();
     } catch (error) {

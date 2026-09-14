@@ -268,6 +268,22 @@ export async function refreshClipsFeed(force = false): Promise<void> {
   }
 }
 
+/**
+ * R15:本地先把素材从池里拿掉,不等下一轮轮询(删素材 / 删集之后调)。
+ * `keep` 返回 false 的素材被移除;随后照常 `refreshClipsFeed(true)` 对齐后端。
+ */
+export function removeClipsFromFeed(keep: (clip: ClipListItem) => boolean): void {
+  const allClips = feed.allClips.filter(keep);
+  if (allClips.length === feed.allClips.length) return;
+  feed = {
+    ...feed,
+    clips: scopeClips(allClips, episode),
+    allClips,
+    clipsById: indexClips(allClips),
+  };
+  notify();
+}
+
 /** 本地乐观更新一条素材,不等下一轮轮询(沿用 SelectPage.tsx applyRatingAction 的语义)。 */
 export function patchClipInFeed(clipId: number, patch: Partial<ClipListItem>): void {
   const current = feed.clipsById.get(clipId);

@@ -4,7 +4,7 @@ import type { EpisodeSummary, StoryTemplate } from "../api";
 import { PLATFORM_LABELS } from "../EpisodePanel";
 import { PIPELINE_STEP_NAMES, PIPELINE_STEPS } from "./pipelineModel";
 import type { HomeTemplate, StepDone } from "./homeModel";
-import { Card, CoverImage, Icon } from "./ui";
+import { Button, Card, CoverImage, Icon } from "./ui";
 
 /** 集卡上的四个小格:①②③④ 各一格,完成的填色。AX 名「第 n 步 已完成 / 未完成」。 */
 export function StepDots({ done }: { done: StepDone }): JSX.Element {
@@ -25,13 +25,30 @@ export interface EpisodeCardProps {
   /** 进行中的集用它的第一条素材封面;封存的集没有封面源,画大号集号。 */
   coverUrl: string | null;
   onOpen(episode: EpisodeSummary): void;
+  /** R15:卡片右上角「···」(AX 名「集操作 · <标题>」),点了把菜单开在哪。不传就没有这个按钮。 */
+  onMore?(episode: EpisodeSummary, anchor: { x: number; y: number }): void;
 }
 
-export function EpisodeCard({ episode, done, coverUrl, onOpen }: EpisodeCardProps): JSX.Element {
+export function EpisodeCard({ episode, done, coverUrl, onOpen, onMore }: EpisodeCardProps): JSX.Element {
   const active = episode.status === "active";
   const numeral = episode.episode_number === null ? "—" : String(episode.episode_number).padStart(2, "0");
   return (
     <li className="home-episode">
+      {/* 卡片本身是个 button,「···」不能嵌在里面(button 里不能再放 button),放成兄弟绝对定位到右上角。 */}
+      {onMore ? (
+        <Button
+          variant="icon"
+          size="sm"
+          icon="more"
+          className="home-episode-more"
+          aria-label={`集操作 · ${episode.title}`}
+          aria-haspopup="menu"
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            onMore(episode, { x: rect.left, y: rect.bottom + 4 });
+          }}
+        />
+      ) : null}
       <Card as="button" interactive className="home-episode-card" onClick={() => onOpen(episode)}>
         <span className="home-episode-cover" aria-hidden="true">
           {coverUrl ? <CoverImage src={coverUrl} crossOrigin="anonymous" className="home-episode-image" /> : <span className="home-episode-numeral">{numeral}</span>}

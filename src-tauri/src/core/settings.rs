@@ -781,14 +781,102 @@ pub fn clear_cache_and_rebuild(
            AND status != 'running'",
         [],
     )?;
+    // R15:旧目录不在这里同步删(几 GB 的代理文件要转圈好久),登记给 cache_gc 后台删;
+    // 与上面的 DELETE / 任务重置同一次提交,应用中途死掉也会在恢复后续删。
+    if retired.exists() {
+        super::cache_gc::enqueue_retired_dir(&transaction, &retired)?;
+    }
     transaction.commit()?;
     swap.committed = true;
-    if retired.exists() {
-        std::fs::remove_dir_all(&retired)?;
-    }
     Ok(CacheRebuildResult {
         removed_database_rows,
         reset_jobs,
+        removed_disk_bytes,
+    })
+}
+
+/// R15:「重置项目库」的结果。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResetLibraryResult {
+    pub removed_clips: usize,
+    pub removed_episodes: usize,
+    pub removed_disk_bytes: u64,
+}
+
+/// 重置时**保留**的表:设置(主题 / 键位 / 引导已看 / 工具路径…都在 `settings`)、
+/// 版本号、平台预设、大模型账单。其余全部清空。
+const RESET_KEEP_TABLES: &[&str] = &["settings", "schema_version", "platform_presets", "llm_ledger"];
+
+/// R15:「重置项目库」—— 清空整个项目库(素材、集、片段、收藏、任务、导入记录、
+/// 关注的文件夹…)并把缓存目录换成空的,只留设置 / 键位 / 引导。单事务;先把缓存目录
+/// 改名,事务失败就改回来;旧目录交给 `cache_gc` 后台删。调用方负责先取消全部任务、
+/// 暂停认领、打快照(快照就是唯一的后悔药:恢复页「从快照恢复」)。
+pub fn reset_project_library(connection: &mut Connection, cache_root: &Path) -> Result<ResetLibraryResult> {
+    let removed_disk_bytes = directory_bytes(cache_root)?;
+    let parent = cache_root.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let cache_name = cache_root.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("cache");
+    let retired = parent.join(format!(".{cache_name}.retired-{}", uuid::Uuid::new_v4()));
+    if cache_root.exists() {
+        std::fs::rename(cache_root, &retired)?;
+    }
+    if let Err(error) = std::fs::create_dir(cache_root) {
+        if retired.exists() {
+            let _ = std::fs::rename(&retired, cache_root);
+        }
+        return Err(error.into());
+    }
+    struct CacheSwap<'a> {
+        current: &'a Path,
+        retired: &'a Path,
+        committed: bool,
+    }
+    impl Drop for CacheSwap<'_> {
+        fn drop(&mut self) {
+            if self.committed {
+                return;
+            }
+            let _ = std::fs::remove_dir_all(self.current);
+            if self.retired.exists() {
+                let _ = std::fs::rename(self.retired, self.current);
+            }
+        }
+    }
+    let mut swap = CacheSwap { current: cache_root, retired: &retired, committed: false };
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // 外键检查推迟到提交:表按 sqlite_master 顺序清,不必排父子关系。
+    transaction.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+    let removed_clips: i64 = transaction.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
+    let removed_episodes: i64 = transaction.query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))?;
+    let tables = {
+        let mut statement = transaction.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for table in tables.iter().filter(|table| !RESET_KEEP_TABLES.contains(&table.as_str())) {
+        transaction.execute(&format!("DELETE FROM \"{table}\""), [])?;
+    }
+    // 设置里指着旧素材 / 旧计数的键一并清掉;主题、键位、引导、工具路径都留着。
+    transaction.execute(
+        "DELETE FROM settings WHERE key LIKE 'ui.selection.%' OR key IN ('removed_clip_high_water', 'import_generation')",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO episodes(title, theme, created_at, status, episode_number, memory_id)
+         VALUES ('EP01', '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'active', 1, lower(hex(randomblob(16))))",
+        [],
+    )?;
+    if retired.exists() {
+        super::cache_gc::enqueue_retired_dir(&transaction, &retired)?;
+    }
+    transaction.commit()?;
+    swap.committed = true;
+    Ok(ResetLibraryResult {
+        removed_clips: removed_clips.max(0) as usize,
+        removed_episodes: removed_episodes.max(0) as usize,
         removed_disk_bytes,
     })
 }
@@ -1138,7 +1226,77 @@ mod tests {
         assert_eq!((status.as_str(), attempt), ("running", 2));
         assert!(cache_root.is_dir());
         assert!(!cache_root.join("old.bin").exists());
+        // R15:旧目录不再在命令里同步删 —— 登记给 cache_gc,跑完才没了。
+        let retired = retired_cache_directories(directory.path()).unwrap();
+        assert_eq!(retired.len(), 1, "旧目录应改名退役、等后台删");
+        let (payload, status): (String, String) = connection
+            .query_row("SELECT payload, status FROM jobs WHERE kind = 'cache_gc'", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert!(payload.contains(&retired[0].file_name().unwrap().to_string_lossy().to_string()));
+        let job = crate::core::jobs::Job {
+            id: 0,
+            kind: "cache_gc".to_owned(),
+            payload,
+            status: crate::core::jobs::JobStatus::Running,
+            attempt: 1,
+            blocked_summary: None,
+            result_path: None,
+        };
+        crate::core::cache_gc::run(&job, &cache_root).unwrap();
         assert!(retired_cache_directories(directory.path()).unwrap().is_empty());
+    }
+
+    /// R15:重置项目库 —— 素材 / 集 / 片段 / 收藏 / 任务 / 关注文件夹全没了,设置留着,
+    /// 种一个空的 EP01,缓存目录换成空的、旧目录交 cache_gc。
+    #[test]
+    fn reset_project_library_wipes_data_but_keeps_settings() {
+        let (directory, mut connection) = connection_with_settings();
+        set_setting(&connection, "keymap.preset", "premiere").unwrap();
+        set_setting(&connection, "ui.selection.last_clip", "1").unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('volume-a')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(id, volume_uuid, rel_path, quick_hash, episode_id)
+                 VALUES (1, 'volume-a', 'clip.mov', 'source-a', (SELECT id FROM episodes WHERE status='active'))",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO segments(id, clip_id, in_ticks, out_ticks, kind, tombstone) VALUES (1, 1, 0, 10, 'select', 0)", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO watched_folders(path, auto_sync, added_at) VALUES ('/card', 1, 'now')", [])
+            .unwrap();
+        crate::core::jobs::enqueue(&mut connection, "proxy", r#"{"clip_id":1}"#, "p1").unwrap();
+        crate::core::episode::archive_current(&mut connection, Some("EP02")).unwrap();
+        let cache_root = directory.path().join("cache");
+        std::fs::create_dir_all(cache_root.join("1")).unwrap();
+        std::fs::write(cache_root.join("1/proxy.mp4"), [0_u8; 16]).unwrap();
+
+        let result = reset_project_library(&mut connection, &cache_root).unwrap();
+        assert_eq!(result.removed_clips, 1);
+        assert_eq!(result.removed_episodes, 2);
+        assert_eq!(result.removed_disk_bytes, 16);
+
+        let count = |sql: &str| connection.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT COUNT(*) FROM clips"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM segments"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM watched_folders"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM volumes"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM episode_archives"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM jobs WHERE kind != 'cache_gc'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM jobs WHERE kind = 'cache_gc' AND status = 'pending'"), 1);
+        assert!(count("SELECT COUNT(*) FROM platform_presets") > 0, "平台预设是种子数据,要留");
+        assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        let current = crate::core::episode::current_episode(&connection).unwrap();
+        assert_eq!(current.title, "EP01");
+        assert_eq!(current.clip_count, 0);
+        assert_eq!(setting_value(&connection, "keymap.preset").unwrap().as_deref(), Some("premiere"), "键位设置要留");
+        assert!(setting_value(&connection, "ui.selection.last_clip").unwrap().is_none(), "指着旧素材的选择要清");
+        assert!(cache_root.is_dir());
+        assert!(!cache_root.join("1").exists());
+        assert_eq!(retired_cache_directories(directory.path()).unwrap().len(), 1);
     }
 
     #[test]

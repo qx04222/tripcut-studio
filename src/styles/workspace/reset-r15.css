@@ -1,0 +1,105 @@
+/*
+ * R15(删除 / 重置):集列表与首页集卡的「···」菜单、「删除这一集」确认块、
+ * 设置「项目与缓存」的两项危险操作。只用 tokens,不新增颜色字面量。
+ */
+
+/* 切集弹层:每行右侧一枚「···」;行本身仍是整行可点的链接按钮。 */
+.workspace-episode-popover .episode-list li.episode-row-with-actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+}
+
+.workspace-episode-popover .episode-row-more.ui-button {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  opacity: 0.7;
+}
+
+.workspace-episode-popover .episode-row-more.ui-button:hover,
+.workspace-episode-popover .episode-row-more.ui-button:focus-visible {
+  opacity: 1;
+}
+
+/* 「删除这一集」确认块(切集弹层与首页共用)。 */
+.workspace-episode-popover .episode-delete-confirm,
+.home-screen .episode-delete-confirm {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+}
+
+.workspace-episode-popover .episode-delete-confirm p,
+.home-screen .episode-delete-confirm p {
+  margin: 0;
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  opacity: 0.85;
+}
+
+.workspace-episode-popover .episode-delete-actions,
+.home-screen .episode-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.home-screen .episode-delete-confirm {
+  margin-top: var(--space-3);
+}
+
+/* 首页集卡:卡片本身是 button,「···」放成兄弟、绝对定位到右上角;li 从 contents 改成定位容器。 */
+.home-screen .home-episode {
+  display: block;
+  position: relative;
+  min-width: 0;
+}
+
+.home-screen .home-episode-more.ui-button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+/* 设置 → 项目与缓存:两块操作卡上下排,重置那块要打「确认」两个字才放行。 */
+.settings-sheet .settings-reset-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-sheet .settings-reset-field input {
+  width: 6em;
+}
+
+/* 危险卡右列很窄:标签占一整行,输入框与按钮一行。 */
+.settings-sheet .settings-sheet-reset .settings-reset-field {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-sheet .settings-sheet-reset .settings-reset-field label {
+  font-size: var(--font-sm);
+  opacity: 0.85;
+}
+
+.settings-sheet .settings-sheet-reset .settings-reset-field input {
+  width: 100%;
+}
+
+/* 恢复页:同两项操作,复用恢复页的操作行,只补输入框宽度。 */
+.recovery-r10 .settings-reset-field input {
+  width: 6em;
+}

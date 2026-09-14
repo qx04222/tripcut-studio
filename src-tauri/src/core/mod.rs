@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod arrange;
 pub mod asset_safety;
 pub mod artifacts;
+pub mod cache_gc;
 pub mod audio_tracks;
 pub mod canonical_time;
 pub mod clip_dimensions;

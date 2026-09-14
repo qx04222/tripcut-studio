@@ -141,6 +141,13 @@ export interface ImportProgress {
   analysis_done?: number;
   /** Z-01(R14 stress):登记完成但判定重复的文件数(没有素材行,状态条算作已处理)。 */
   duplicate?: number;
+  /** R15-perf:当前集排过「预览小文件」的素材数 / 其中还在排队或进行中的数;旧后端缺省。 */
+  proxy_total?: number;
+  proxy_pending?: number;
+  /** R15:还没做完的缓存文件清理任务数(删素材 / 删集 / 清缓存后后台删目录);旧后端缺省。 */
+  cleanup_pending?: number;
+  /** R15:还没生成完的预览文件任务数(封面 / 胶片条 / 波形 / 预览小文件 / 向量);旧后端缺省。 */
+  derived_pending?: number;
 }
 
 export interface ClipAnalysis {
@@ -1961,4 +1968,45 @@ export function getStoryboardOf(episodeId: number | null): Promise<Storyboard> {
 /** Z-14(R14 stress):只读查看已封存集时按被查看的集列缺口;`null` = 当前集。 */
 export function listStoryGapsOf(episodeId: number | null): Promise<StoryGap[]> {
   return invoke<StoryGap[]>("list_story_gaps", { episodeId });
+}
+
+/** R15:「删除这一集」的结果。 */
+export interface DeleteEpisodeOutcome {
+  /** 被删掉的集(删除前的信息)。 */
+  deleted: EpisodeSummary;
+  /** 删完之后进行中的集:删历史集则原样;删当前集则回退到最近剩下的一集,一集都不剩就是新种的空集。 */
+  active: EpisodeSummary;
+  /** `active` 是这次新种出来的空集。 */
+  created_fresh: boolean;
+  /** 随集一起删掉的素材条数(原片不动)。 */
+  removed_clips: number;
+}
+
+/**
+ * R15:删除一集 —— 历史集或当前集都行。这一集的素材记录、收藏、片段、顺序、任务一起删;
+ * 原片不动;缓存文件在后台清理。调用方拿到结果后请派发 `tripcut:episode-changed`(带 `active`)。
+ */
+export function deleteEpisode(episodeId: number): Promise<DeleteEpisodeOutcome> {
+  return invoke<DeleteEpisodeOutcome>("delete_episode", { episodeId });
+}
+
+/** R15:「重置项目库」的结果。 */
+export interface ResetLibraryResult {
+  removed_clips: number;
+  removed_episodes: number;
+  removed_disk_bytes: number;
+}
+
+/**
+ * R15:重置项目库 —— 清空素材、集、片段、收藏、任务、导入记录和缓存,只留设置 / 键位 / 引导。
+ * 后端先打一份数据库快照(恢复页「从快照恢复」可以退回)。调用方随后应回到首页并派发
+ * `tripcut:episode-changed`。
+ */
+export function resetProjectLibrary(): Promise<ResetLibraryResult> {
+  return invoke<ResetLibraryResult>("reset_project_library");
+}
+
+/** R15:恢复页上的「重置项目库」(同一件事,走恢复页的运行时状态)。 */
+export function resetRecoveryLibrary(): Promise<ResetLibraryResult> {
+  return invoke<ResetLibraryResult>("reset_recovery_library");
 }

@@ -1948,8 +1948,7 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
                             THEN json_extract(j.payload, '$.path') END
                      FROM jobs j
                      WHERE j.kind IN ('analyze_l1', 'thumbnail', 'waveform', 'proxy')
-                       AND CAST(CASE WHEN json_valid(j.payload)
-                            THEN json_extract(j.payload, '$.clip_id') END AS INTEGER) = c.id
+                       AND j.clip_id = c.id
                      ORDER BY CASE j.kind WHEN 'analyze_l1' THEN 1 ELSE 0 END DESC,
                               j.id DESC LIMIT 1),
                     c.rel_path

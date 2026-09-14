@@ -5,6 +5,7 @@ import {
   getDoctorReport,
   openLogsDirectory,
   rebuildRecoveryCache,
+  resetRecoveryLibrary,
   restoreLatestSnapshot,
   type DoctorReport,
 } from "./api";
@@ -38,6 +39,9 @@ export function RecoveryPage({ report, loadError, onContinue, onReport }: Recove
     loadError ?? (report ? "自检完成，请先确认恢复状态。" : "正在运行启动自检…"),
   );
   const [restoreArmed, setRestoreArmed] = useState(false);
+  // R15:「重置项目库」要打「确认」两个字才放行(与设置页同一套)。
+  const [resetDraft, setResetDraft] = useState("");
+  const resetArmed = resetDraft.trim() === "确认";
 
   useEffect(() => {
     if (loadError) {
@@ -137,10 +141,40 @@ export function RecoveryPage({ report, loadError, onContinue, onReport }: Recove
               <span>导出评级、片段、故事顺序与人工偏好 JSON</span>
             </div>
             <div className="recovery-r10-action">
-              <Button icon="settings-performance" busy={busy === "缓存重建"} disabled={Boolean(busy)} onClick={() => void run("缓存重建", rebuildRecoveryCache)}>
-                重建缓存
+              <Button icon="settings-performance" busy={busy === "清理缓存"} disabled={Boolean(busy)} onClick={() => void run("清理缓存", rebuildRecoveryCache)}>
+                清理缓存并重新分析
               </Button>
-              <span>清理可重建产物，不触碰原片与人工决策</span>
+              <span>删掉封面、预览小文件这些可以再生成的文件,进入工作台后在后台重新生成;素材、评分和片段都会留着,原片不会被删</span>
+            </div>
+            <div className="recovery-r10-action">
+              <div className="settings-reset-field">
+                <label htmlFor="recovery-reset-confirm">输入「确认」两个字才能重置</label>
+                <input
+                  id="recovery-reset-confirm"
+                  aria-label="重置确认"
+                  value={resetDraft}
+                  disabled={Boolean(busy)}
+                  placeholder="确认"
+                  onChange={(event) => setResetDraft(event.target.value)}
+                />
+                <Button
+                  tone="danger"
+                  variant="primary"
+                  icon="warning"
+                  busy={busy === "重置项目库"}
+                  disabled={Boolean(busy) || !resetArmed}
+                  onClick={() =>
+                    void run("重置项目库", async () => {
+                      const result = await resetRecoveryLibrary();
+                      setResetDraft("");
+                      return `项目库已重置:清掉 ${result.removed_clips} 条素材记录、${result.removed_episodes} 集;主题、快捷键和引导都还在。进入工作台会回到首页。`;
+                    })
+                  }
+                >
+                  重置项目库
+                </Button>
+              </div>
+              <span>把整个项目库清空,回到刚安装时的样子:素材记录、集、评分、片段、导入记录和缓存都会删掉;主题、快捷键和引导会留着,原片不会被删。会先保存一份数据库快照</span>
             </div>
             <div className="recovery-r10-action">
               <Button icon="settings-privacy" busy={busy === "打开日志目录"} disabled={Boolean(busy)} onClick={() => void run("打开日志目录", openLogsDirectory)}>

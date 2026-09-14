@@ -1122,6 +1122,18 @@ const HANDLERS: Record<string, Handler> = {
   ask_director: () => ({ answer: "先把洱海航拍那条当作本章开场,再接喜洲院子的细节。", provider: "claude" }),
   get_settings_status: () => SETTINGS_STATUS,
   clear_cache_and_rebuild: () => ({ removed_database_rows: 0, reset_jobs: 0, removed_disk_bytes: 0 }),
+  // R15:重置项目库(mock 里只清素材与集,种一个空 EP01)。
+  reset_project_library: () => {
+    const removedClips = state.clips.length;
+    const removedEpisodes = state.episodes.length;
+    state.clips = [];
+    const first = state.episodes[0];
+    state.episodes = first
+      ? [{ ...first, id: first.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, episode_number: 1 }]
+      : [];
+    return { removed_clips: removedClips, removed_episodes: removedEpisodes, removed_disk_bytes: 0 };
+  },
+  reset_recovery_library: () => ({ removed_clips: 0, removed_episodes: 0, removed_disk_bytes: 0 }),
   run_clip_self_check: () => "Chinese-CLIP 自检通过(mock)",
 
   // --- 导入 ---
@@ -1550,6 +1562,28 @@ const HANDLERS: Record<string, Handler> = {
     };
     state.episodes.unshift(next);
     return { episode: next, reused_empty: false, archived: current };
+  },
+  // R15:删除一集 —— 删当前集回退到最近剩下的一集;一集不剩就种空 EP01。
+  delete_episode: ({ episodeId }) => {
+    const id = Number(episodeId);
+    const index = state.episodes.findIndex((item) => item.id === id);
+    if (index < 0) throw new Error(`Episode ${id} 不存在`);
+    const [deleted] = state.episodes.splice(index, 1);
+    const removed = state.clips.filter((clip) => clip.episode_id === id).length;
+    state.clips = state.clips.filter((clip) => clip.episode_id !== id);
+    let createdFresh = false;
+    if (deleted!.status === "active") {
+      const fallback = [...state.episodes].sort((a, b) => b.id - a.id)[0];
+      if (fallback) {
+        fallback.status = "active";
+        fallback.archived_at = null;
+      } else {
+        createdFresh = true;
+        state.episodes.unshift({ ...deleted!, id: deleted!.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, episode_number: 1 });
+      }
+    }
+    const active = state.episodes.find((item) => item.status === "active")!;
+    return { deleted, active, created_fresh: createdFresh, removed_clips: removed };
   },
   // U-19:状态条音乐分析计数(mock 里唯一一条音乐轨已分析完)。
   get_music_analysis_progress: () => ({ total: 1, done: 1, failed: 0, running: 0, pending: 0 }),

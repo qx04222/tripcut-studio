@@ -208,15 +208,33 @@ pub fn run_analyze_motion(connection: &mut Connection, job: &Job) -> Result<()> 
         super::settings::DEFAULT_JITTER_THRESHOLD,
     )?
     .clamp(0.0, 1.0);
-    let mut motion = analyze_video(&source.path, &ffmpeg)?;
+    // R15-perf:L1 分析同一次解码留下的采样帧优先;没有(旧任务、交接失败)就自己解码。
+    let cache_root = connection
+        .path()
+        .map(|db_path| super::artifacts::cache_root_for_db(Path::new(db_path)));
+    let handed_off = cache_root
+        .as_deref()
+        .and_then(|root| analyze_from_handoff(root, source.clip_id, &source.quick_hash));
+    let (mut motion, frames_source) = match handed_off {
+        Some(Ok(motion)) => (motion, "l1-pass"),
+        Some(Err(error)) => {
+            tracing::warn!(%error, clip_id = source.clip_id, "交接的运镜采样帧不可用,改为自行解码");
+            (analyze_video(&source.path, &ffmpeg)?, "decode")
+        }
+        None => (analyze_video(&source.path, &ffmpeg)?, "decode"),
+    };
     motion.clip_id = source.clip_id;
     motion.is_shaky = shake_is_flagged(motion.shake_score, jitter_threshold);
     motion.tool_version = format!(
-        "{};jitter_threshold={jitter_threshold:.6} | {}",
+        "{};jitter_threshold={jitter_threshold:.6} | {} | frames={frames_source}",
         motion.tool_version,
         tool_version(&ffmpeg)?
     );
-    persist_motion(connection, &source, &motion)
+    let persisted = persist_motion(connection, &source, &motion);
+    if let Some(root) = cache_root.as_deref() {
+        remove_handoff(root, source.clip_id);
+    }
+    persisted
 }
 
 pub fn get_clip_motion(connection: &Connection, clip_id: i64) -> Result<Option<ClipMotion>> {
@@ -273,10 +291,125 @@ fn load_source(connection: &Connection, payload: &AnalyzeMotionPayload) -> Resul
         })
 }
 
-fn gray_frame_args(path: &Path, hardware_decode: bool) -> Vec<OsString> {
-    let filter = format!(
+/// 运镜采样链:2 fps → 160×160 灰度。R15-perf 起 L1 画质分析同一次解码里也挂这条链
+/// (`analysis::video_filter`),把采样帧交给运镜任务,免去第二次整片解码。
+pub(crate) fn gray_frame_filter() -> String {
+    format!(
         "fps={MOTION_SAMPLE_FPS},scale={MOTION_WIDTH}:{MOTION_HEIGHT}:force_original_aspect_ratio=increase,crop={MOTION_WIDTH}:{MOTION_HEIGHT},format=gray"
-    );
+    )
+}
+
+/// 采样帧率(与 `gray_frame_filter` 的 fps 一致),分段时按它换算每段该有几帧。
+pub(crate) const HANDOFF_SAMPLE_FPS: usize = MOTION_SAMPLE_FPS;
+const HANDOFF_FRAMES_FILE: &str = "motion-frames.gray";
+const HANDOFF_META_FILE: &str = "motion-frames.json";
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct HandoffMeta {
+    quick_hash: String,
+    frame_count: usize,
+    sample_fps: usize,
+    frame_bytes: usize,
+}
+
+/// L1 交接给运镜任务的采样帧文件与它的说明。
+pub(crate) fn handoff_paths(cache_root: &Path, clip_id: i64) -> (PathBuf, PathBuf) {
+    let root = cache_root.join(clip_id.to_string());
+    (root.join(HANDOFF_FRAMES_FILE), root.join(HANDOFF_META_FILE))
+}
+
+/// 一段解码产出的采样帧文件:前 `skip` 帧是重叠上下文要丢,`expect` 是这段该留下的帧数
+/// (最后一段为 `None`:解到片尾,有多少留多少)。
+pub(crate) struct HandoffPart {
+    pub path: PathBuf,
+    pub skip: usize,
+    pub expect: Option<usize>,
+}
+
+/// 把各段采样帧按顺序拼成交接文件。任一段帧数对不上就整个不交接(返回 Err),
+/// 运镜任务会像以前一样自己解码——交接只是省一次解码,不能改结果。
+pub(crate) fn write_handoff(cache_root: &Path, clip_id: i64, quick_hash: &str, parts: &[HandoffPart]) -> Result<usize> {
+    use std::io::Write;
+    let (frames_path, meta_path) = handoff_paths(cache_root, clip_id);
+    if let Some(parent) = frames_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = frames_path.with_extension("gray.tmp");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&temporary)?);
+    let mut total = 0_usize;
+    let write_result = (|| -> Result<()> {
+        for (index, part) in parts.iter().enumerate() {
+            let bytes = std::fs::read(&part.path)?;
+            if bytes.len() % FRAME_BYTES != 0 {
+                return Err(CoreError::Motion(format!("第 {index} 段采样帧字节数 {} 不能整除单帧", bytes.len())));
+            }
+            let frames = bytes.len() / FRAME_BYTES;
+            let owned = frames.saturating_sub(part.skip);
+            if let Some(expect) = part.expect {
+                if owned != expect {
+                    return Err(CoreError::Motion(format!("第 {index} 段采样帧 {owned} 帧,期望 {expect}")));
+                }
+            } else if owned == 0 {
+                return Err(CoreError::Motion(format!("第 {index} 段没有采样帧")));
+            }
+            writer.write_all(&bytes[part.skip * FRAME_BYTES..])?;
+            total += owned;
+        }
+        writer.flush()?;
+        Ok(())
+    })();
+    drop(writer);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if total < 2 {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(CoreError::Motion(format!("采样帧只有 {total} 帧,运镜分析至少要 2 帧")));
+    }
+    let meta = HandoffMeta {
+        quick_hash: quick_hash.to_owned(),
+        frame_count: total,
+        sample_fps: MOTION_SAMPLE_FPS,
+        frame_bytes: FRAME_BYTES,
+    };
+    std::fs::rename(&temporary, &frames_path)?;
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).map_err(|error| CoreError::Motion(error.to_string()))?)?;
+    Ok(total)
+}
+
+/// 找到并校验交接文件:说明里的 quick_hash / 帧尺寸 / 帧数都要对得上,否则当没有。
+fn open_handoff(cache_root: &Path, clip_id: i64, quick_hash: &str) -> Option<std::fs::File> {
+    let (frames_path, meta_path) = handoff_paths(cache_root, clip_id);
+    let meta: HandoffMeta = serde_json::from_slice(&std::fs::read(&meta_path).ok()?).ok()?;
+    if meta.quick_hash != quick_hash || meta.frame_bytes != FRAME_BYTES || meta.sample_fps != MOTION_SAMPLE_FPS || meta.frame_count < 2 {
+        return None;
+    }
+    let file = std::fs::File::open(&frames_path).ok()?;
+    let length = file.metadata().ok()?.len();
+    (length == (meta.frame_count * FRAME_BYTES) as u64).then_some(file)
+}
+
+/// 用完即删——它是一次交接,不是缓存产物。
+fn remove_handoff(cache_root: &Path, clip_id: i64) {
+    let (frames_path, meta_path) = handoff_paths(cache_root, clip_id);
+    let _ = std::fs::remove_file(frames_path);
+    let _ = std::fs::remove_file(meta_path);
+}
+
+/// 从交接文件算运镜(不解码)。文件不存在 / 对不上 → `None`,调用方自己解码。
+fn analyze_from_handoff(cache_root: &Path, clip_id: i64, quick_hash: &str) -> Option<Result<ClipMotion>> {
+    let file = open_handoff(cache_root, clip_id, quick_hash)?;
+    let pairs = match analyze_frame_stream(std::io::BufReader::new(file)) {
+        Ok(Ok(pairs)) => pairs,
+        Ok(Err(error)) => return Some(Err(error)),
+        Err(error) => return Some(Err(CoreError::Motion(format!("读取交接采样帧失败：{error}")))),
+    };
+    Some(aggregate_motion(&pairs))
+}
+
+fn gray_frame_args(path: &Path, hardware_decode: bool) -> Vec<OsString> {
+    let filter = gray_frame_filter();
     let mut args = vec![OsString::from("-v"), OsString::from("error"), OsString::from("-nostdin")];
     if hardware_decode {
         args.extend([OsString::from("-hwaccel"), OsString::from("videotoolbox")]);
@@ -367,7 +500,7 @@ fn analyze_frame_stream(mut reader: impl Read) -> std::io::Result<Result<Vec<Pai
 }
 
 #[cfg(test)]
-fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn extract_gray_frames(path: &Path, ffmpeg: &OsStr) -> Result<Vec<Vec<u8>>> {
     let args = gray_frame_args(path, true);
     let output = execute_with_timeout(ffmpeg, &args, MOTION_TIMEOUT)
         .map_err(|error| CoreError::Motion(format!("提取运镜采样帧失败：{error}")))?;
@@ -1577,6 +1710,128 @@ mod tests {
             );
         }
         eprintln!("{:?}", aggregate_motion(&pairs).unwrap());
+    }
+
+    // ---- R15-perf:L1 交接的采样帧 ----
+
+    fn frame_of(value: u8) -> Vec<u8> {
+        vec![value; FRAME_BYTES]
+    }
+
+    #[test]
+    fn handoff_concatenates_parts_and_drops_each_parts_context_frames() {
+        let directory = TestDirectory::new();
+        let cache_root = directory.path().join("cache");
+        let part_a = directory.path().join("a.gray");
+        let part_b = directory.path().join("b.gray");
+        let part_c = directory.path().join("c.gray");
+        std::fs::write(&part_a, [frame_of(1), frame_of(2)].concat()).unwrap();
+        // b:第一帧是上下文(与 a 的末帧同一时刻),后两帧是自己的。
+        std::fs::write(&part_b, [frame_of(2), frame_of(3), frame_of(4)].concat()).unwrap();
+        // c:最后一段,不限帧数。
+        std::fs::write(&part_c, [frame_of(4), frame_of(5), frame_of(6), frame_of(7)].concat()).unwrap();
+        let parts = [
+            HandoffPart { path: part_a.clone(), skip: 0, expect: Some(2) },
+            HandoffPart { path: part_b.clone(), skip: 1, expect: Some(2) },
+            HandoffPart { path: part_c.clone(), skip: 1, expect: None },
+        ];
+        assert_eq!(write_handoff(&cache_root, 7, "qh", &parts).unwrap(), 7);
+        let (frames_path, meta_path) = handoff_paths(&cache_root, 7);
+        let bytes = std::fs::read(&frames_path).unwrap();
+        assert_eq!(bytes.len(), 7 * FRAME_BYTES);
+        let sequence: Vec<u8> = bytes.chunks(FRAME_BYTES).map(|frame| frame[0]).collect();
+        assert_eq!(sequence, vec![1, 2, 3, 4, 5, 6, 7]);
+        let meta: HandoffMeta = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta, HandoffMeta { quick_hash: "qh".into(), frame_count: 7, sample_fps: MOTION_SAMPLE_FPS, frame_bytes: FRAME_BYTES });
+
+        assert!(open_handoff(&cache_root, 7, "qh").is_some());
+        assert!(open_handoff(&cache_root, 7, "other-hash").is_none(), "素材变了就不能用旧帧");
+        assert!(open_handoff(&cache_root, 8, "qh").is_none());
+        // 帧文件被截断:说明与实际不符,当没有。
+        std::fs::write(&frames_path, &bytes[..6 * FRAME_BYTES]).unwrap();
+        assert!(open_handoff(&cache_root, 7, "qh").is_none());
+        remove_handoff(&cache_root, 7);
+        assert!(!frames_path.exists() && !meta_path.exists());
+    }
+
+    #[test]
+    fn handoff_refuses_parts_with_the_wrong_frame_count_and_leaves_nothing_behind() {
+        let directory = TestDirectory::new();
+        let cache_root = directory.path().join("cache");
+        let part = directory.path().join("short.gray");
+        std::fs::write(&part, [frame_of(1), frame_of(2)].concat()).unwrap();
+        let parts = [HandoffPart { path: part.clone(), skip: 0, expect: Some(3) }];
+        let error = write_handoff(&cache_root, 9, "qh", &parts).unwrap_err();
+        assert!(error.to_string().contains("期望 3"), "{error}");
+        let (frames_path, meta_path) = handoff_paths(&cache_root, 9);
+        assert!(!frames_path.exists() && !meta_path.exists());
+        assert!(!frames_path.with_extension("gray.tmp").exists());
+        // 不能整除单帧同样拒绝。
+        std::fs::write(&part, vec![0_u8; FRAME_BYTES + 1]).unwrap();
+        assert!(write_handoff(&cache_root, 9, "qh", &[HandoffPart { path: part, skip: 0, expect: None }]).is_err());
+    }
+
+    /// 交接帧与自己解码算出的运镜结果一致;任务写完就把交接文件删掉,tool_version 记下来源。
+    #[test]
+    fn motion_job_uses_handed_off_frames_then_removes_them() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let directory = TestDirectory::new();
+        let path = directory.path().join("pan-handoff.mp4");
+        let filter = format!("{FIXED_PATTERN},crop=240:180:x='60+min(36,n/15*3)':y=50");
+        if !generate_fixture(&path, &filter) {
+            return;
+        }
+        let db_path = directory.path().join("project.db");
+        let mut connection = crate::core::db::open_project(&db_path).unwrap();
+        // 任务会按路径 + quick_hash 核对素材,得用真指纹(绝对路径不走外置盘重绑)。
+        let (quick_hash, byte_size) = crate::core::import::quick_fingerprint(&path).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('motion-volume')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path, quick_hash, byte_size) VALUES ('motion-volume', ?1, ?2, ?3)",
+                params![path.to_string_lossy(), quick_hash, byte_size as i64],
+            )
+            .unwrap();
+        let clip_id = connection.last_insert_rowid();
+        let cache_root = super::super::artifacts::cache_root_for_db(&db_path);
+
+        // 交接文件 = 自己解码会得到的同一批帧(L1 那边的字节级一致另有测试)。
+        let frames = extract_gray_frames(&path, &test_ffmpeg()).unwrap();
+        let part = directory.path().join("part0.gray");
+        std::fs::write(&part, frames.concat()).unwrap();
+        write_handoff(&cache_root, clip_id, &quick_hash, &[HandoffPart { path: part, skip: 0, expect: None }]).unwrap();
+        let expected = analyze_frames(&frames).unwrap();
+
+        let job = Job {
+            id: 1,
+            kind: "analyze_motion".into(),
+            payload: serde_json::to_string(&AnalyzeMotionPayload {
+                clip_id,
+                path: path.to_string_lossy().into_owned(),
+                quick_hash: quick_hash.clone(),
+            })
+            .unwrap(),
+            status: super::super::jobs::JobStatus::Running,
+            attempt: 1,
+            blocked_summary: None,
+            result_path: None,
+        };
+        run_analyze_motion(&mut connection, &job).unwrap();
+        let stored = get_clip_motion(&connection, clip_id).unwrap().unwrap();
+        assert_eq!(stored.class, expected.class);
+        assert_eq!(stored.shake_score, expected.shake_score);
+        assert!(stored.tool_version.ends_with("frames=l1-pass"), "{}", stored.tool_version);
+        let (frames_path, meta_path) = handoff_paths(&cache_root, clip_id);
+        assert!(!frames_path.exists() && !meta_path.exists(), "交接文件用完即删");
+
+        // 没有交接文件:自己解码,结果一样,来源标成 decode。
+        run_analyze_motion(&mut connection, &job).unwrap();
+        let decoded = get_clip_motion(&connection, clip_id).unwrap().unwrap();
+        assert_eq!(decoded.class, expected.class);
+        assert_eq!(decoded.shake_score, expected.shake_score);
+        assert!(decoded.tool_version.ends_with("frames=decode"), "{}", decoded.tool_version);
     }
 
     #[test]

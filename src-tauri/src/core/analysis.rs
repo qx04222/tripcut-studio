@@ -65,6 +65,16 @@ pub const BRNG_RATIO_THRESHOLD: f64 = 0.25;
 pub const AUDIO_CLIP_PEAK_DB: f64 = -0.1;
 
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+// R15-perf:分段并行解码。ffmpeg 里的 VideoToolbox 硬解是逐帧同步的——延迟决定吞吐,
+// 4K H.264 60 Mbps 单进程只有 ~150 fps(5 分钟素材 58 s),而三个进程各解一段几乎线性
+// 加速(实测 20 s)。分段边界落在 0.5 s 窗口格点上,每段多解前面 0.5 s 作为上下文
+// (场景检测 / vmafmotion 都要前一帧),合并时按绝对时间裁掉重叠——统计量与单进程逐字一致。
+/// 至少这么长才值得分段(每段至少 SEGMENT_MIN_SECONDS)。
+pub(crate) const SEGMENT_MIN_SECONDS: f64 = 40.0;
+/// 一条素材最多开几个解码进程(含自己那一份许可)。
+pub(crate) const MAX_SEGMENTS: usize = 4;
+/// 每段往前多解的上下文,等于一个统计窗口(fps=2)。
+const SEGMENT_OVERLAP_SECONDS: f64 = 0.5;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const FOCUS_FRAME_TIMEOUT: Duration = Duration::from_secs(60);
 const FOCUS_WIDTH: usize = 320;
@@ -257,7 +267,14 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
     )?;
     let ffprobe = crate::core::settings::configured_ffprobe(connection, &ffmpeg)?;
     let scene_threshold = effective_scene_threshold(connection)?;
-    let computation = analyze_source(&source, &ffmpeg, &ffprobe, scene_threshold)?;
+    // R15-perf:同一次解码顺手留下运镜采样帧,后面的 analyze_motion 不再整片解码第二遍。
+    let motion_handoff = connection.path().map(|db_path| MotionHandoff {
+        cache_root: super::artifacts::cache_root_for_db(Path::new(db_path)),
+        clip_id: source.clip_id,
+        quick_hash: source.quick_hash.clone(),
+    });
+    let computation =
+        analyze_source_with_handoff(&source, &ffmpeg, &ffprobe, scene_threshold, motion_handoff.as_ref())?;
     persist_analysis(connection, &source, &computation)?;
     // R11:时刻分是 L1 的后续步骤,用的是同一份日志(不再解码第二次)。
     // 它失败不能连累已经落盘的分析结果——记日志,交给启动时的「补齐时刻分」重跑。
@@ -419,40 +436,61 @@ fn load_source(connection: &Connection, payload: &AnalyzeL1Payload) -> Result<Cl
 /// 场景检测在 10 fps 上比相邻帧(摇镜相邻帧差得小、硬切差得大);统计量再抽到 2 fps
 /// (与 R11 时刻分的 0.5 s 窗口对齐)。
 /// `hardware_decode` 为真时在 `-i` 前插入 VideoToolbox 硬解前缀。
-fn analysis_args(
-    path: &Path,
-    scene_threshold: f64,
-    has_audio: bool,
-    hardware_decode: bool,
-) -> Vec<OsString> {
-    let mut filter = format!(
-        "[0:v:0]fps={SCENE_SAMPLE_FPS},scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
+/// `with_motion` 为真时从**解码后、缩放前**的原始流再分一路给运镜采样链
+/// (`motion::gray_frame_filter`,2 fps → 160×160 灰度)——与运镜任务自己解码时的 `-vf`
+/// 作用在同样的解码帧上,采样帧逐字节相同(2026-09-14 实测),运镜结果不变,只省一次整片解码。
+fn video_filter(scene_threshold: f64, with_motion: bool) -> String {
+    let l1 = format!(
+        "fps={SCENE_SAMPLE_FPS},scale=640:-2,format=yuv420p,split=2[scene_src][stats_src];\
          [scene_src]select='eq(n,0)+gt(scene,{scene_threshold})',showinfo[scene_out];\
          [stats_src]fps=2,signalstats=stat=brng,blurdetect=radius=20,entropy,vmafmotion,\
          metadata=mode=print[stats_out]"
     );
-    if has_audio {
-        // R11 时刻分:同一次解码里把音频分成两路——整条汇总(原有 Peak/动态范围)
-        // 与每 0.5 s 一窗的 RMS/峰值/熵(`asetnsamples` 按重采样后的 8 kHz 切 4000 样本)。
-        filter.push_str(&format!(
-            ";[0:a:0]asplit=2[a_all][a_win];\
-             [a_all]astats=metadata=1:reset=0:measure_overall=Peak_level+Peak_count+Dynamic_range[a_all_out];\
-             [a_win]aresample={rate},asetnsamples=n={samples},\
-             astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level+Entropy,\
-             ametadata=mode=print[a_win_out]",
-            rate = super::moments::AUDIO_WINDOW_SAMPLE_RATE,
-            samples = super::moments::AUDIO_WINDOW_SAMPLES,
-        ));
+    if with_motion {
+        format!(
+            "[0:v:0]split=2[l1_src][motion_src];[l1_src]{l1};[motion_src]{}[motion_out]",
+            super::motion::gray_frame_filter()
+        )
+    } else {
+        format!("[0:v:0]{l1}")
     }
-    let mut args = vec![OsString::from("-hide_banner"), OsString::from("-nostdin")];
-    if hardware_decode {
-        args.extend(super::artifacts::hardware_decode_prefix());
+}
+
+/// 运镜采样帧输出:写成裸灰度文件,`max_frames` 是这段该有的帧数上限(含上下文),
+/// 最后一段不限。
+fn motion_output_args(path: &Path, max_frames: Option<usize>) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-map"), OsString::from("[motion_out]")];
+    if let Some(max) = max_frames {
+        args.extend([OsString::from("-frames:v"), OsString::from(max.to_string())]);
     }
     args.extend([
-        OsString::from("-i"),
+        OsString::from("-an"),
+        OsString::from("-pix_fmt"),
+        OsString::from("gray"),
+        OsString::from("-f"),
+        OsString::from("rawvideo"),
+        OsString::from("-y"),
         path.as_os_str().to_owned(),
-        OsString::from("-filter_complex"),
-        OsString::from(filter),
+    ]);
+    args
+}
+
+/// R11 时刻分:同一次解码里把音频分成两路——整条汇总(原有 Peak/动态范围)
+/// 与每 0.5 s 一窗的 RMS/峰值/熵(`asetnsamples` 按重采样后的 8 kHz 切 4000 样本)。
+fn audio_filter() -> String {
+    format!(
+        "[0:a:0]asplit=2[a_all][a_win];\
+         [a_all]astats=metadata=1:reset=0:measure_overall=Peak_level+Peak_count+Dynamic_range[a_all_out];\
+         [a_win]aresample={rate},asetnsamples=n={samples},\
+         astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level+Entropy,\
+         ametadata=mode=print[a_win_out]",
+        rate = super::moments::AUDIO_WINDOW_SAMPLE_RATE,
+        samples = super::moments::AUDIO_WINDOW_SAMPLES,
+    )
+}
+
+fn video_output_args() -> [OsString; 12] {
+    [
         OsString::from("-map"),
         OsString::from("[scene_out]"),
         OsString::from("-an"),
@@ -465,20 +503,215 @@ fn analysis_args(
         OsString::from("-f"),
         OsString::from("null"),
         OsString::from("-"),
-    ]);
-    if has_audio {
-        for label in ["[a_all_out]", "[a_win_out]"] {
-            args.extend([
-                OsString::from("-map"),
-                OsString::from(label),
-                OsString::from("-vn"),
-                OsString::from("-f"),
-                OsString::from("null"),
-                OsString::from("-"),
-            ]);
-        }
+    ]
+}
+
+fn audio_output_args() -> Vec<OsString> {
+    let mut args = Vec::with_capacity(12);
+    for label in ["[a_all_out]", "[a_win_out]"] {
+        args.extend([
+            OsString::from("-map"),
+            OsString::from(label),
+            OsString::from("-vn"),
+            OsString::from("-f"),
+            OsString::from("null"),
+            OsString::from("-"),
+        ]);
     }
     args
+}
+
+fn analysis_args(
+    path: &Path,
+    scene_threshold: f64,
+    has_audio: bool,
+    hardware_decode: bool,
+    motion_out: Option<&Path>,
+) -> Vec<OsString> {
+    let mut filter = video_filter(scene_threshold, motion_out.is_some());
+    if has_audio {
+        filter.push(';');
+        filter.push_str(&audio_filter());
+    }
+    let mut args = vec![OsString::from("-hide_banner"), OsString::from("-nostdin")];
+    if hardware_decode {
+        args.extend(super::artifacts::hardware_decode_prefix());
+    }
+    args.extend([
+        OsString::from("-i"),
+        path.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from(filter),
+    ]);
+    args.extend(video_output_args());
+    if has_audio {
+        args.extend(audio_output_args());
+    }
+    if let Some(motion_path) = motion_out {
+        args.extend(motion_output_args(motion_path, None));
+    }
+    args
+}
+
+/// R15-perf:一段视频的分析参数——`-ss`(输入侧,先按关键帧跳再精确丢帧到 `seek`)与
+/// 可选的 `-t`;时间戳从 0 重新计,合并时由 `rebase_segment_log` 加回 `seek`。只跑视频
+/// 滤镜——音频另起一个轻量进程整条跑(AAC 解码 5 分钟不到 1 s,分段不值得)。
+fn analysis_segment_args(
+    path: &Path,
+    scene_threshold: f64,
+    hardware_decode: bool,
+    seek_seconds: f64,
+    length_seconds: Option<f64>,
+    motion_out: Option<(&Path, Option<usize>)>,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-hide_banner"), OsString::from("-nostdin")];
+    if hardware_decode {
+        args.extend(super::artifacts::hardware_decode_prefix());
+    }
+    args.extend([OsString::from("-ss"), OsString::from(format!("{seek_seconds:.3}"))]);
+    if let Some(length) = length_seconds {
+        args.extend([OsString::from("-t"), OsString::from(format!("{length:.3}"))]);
+    }
+    args.extend([
+        OsString::from("-i"),
+        path.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from(video_filter(scene_threshold, motion_out.is_some())),
+    ]);
+    args.extend(video_output_args());
+    if let Some((motion_path, max_frames)) = motion_out {
+        args.extend(motion_output_args(motion_path, max_frames));
+    }
+    args
+}
+
+/// 分段跑时音频单独一趟(不带硬解前缀,音频用不上)。
+fn analysis_audio_args(path: &Path) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-nostdin"),
+        OsString::from("-i"),
+        path.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from(audio_filter()),
+    ];
+    args.extend(audio_output_args());
+    args
+}
+
+/// 一段:`start` 是这段负责的绝对起点,`seek` 是实际解码起点(前面多解 0.5 s 上下文),
+/// `end` 是负责的绝对终点(最后一段为 `None`,解到片尾)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Segment {
+    pub start: f64,
+    pub seek: f64,
+    pub end: Option<f64>,
+}
+
+impl Segment {
+    /// 传给 ffmpeg `-t` 的长度:从 `seek` 解到 `end`(最后一段不限)。
+    fn length(&self) -> Option<f64> {
+        self.end.map(|end| end - self.seek)
+    }
+
+    /// 这段的运镜采样帧里,前面多少帧是上下文(要丢),多少帧是自己的(最后一段 `None`)。
+    fn motion_frames(&self) -> (usize, Option<usize>) {
+        let fps = super::motion::HANDOFF_SAMPLE_FPS as f64;
+        let context = ((self.start - self.seek) * fps).round() as usize;
+        let owned = self.end.map(|end| ((end - self.start) * fps).round() as usize);
+        (context, owned)
+    }
+}
+
+/// 决定分几段:不超过 `1 + extra_slots`(自己那份许可加借来的)、不超过 MAX_SEGMENTS,
+/// 且每段至少 SEGMENT_MIN_SECONDS。段界落在 0.5 s 格点上。只有一段时返回空——调用方走
+/// 原来的单进程路径,参数逐字不变。
+pub(crate) fn segment_plan(duration_seconds: f64, extra_slots: usize) -> Vec<Segment> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return Vec::new();
+    }
+    let by_length = (duration_seconds / SEGMENT_MIN_SECONDS).floor() as usize;
+    let count = by_length.min(1 + extra_slots).min(MAX_SEGMENTS);
+    if count < 2 {
+        return Vec::new();
+    }
+    let raw_length = duration_seconds / count as f64;
+    // 段界对齐到 0.5 s 格点(统计窗口),重叠上下文正好一整窗。
+    let grid = SEGMENT_OVERLAP_SECONDS;
+    (0..count)
+        .map(|index| {
+            let start = ((index as f64 * raw_length) / grid).round() * grid;
+            let end = if index + 1 == count {
+                None
+            } else {
+                Some((((index + 1) as f64 * raw_length) / grid).round() * grid)
+            };
+            let seek = if index == 0 { 0.0 } else { (start - SEGMENT_OVERLAP_SECONDS).max(0.0) };
+            Segment { start, seek, end }
+        })
+        .collect()
+}
+
+/// 把一段的日志换算回整条素材的时间轴:`pts_time:` 加上 `seek`,再按 `[start, end)`
+/// 裁掉上下文与越界帧——`metadata=print` 的 `frame:` 行带着它后面的 `lavfi.*` 行一起去留,
+/// `showinfo` 行单独判。其它行(横幅、进度)原样保留,解析器本来就不看它们。
+fn rebase_segment_log(log: &str, segment: Segment) -> String {
+    const EPSILON: f64 = 1e-4;
+    let in_range = |seconds: f64| {
+        seconds >= segment.start - EPSILON && segment.end.is_none_or(|end| seconds < end - EPSILON)
+    };
+    let rewrite = |line: &str, seconds: f64| -> String {
+        line.split(' ')
+            .map(|token| {
+                if token.starts_with("pts_time:") {
+                    format!("pts_time:{}", (seconds * 1e6).round() / 1e6)
+                } else {
+                    token.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut output = String::with_capacity(log.len());
+    let mut keep_block = true;
+    for line in log.lines() {
+        let is_showinfo = line.contains("showinfo");
+        let is_frame_header = line.contains("frame:") && line.contains("pts_time:") && !is_showinfo;
+        if is_showinfo && line.contains("pts_time:") {
+            if let Some(local) = token_prefixed_f64(line, "pts_time:") {
+                let absolute = local + segment.seek;
+                if in_range(absolute) {
+                    output.push_str(&rewrite(line, absolute));
+                    output.push('\n');
+                }
+            }
+            continue;
+        }
+        if is_frame_header {
+            match token_prefixed_f64(line, "pts_time:") {
+                Some(local) => {
+                    let absolute = local + segment.seek;
+                    keep_block = in_range(absolute);
+                    if keep_block {
+                        output.push_str(&rewrite(line, absolute));
+                        output.push('\n');
+                    }
+                }
+                None => keep_block = false,
+            }
+            continue;
+        }
+        if line.contains("lavfi.") {
+            if keep_block {
+                output.push_str(line);
+                output.push('\n');
+            }
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
 }
 
 /// 先硬解后软解:硬解失败(进程报错或非零退出)就用软解重跑一次;
@@ -489,12 +722,13 @@ fn run_analysis_ffmpeg(
     path: &Path,
     scene_threshold: f64,
     has_audio: bool,
+    motion_out: Option<&Path>,
 ) -> Result<String> {
     run_analysis_ffmpeg_with_args(
         ffmpeg,
         path,
-        &analysis_args(path, scene_threshold, has_audio, true),
-        &analysis_args(path, scene_threshold, has_audio, false),
+        &analysis_args(path, scene_threshold, has_audio, true, motion_out),
+        &analysis_args(path, scene_threshold, has_audio, false, motion_out),
     )
 }
 
@@ -530,6 +764,105 @@ fn run_analysis_ffmpeg_with_args(
     }
 }
 
+/// R15-perf:分段并行——每段一个线程跑 `run_analysis_ffmpeg_with_args`(各自先硬解后软解),
+/// 音频整条另跑一趟;任何一段失败或用户取消就让其余段停下,再把各段日志按绝对时间
+/// 换算、裁重叠、按顺序拼成一份,交给原来的解析器。
+fn run_analysis_ffmpeg_segmented(
+    ffmpeg: &OsStr,
+    path: &Path,
+    scene_threshold: f64,
+    has_audio: bool,
+    plan: &[Segment],
+    motion_parts: Option<&[PathBuf]>,
+) -> Result<String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let abort = Arc::new(AtomicBool::new(false));
+    let parent_flag = super::jobs::current_cancellation_flag();
+    let mut handles = Vec::with_capacity(plan.len() + 1);
+    let spawn = |args_hw: Vec<OsString>, args_sw: Vec<OsString>| {
+        let ffmpeg = ffmpeg.to_owned();
+        let path = path.to_path_buf();
+        let abort = abort.clone();
+        let parent_flag = parent_flag.clone();
+        thread::spawn(move || {
+            // 子线程的取消标志 = 父任务的取消 || 本次分段的任一失败。
+            let merged = Arc::new(AtomicBool::new(false));
+            super::jobs::adopt_cancellation_flag(Some(merged.clone()));
+            let watcher_abort = abort.clone();
+            let watcher_flag = merged.clone();
+            let watcher_parent = parent_flag.clone();
+            let watcher_done = Arc::new(AtomicBool::new(false));
+            let watcher_done_flag = watcher_done.clone();
+            let watcher = thread::spawn(move || {
+                while !watcher_done_flag.load(Ordering::SeqCst) {
+                    if watcher_abort.load(Ordering::SeqCst)
+                        || watcher_parent.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst))
+                    {
+                        watcher_flag.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            });
+            let result = run_analysis_ffmpeg_with_args(&ffmpeg, &path, &args_hw, &args_sw);
+            watcher_done.store(true, Ordering::SeqCst);
+            let _ = watcher.join();
+            if result.is_err() {
+                abort.store(true, Ordering::SeqCst);
+            }
+            result
+        })
+    };
+    for (index, segment) in plan.iter().enumerate() {
+        let motion_out = motion_parts.and_then(|parts| parts.get(index)).map(|part| {
+            let (context, owned) = segment.motion_frames();
+            (part.as_path(), owned.map(|owned| context + owned))
+        });
+        handles.push(spawn(
+            analysis_segment_args(path, scene_threshold, true, segment.seek, segment.length(), motion_out),
+            analysis_segment_args(path, scene_threshold, false, segment.seek, segment.length(), motion_out),
+        ));
+    }
+    if has_audio {
+        let audio_args = analysis_audio_args(path);
+        handles.push(spawn(audio_args.clone(), audio_args));
+    }
+    let mut logs = Vec::with_capacity(handles.len());
+    let mut first_error = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(log)) => logs.push(log),
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(CoreError::Analysis("分段分析线程异常退出".to_owned()));
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        if super::jobs::current_cancellation_requested() {
+            return Err(CoreError::Analysis("用户已取消".to_owned()));
+        }
+        return Err(error);
+    }
+    let mut merged = String::new();
+    for (index, log) in logs.iter().enumerate() {
+        match plan.get(index) {
+            Some(segment) => merged.push_str(&rebase_segment_log(log, *segment)),
+            None => merged.push_str(log),
+        }
+        merged.push('\n');
+    }
+    Ok(merged)
+}
+
 fn combined_log(output: &CommandOutput) -> String {
     let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
     log.push('\n');
@@ -537,21 +870,32 @@ fn combined_log(output: &CommandOutput) -> String {
     log
 }
 
+#[cfg(test)]
 fn analyze_source(
     source: &ClipSource,
     ffmpeg: &OsStr,
     ffprobe: &OsStr,
     scene_threshold: f64,
 ) -> Result<AnalysisComputation> {
-    let has_audio = probe_has_audio(&source.path, ffprobe)?;
-    let log = run_analysis_ffmpeg(ffmpeg, &source.path, scene_threshold, has_audio)?;
-    let signals = parse_signal_log(&log, has_audio, source.tb_num, source.tb_den)?;
+    analyze_source_with_handoff(source, ffmpeg, ffprobe, scene_threshold, None)
+}
 
+fn analyze_source_with_handoff(
+    source: &ClipSource,
+    ffmpeg: &OsStr,
+    ffprobe: &OsStr,
+    scene_threshold: f64,
+    motion_handoff: Option<&MotionHandoff>,
+) -> Result<AnalysisComputation> {
     let duration_seconds = ticks_to_seconds(
         source.duration_ticks,
         source.tb_num,
         source.tb_den,
     )?;
+    let has_audio = probe_has_audio(&source.path, ffprobe)?;
+    let (log, segments) =
+        run_analysis_pass(ffmpeg, &source.path, duration_seconds, scene_threshold, has_audio, None, motion_handoff)?;
+    let signals = parse_signal_log(&log, has_audio, source.tb_num, source.tb_den)?;
     let focus_scores = [0.1_f64, 0.5, 0.9]
         .into_iter()
         .map(|position| extract_focus_score(&source.path, duration_seconds * position, ffmpeg))
@@ -577,6 +921,7 @@ fn analyze_source(
         },
         "preprocess": {
             "exposure_fps": 2,
+            "decode_segments": segments,
             "focus_positions": [0.1, 0.5, 0.9],
             "focus_rgb_size": [FOCUS_WIDTH, FOCUS_HEIGHT],
             "focus_kernel": "3x3-laplacian-cross"
@@ -603,14 +948,91 @@ pub(crate) fn scan_windows(
     path: &Path,
     tb_num: i64,
     tb_den: i64,
+    duration_ticks: i64,
     ffmpeg: &OsStr,
     ffprobe: &OsStr,
     scene_threshold: f64,
 ) -> Result<(super::moments::WindowSignals, Vec<i64>, bool)> {
     let has_audio = probe_has_audio(path, ffprobe)?;
-    let log = run_analysis_ffmpeg(ffmpeg, path, scene_threshold, has_audio)?;
+    let duration_seconds = ticks_to_seconds(duration_ticks, tb_num, tb_den)?;
+    let (log, _) = run_analysis_pass(ffmpeg, path, duration_seconds, scene_threshold, has_audio, None, None)?;
     let cuts = scene_cuts_from_log(&log, tb_num, tb_den);
     Ok((super::moments::WindowSignals::parse(&log), cuts, has_audio))
+}
+
+/// 一次分析扫描:借空闲解码许可决定分几段(`forced_segments` 只给测试用来定死段数),
+/// 一段就走原来的单进程;返回日志与实际段数。
+fn run_analysis_pass(
+    ffmpeg: &OsStr,
+    path: &Path,
+    duration_seconds: f64,
+    scene_threshold: f64,
+    has_audio: bool,
+    forced_segments: Option<usize>,
+    motion_handoff: Option<&MotionHandoff>,
+) -> Result<(String, usize)> {
+    let loan = super::jobs::borrow_spare_decode_slots(MAX_SEGMENTS - 1);
+    let plan = match forced_segments {
+        Some(count) => segment_plan(duration_seconds, count.saturating_sub(1)),
+        None => segment_plan(duration_seconds, loan.count()),
+    };
+    let part_count = plan.len().max(1);
+    let parts: Vec<PathBuf> = motion_handoff
+        .map(|handoff| handoff.part_paths(part_count))
+        .unwrap_or_default();
+    if let Some(parent) = parts.first().and_then(|part| part.parent()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let result = if plan.len() < 2 {
+        run_analysis_ffmpeg(ffmpeg, path, scene_threshold, has_audio, parts.first().map(PathBuf::as_path))
+            .map(|log| (log, 1))
+    } else {
+        run_analysis_ffmpeg_segmented(
+            ffmpeg,
+            path,
+            scene_threshold,
+            has_audio,
+            &plan,
+            (!parts.is_empty()).then_some(parts.as_slice()),
+        )
+        .map(|log| (log, plan.len()))
+    };
+    drop(loan);
+    if let (Ok(_), Some(handoff)) = (&result, motion_handoff) {
+        let handoff_parts: Vec<super::motion::HandoffPart> = if plan.len() < 2 {
+            vec![super::motion::HandoffPart { path: parts[0].clone(), skip: 0, expect: None }]
+        } else {
+            plan.iter()
+                .zip(parts.iter())
+                .map(|(segment, part)| {
+                    let (skip, expect) = segment.motion_frames();
+                    super::motion::HandoffPart { path: part.clone(), skip, expect }
+                })
+                .collect()
+        };
+        match super::motion::write_handoff(&handoff.cache_root, handoff.clip_id, &handoff.quick_hash, &handoff_parts) {
+            Ok(frames) => tracing::debug!(clip_id = handoff.clip_id, frames, "运镜采样帧已随画质分析交接"),
+            Err(error) => tracing::warn!(%error, clip_id = handoff.clip_id, "运镜采样帧交接失败,运镜任务将自行解码"),
+        }
+    }
+    for part in &parts {
+        let _ = std::fs::remove_file(part);
+    }
+    result
+}
+
+/// R15-perf:画质分析顺手为运镜任务留下采样帧的去处(见 `motion::write_handoff`)。
+pub(crate) struct MotionHandoff {
+    pub cache_root: PathBuf,
+    pub clip_id: i64,
+    pub quick_hash: String,
+}
+
+impl MotionHandoff {
+    fn part_paths(&self, count: usize) -> Vec<PathBuf> {
+        let root = self.cache_root.join(self.clip_id.to_string());
+        (0..count).map(|index| root.join(format!("motion-frames.part{index}.tmp"))).collect()
+    }
 }
 
 /// v4:场景检测挪到 fps=2 降采样之后,showinfo 报告的 raw `pts:` 落在 fps 滤镜
@@ -1239,7 +1661,7 @@ mod tests {
     #[test]
     fn analysis_filter_runs_scene_detection_after_downscale_and_bumps_pipeline_version() {
         assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v5");
-        let args = analysis_args(Path::new("/x.mp4"), 0.25, false, true);
+        let args = analysis_args(Path::new("/x.mp4"), 0.25, false, true, None);
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.starts_with("-hide_banner -nostdin -hwaccel videotoolbox -i"));
         let filter = args.iter().position(|a| a == "-filter_complex").map(|i| args[i + 1].to_string_lossy().into_owned()).unwrap();
@@ -1248,6 +1670,229 @@ mod tests {
         assert!(filter.contains("[scene_src]select='eq(n,0)+gt(scene,0.25)',showinfo[scene_out]"));
         assert!(filter.contains("[stats_src]fps=2,signalstats"));
         assert_eq!(SCENE_THRESHOLD, 0.25);
+    }
+
+    // ---- R15-perf:分段并行解码 ----
+
+    #[test]
+    fn segment_plan_only_splits_long_clips_and_never_beyond_the_borrowed_slots() {
+        assert!(segment_plan(30.0, 3).is_empty(), "短于两段的素材不分");
+        assert!(segment_plan(300.0, 0).is_empty(), "没借到许可就不分");
+        assert!(segment_plan(f64::NAN, 3).is_empty());
+        assert_eq!(segment_plan(100.0, 3).len(), 2, "100 s 只够两段 40 s");
+        assert_eq!(segment_plan(300.0, 1).len(), 2);
+        assert_eq!(segment_plan(3600.0, 9).len(), MAX_SEGMENTS);
+    }
+
+    #[test]
+    fn segment_plan_boundaries_sit_on_half_second_grid_with_half_second_context() {
+        let plan = segment_plan(300.0, 3);
+        assert_eq!(
+            plan,
+            vec![
+                Segment { start: 0.0, seek: 0.0, end: Some(75.0) },
+                Segment { start: 75.0, seek: 74.5, end: Some(150.0) },
+                Segment { start: 150.0, seek: 149.5, end: Some(225.0) },
+                Segment { start: 225.0, seek: 224.5, end: None },
+            ]
+        );
+        assert_eq!(plan[1].length(), Some(75.5));
+        assert_eq!(plan[3].length(), None);
+        // 不整除时段界仍落在 0.5 s 格点上。
+        for segment in segment_plan(299.0, 2) {
+            assert_eq!((segment.start * 2.0).fract(), 0.0, "{segment:?}");
+        }
+    }
+
+    #[test]
+    fn segment_args_seek_before_input_and_carry_only_the_video_filter() {
+        let args = analysis_segment_args(Path::new("/x.mp4"), 0.25, true, 74.5, Some(75.5), None);
+        let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.starts_with("-hide_banner -nostdin -hwaccel videotoolbox -ss 74.500 -t 75.500 -i /x.mp4"), "{joined}");
+        assert!(joined.contains("[stats_src]fps=2,signalstats"));
+        assert!(!joined.contains("[0:a:0]"), "分段进程不碰音频");
+        assert!(!joined.contains("-vn"));
+        let last = analysis_segment_args(Path::new("/x.mp4"), 0.25, false, 224.5, None, None);
+        let joined = last.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.starts_with("-hide_banner -nostdin -ss 224.500 -i /x.mp4"), "{joined}");
+        assert!(!joined.contains(" -t "), "最后一段解到片尾");
+        let audio = analysis_audio_args(Path::new("/x.mp4"));
+        let joined = audio.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("[0:a:0]asplit=2[a_all][a_win]"));
+        assert!(!joined.contains("[0:v:0]"));
+        assert!(!joined.contains("-hwaccel"));
+    }
+
+    #[test]
+    fn rebase_segment_log_shifts_timestamps_and_trims_context_and_overrun() {
+        // 第二段:负责 [75, 150),实际从 74.5 解起;日志里的时间从 0 计。
+        let segment = Segment { start: 75.0, seek: 74.5, end: Some(150.0) };
+        let log = "\
+[Parsed_metadata_11 @ 0x1] frame:0    pts:0       pts_time:0
+[Parsed_metadata_11 @ 0x1] lavfi.signalstats.YAVG=1
+[Parsed_metadata_11 @ 0x1] frame:1    pts:1       pts_time:0.5
+[Parsed_metadata_11 @ 0x1] lavfi.signalstats.YAVG=2
+[Parsed_showinfo_5 @ 0x2] n:   0 pts:      0 pts_time:0       duration:      1
+[Parsed_showinfo_5 @ 0x2] n:   7 pts:      7 pts_time:0.7     duration:      1
+[Parsed_metadata_11 @ 0x1] frame:150  pts:150     pts_time:75
+[Parsed_metadata_11 @ 0x1] lavfi.signalstats.YAVG=3
+[Parsed_metadata_11 @ 0x1] frame:151  pts:151     pts_time:75.5
+[Parsed_metadata_11 @ 0x1] lavfi.signalstats.YAVG=4
+frame=  151 fps=0.0 q=-0.0 size=N/A
+";
+        let rebased = rebase_segment_log(log, segment);
+        let yavg = values_after(&rebased, "lavfi.signalstats.YAVG=");
+        assert_eq!(yavg, vec![2.0, 3.0], "74.5 是上下文、150 越界,留下 75.0 与 149.5 两窗");
+        assert!(rebased.contains("frame:1    pts:1       pts_time:75"), "{rebased}");
+        assert!(rebased.contains("frame:150  pts:150     pts_time:149.5"), "{rebased}");
+        assert!(!rebased.contains("pts_time:0.5"));
+        assert!(!rebased.contains("pts_time:150"));
+        // showinfo:上下文里的 n:0 被裁掉,75.2 s 的切点保留并换算成绝对时间。
+        assert!(!rebased.contains("n:   0"), "{rebased}");
+        assert!(rebased.contains("n:   7 pts:      7 pts_time:75.2"), "{rebased}");
+        assert_eq!(scene_cuts_from_log(&rebased, 1, 10), vec![752]);
+        // 与解析无关的进度行原样保留。
+        assert!(rebased.contains("frame=  151 fps=0.0"));
+        // 最后一段没有上界。
+        let tail = rebase_segment_log(log, Segment { start: 75.0, seek: 74.5, end: None });
+        assert_eq!(values_after(&tail, "lavfi.signalstats.YAVG="), vec![2.0, 3.0, 4.0]);
+    }
+
+    /// 真 ffmpeg:2 分钟合成素材(有硬切、有运动、有音频),定死 1 段与 3 段各跑一遍,
+    /// 统计量、场景切点与时刻窗口必须一致——分段只是解码方式,不是另一种分析。
+    #[test]
+    fn segmented_analysis_matches_the_single_pass_on_a_two_minute_fixture() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let path = directory.path().join("two-minutes.mp4");
+        if !generate_fixture(
+            &path,
+            &[
+                "-f", "lavfi", "-i", "testsrc2=s=320x180:r=10:d=50",
+                "-f", "lavfi", "-i", "color=c=white:s=320x180:r=10:d=20",
+                "-f", "lavfi", "-i", "testsrc=s=320x180:r=10:d=55",
+                "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:d=125",
+                "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+                "-map", "[v]", "-map", "3:a", "-t", "125",
+                "-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac",
+            ],
+        ) {
+            eprintln!("skipping two-minute fixture: encoder unavailable");
+            return;
+        }
+        let source = fixture_source(&path);
+        let duration_seconds = ticks_to_seconds(source.duration_ticks, source.tb_num, source.tb_den).unwrap();
+        assert!(duration_seconds >= 120.0, "夹具至少两分钟,实际 {duration_seconds}");
+        let has_audio = probe_has_audio(&path, &ffprobe).unwrap();
+        assert!(has_audio);
+
+        let (single_log, single_segments) =
+            run_analysis_pass(&ffmpeg, &path, duration_seconds, SCENE_THRESHOLD, has_audio, Some(1), None).unwrap();
+        let (split_log, split_segments) =
+            run_analysis_pass(&ffmpeg, &path, duration_seconds, SCENE_THRESHOLD, has_audio, Some(3), None).unwrap();
+        assert_eq!(single_segments, 1);
+        assert_eq!(split_segments, 3);
+
+        let single = parse_signal_log(&single_log, has_audio, source.tb_num, source.tb_den).unwrap();
+        let split = parse_signal_log(&split_log, has_audio, source.tb_num, source.tb_den).unwrap();
+        assert_eq!(split.scene_cuts, single.scene_cuts, "场景切点必须逐个一致");
+        // blurdetect 在没有边缘的帧上给 NaN,NaN != NaN,按位比较。
+        let same_series = |marker: &str| {
+            let left = values_after(&split_log, marker);
+            let right = values_after(&single_log, marker);
+            assert_eq!(left.len(), right.len(), "{marker} 样本数");
+            for (index, (l, r)) in left.iter().zip(right.iter()).enumerate() {
+                assert!(l.to_bits() == r.to_bits() || (l - r).abs() < 1e-9, "{marker}[{index}]: {l} vs {r}");
+            }
+        };
+        same_series("lavfi.signalstats.YAVG=");
+        same_series("lavfi.blur=");
+        same_series("lavfi.vmafmotion.score=");
+        for (name, left, right) in [
+            ("exposure_yavg", split.exposure_yavg, single.exposure_yavg),
+            ("overexposed_ratio", split.overexposed_ratio, single.overexposed_ratio),
+            ("underexposed_ratio", split.underexposed_ratio, single.underexposed_ratio),
+            ("dynamic_range", split.dynamic_range, single.dynamic_range),
+            ("blur_mean", split.blur_mean, single.blur_mean),
+            ("entropy_mean", split.entropy_mean, single.entropy_mean),
+            ("motion_mean", split.motion_mean, single.motion_mean),
+            ("out_of_focus_ratio", split.out_of_focus_ratio, single.out_of_focus_ratio),
+        ] {
+            assert!((left - right).abs() < 1e-9, "{name}: 分段 {left} vs 单进程 {right}");
+        }
+        assert_eq!(split.audio_peak_db, single.audio_peak_db);
+        assert_eq!(split.audio_clipped, single.audio_clipped);
+
+        let single_windows = super::super::moments::WindowSignals::parse(&single_log);
+        let split_windows = super::super::moments::WindowSignals::parse(&split_log);
+        assert_eq!(split_windows.video.len(), single_windows.video.len());
+        assert_eq!(split_windows.audio.len(), single_windows.audio.len());
+        for (left, right) in split_windows.video.iter().zip(single_windows.video.iter()) {
+            assert!((left.t_secs - right.t_secs).abs() < 1e-6, "{} vs {}", left.t_secs, right.t_secs);
+            assert_eq!(left.yavg, right.yavg);
+            assert_eq!(left.motion, right.motion);
+        }
+    }
+
+    #[test]
+    fn motion_branch_is_only_added_when_a_handoff_path_is_given() {
+        let plain = analysis_args(Path::new("/x.mp4"), 0.25, false, true, None);
+        let joined = plain.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(!joined.contains("motion_out") && !joined.contains("rawvideo"));
+
+        let with = analysis_args(Path::new("/x.mp4"), 0.25, true, true, Some(Path::new("/c/1/motion-frames.part0.tmp")));
+        let joined = with.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        let filter = with.iter().position(|a| a == "-filter_complex").map(|i| with[i + 1].to_string_lossy().into_owned()).unwrap();
+        // 运镜链挂在解码后、缩放前的原始流上,与运镜任务自己的 `-vf` 一字不差。
+        assert!(filter.starts_with("[0:v:0]split=2[l1_src][motion_src];[l1_src]fps=10,scale=640:-2,format=yuv420p,split=2[scene_src][stats_src]"), "{filter}");
+        assert!(filter.contains(&format!("[motion_src]{}[motion_out]", super::super::motion::gray_frame_filter())), "{filter}");
+        assert!(joined.ends_with("-map [motion_out] -an -pix_fmt gray -f rawvideo -y /c/1/motion-frames.part0.tmp"), "{joined}");
+        assert!(!joined.contains("-frames:v"), "单进程不限帧数");
+
+        let segment = analysis_segment_args(Path::new("/x.mp4"), 0.25, true, 74.5, Some(75.5), Some((Path::new("/c/1/p1.tmp"), Some(152))));
+        let joined = segment.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert!(joined.ends_with("-map [motion_out] -frames:v 152 -an -pix_fmt gray -f rawvideo -y /c/1/p1.tmp"), "{joined}");
+        assert_eq!(Segment { start: 75.0, seek: 74.5, end: Some(150.0) }.motion_frames(), (1, Some(150)));
+        assert_eq!(Segment { start: 0.0, seek: 0.0, end: Some(75.0) }.motion_frames(), (0, Some(150)));
+        assert_eq!(Segment { start: 225.0, seek: 224.5, end: None }.motion_frames(), (1, None));
+    }
+
+    /// 真 ffmpeg:分段 / 单进程两种跑法交接出来的采样帧,都与运镜任务自己解码得到的
+    /// 逐字节相同——所以运镜结果不会因为省掉一次解码而变。
+    #[test]
+    fn handed_off_motion_frames_match_the_motion_jobs_own_decode() {
+        let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
+        let directory = TestDirectory::new();
+        let path = directory.path().join("pan-two-minutes.mp4");
+        if !generate_fixture(
+            &path,
+            &[
+                "-f", "lavfi", "-i",
+                "nullsrc=size=360x280:rate=10:duration=125,geq=lum='mod(X*19+Y*37+X*Y,220)+16':cb=128:cr=128,crop=240:180:x='60+mod(n,60)':y=50",
+                "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p", "-an",
+            ],
+        ) {
+            eprintln!("skipping handoff fixture: encoder unavailable");
+            return;
+        }
+        let expected = super::super::motion::extract_gray_frames(&path, &ffmpeg).unwrap().concat();
+        let source = fixture_source(&path);
+        let duration_seconds = ticks_to_seconds(source.duration_ticks, source.tb_num, source.tb_den).unwrap();
+        for (label, forced) in [("单进程", 1), ("三段", 3)] {
+            let cache_root = directory.path().join(format!("cache-{forced}"));
+            let handoff = MotionHandoff { cache_root: cache_root.clone(), clip_id: 5, quick_hash: "qh".into() };
+            let (_, segments) =
+                run_analysis_pass(&ffmpeg, &path, duration_seconds, SCENE_THRESHOLD, false, Some(forced), Some(&handoff)).unwrap();
+            assert_eq!(segments, forced);
+            let (frames_path, meta_path) = super::super::motion::handoff_paths(&cache_root, 5);
+            assert!(meta_path.exists(), "{label}:交接说明缺失");
+            let actual = std::fs::read(&frames_path).unwrap();
+            assert_eq!(actual.len(), expected.len(), "{label}:帧数 {} vs {}", actual.len() / 25600, expected.len() / 25600);
+            assert!(actual == expected, "{label}:采样帧与运镜任务自己解码的不一致");
+            // 分段临时文件清干净。
+            assert!(!cache_root.join("5").join("motion-frames.part0.tmp").exists());
+        }
+        let _ = ffprobe;
     }
 
     #[test]
@@ -1384,8 +2029,8 @@ lavfi.signalstats.YMAX=255
             "-f", "lavfi", "-i", "color=c=black:s=64x64:r=2:d=1",
         ]));
         let bogus_path = directory.path().join("does-not-exist.mp4");
-        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true);
-        let software_args = analysis_args(&good_path, SCENE_THRESHOLD, false, false);
+        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true, None);
+        let software_args = analysis_args(&good_path, SCENE_THRESHOLD, false, false, None);
 
         let log = run_analysis_ffmpeg_with_args(&ffmpeg, &good_path, &hardware_args, &software_args)
             .expect("software fallback must succeed after the deliberately-broken hardware attempt");
@@ -1400,8 +2045,8 @@ lavfi.signalstats.YMAX=255
         let Some((ffmpeg, _)) = ffmpeg_tools() else { return; };
         let directory = TestDirectory::new();
         let bogus_path = directory.path().join("does-not-exist.mp4");
-        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true);
-        let software_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, false);
+        let hardware_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, true, None);
+        let software_args = analysis_args(&bogus_path, SCENE_THRESHOLD, false, false, None);
 
         let error =
             run_analysis_ffmpeg_with_args(&ffmpeg, &bogus_path, &hardware_args, &software_args)
@@ -1822,7 +2467,7 @@ mod moments_fixture_tests {
         assert!(synthetic_clip(&ffmpeg, &path), "合成素材生成失败");
         let metadata = crate::core::import::probe_media(&path).unwrap();
         let (windows, cuts, has_audio) =
-            scan_windows(&path, metadata.tb_num, metadata.tb_den, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+            scan_windows(&path, metadata.tb_num, metadata.tb_den, metadata.duration_ticks, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
         assert!(has_audio);
         assert!(windows.video.len() >= 22 && windows.video.len() <= 25, "0.5 s 一窗:{}", windows.video.len());
         assert!(windows.audio.len() >= 22, "声音窗口:{}", windows.audio.len());
@@ -1866,7 +2511,7 @@ mod moments_fixture_tests {
         let metadata = crate::core::import::probe_media(&path).unwrap();
         let started = Instant::now();
         let (windows, cuts, has_audio) =
-            scan_windows(&path, metadata.tb_num, metadata.tb_den, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+            scan_windows(&path, metadata.tb_num, metadata.tb_den, metadata.duration_ticks, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
         let cuts = normalized_scene_cuts(&cuts, metadata.duration_ticks);
         let source = MomentSource {
             clip_id: 0,

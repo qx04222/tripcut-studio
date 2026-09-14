@@ -80,7 +80,8 @@ describe("HomeScreen", () => {
     pinHome(true);
     render(<HomeScreen />);
     const list = await screen.findByRole("list", { name: "最近的集" });
-    const cards = within(list).getAllByRole("button");
+    // R15:每张卡旁边多了「集操作 · <标题>」按钮,这里只取卡片本身。
+    const cards = within(list).getAllByRole("button").filter((button) => button.classList.contains("home-episode-card"));
     expect(cards[0].textContent).toContain("EP01 大理");
     expect(cards[0].textContent).toContain("进行中");
     expect(cards[1].textContent).toContain("EP00 试拍");

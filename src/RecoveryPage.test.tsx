@@ -30,8 +30,19 @@ describe("P5-F2 startup recovery page", () => {
 
     expect(markup).toContain("从快照恢复");
     expect(markup).toContain("导出决策数据");
-    expect(markup).toContain("重建缓存");
+    // R15:「重建缓存」改名「清理缓存并重新分析」,并加「重置项目库」(与设置页同名同文案)。
+    expect(markup).toContain("清理缓存并重新分析");
+    expect(markup).toContain("重置项目库");
+    expect(markup).toContain("原片不会被删");
     expect(markup).toContain("打开日志目录");
+  });
+
+  it("R15:「重置项目库」没打「确认」两个字时是禁用的", () => {
+    const markup = renderToStaticMarkup(
+      <RecoveryPage report={report} onContinue={() => undefined} onReport={() => undefined} />,
+    );
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>(?:<[^>]+>|<\/[^>]+>)*重置项目库<\/span><\/button>/);
+    expect(markup).toContain('aria-label="重置确认"');
   });
 
   it("blocks entering the workbench while doctor status is FAIL", () => {

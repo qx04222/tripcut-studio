@@ -731,13 +731,49 @@ fn strip_args(
     manual_rotation: Option<i64>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("-hide_banner"), OsString::from("-loglevel"), OsString::from("error")];
+    let rotate_prefix = rotation_prefix_filter(manual_rotation).unwrap_or("");
+    if keyframes_only {
+        // R15-perf:长素材不再 `-skip_frame nokey` 从头扫到尾(5 分钟 4K 要解封装 2 GB、解
+        // 750 个关键帧,6.8 s),改成每格一个输入各自 `-ss` 直接跳到该格时刻、只解它前面
+        // 最近的那个关键帧(`-noaccurate_seek` 保留 seek 落点的关键帧,与 fps 滤镜「取
+        // 格点前最后一帧」语义一致),再 hstack 拼条:0.8 s。故意用软解——单个 I 帧软解
+        // 几十毫秒,而 N 个输入各开一个 VideoToolbox 会话是 N 份 4K 解码器内存。
+        let _ = hardware_decode;
+        let mut filter = String::new();
+        let mut labels = String::new();
+        for index in 0..frame_count.max(1) {
+            let seek = index as f64 * duration_seconds / frame_count.max(1) as f64;
+            args.extend([
+                OsString::from("-noaccurate_seek"),
+                OsString::from("-ss"),
+                OsString::from(format!("{seek:.6}")),
+                OsString::from("-skip_frame"),
+                OsString::from("nokey"),
+                OsString::from("-i"),
+                source.as_os_str().to_owned(),
+            ]);
+            filter.push_str(&format!("[{index}:v:0]{rotate_prefix}scale=160:-2[s{index}];"));
+            labels.push_str(&format!("[s{index}]"));
+        }
+        if frame_count > 1 {
+            filter.push_str(&format!("{labels}hstack=inputs={frame_count}[strip]"));
+        } else {
+            filter.push_str("[s0]copy[strip]");
+        }
+        args.extend([
+            OsString::from("-filter_complex"), OsString::from(filter),
+            OsString::from("-map"), OsString::from("[strip]"),
+            OsString::from("-frames:v"), OsString::from("1"),
+            OsString::from("-c:v"), OsString::from("mjpeg"),
+            OsString::from("-q:v"), OsString::from("4"),
+            OsString::from("-f"), OsString::from("image2"),
+            OsString::from("-y"), output.as_os_str().to_owned(),
+        ]);
+        return args;
+    }
     if hardware_decode {
         args.extend(hardware_decode_prefix());
     }
-    if keyframes_only {
-        args.extend([OsString::from("-skip_frame"), OsString::from("nokey")]);
-    }
-    let rotate_prefix = rotation_prefix_filter(manual_rotation).unwrap_or("");
     let strip_filter = format!(
         "fps={frame_count}/{duration_seconds:.6},{rotate_prefix}scale=160:-2,tile={frame_count}x1:padding=0:margin=0"
     );
@@ -2190,7 +2226,65 @@ mod tests {
         let j = |v: &Vec<OsString>| v.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(j(&short).contains("-hwaccel videotoolbox"));
         assert!(!j(&short).contains("-skip_frame"));
+        assert!(j(&short).contains("fps=6/30.000000,scale=160:-2,tile=6x1"));
+        // R15-perf:长素材每格一个输入各自 seek 到格点、只解最近的关键帧,软解(见 strip_args 注释)。
         assert!(j(&long).contains("-skip_frame nokey"));
+        assert!(!j(&long).contains("-hwaccel"), "{}", j(&long));
+        assert_eq!(long.iter().filter(|a| *a == "-i").count(), 12);
+        assert!(j(&long).contains("-noaccurate_seek -ss 0.000000 -skip_frame nokey -i /x.mp4"));
+        assert!(j(&long).contains("-noaccurate_seek -ss 25.000000 -skip_frame nokey -i /x.mp4"));
+        assert!(j(&long).contains("-noaccurate_seek -ss 275.000000 -skip_frame nokey -i /x.mp4"));
+        assert!(!j(&long).contains("-ss 300.000000"), "格点是 k×duration/N,不含片尾");
+        assert!(j(&long).contains("[11:v:0]scale=160:-2[s11];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11]hstack=inputs=12[strip]"), "{}", j(&long));
+        assert!(j(&long).contains("-map [strip] -frames:v 1 -c:v mjpeg -q:v 4 -f image2 -y /tmp/s.jpg"));
+        assert!(!j(&long).contains("tile="));
+    }
+
+    #[test]
+    fn keyframe_seek_strip_rotates_every_cell_before_scaling() {
+        let args = strip_args(Path::new("/x.mp4"), 300.0, 12, Path::new("/tmp/s.jpg"), true, true, Some(90));
+        let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        assert_eq!(joined.matches("transpose=1,scale=160:-2").count(), 12, "{joined}");
+        let plain = strip_args(Path::new("/x.mp4"), 300.0, 12, Path::new("/tmp/s.jpg"), true, true, None);
+        assert!(!plain.iter().any(|a| a.to_string_lossy().contains("transpose")));
+    }
+
+    /// 真 ffmpeg:关键帧 seek 拼出来的胶片条与 fps 滤镜整段扫出来的尺寸一致(12 格 × 160 宽)。
+    #[test]
+    fn keyframe_seek_strip_produces_the_same_geometry_as_the_full_scan() {
+        let ffmpeg = test_ffmpeg();
+        if Command::new(&ffmpeg).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| !s.success()).unwrap_or(true) {
+            return;
+        }
+        let directory = TestDirectory::new();
+        let source = directory.path().join("long.mp4");
+        let generated = Command::new(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=10:d=65", "-g", "10", "-c:v", "mpeg4", "-q:v", "4"])
+            .arg(&source)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !generated {
+            return;
+        }
+        let seek_out = directory.path().join("seek.jpg");
+        let scan_out = directory.path().join("scan.jpg");
+        for (keyframes_only, out) in [(true, &seek_out), (false, &scan_out)] {
+            let args = strip_args(&source, 65.0, 12, out, false, keyframes_only, None);
+            let status = Command::new(&ffmpeg).args(&args).stdin(Stdio::null()).status().unwrap();
+            assert!(status.success(), "keyframes_only={keyframes_only}");
+        }
+        let connection = Connection::open_in_memory().unwrap();
+        let ffprobe = super::super::settings::configured_ffprobe(&connection, &ffmpeg).unwrap();
+        let size = |path: &Path| {
+            let output = Command::new(&ffprobe)
+                .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        assert_eq!(size(&seek_out), "1920,90");
+        assert_eq!(size(&seek_out), size(&scan_out));
     }
 
     #[test]

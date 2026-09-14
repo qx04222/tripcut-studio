@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
 
-import { createEpisode, listEpisodes, setSetting, type EpisodeSummary } from "../api";
+import { createEpisode, deleteEpisode, listEpisodes, setSetting, type EpisodeSummary } from "../api";
 import { episodeErrorMessage } from "../EpisodePanel";
+import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
 import { EpisodeCard, TemplateCard } from "./HomeCards";
 import { HOME_TEMPLATES, TEMPLATE_PRESELECT_KEY, episodeProgress, recentEpisodes, templateEpisodeTitle, type HomeTemplate } from "./homeModel";
 import { pinHome } from "./homeStore";
 import { ONBOARDING_STEPS } from "./onboarding";
-import { Button, Icon } from "./ui";
+import { Button, Icon, Menu } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 import { usePipeline } from "./usePipeline";
 import { useOccludesPlayer } from "./usePlayerOcclusion";
@@ -28,6 +29,9 @@ export function HomeScreen(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingTemplate, setPendingTemplate] = useState<HomeTemplate | null>(null);
+  // R15:集卡片「···」菜单与「删除这一集」确认。
+  const [menu, setMenu] = useState<{ episode: EpisodeSummary; x: number; y: number } | null>(null);
+  const [deleting, setDeleting] = useState<EpisodeSummary | null>(null);
 
   const refresh = useCallback(() => {
     void listEpisodes()
@@ -86,6 +90,28 @@ export function HomeScreen(): JSX.Element {
     void createFromTemplate(template);
   };
 
+  // R15:删一集。删完后端告诉我们哪一集在进行中;派发 tripcut:episode-changed 让媒体池 /
+  // 镜头带换范围(首页自己也听这个事件刷新卡片)。首页留在原地 —— 删错的集后下一步还是从这里开始。
+  const removeEpisode = async (episode: EpisodeSummary) => {
+    setBusy(true);
+    try {
+      const outcome = await deleteEpisode(episode.id);
+      setDeleting(null);
+      setNotice(
+        outcome.created_fresh
+          ? `已删除「${outcome.deleted.title}」,新开了空集「${outcome.active.title}」;原片没有动。`
+          : `已删除「${outcome.deleted.title}」;现在在「${outcome.active.title}」;原片没有动。`,
+      );
+      window.dispatchEvent(
+        new CustomEvent("tripcut:episode-changed", { detail: { id: outcome.active.id, title: outcome.active.title } }),
+      );
+    } catch (error) {
+      setNotice(episodeErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const recent = recentEpisodes(episodes);
   const activeCover = feed.clips.find((clip) => clip.cover_url)?.cover_url ?? null;
 
@@ -130,9 +156,34 @@ export function HomeScreen(): JSX.Element {
                   done={episodeProgress(episode, episode.status === "active" ? pipeline.done : null)}
                   coverUrl={episode.status === "active" ? activeCover : null}
                   onOpen={openEpisode}
+                  onMore={(target, anchor) => setMenu({ episode: target, ...anchor })}
                 />
               ))}
             </ul>
+            {deleting ? (
+              <EpisodeDeleteConfirm
+                episode={deleting}
+                busy={busy}
+                consequence={episodeDeleteConsequence(deleting, episodes)}
+                onConfirm={() => void removeEpisode(deleting)}
+                onCancel={() => setDeleting(null)}
+              />
+            ) : null}
+            {menu ? (
+              <Menu
+                items={[{ id: "delete", label: "删除这一集", ariaLabel: "删除这一集" }]}
+                x={menu.x}
+                y={menu.y}
+                ariaLabel={`集操作 · ${menu.episode.title}`}
+                onSelect={(id) => {
+                  if (id === "delete") {
+                    setDeleting(menu.episode);
+                    setNotice(null);
+                  }
+                }}
+                onClose={() => setMenu(null)}
+              />
+            ) : null}
           </div>
         ) : null}
 
