@@ -6,35 +6,36 @@
 
 <p align="center"><strong>把一整天的旅途素材，收束成一条可以开始剪的故事。</strong></p>
 
-<p align="center"><strong>v0.8.3：像剪映一样上手的旅拍精选工作台，自己更新</strong> —— 四步流水线：导入 → 挑选 → 排列 → 导出，顶栏永远告诉你下一步点哪里，键位与设置都按剪映的习惯来。</p>
+<p align="center"><strong>v0.8.4：像剪映一样上手的旅拍精选工作台，自己更新</strong> —— 四步流水线：导入 → 挑选 → 排列 → 导出，顶栏永远告诉你下一步点哪里，键位与设置都按剪映的习惯来。</p>
 
 <p align="center">
-  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.8.3">下载 v0.8.3</a>
+  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.8.4">下载 v0.8.4</a>
   · <a href="docs/USER_GUIDE.md">用户指南</a>
-  · <a href="docs/releases/v0.8.3.md">版本说明</a>
+  · <a href="docs/releases/v0.8.4.md">版本说明</a>
   · <a href="docs/design/design-system.md">设计系统</a>
   · <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img alt="Release v0.8.3" src="https://img.shields.io/badge/preview-v0.8.3-f4a261?style=flat-square">
+  <img alt="Release v0.8.4" src="https://img.shields.io/badge/preview-v0.8.4-f4a261?style=flat-square">
   <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=flat-square&amp;logo=apple">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-offline-2a9d8f?style=flat-square">
   <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-3b82f6?style=flat-square">
 </p>
 
 > [!IMPORTANT]
-> v0.8.3 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试；首次启动如遇 Gatekeeper 拦截，右键点击应用图标选择「打开」即可。
+> v0.8.4 是面向测试者的 Apple Silicon 未签名预览版，使用 ad-hoc 签名，尚未经过 Apple Developer ID 签名与公证。请从本仓库 Release 下载、核对 SHA-256，并使用有独立备份的素材测试；首次启动如遇 Gatekeeper 拦截，右键点击应用图标选择「打开」即可。
 >
-> 本版 DMG：[`TripCut-Studio_0.8.3_github-preview-v0.8.3-20260914T2204Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.8.3/TripCut-Studio_0.8.3_github-preview-v0.8.3-20260914T2204Z_preview_aarch64.dmg)，SHA-256 `f04d0dd2d9a18c0c5eebc124b6c1b89cb31901070e67b71a0b34c699d1823258`。
+> 本版 DMG：[`TripCut-Studio_0.8.4_github-preview-v0.8.4-20260914T2314Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.8.4/TripCut-Studio_0.8.4_github-preview-v0.8.4-20260914T2314Z_preview_aarch64.dmg)，SHA-256 `a78821b6a74a6b6b400fad47b50379ec9baeb8fe663572db0a37b5ee99338caa`。
 >
 > **本版把散落的功能收成一条四步流水线，键位、设置与引导都向剪映对齐，并给出两条把片段交给剪映的路**；已安装 v0.3.0 / v0.5.0 的用户可直接在「设置 → 关于 → 检查更新」应用内升级到本版（0.6.0 未对外发布，本版一并包含它的全部改动）。
 >
+> **0.8.4**：4K HEVC 等大素材导出不再因「命令超过 30 秒」的核对超时被当成失败（时限按片段长度放大；核对超时只打黄标，文件照样导出）。
 > **0.8.3**：更新下载完成后界面不再冻住（替换改在「重启完成更新」或退出时做）。**正在用 0.8.1 / 0.8.2 的：收到这次更新后界面可能卡住一次，退出再打开即是新版本。**
 > **0.8.2**：修好「剪映素材包 / 导出片段」在别的电脑上全部失败的问题（导出改用软件自带的 ffmpeg，并自动回退编码），修好切下一条素材从上一条停住位置起播的问题；顶栏齿轮旁新增「新版本」提醒。
 > **0.8.1**：默认开启自动更新——启动后自动检查、后台静默下载、下载好只提醒一次「重启完成更新」，以后不用再手动下载 DMG。
 > **0.8.0**：该有的按钮都有了（删除／改名／移出／取消任务／找回缺失素材…都在界面上），支持 macOS 14+ 与 8 GB 低配机，分析更快。
-> 完整说明见 [v0.8.3](docs/releases/v0.8.3.md) / [v0.8.2](docs/releases/v0.8.2.md) / [v0.8.1](docs/releases/v0.8.1.md) / [v0.8.0](docs/releases/v0.8.0.md) 更新说明。
+> 完整说明见 [v0.8.4](docs/releases/v0.8.4.md) / [v0.8.3](docs/releases/v0.8.3.md) / [v0.8.2](docs/releases/v0.8.2.md) / [v0.8.1](docs/releases/v0.8.1.md) / [v0.8.0](docs/releases/v0.8.0.md) 更新说明。
 
 ## 它解决的不是剪辑，而是剪辑前的混乱
 
@@ -279,8 +280,8 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 
 ## 下载与第一次使用
 
-1. 前往 [v0.8.3 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.8.3)，下载 [`TripCut-Studio_0.8.3_github-preview-v0.8.3-20260914T2204Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.8.3/TripCut-Studio_0.8.3_github-preview-v0.8.3-20260914T2204Z_preview_aarch64.dmg)；
-2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256 为 `f04d0dd2d9a18c0c5eebc124b6c1b89cb31901070e67b71a0b34c699d1823258`；
+1. 前往 [v0.8.4 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.8.4)，下载 [`TripCut-Studio_0.8.4_github-preview-v0.8.4-20260914T2314Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.8.4/TripCut-Studio_0.8.4_github-preview-v0.8.4-20260914T2314Z_preview_aarch64.dmg)；
+2. 同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256 为 `a78821b6a74a6b6b400fad47b50379ec9baeb8fe663572db0a37b5ee99338caa`；
 3. 打开 DMG，把“旅剪工作台”拖入 Applications；
 4. 本版为 ad-hoc 签名、未公证：首次启动 Gatekeeper 会拦截，右键点击应用图标选择「打开」（或在“系统设置 → 隐私与安全性”中确认“仍要打开”）；
 5. 第一次打开会看到首页，点「开始一个新旅程」，顶栏四步导航与「下一步：…」按钮会带你走完「导入 → 挑选 → 排列 → 导出」；按[用户指南](docs/USER_GUIDE.md)用一份有备份的短素材走一遍，最后试试「导入剪映继续剪」或「剪映素材包」。

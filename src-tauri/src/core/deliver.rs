@@ -21,6 +21,13 @@ use super::platform;
 
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 回读 / 指纹探测要真解码素材(ffprobe 没有硬解),4K HEVC 10-bit 软解只有几 fps;
+/// 固定 30 s 会把导出正确的文件当失败扔掉(业主 2026-09-14 DJI 素材 9/11 条「命令超过 30 秒」)。
+/// 按要解码的媒体时长放大:每秒媒体给 8 s,下限 60 s,上限 15 分钟。
+fn probe_timeout(media_seconds: f64) -> Duration {
+    let scaled = 60.0 + media_seconds.max(0.0) * 8.0;
+    Duration::from_secs_f64(scaled.min(15.0 * 60.0))
+}
 /// 集标题为空 / 全是非法字符时的兜底集名(R10 U-20)。
 const PROJECT_NAME: &str = "旅剪项目";
 /// 交付包文件夹:`<集名>_交付_<YYYY-MM-DD>`(R10 U-20;旧名「旅剪项目_剪映交付_日期」退役)。
@@ -2353,8 +2360,28 @@ fn export_clip(
         }
     }
     let fallback_note = transcode_select_segment(ffmpeg, clip, output_path, cancellation)?;
-    let pts_note = verify_segment_pts(ffmpeg, ffprobe, clip, output_path, cancellation)?;
+    let pts_note = verify_or_warn(
+        verify_segment_pts(ffmpeg, ffprobe, clip, output_path, cancellation),
+        cancellation,
+    )?;
     Ok(join_notes(fallback_note, pts_note))
+}
+
+/// 转码本身成功后,回读核对若只是**超时**(不是核对不过),文件保留、结果记一句黄标——
+/// 核对是给转码把关的,不能因为核对跑得慢就把正确的导出当失败。核对不过 / 取消照旧报错。
+fn verify_or_warn(
+    verified: Result<Option<String>>,
+    cancellation: &AtomicBool,
+) -> Result<Option<String>> {
+    match verified {
+        Err(CoreError::Export(message))
+            if !cancellation.load(Ordering::SeqCst) && message.contains("秒未完成") =>
+        {
+            tracing::warn!(%message, "segment verification timed out; keeping exported file with a warning");
+            Ok(Some("边界核对超时,未能逐帧核对;文件已导出".to_owned()))
+        }
+        other => other,
+    }
 }
 
 /// 入点是否正好是源片的一个关键帧:`-skip_frame nokey` 只解关键帧,区间从入点前一点读到
@@ -2742,8 +2769,13 @@ fn probe_source_tick_bounds(
         OsString::from("json"),
         OsString::from(&clip.source_path),
     ];
-    let source_output = execute_with_cancel(ffprobe, &source_args, TOOL_TIMEOUT, cancellation)
-        .map_err(command_io_error)?;
+    let source_output = execute_with_cancel(
+        ffprobe,
+        &source_args,
+        probe_timeout(probe_end - probe_start),
+        cancellation,
+    )
+    .map_err(command_io_error)?;
     if !source_output.success {
         return Err(command_failure("ffprobe 源片 PTS 边界回读", ffprobe, &source_output));
     }
@@ -2936,8 +2968,13 @@ fn probe_boundary_fingerprint(
         OsString::from("rawvideo"),
         OsString::from("pipe:1"),
     ];
-    let output = execute_with_cancel(ffmpeg, &args, TOOL_TIMEOUT, cancellation)
-        .map_err(command_io_error)?;
+    let output = execute_with_cancel(
+        ffmpeg,
+        &args,
+        probe_timeout(SOURCE_PROBE_ROLLBACK_SECONDS + at_seconds.min(SOURCE_PROBE_ROLLBACK_SECONDS)),
+        cancellation,
+    )
+    .map_err(command_io_error)?;
     if !output.success {
         return Err(command_failure(&format!("{label}内容指纹提取"), ffmpeg, &output));
     }
@@ -3524,6 +3561,9 @@ fn read_pipe<R: Read>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
 fn command_io_error(error: CommandError) -> CoreError {
     match error {
         CommandError::Cancelled => CoreError::Export("用户已取消；半成品已清理".to_owned()),
+        CommandError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            CoreError::Export(format!("媒体工具{error}（素材太大或电脑太忙）"))
+        }
         CommandError::Io(error) => CoreError::Export(format!(
             "找不到或无法运行媒体工具（可设置 FFMPEG_PATH/FFPROBE_PATH）：{error}"
         )),
@@ -4407,6 +4447,40 @@ fn serialize_payload(payload: &ExportJobPayload) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_timeout_scales_with_media_length_and_is_bounded() {
+        // 业主 2026-09-14:4K HEVC 10-bit 段固定 30 s 回读必超时。
+        assert_eq!(probe_timeout(0.0), Duration::from_secs(60));
+        assert_eq!(probe_timeout(30.0), Duration::from_secs(300));
+        assert_eq!(probe_timeout(10_000.0), Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn verification_timeout_keeps_the_file_with_a_warning_but_real_failures_still_fail() {
+        let cancel = AtomicBool::new(false);
+        let timed_out = Err(CoreError::Export("媒体工具命令超过 60 秒未完成（素材太大或电脑太忙）".to_owned()));
+        let note = verify_or_warn(timed_out, &cancel).unwrap();
+        assert!(note.unwrap().contains("边界核对超时"));
+
+        let mismatch = Err(CoreError::Export("尾帧内容指纹不一致".to_owned()));
+        assert!(verify_or_warn(mismatch, &cancel).is_err(), "核对不过必须仍是失败");
+
+        let cancelled = AtomicBool::new(true);
+        let timed_out = Err(CoreError::Export("媒体工具命令超过 60 秒未完成".to_owned()));
+        assert!(verify_or_warn(timed_out, &cancelled).is_err(), "取消时不伪装成成功");
+    }
+
+    #[test]
+    fn command_io_error_names_timeouts_instead_of_blaming_missing_tools() {
+        let error = command_io_error(CommandError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "命令超过 30 秒未完成",
+        )));
+        let text = format!("{error}");
+        assert!(text.contains("超过 30 秒"), "{text}");
+        assert!(!text.contains("找不到"), "超时不是找不到工具:{text}");
+    }
     use crate::core::{db, test_support::TestDirectory};
 
     fn insert_clip(
