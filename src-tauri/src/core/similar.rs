@@ -14,6 +14,21 @@ use super::sidecar::{EMBEDDING_DIMENSIONS, MODEL_NAME};
 // 待 97 条真机变体素材校准；当前先采用任务卡指定的纯视觉余弦阈值。
 pub const SIM_THRESHOLD: f32 = 0.90;
 
+/// R18 C-3:clip 级均值向量把 ≤12 帧抹成一个点 —— 两条素材只要有**一段**画面是同一个
+/// 机位/地点,均值就会被其余帧稀释掉,归不到一组。有帧级向量时改用**帧与帧的最大余弦**。
+///
+/// 阈值必须比 `SIM_THRESHOLD` 高:帧级最大值是 144 对里取最大,分布天然右移,
+/// 照搬 0.90 会把只是「都有天空」的两条并进同一组。
+/// **这个 0.95 还没有标定**:本机没有本地 Chinese-CLIP 模型目录,侧车起不来,
+/// `qa/ai-eval` 那 20 条检索跑不出数(见 lane-aiscore-report.md「未测量」一节)。
+/// 拿到模型后按 PR 曲线选 F1 最高点替掉它 —— 在那之前这条只**新增**合并、
+/// 且只在均值已经接近阈值的近邻对上生效(见 `FRAME_PREFILTER_MARGIN`),不会推翻旧分组。
+pub const FRAME_SIM_THRESHOLD: f32 = 0.95;
+
+/// 帧级精排的入口闸:均值余弦低于 `SIM_THRESHOLD - 这个余量` 的两条,连近邻都算不上,
+/// 不值得为它们跑 144 次 512 维余弦(全库 O(n²) 已经够贵了)。
+pub const FRAME_PREFILTER_MARGIN: f32 = 0.15;
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SimilarGroup {
     pub id: i64,
@@ -39,6 +54,8 @@ struct EmbeddedClip {
     clip_id: i64,
     source_hash: String,
     embedding: Vec<f32>,
+    /// R18 C-1 落库的帧级向量;空 = 这条还没重嵌过,退回只用均值。
+    frames: Vec<Vec<f32>>,
     primary_rank: PrimaryRank,
 }
 
@@ -221,6 +238,15 @@ pub fn run_similar_cluster(connection: &mut Connection, job: &Job) -> Result<()>
 
 /// C4 视觉近似结果的诊断读取口。P3-D4 起它只供 Shot Stack 聚合使用，
 /// 不再代表 UI 容器，也不能单独决定折叠或淘汰。
+/// R18 B-4 的视觉去重用:clip_id → 它所在的相似组号。不在任何组里的素材不出现。
+/// 只读组表,不重算聚类 —— 自动挑选不该在这条路上等 O(n²)。
+pub fn group_id_by_clip(connection: &Connection) -> Result<BTreeMap<i64, i64>> {
+    let mut statement = connection
+        .prepare("SELECT clip_id, group_id FROM similar_group_members ORDER BY clip_id")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>().map_err(super::error::CoreError::from)
+}
+
 pub fn similar_groups(connection: &Connection) -> Result<Vec<SimilarGroup>> {
     let embedded = load_current_embeddings(connection)?;
     let embedding_by_clip = embedded
@@ -375,6 +401,10 @@ fn load_current_embeddings(connection: &Connection) -> Result<Vec<EmbeddedClip>>
             clip_id,
             source_hash,
             embedding: decode_embedding(&blob)?,
+            frames: super::clip_search::load_frame_embeddings(connection, clip_id)?
+                .into_iter()
+                .map(|(_, vector)| vector)
+                .collect(),
             primary_rank: PrimaryRank {
                 star_rating,
                 l1_badge_count,
@@ -436,13 +466,36 @@ fn embedding_fingerprint(embedded: &[EmbeddedClip]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// 两条素材算不算「同一镜头」。先按均值向量判(老口径,一条都不会少);
+/// 均值已经接近阈值、且两边都有帧级向量时,再用帧与帧的最大余弦补一刀
+/// —— 这就是「同一地点/主体跨素材」那一类新分组的来源。
+fn clips_are_similar(left: &EmbeddedClip, right: &EmbeddedClip) -> bool {
+    let Some(mean) = cosine_similarity(&left.embedding, &right.embedding) else {
+        return false;
+    };
+    if meets_similarity_threshold(mean) {
+        return true;
+    }
+    if left.frames.is_empty() || right.frames.is_empty() {
+        return false;
+    }
+    if mean < SIM_THRESHOLD - FRAME_PREFILTER_MARGIN {
+        return false;
+    }
+    left.frames.iter().any(|one| {
+        right
+            .frames
+            .iter()
+            .filter_map(|other| cosine_similarity(one, other))
+            .any(|score| score >= FRAME_SIM_THRESHOLD)
+    })
+}
+
 fn cluster_embeddings(embedded: &[EmbeddedClip]) -> Vec<Cluster> {
     let mut parent = (0..embedded.len()).collect::<Vec<_>>();
     for left in 0..embedded.len() {
         for right in (left + 1)..embedded.len() {
-            if cosine_similarity(&embedded[left].embedding, &embedded[right].embedding)
-                .is_some_and(meets_similarity_threshold)
-            {
+            if clips_are_similar(&embedded[left], &embedded[right]) {
                 union(&mut parent, left, right);
             }
         }
@@ -531,10 +584,15 @@ mod tests {
     }
 
     fn embedded(clip_id: i64, vector: Vec<f32>) -> EmbeddedClip {
+        embedded_with_frames(clip_id, vector, Vec::new())
+    }
+
+    fn embedded_with_frames(clip_id: i64, vector: Vec<f32>, frames: Vec<Vec<f32>>) -> EmbeddedClip {
         EmbeddedClip {
             clip_id,
             source_hash: format!("source-{clip_id}"),
             embedding: vector,
+            frames,
             primary_rank: PrimaryRank {
                 star_rating: 0,
                 l1_badge_count: 0,
@@ -542,6 +600,32 @@ mod tests {
                 clip_id,
             },
         }
+    }
+
+    /// R18 C-3:clip 级均值把 ≤12 帧抹成一个点 —— 两条素材里各有一帧是同一个机位,
+    /// 均值被其余帧稀释到 0.80,老口径归不到一组。有帧级向量时按帧与帧的最大余弦补一刀。
+    /// 这条在 `clips_are_similar` 还只看均值的时候必红。
+    #[test]
+    fn frame_level_similarity_catches_a_shared_shot_the_mean_vector_dilutes() {
+        let mean = vector_with_cosine(0.80);
+        let shared = axis();
+        let left = embedded_with_frames(1, axis(), vec![axis(), vector_with_cosine(0.1)]);
+        let right = embedded_with_frames(2, mean.clone(), vec![shared, vector_with_cosine(0.2)]);
+        assert!(clips_are_similar(&left, &right), "两条各有一帧完全一样,应判同组");
+        // 没有帧级向量的老库照旧只看均值 —— 0.80 < 0.90,不归组。
+        let bare_left = embedded(1, axis());
+        let bare_right = embedded(2, mean);
+        assert!(!clips_are_similar(&bare_left, &bare_right));
+    }
+
+    /// 帧级只在**近邻对**上生效:均值都差到 0.5 了,帧级再像也不合并 ——
+    /// 不然「都有天空」的两条会被并进同一组,而且全库 O(n²×144) 也跑不动。
+    #[test]
+    fn frame_level_similarity_never_fires_on_far_pairs() {
+        let far = vector_with_cosine(0.50);
+        let left = embedded_with_frames(1, axis(), vec![axis()]);
+        let right = embedded_with_frames(2, far, vec![axis()]);
+        assert!(!clips_are_similar(&left, &right));
     }
 
     fn axis() -> Vec<f32> {

@@ -5441,7 +5441,7 @@ dependencies = [
 
 [[package]]
 name = "tripcut-studio"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -5451,6 +5451,7 @@ dependencies = [
  "libc",
  "libmpv2",
  "lopdf",
+ "notify-rust",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

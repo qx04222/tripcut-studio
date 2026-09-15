@@ -23,11 +23,16 @@ pub struct SelectSegment {
     pub out_ticks: i64,
     pub tb_num: i64,
     pub tb_den: i64,
+    /// `'auto'` = 自动挑选放进来的;手打的段是 `None`。界面靠它决定按钮说「删除」还是「不要这一段」。
+    pub source: Option<String>,
+    /// R18 B-4「为什么选它」:自动挑选写进 `segments.reason_json` 的白话短语。
+    /// 手打的段本来就没有理由,这里是空数组。
+    pub reasons: Vec<String>,
 }
 
 pub fn list_select_segments(connection: &Connection, clip_id: i64) -> Result<Vec<SelectSegment>> {
     let mut statement = connection.prepare(
-        "SELECT s.id, s.clip_id, s.in_ticks, s.out_ticks, c.tb_num, c.tb_den
+        "SELECT s.id, s.clip_id, s.in_ticks, s.out_ticks, c.tb_num, c.tb_den, s.source, s.reason_json
          FROM segments s
          JOIN clips c ON c.id = s.clip_id
          WHERE s.clip_id = ?1 AND s.kind = 'select' AND s.tombstone = 0
@@ -41,6 +46,11 @@ pub fn list_select_segments(connection: &Connection, clip_id: i64) -> Result<Vec
             out_ticks: row.get(3)?,
             tb_num: row.get(4)?,
             tb_den: row.get(5)?,
+            source: row.get(6)?,
+            reasons: row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default(),
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -117,6 +127,8 @@ pub fn create_select_segment(
         out_ticks,
         tb_num,
         tb_den,
+        source: None,
+        reasons: Vec::new(),
     })
 }
 
@@ -132,8 +144,14 @@ pub fn delete_select_segment(connection: &mut Connection, segment_id: i64) -> Re
     if let Some(clip_id) = owner_clip {
         super::episode::ensure_clip_writable(&transaction, clip_id)?;
     }
+    // R18 B-4「不要这一段」:自动挑选的段被单独丢掉时,同时从那一批里**摘掉**
+    // (`batch_id = NULL`)。不摘的话「撤销这一批」会去删一条用户已经明确拒绝的段,
+    // 两个动作对同一行各说各话;摘掉之后整批撤销的语义仍然是「把这批剩下的收回去」。
     let changed = transaction.execute(
-        "UPDATE segments SET tombstone = 1, deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        "UPDATE segments
+            SET tombstone = 1,
+                deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                batch_id = CASE WHEN source = 'auto' THEN NULL ELSE batch_id END
          WHERE id = ?1 AND kind = 'select' AND tombstone = 0",
         [segment_id],
     )?;

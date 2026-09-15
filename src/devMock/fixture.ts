@@ -2375,3 +2375,8 @@ HANDLERS.relocate_cache_dir = ({ folder }) => {
 // R18 M-04:假后端直接报一个已存好的诊断包(真后端会弹保存面板)。
 HANDLERS.export_diagnostics_bundle = () => ({ path: "~/Desktop/旅剪诊断-20260914-1930.zip", log_files: 3, failed_jobs: 2 });
 (MOCK_COMMANDS as string[]).push("export_diagnostics_bundle");
+// R18 M-10:假后端里一切都在本机(真后端按卷挂载与 SF_DATALESS 判定)。
+HANDLERS.inspect_paths = ({ paths }) =>
+  (paths as string[]).map((path) => ({ path, state: "ok" as const, volume: null }));
+HANDLERS.download_cloud_file = () => undefined;
+(MOCK_COMMANDS as string[]).push("inspect_paths", "download_cloud_file");

@@ -41,6 +41,10 @@ const commands = [
   { id: "preflight-script-syntax", command: "node", args: ["--check", "scripts/qa/preflight.mjs"] },
   { id: "cua-launcher-script-syntax", command: "node", args: ["--check", "scripts/qa/prepare-cua-candidate.mjs"] },
   { id: "crash-diff-script-syntax", command: "node", args: ["--check", "scripts/qa/crash-diff.mjs"] },
+  // R18 M-12:原生行为审计套件。真机那半要 pid + 辅助功能权限,进不了 fast-gates
+  // 本体(判定部分由 vitest 的 fileAssociations.test.mjs / menuAudit.test.mjs 正控覆盖);
+  // 这里只做语法检查,让"脚本被改坏了"当场红,而不是等到验收时才发现跑不起来。
+  { id: "native-audit-runner-syntax", command: "node", args: ["--check", "scripts/qa/native-audit/run.mjs"] },
   { id: "dmg-audit-script-syntax", command: "node", args: ["--check", "scripts/qa/audit-dmg.mjs"] },
   // 全量跑 crash-recovery.mjs 太慢(要建种子库+跑三条崩溃路径),不进 fast-gates
   // 本体——只做语法检查。它是每日收尾链的一部分,单独用

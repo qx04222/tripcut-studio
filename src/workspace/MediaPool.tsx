@@ -9,7 +9,7 @@ import {
   type UIEvent,
 } from "react";
 
-import { searchClips, searchTranscripts } from "../api";
+import { playerCommand, searchClips, searchTranscripts } from "../api";
 import { PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
 import { useMediaPoolHotkeys } from "./MediaPoolHotkeys";
 import { PoolStackStrip } from "./MediaPoolStackStrip";
@@ -54,6 +54,10 @@ export function MediaPool(): JSX.Element {
     () => new Map(),
   );
   const [searchRestriction, setSearchRestriction] = useState<ReadonlySet<number> | null>(null);
+  // R18 C-2:命中的是第几秒(帧级向量精排出来的)。只到素材级的老库这张表是空的。
+  const [semanticSeconds, setSemanticSeconds] = useState<ReadonlyMap<number, number>>(
+    () => new Map(),
+  );
   const searchRequest = useRef(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -164,6 +168,7 @@ export function MediaPool(): JSX.Element {
     const request = ++searchRequest.current;
     if (!query) {
       setSemanticScores(new Map());
+      setSemanticSeconds(new Map());
       setSearchRestriction(null);
       setSearchError(null);
       return;
@@ -177,7 +182,15 @@ export function MediaPool(): JSX.Element {
       ]);
       if (request !== searchRequest.current) return;
       const scores = new Map<number, number>();
-      for (const hit of hits) scores.set(hit.clip_id, hit.score);
+      const seconds = new Map<number, number>();
+      for (const hit of hits) {
+        scores.set(hit.clip_id, hit.score);
+        const tbNum = hit.tb_num ?? 0;
+        const tbDen = hit.tb_den ?? 0;
+        if (hit.best_t_ticks !== null && hit.best_t_ticks !== undefined && tbDen > 0 && tbNum > 0) {
+          seconds.set(hit.clip_id, (hit.best_t_ticks * tbNum) / tbDen);
+        }
+      }
       // U-15:文件名子串也算命中(⌘K 早就这么搜,池内搜索却只走语义/对白索引,
       // 「登机」搜不到 IMG_0813_登机口.mov 就是这条缺口)。前端并集,不改 Rust。
       const allowed = new Set<number>([
@@ -186,6 +199,7 @@ export function MediaPool(): JSX.Element {
         ...matchClipsByFileName(clipsRef.current, query),
       ]);
       setSemanticScores(scores);
+      setSemanticSeconds(seconds);
       setSearchRestriction(allowed);
     } catch (error) {
       if (request === searchRequest.current) setSearchError(failureText("搜索", error, "换个词再试"));
@@ -220,6 +234,8 @@ export function MediaPool(): JSX.Element {
   );
   const selectClipRef = useRef(selectClip);
   selectClipRef.current = selectClip;
+  const secondsRef = useRef(semanticSeconds);
+  secondsRef.current = semanticSeconds;
   const toggleHandlers = useRef(new Map<number, () => void>());
   const selectHandlers = useRef(new Map<number, (modifiers: { shift?: boolean; meta?: boolean }) => void>());
   const toggleHandler = useCallback(
@@ -237,6 +253,21 @@ export function MediaPool(): JSX.Element {
     if (cached) return cached;
     const handler = (modifiers: { shift?: boolean; meta?: boolean }) => selectClipRef.current(clipId, modifiers);
     selectHandlers.current.set(clipId, handler);
+    return handler;
+  }, []);
+  // R18 C-2:点「第 n 秒」= 先选中这条(监视器才会载它),再把播放头拉到那一秒。
+  // 和 selectHandler 一样按 clipId 缓存成恒定引用,不然 PoolCard 的 memo 每次都失效。
+  const seekHandlers = useRef(new Map<number, () => void>());
+  const seekHandler = useCallback((clipId: number) => {
+    const cached = seekHandlers.current.get(clipId);
+    if (cached) return cached;
+    const handler = () => {
+      selectClipRef.current(clipId, {});
+      const seconds = secondsRef.current.get(clipId);
+      if (seconds === undefined) return;
+      void playerCommand({ type: "seek_abs", seconds }, clipId).catch(() => undefined);
+    };
+    seekHandlers.current.set(clipId, handler);
     return handler;
   }, []);
   // 没有 clip_id 的卡片(占位)点了不该做事,但也不能每次渲染换一个新函数。
@@ -396,6 +427,10 @@ export function MediaPool(): JSX.Element {
                     clip={item.clip}
                     columnIndex={columnOffset + 1}
                     semanticScore={item.semanticScore}
+                    semanticAtSeconds={
+                      item.clip.id === null ? undefined : semanticSeconds.get(item.clip.id)
+                    }
+                    onSeekToMatch={item.clip.id === null ? undefined : seekHandler(item.clip.id)}
                     stackCount={item.stack ? item.stack.members.length : undefined}
                     stackExpanded={item.stack ? item.stack.id === expandedStackId : undefined}
                     onToggleStack={item.stack ? toggleHandler(item.stack.id) : undefined}

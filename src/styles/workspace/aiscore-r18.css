@@ -1,0 +1,27 @@
+/*
+ * R18 车道 aiscore 的样式。两块:
+ *  ① 检查器精选段行的「为什么选它」(B-4);
+ *  ② 媒体池搜索结果卡的「第 n 秒」(C-2)。
+ * 颜色一律用已有 token,不新增字面量;选择器带各自面板的根类。
+ */
+
+/* ① 「为什么选它」占满整行(段行是四列网格,这一句另起一行)。 */
+.workspace-shell .inspector .inspector-segment-row {
+  row-gap: 0;
+}
+
+.workspace-shell .inspector .inspector-segment-why {
+  grid-column: 1 / -1;
+  padding-bottom: var(--space-1);
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--text-11, var(--text-12));
+  line-height: var(--lh-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ② 「第 n 秒」角标:和「匹配度」同一排、同一套语言,只是可点。 */
+.workspace-shell .pool .pool-card-at {
+  cursor: pointer;
+}

@@ -222,6 +222,8 @@ struct Candidate {
     chapter_key: i64,
     suggestion: SegmentSuggestion,
     secs: f64,
+    /// R18 B-4:这条素材所在的相似组(同一机位连拍的几条)。`None` = 不在任何组里。
+    similar_group: Option<i64>,
 }
 
 /// 候选素材:当前集、在线、有时刻分、范围内、**还没有任何存活精选段**(手打或上一批
@@ -239,6 +241,7 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
           ORDER BY ch.start_at IS NULL, ch.start_at, c.chapter_id, c.captured_at, c.id",
         scope.sql_predicate()
     );
+    let groups = super::similar::group_id_by_clip(connection)?;
     let mut statement = connection.prepare(&sql)?;
     let rows = statement
         .query_map([episode_id], |row| {
@@ -254,7 +257,13 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
         if secs <= 0.0 {
             continue;
         }
-        candidates.push(Candidate { clip_id, chapter_key, suggestion: best, secs });
+        candidates.push(Candidate {
+            clip_id,
+            chapter_key,
+            suggestion: best,
+            secs,
+            similar_group: groups.get(&clip_id).copied(),
+        });
     }
     Ok(candidates)
 }
@@ -262,7 +271,22 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
 /// 纯函数:章节轮转挑段。每章各自按分数降序,轮流从每章取一条,装得下就收,
 /// 直到预算用完或候选耗尽。返回选中的候选(按选中顺序)。
 fn rotate_by_chapter(mut candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.suggestion.score.total_cmp(&a.suggestion.score));
+    candidates.sort_by(|a, b| {
+        b.suggestion
+            .score
+            .total_cmp(&a.suggestion.score)
+            .then(a.clip_id.cmp(&b.clip_id))
+    });
+    // R18 B-4 视觉去重:同一机位连拍的几条(`similar_groups` 已经把它们判成一组)
+    // 以前会各出一段,成片里连着三个几乎一样的画面。按分数降序扫,**每组只留最高分那一条**。
+    // 只在这里剔,不动 `similar_groups` 本身 —— 分组是别处算的,这里只是消费者。
+    {
+        let mut seen_groups = std::collections::BTreeSet::new();
+        candidates.retain(|candidate| match candidate.similar_group {
+            Some(group) => seen_groups.insert(group),
+            None => true,
+        });
+    }
     let mut chapters: Vec<(i64, Vec<Candidate>)> = Vec::new();
     for candidate in candidates {
         match chapters.iter_mut().find(|(key, _)| *key == candidate.chapter_key) {
@@ -351,10 +375,20 @@ pub fn auto_select_episode(
     let mut chapters = Vec::new();
     for candidate in &chosen {
         super::episode::ensure_clip_writable(&transaction, candidate.clip_id)?;
+        // R18 B-4:「为什么选它」跟着段一起落盘。以前 `reasons` 算出来就扔了,
+        // 用户看到 11 段凭空出现、点开任何一段都问不出理由。
+        let reasons = serde_json::to_string(&candidate.suggestion.reasons)
+            .map_err(|error| CoreError::Rating(format!("无法保存挑选理由:{error}")))?;
         transaction.execute(
-            "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind, tombstone, source, batch_id)
-             VALUES (?1, ?2, ?3, 'select', 0, 'auto', ?4)",
-            params![candidate.clip_id, candidate.suggestion.in_ticks, candidate.suggestion.out_ticks, batch_id],
+            "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind, tombstone, source, batch_id, reason_json)
+             VALUES (?1, ?2, ?3, 'select', 0, 'auto', ?4, ?5)",
+            params![
+                candidate.clip_id,
+                candidate.suggestion.in_ticks,
+                candidate.suggestion.out_ticks,
+                batch_id,
+                reasons
+            ],
         )?;
         let segment_id = transaction.last_insert_rowid();
         transaction.execute(
@@ -422,6 +456,7 @@ mod tests {
             loud: false,
             speech: false,
             scene_cut,
+            interest: None,
             score,
             reasons: reasons.iter().map(|reason| (*reason).to_owned()).collect(),
         }
@@ -527,6 +562,80 @@ mod tests {
             crate::core::ratings::rate_clip(connection, clip_id, "star", stars).unwrap();
         }
         clip_id
+    }
+
+    /// R18 B-4:自动挑选写下「为什么选它」。以前 `reasons` 算出来就扔了 ——
+    /// 这条在写 `reason_json` 之前必红。
+    #[test]
+    fn auto_select_writes_down_why_it_picked_each_segment() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "机场", "2026-09-13T08:00:00Z");
+        add_clip(&mut connection, chapter, 0.9, true, 0);
+        auto_select_episode(&mut connection, Some(30.0), Some("all")).unwrap();
+        let reasons: String = connection
+            .query_row(
+                "SELECT reason_json FROM segments WHERE source = 'auto' AND tombstone = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: Vec<String> = serde_json::from_str(&reasons).unwrap();
+        assert!(parsed.iter().any(|reason| reason == "清晰"), "{reasons}");
+    }
+
+    /// R18 B-4 视觉去重:同一机位连拍的三条(`similar_groups` 已经判成一组)以前各出一段,
+    /// 成片里连着三个几乎一样的画面。现在**每组只留最高分那一条**;不在组里的照常各出一段。
+    #[test]
+    fn auto_select_keeps_only_the_best_take_of_a_similar_group() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "机场", "2026-09-13T08:00:00Z");
+        let dull = add_clip(&mut connection, chapter, 0.5, true, 0);
+        let best = add_clip(&mut connection, chapter, 0.9, true, 0);
+        let other = add_clip(&mut connection, chapter, 0.7, true, 0);
+        connection
+            .execute("INSERT INTO similar_groups(id, created_at) VALUES (1, '2026-09-13T00:00:00Z')", [])
+            .unwrap();
+        for (clip_id, primary) in [(dull, 0), (best, 1)] {
+            connection
+                .execute(
+                    "INSERT INTO similar_group_members(group_id, clip_id, is_primary) VALUES (1, ?1, ?2)",
+                    params![clip_id, primary],
+                )
+                .unwrap();
+        }
+        let outcome = auto_select_episode(&mut connection, Some(300.0), Some("all")).unwrap();
+        let picked: Vec<i64> = {
+            let mut statement = connection
+                .prepare("SELECT clip_id FROM segments WHERE source = 'auto' AND tombstone = 0 ORDER BY clip_id")
+                .unwrap();
+            let rows = statement.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(outcome.created.len(), 2, "同一组三取一 + 组外那条 = 2 段");
+        assert!(picked.contains(&best) && picked.contains(&other), "{picked:?}");
+        assert!(!picked.contains(&dull), "同组里分低的那条不该也出一段:{picked:?}");
+    }
+
+    /// R18 B-4「不要这一段」:单独丢掉一条自动段时,它要从那一批里**摘掉** ——
+    /// 否则「撤销这一批」还会去删一条用户已经明确拒绝的段,两个动作对同一行各说各话。
+    #[test]
+    fn dropping_one_auto_segment_detaches_it_from_the_batch() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "机场", "2026-09-13T08:00:00Z");
+        add_clip(&mut connection, chapter, 0.9, true, 0);
+        add_clip(&mut connection, chapter, 0.8, true, 0);
+        let outcome = auto_select_episode(&mut connection, Some(300.0), Some("all")).unwrap();
+        assert_eq!(outcome.created.len(), 2);
+        crate::core::ratings::delete_select_segment(&mut connection, outcome.created[0]).unwrap();
+        let still_in_batch: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM segments WHERE id = ?1 AND batch_id IS NOT NULL",
+                [outcome.created[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_in_batch, 0, "被丢掉的那一段不该还挂在批次上");
+        assert_eq!(undo_auto_select(&mut connection, &outcome.batch_id).unwrap(), 1, "整批撤销只收回剩下那一段");
     }
 
     #[test]

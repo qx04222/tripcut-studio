@@ -229,6 +229,8 @@ pub fn apply_rescue_range(connection: &mut Connection, clip_id: i64) -> Result<S
         out_ticks: timing.1,
         tb_num: timing.2,
         tb_den: timing.3,
+        source: None,
+        reasons: Vec::new(),
     })
 }
 

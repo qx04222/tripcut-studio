@@ -475,17 +475,32 @@ fn motion_output_args(path: &Path, max_frames: Option<usize>) -> Vec<OsString> {
     args
 }
 
-/// R11 时刻分:同一次解码里把音频分成两路——整条汇总(原有 Peak/动态范围)
-/// 与每 0.5 s 一窗的 RMS/峰值/熵(`asetnsamples` 按重采样后的 8 kHz 切 4000 样本)。
+/// R11 时刻分:同一次解码里把音频分成三路——整条汇总(原有 Peak/动态范围)、
+/// 每 0.5 s 一窗的全频段 RMS/峰值/熵/窗内 RMS 起伏(`asetnsamples` 按重采样后的
+/// 8 kHz 切 4000 样本),以及 R18 新增的**人声频段**(300–3000 Hz)同一批窗口的 RMS。
+///
+/// 第三路是为了「有人声」这一位:光看响度与峰均比,成品混音的音乐会被整条判成有人声
+/// (2026-09-14 基线负控 3/7)。判据改成「人声频段相对**这条素材自己的底色**更突出」,
+/// 需要同一批窗口的带内 RMS —— 在同一次解码里加一条 biquad 支路,不多解一遍。
+///
+/// 两路 `ametadata=print` 的块头一模一样,所以带内那一路先 `mode=add` 打一个
+/// `lavfi.tripcut.speechband` 标记,`WindowSignals::parse` 靠它分辨(见 moments.rs)。
 fn audio_filter() -> String {
     format!(
-        "[0:a:0]asplit=2[a_all][a_win];\
+        "[0:a:0]asplit=3[a_all][a_win][a_band];\
          [a_all]astats=metadata=1:reset=0:measure_overall=Peak_level+Peak_count+Dynamic_range[a_all_out];\
          [a_win]aresample={rate},asetnsamples=n={samples},\
-         astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level+Entropy,\
-         ametadata=mode=print[a_win_out]",
+         astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level+Entropy+RMS_peak+RMS_trough,\
+         ametadata=mode=print[a_win_out];\
+         [a_band]aresample={rate},highpass=f={low}:poles=2,lowpass=f={high}:poles=2,\
+         asetnsamples=n={samples},\
+         astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,\
+         ametadata=mode=add:key=lavfi.tripcut.speechband:value=1,\
+         ametadata=mode=print[a_band_out]",
         rate = super::moments::AUDIO_WINDOW_SAMPLE_RATE,
         samples = super::moments::AUDIO_WINDOW_SAMPLES,
+        low = super::moments::SPEECH_BAND_LOW_HZ,
+        high = super::moments::SPEECH_BAND_HIGH_HZ,
     )
 }
 
@@ -507,8 +522,8 @@ fn video_output_args() -> [OsString; 12] {
 }
 
 fn audio_output_args() -> Vec<OsString> {
-    let mut args = Vec::with_capacity(12);
-    for label in ["[a_all_out]", "[a_win_out]"] {
+    let mut args = Vec::with_capacity(18);
+    for label in ["[a_all_out]", "[a_win_out]", "[a_band_out]"] {
         args.extend([
             OsString::from("-map"),
             OsString::from(label),
@@ -1718,7 +1733,11 @@ mod tests {
         assert!(!joined.contains(" -t "), "最后一段解到片尾");
         let audio = analysis_audio_args(Path::new("/x.mp4"));
         let joined = audio.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
-        assert!(joined.contains("[0:a:0]asplit=2[a_all][a_win]"));
+        assert!(joined.contains("[0:a:0]asplit=3[a_all][a_win][a_band]"));
+        // R18:人声频段那一路必须带上标记,否则 `WindowSignals::parse` 分不出两路的块。
+        assert!(joined.contains("highpass=f=300:poles=2,lowpass=f=3000:poles=2"), "{joined}");
+        assert!(joined.contains("key=lavfi.tripcut.speechband"), "{joined}");
+        assert!(joined.contains("RMS_peak+RMS_trough"), "{joined}");
         assert!(!joined.contains("[0:v:0]"));
         assert!(!joined.contains("-hwaccel"));
     }

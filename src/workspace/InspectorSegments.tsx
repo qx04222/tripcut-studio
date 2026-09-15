@@ -113,6 +113,9 @@ export function SelectSegmentsSection({
             const inLabel = segmentSecondsLabel(segment.in_ticks, segment.tb_num, segment.tb_den);
             const outLabel = segmentSecondsLabel(segment.out_ticks, segment.tb_num, segment.tb_den);
             const durationLabel = segmentSecondsLabel(segment.out_ticks - segment.in_ticks, segment.tb_num, segment.tb_den);
+            // R18 B-4:自动挑选放进来的段要说得出「为什么选它」,且能单独丢掉。
+            const picked = segment.source === "auto";
+            const why = (segment.reasons ?? []).join(" · ");
             return (
               <li key={segment.id} className="inspector-segment-row">
                 <span className="inspector-segment-index">{`段 ${index + 1}`}</span>
@@ -125,12 +128,17 @@ export function SelectSegmentsSection({
                     size="sm"
                     icon="x"
                     tone="danger"
-                    aria-label={`删除精选段 ${index + 1}`}
-                    title="删除这段精选"
+                    aria-label={picked ? `不要这一段 ${index + 1}` : `删除精选段 ${index + 1}`}
+                    title={picked ? "不要这一段(只丢这一段,其余保留)" : "删除这段精选"}
                     disabled={readOnly || busyId === segment.id}
                     onClick={() => void remove(segment)}
                   />
                 </span>
+                {picked ? (
+                  <span className="inspector-segment-why">
+                    {why === "" ? "自动挑的:这一段整体分最高" : `为什么选它:${why}`}
+                  </span>
+                ) : null}
               </li>
             );
           })}

@@ -1,8 +1,6 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getSettingsStatus,
-  importPaths,
   listWatchedFolders,
   pickImportFolder,
   removeWatchedFolder,
@@ -11,6 +9,7 @@ import {
   startImport,
   type WatchedFolder,
 } from "../../api";
+import { importNotice, useGlobalDrop } from "../useGlobalDrop";
 
 export interface ImportSources {
   watched: readonly WatchedFolder[];
@@ -33,11 +32,6 @@ export interface ImportSources {
   refreshWatched(): Promise<void>;
 }
 
-function importNotice(total: number, enqueued: number, skipped: number): string {
-  const duplicateNote = skipped > 0 ? `，跳过 ${skipped} 项已入库或已排队素材（可能属于其他集）` : "";
-  return `已发现 ${total} 个视频，新增 ${enqueued} 项${duplicateNote}`;
-}
-
 /**
  * 抽自 `ImportPage`:关注文件夹、选文件夹导入、立即扫描、拖放导入、工具链状态、
  * `tripcut:action` 的 `import-pick`。api 调用顺序与文案一字不改;
@@ -50,7 +44,6 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
   const [error, setError] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
   const [toolchainMissing, setToolchainMissing] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
   const onImportedRef = useRef(onImported);
@@ -116,49 +109,17 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
     return () => window.removeEventListener("tripcut:action", onAction);
   }, [chooseFolder]);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    // 非 Tauri 环境(vitest / 浏览器预览)里 getCurrentWebview() 会同步抛错(没有 __TAURI_INTERNALS__),
-    // 拖放监听只在真应用里挂;别让首页/导入抽屉的测试因此炸成 Unhandled Exception。
-    let webview: ReturnType<typeof getCurrentWebview>;
-    try {
-      webview = getCurrentWebview();
-    } catch {
-      return undefined;
-    }
-    void webview
-      .onDragDropEvent((event) => {
-        const payload = event.payload;
-        if (payload.type === "enter" || payload.type === "over") {
-          setDragActive(true);
-        } else if (payload.type === "leave") {
-          setDragActive(false);
-        } else if (payload.type === "drop") {
-          setDragActive(false);
-          if (payload.paths.length === 0) return;
-          setError(null);
-          setNotice(null);
-          void importPaths(payload.paths)
-            .then((results) => {
-              const total = results.reduce((sum, result) => sum + result.total, 0);
-              const enqueued = results.reduce((sum, result) => sum + result.enqueued, 0);
-              const skipped = results.reduce((sum, result) => sum + result.skipped, 0);
-              setNotice(importNotice(total, enqueued, skipped));
-              onImportedRef.current?.();
-            })
-            .catch((importError) => setError(String(importError)));
-        }
-      })
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
+  // M-06①:拖放监听搬到 `useGlobalDrop`(整窗 + Dock 打开同一个入口)。
+  // 这里只订阅结果——抽屉照旧显示自己的高亮与那句提示,一次松手只导入一遍。
+  const dragActive = useGlobalDrop({
+    onStart: () => {
+      setError(null);
+      setNotice(null);
+    },
+    onNotice: setNotice,
+    onError: setError,
+    onImported: () => onImportedRef.current?.(),
+  });
 
   const rescan = useCallback(async () => {
     setNotice("正在扫描…");

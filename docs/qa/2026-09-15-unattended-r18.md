@@ -34,3 +34,12 @@
 - **A18-01(一次,未复现)** 第一次启动(profile 从 0.8.x 复制,启动时 4 类任务 ×27 重排,机器 load 30+)媒体池「正在整理素材」约 7 分钟才出卡,期间点设置无响应,WebContent CPU 0%;同构建同 profile 再启两次分别 24 s / 12 s(含 x=5000 钳制)。留观:下次出现先抓 `logs/` 与 WebContent 采样。
 - 关于页「自动更新」说明文案在 1512 宽下换行到开关下方(轻微)。
 - 未做:诊断包保存面板(原生 NSSavePanel,AX 难驱动;单测已证 zip 无绝对路径)、VoiceOver 走查、深色主题走查、M-Pro/Max 与 8 GB 真机。
+
+## 3. Wave 2 合入
+
+| 车道 | 合入 | 要点 |
+|---|---|---|
+| native2 | `e3e68fb` | 整窗 / Dock 拖放导入(`opened.rs`,status「拖放导入」)、Dock 进度、通知「在 Finder 中显示」、卷弹出标缺失 + iCloud dataless「现在下载」、`scripts/qa/native-audit/run.mjs` 探针套件(对 0.8.3 真包正控全红)。thread-id 归组需新依赖,推迟。拖放 / Dock 进度 / 卷弹出**无真机证据**(开跑时锁屏),留 0.9.1 验收。 |
+| aiscore | `899e66d` | 时刻分 `interest`(无 CLIP 权重 0)、口播判定改带内突出度 + RMS 起伏(基线负控 3/7 → 7/7,召回 12/12、最佳窗 IoU 7/18、OCR 不变)、`segments.reason_json`(0046)+ 逐段「不要这一段」+ 同组去重、帧级向量表(0047–0048)+ 搜索「第 n 秒」+ 帧级聚类;15 条检测器 9 条实测红。偏离:改了 `analysis.rs` 的 audio_filter(带内 RMS)。本机无 CLIP 模型 → interest / 帧向量在真素材上零覆盖(记「未测量」)。 |
+
+发布:v0.9.0(Wave 1)、v0.9.1(Wave 2)。

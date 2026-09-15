@@ -6,6 +6,7 @@ import { applyAppearanceSettings } from "./appearance";
 import { getDoctorReport, getSettings, type DoctorReport, type SettingsMap } from "./api";
 import { documentTitleForRoute, routeFromHash, type RoutePath } from "./routes";
 import { ExitConfirm } from "./workspace/ExitConfirm";
+import { GlobalDropOverlay } from "./workspace/GlobalDropOverlay";
 import { useMenuBridge } from "./workspace/menuBridge";
 import { WorkspaceShell } from "./workspace/WorkspaceShell";
 import { dispatchWorkspace, type BandMode } from "./workspace/WorkspaceStore";
@@ -150,6 +151,8 @@ export default function App() {
       <WorkspaceShell />
       {/* R18 F2:关窗口时后台任务还没做完的确认(后端已经 prevent_close 了)。 */}
       <ExitConfirm />
+      {/* R18 M-06①:窗口任意位置都能接素材(Dock 图标拖入走同一个入口)。 */}
+      <GlobalDropOverlay />
       <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
     </>
   );

@@ -14,6 +14,48 @@ use std::sync::Mutex;
 /// `core::import::mark_batch_analysis_notified` 上的注释)。
 pub trait NotificationSink {
     fn notify(&self, title: &str, body: &str) -> bool;
+
+    /// R18 H-16:带一个动作按钮的通知。默认实现忽略动作,退回普通通知——
+    /// 失败朝"少一个按钮"而不是"少一条通知"。
+    fn notify_with_reveal(&self, title: &str, body: &str, _reveal: Option<&RevealAction>) -> bool {
+        self.notify(title, body)
+    }
+}
+
+/// R18 H-16:「交付完成」通知上那个「在 Finder 中显示」按钮要打开的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevealAction {
+    pub label: &'static str,
+    pub path: String,
+}
+
+/// 按钮文案。用户看到的就是这句,测试按字面量钉着。
+pub const REVEAL_ACTION_LABEL: &str = "在 Finder 中显示";
+
+/// 这条通知配不配一个「在 Finder 中显示」。
+///
+/// 只有交付完成配:批量分析完成没有"一个可以打开的东西"(结果散在库里),
+/// 给它一个按钮只会让人点开一个不知道是什么的文件夹。
+///
+/// 路径从**刚做完的那条 `export_package`** 身上取(`result_path`)。为什么不
+/// 由调用方传进来:通知出口的签名 `Fn(&str, &str) -> bool` 是 `core::jobs`
+/// 的(不归本车道),改它等于改所有调用方;而"最近一条做完的交付"在这里
+/// 一次查询就能拿到,语义与那条通知说的是同一件事。
+pub fn reveal_action_for(connection: &rusqlite::Connection, title: &str) -> Option<RevealAction> {
+    if title != EXPORT_COMPLETE_TITLE {
+        return None;
+    }
+    let path: Option<String> = connection
+        .query_row(
+            "SELECT result_path FROM jobs
+             WHERE kind = 'export_package' AND status = 'done' AND result_path IS NOT NULL
+             ORDER BY updated_at DESC, id DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    path.map(|path| RevealAction { label: REVEAL_ACTION_LABEL, path })
 }
 
 impl NotificationSink for tauri::AppHandle {
@@ -27,6 +69,57 @@ impl NotificationSink for tauri::AppHandle {
             }
         }
     }
+
+    /// 带动作的那条走 `notify-rust`(插件的桌面 builder 给不了按钮),
+    /// 没有动作的照旧走插件——只有需要按钮的那一条改路,别的一行不动。
+    fn notify_with_reveal(&self, title: &str, body: &str, reveal: Option<&RevealAction>) -> bool {
+        match reveal {
+            #[cfg(target_os = "macos")]
+            Some(action) => show_with_reveal(self, title, body, action),
+            #[cfg(not(target_os = "macos"))]
+            Some(_) => self.notify(title, body),
+            None => self.notify(title, body),
+        }
+    }
+}
+
+/// 发一条带按钮的通知。
+///
+/// **必须整条搬到另一根线程上**:NSUserNotification 这条路 `show()` 是同步的,
+/// 要一直等到用户点了按钮或者通知自己消失才返回。调用方(`core::jobs` 的通知出口)
+/// 拿返回值决定去重标记落不落,在那里同步等于把一个 worker 槽押给用户的手速。
+/// 所以这里投递出去就算成功——交付完成这条没有去重标记依赖它(有依赖的是
+/// 批量分析完成那条,而那条不带按钮,走的仍是插件的原路)。
+#[cfg(target_os = "macos")]
+fn show_with_reveal(app: &tauri::AppHandle, title: &str, body: &str, action: &RevealAction) -> bool {
+    let identifier = app.config().identifier.clone();
+    let title = title.to_owned();
+    let body = body.to_owned();
+    let label = action.label.to_owned();
+    let path = std::path::PathBuf::from(&action.path);
+    std::thread::Builder::new()
+        .name("notify-reveal".to_owned())
+        .spawn(move || {
+            // 与插件同一套:开发态没有 bundle,借 Terminal 的身份才发得出来。
+            let _ = notify_rust::set_application(if tauri::is_dev() { "com.apple.Terminal" } else { &identifier });
+            let mut notification = notify_rust::Notification::new();
+            notification.summary(&title).body(&body).action("reveal", &label);
+            match notification.show() {
+                Ok(handle) => handle.wait_for_action(|identifier| {
+                    if identifier == "reveal" {
+                        if let Err(error) = crate::reveal_in_finder(&path) {
+                            tracing::warn!(%error, "「在 Finder 中显示」没能打开交付包");
+                        }
+                    }
+                }),
+                Err(error) => tracing::warn!(%error, title, "带动作的系统通知发送失败"),
+            }
+        })
+        .map(|_| true)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "带动作的通知线程没起来");
+            false
+        })
 }
 
 /// 发一条系统通知,返回是否投递成功。薄封装,存在的意义是给测试一个可
@@ -53,7 +146,9 @@ pub fn post_gated(sink: &impl NotificationSink, connection: &rusqlite::Connectio
             return false;
         }
     }
-    post(sink, title, body)
+    // R18 H-16:交付完成那条带「在 Finder 中显示」;其余照旧。
+    let reveal = reveal_action_for(connection, title);
+    sink.notify_with_reveal(title, body, reveal.as_ref())
 }
 
 /// R18 F1:两条完成通知都关掉时,首次后台任务那条「引权限弹框」的通知也不该发——
@@ -74,6 +169,8 @@ pub const BACKGROUND_STARTED_TITLE: &str = "旅剪已开始后台处理";
 #[derive(Default)]
 pub struct MockSink {
     pub calls: Mutex<Vec<(String, String)>>,
+    /// 每条通知带的动作(没有就是 `None`)——H-16 的判据。
+    pub reveals: Mutex<Vec<Option<RevealAction>>>,
 }
 
 #[cfg(test)]
@@ -84,6 +181,14 @@ impl NotificationSink for MockSink {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((title.to_owned(), body.to_owned()));
         true
+    }
+
+    fn notify_with_reveal(&self, title: &str, body: &str, reveal: Option<&RevealAction>) -> bool {
+        self.reveals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(reveal.cloned());
+        self.notify(title, body)
     }
 }
 
@@ -123,6 +228,47 @@ mod tests {
         assert!(any_completion_enabled(&connection));
         settings::set_setting(&connection, settings::NOTIFY_BATCH_COMPLETE_KEY, "false").unwrap();
         assert!(!any_completion_enabled(&connection));
+    }
+
+    /// H-16:交付完成带「在 Finder 中显示」,按钮指向刚做完那条交付的 result_path;
+    /// 批量分析完成不配按钮(它没有"一个可以打开的东西")。
+    #[test]
+    fn only_the_export_notification_carries_a_reveal_action() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        let sink = MockSink::default();
+
+        // 还没有任何交付做完:有开关、有通知,但没有可打开的东西 → 不硬造一个按钮。
+        assert!(post_gated(&sink, &connection, EXPORT_COMPLETE_TITLE, "包"));
+        assert_eq!(sink.reveals.lock().unwrap()[0], None);
+
+        let id = crate::core::jobs::enqueue(&mut connection, "export_package", "{}", "e-1").unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET status='done', result_path='/Users/x/交付/我的交付包' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+
+        assert!(post_gated(&sink, &connection, EXPORT_COMPLETE_TITLE, "我的交付包"));
+        assert_eq!(
+            sink.reveals.lock().unwrap()[1],
+            Some(RevealAction { label: REVEAL_ACTION_LABEL, path: "/Users/x/交付/我的交付包".to_owned() })
+        );
+
+        assert!(post_gated(&sink, &connection, BATCH_ANALYSIS_COMPLETE_TITLE, "12 条"));
+        assert_eq!(sink.reveals.lock().unwrap()[2], None, "批量分析完成不配「在 Finder 中显示」");
+    }
+
+    /// 关掉的那条连动作都不该构造——它一次 `notify_with_reveal` 都不调。
+    #[test]
+    fn a_switched_off_notification_does_not_reach_the_action_path() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let sink = MockSink::default();
+        settings::set_setting(&connection, settings::NOTIFY_EXPORT_COMPLETE_KEY, "false").unwrap();
+        assert!(!post_gated(&sink, &connection, EXPORT_COMPLETE_TITLE, "包"));
+        assert!(sink.reveals.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -1397,6 +1397,44 @@ pub const MIGRATION_0045: &str = r#"
 ALTER TABLE clips ADD COLUMN local_brief TEXT;
 "#;
 
+// R18 车道 aiscore(B-1 / B-4):时刻分的第六项与自动挑选的留痕。
+//
+// `clip_moments.interest` 可空:NULL = 这条素材没有帧级 CLIP 向量,这一项**不参与打分、
+// 也不计入分母**(8 GB 档、侧车没起来、老库都是这种)。NULL 与 0.0 含义完全不同 ——
+// 0.0 是「看过了,很平庸」,NULL 是「没看」。
+//
+// `segments.reason_json` NOT NULL DEFAULT '[]':自动挑选写进来的「为什么选它」。
+// 给缺省值是为了老行 —— 手打的段本来就没有理由,读出来是空数组,界面不画那一行。
+pub const MIGRATION_0046: &str = r#"
+ALTER TABLE clip_moments ADD COLUMN interest REAL;
+ALTER TABLE segments ADD COLUMN reason_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
+// R18 车道 aiscore(C-1):帧级 CLIP 向量。侧车本来就在算这 ≤12 个向量
+// (切胶片条 → 逐帧 embed → 再求均值),求完均值就扔了;C-1 的边际算力成本是 0,只是别扔。
+// `clip_embeddings`(均值)留着做粗筛,这张表做精排与「搜到第几秒」。
+// `t_ticks` 用素材自己的时基,和 `segments` / `clip_moments` 同一套坐标。
+pub const MIGRATION_0047: &str = r#"
+CREATE TABLE clip_frame_embeddings (
+  clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  frame_index INTEGER NOT NULL,
+  t_ticks INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  dimensions INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  model TEXT NOT NULL,
+  embedded_at TEXT NOT NULL,
+  PRIMARY KEY (clip_id, frame_index)
+);
+"#;
+
+// R18 车道 aiscore(C-1 续):检索按 (model, dimensions) 全表扫,过滤在这条索引上。
+// clip_id 的级联删除走 PRIMARY KEY(clip_id, frame_index) 那条隐式索引,不用再建一条。
+pub const MIGRATION_0048: &str = r#"
+CREATE INDEX clip_frame_embeddings_model_idx
+  ON clip_frame_embeddings(model, dimensions);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1543,9 +1581,12 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 43, sql: MIGRATION_0043 },
     Migration { version: 44, sql: MIGRATION_0044 },
     Migration { version: 45, sql: MIGRATION_0045 },
+    Migration { version: 46, sql: MIGRATION_0046 },
+    Migration { version: 47, sql: MIGRATION_0047 },
+    Migration { version: 48, sql: MIGRATION_0048 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 45;
+pub const LATEST_SCHEMA_VERSION: i64 = 48;
 
 #[cfg(test)]
 mod tests {
@@ -1818,9 +1859,47 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_45() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 45);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 45);
+    fn schema_version_is_48() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 48);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 48);
+    }
+
+    /// R18 车道 aiscore:0046 的两列与 0047/0048 的帧表。
+    #[test]
+    fn migrations_0046_to_0048_add_the_aiscore_columns_and_frame_table() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let has_column = |table: &str, column: &str| -> i64 {
+            connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(has_column("clip_moments", "interest"), 1, "0046 必须给 clip_moments 加 interest 列");
+        assert_eq!(has_column("segments", "reason_json"), 1, "0046 必须给 segments 加 reason_json 列");
+        for column in ["clip_id", "frame_index", "t_ticks", "embedding", "dimensions", "source_hash", "model"] {
+            assert_eq!(has_column("clip_frame_embeddings", column), 1, "0047 的帧表缺列 {column}");
+        }
+        let index: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'clip_frame_embeddings_model_idx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1, "0048 必须建 clip_frame_embeddings_model_idx");
+        // 老行拿得到缺省值:手打的段没有理由,读出来是空数组而不是 NULL。
+        let default_reason: String = connection
+            .query_row(
+                "SELECT COALESCE(dflt_value, '') FROM pragma_table_info('segments') WHERE name = 'reason_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(default_reason.contains("[]"), "reason_json 缺省该是空数组:{default_reason}");
     }
 
     #[test]

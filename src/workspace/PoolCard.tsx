@@ -70,6 +70,8 @@ function PoolCardInner({
   clip,
   columnIndex,
   semanticScore,
+  semanticAtSeconds,
+  onSeekToMatch,
   stackCount,
   stackExpanded,
   onToggleStack,
@@ -81,6 +83,10 @@ function PoolCardInner({
   clip: ClipListItem;
   columnIndex: number;
   semanticScore?: number;
+  /** R18 C-2:画面搜索命中的是第几秒(帧级向量精排出来的);老库只到素材级时不传。 */
+  semanticAtSeconds?: number;
+  /** 点「第 n 秒」角标时调:选中这条并把监视器定位到那一秒。 */
+  onSeekToMatch?: () => void;
   stackCount?: number;
   /** Stack 卡片:池内候选条是否展开(U-02);非 Stack 卡片不传。 */
   stackExpanded?: boolean;
@@ -125,6 +131,12 @@ function PoolCardInner({
         const target = event.target as HTMLElement | null;
         if (onToggleStack && target?.closest?.(".pool-card-stack")) {
           onToggleStack();
+          return;
+        }
+        // R18 C-2:点「第 n 秒」= 选中这条并把监视器拉到那一秒。和上面的「n 条候选」
+        // 一样是卡片(一个 <button>)里的一块,不能再嵌一个按钮。
+        if (onSeekToMatch && target?.closest?.(".pool-card-at")) {
+          onSeekToMatch();
           return;
         }
         onSelect({ shift: event.shiftKey, meta: event.metaKey || event.ctrlKey });
@@ -178,6 +190,14 @@ function PoolCardInner({
         {semanticScore !== undefined ? (
           <Badge tone="ink" className="pool-card-match">
             匹配度 {Math.round(Math.min(1, Math.max(0, semanticScore)) * 100)}%
+          </Badge>
+        ) : null}
+        {semanticAtSeconds !== undefined ? (
+          <Badge tone="ink" className="pool-card-at">
+            <span aria-hidden="true">{`第 ${Math.max(0, Math.round(semanticAtSeconds))} 秒`}</span>
+            <span className="visually-hidden">
+              {`画面在第 ${Math.max(0, Math.round(semanticAtSeconds))} 秒,点这里跳过去`}
+            </span>
           </Badge>
         ) : null}
         {clip.has_suggestions === true ? <BoltMark /> : null}

@@ -11,6 +11,20 @@ use super::sidecar::{self, EMBEDDING_DIMENSIONS, MODEL_NAME};
 pub struct ClipSearchHit {
     pub clip_id: i64,
     pub score: f32,
+    /// R18 C-2:命中的是**第几秒**。帧级向量精排出来的那一帧的时刻(素材自己的时基);
+    /// 只有 clip 级均值向量(老库、还没重嵌)时为 `None` —— 界面就不画「第 n 秒」。
+    pub best_t_ticks: Option<i64>,
+    pub best_frame_index: Option<i64>,
+    pub tb_num: i64,
+    pub tb_den: i64,
+}
+
+impl ClipSearchHit {
+    pub fn best_seconds(&self) -> Option<f64> {
+        let t_ticks = self.best_t_ticks?;
+        (self.tb_den > 0 && self.tb_num > 0)
+            .then(|| t_ticks as f64 * self.tb_num as f64 / self.tb_den as f64)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +205,13 @@ pub fn run_clip_embed(connection: &mut Connection, job: &Job) -> Result<()> {
     }
     let frame_embeddings = sidecar::embed_images(&strip_path, payload.strip_frame_count)?;
     let embedding = mean_normalized_embedding(&frame_embeddings)?;
-    store_embedding(connection, job, &payload, &embedding)
+    store_embedding(connection, job, &payload, &embedding)?;
+    // R18 C-1:侧车本来就算了这 ≤12 个帧向量,以前求完均值就扔。边际算力成本 0。
+    // 落库失败不能把整条嵌入判失败(均值已经写进去了,搜索照常工作),只降级。
+    if let Err(error) = store_frame_embeddings(connection, &payload, &frame_embeddings) {
+        tracing::warn!(%error, clip_id = payload.clip_id, "帧级向量落库失败,搜索退回只到素材级");
+    }
+    Ok(())
 }
 
 pub fn search_clips(connection: &Connection, query: &str) -> Result<Vec<ClipSearchHit>> {
@@ -253,36 +273,183 @@ fn store_embedding(
     Ok(())
 }
 
+/// R18 C-1:把侧车已经算好的 ≤12 个帧向量落库。第 i 帧的时刻与胶片条取帧是同一条公式
+/// (`artifacts::strip_args`:第 i 格 `-ss i × 时长 ÷ 格数`),两边必须一致 ——
+/// 不一致的话「搜到第 n 秒」指的就是另一帧。
+fn store_frame_embeddings(
+    connection: &mut Connection,
+    payload: &ClipEmbedPayload,
+    frames: &[Vec<f32>],
+) -> Result<()> {
+    let duration_ticks: i64 = connection.query_row(
+        "SELECT duration_ticks FROM clips WHERE id = ?1 AND quick_hash = ?2",
+        params![payload.clip_id, payload.source_hash],
+        |row| row.get(0),
+    )?;
+    let count = frames.len().max(1) as i64;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "DELETE FROM clip_frame_embeddings WHERE clip_id = ?1",
+        [payload.clip_id],
+    )?;
+    for (index, frame) in frames.iter().enumerate() {
+        let blob = encode_embedding(frame)?;
+        let t_ticks = duration_ticks.max(0) * index as i64 / count;
+        transaction.execute(
+            "INSERT INTO clip_frame_embeddings(
+                clip_id, frame_index, t_ticks, embedding, dimensions, source_hash, model, embedded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            params![
+                payload.clip_id,
+                index as i64,
+                t_ticks,
+                blob,
+                EMBEDDING_DIMENSIONS as i64,
+                payload.source_hash,
+                MODEL_NAME,
+            ],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// 一条素材的帧级向量(按帧序);素材换过源(`quick_hash` 变了)的旧行不算数。
+pub(super) fn load_frame_embeddings(
+    connection: &Connection,
+    clip_id: i64,
+) -> Result<Vec<(i64, Vec<f32>)>> {
+    let mut statement = connection.prepare(
+        "SELECT f.t_ticks, f.embedding
+           FROM clip_frame_embeddings f
+           JOIN clips c ON c.id = f.clip_id AND c.quick_hash = f.source_hash
+          WHERE f.clip_id = ?1 AND f.dimensions = ?2 AND f.model = ?3
+          ORDER BY f.frame_index",
+    )?;
+    let rows = statement.query_map(
+        params![clip_id, EMBEDDING_DIMENSIONS as i64, MODEL_NAME],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    )?;
+    let mut frames = Vec::new();
+    for row in rows {
+        let (t_ticks, blob) = row?;
+        frames.push((t_ticks, decode_embedding(&blob)?));
+    }
+    Ok(frames)
+}
+
+/// 全库平均画面:所有素材的 clip 级均值向量再求一次均值。
+/// 「大家都在拍的东西」就长这样 —— 时刻分的 `interest` 拿它当参照(见 `moments::frame_interest`)。
+fn library_mean_embedding(connection: &Connection) -> Result<Option<Vec<f32>>> {
+    let mut statement = connection.prepare(
+        "SELECT e.embedding FROM clip_embeddings e
+           JOIN clips c ON c.id = e.clip_id AND c.quick_hash = e.source_hash
+          WHERE e.dimensions = ?1 AND e.model = ?2",
+    )?;
+    let rows = statement
+        .query_map(params![EMBEDDING_DIMENSIONS as i64, MODEL_NAME], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let decoded = rows
+        .iter()
+        .map(|blob| decode_embedding(blob))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(mean_normalized_embedding(&decoded)?))
+}
+
+/// R18 B-1 的数据源:一条素材每一帧的兴趣度 `(t_ticks, 0–1)`。
+/// 没有帧级向量或全库还一条向量都没有时返回空 —— 时刻分那边就把 `interest` 整项剔除。
+pub fn clip_frame_interest(connection: &Connection, clip_id: i64) -> Result<Vec<(i64, f64)>> {
+    let frames = load_frame_embeddings(connection, clip_id)?;
+    if frames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(library_mean) = library_mean_embedding(connection)? else {
+        return Ok(Vec::new());
+    };
+    let vectors: Vec<Vec<f32>> = frames.iter().map(|(_, vector)| vector.clone()).collect();
+    Ok(frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (t_ticks, _))| {
+            super::moments::frame_interest(&vectors, index, &library_mean)
+                .map(|interest| (*t_ticks, interest))
+        })
+        .collect())
+}
+
+/// R18 C-2:粗筛 top-50 的上限。clip 级均值向量把 12 帧抹成一个点,长素材里
+/// 「只有第 50 秒是食物」会被稀释掉 —— 所以粗筛要给得宽,精排才有机会把它捞回来。
+const COARSE_CANDIDATES: usize = 50;
+
 fn search_by_embedding(
     connection: &Connection,
     query_embedding: &[f32],
 ) -> Result<Vec<ClipSearchHit>> {
     validate_embedding(query_embedding)?;
     let mut statement = connection.prepare(
-        "SELECT e.clip_id, e.embedding
+        "SELECT e.clip_id, e.embedding, c.tb_num, c.tb_den
          FROM clip_embeddings e
          JOIN clips c ON c.id = e.clip_id AND c.quick_hash = e.source_hash
          WHERE e.dimensions = ?1 AND e.model = ?2",
     )?;
     let rows = statement.query_map(params![EMBEDDING_DIMENSIONS as i64, MODEL_NAME], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Option<i64>>(2)?.unwrap_or(1),
+            row.get::<_, Option<i64>>(3)?.unwrap_or(1000),
+        ))
     })?;
 
     let mut hits = Vec::new();
     for row in rows {
-        let (clip_id, blob) = row?;
+        let (clip_id, blob, tb_num, tb_den) = row?;
         let embedding = decode_embedding(&blob)?;
         if let Some(score) = cosine_similarity(query_embedding, &embedding) {
-            hits.push(ClipSearchHit { clip_id, score });
+            hits.push(ClipSearchHit {
+                clip_id,
+                score,
+                best_t_ticks: None,
+                best_frame_index: None,
+                tb_num,
+                tb_den,
+            });
         }
     }
+    sort_hits(&mut hits);
+    // 两段排序:均值向量粗筛,再在粗筛集的帧表里精排。clip 分 = **帧的最大值**,
+    // 不是均值 —— 12 帧里有 1 帧是要找的东西就该搜得到。
+    for hit in hits.iter_mut().take(COARSE_CANDIDATES) {
+        let frames = load_frame_embeddings(connection, hit.clip_id)?;
+        let best = frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (t_ticks, vector))| {
+                cosine_similarity(query_embedding, vector).map(|score| (score, index, *t_ticks))
+            })
+            .max_by(|left, right| left.0.total_cmp(&right.0));
+        if let Some((score, index, t_ticks)) = best {
+            hit.score = hit.score.max(score);
+            hit.best_frame_index = Some(index as i64);
+            hit.best_t_ticks = Some(t_ticks);
+        }
+    }
+    sort_hits(&mut hits);
+    Ok(hits)
+}
+
+fn sort_hits(hits: &mut [ClipSearchHit]) {
     hits.sort_by(|left, right| {
         right
             .score
             .total_cmp(&left.score)
             .then_with(|| left.clip_id.cmp(&right.clip_id))
     });
-    Ok(hits)
 }
 
 fn mean_normalized_embedding(rows: &[Vec<f32>]) -> Result<Vec<f32>> {

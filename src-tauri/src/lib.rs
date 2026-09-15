@@ -12,6 +12,11 @@ mod update_flow;
 mod updater;
 /// R18 车道 native / M-02:窗口几何钳制与全屏态(纯几何,单测判定)。
 pub mod window_state;
+
+// R18 车道 native2:Dock 打开 / 文件关联(M-06①)。
+pub mod opened;
+pub mod dock;
+pub mod volumes;
 #[cfg(target_os = "macos")]
 pub mod player;
 pub mod runtime;
@@ -1818,6 +1823,24 @@ fn reveal_clip(clip_id: i64, state: tauri::State<'_, RuntimeState>) -> std::resu
     reveal_in_finder(&path).map_err(|error| error.to_string())
 }
 
+/// R18 M-10:导入前先分清「盘拔了」「在 iCloud 没下载」「真没了」。
+/// 前端(`useGlobalDrop`)拿它决定说哪句话、给不给「现在下载」,
+/// 而不是把三件事一律排成必然失败的导入任务、再刷一屏红字。
+#[tauri::command]
+fn inspect_paths(paths: Vec<String>) -> Vec<volumes::PathCondition> {
+    paths
+        .iter()
+        .map(|path| volumes::classify(std::path::Path::new(path)))
+        .collect()
+}
+
+/// R18 M-10:「现在下载」。只是请求 iCloud 拉本体,回来时可能还在下,
+/// 所以前端要重新 `inspect_paths` 一次才算数。
+#[tauri::command]
+fn download_cloud_file(path: String) -> std::result::Result<(), String> {
+    volumes::request_download(std::path::Path::new(&path)).map_err(|error| error.to_string())
+}
+
 /// R16 P2-10:检查器标签段。AI 标签(`ai_l3`)与用户标签(`user`)一起列;只有用户标签可删。
 #[tauri::command]
 fn list_tags(clip_id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::tags::Tag>, String> {
@@ -3382,6 +3405,9 @@ pub fn run() {
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| CoreError::BackgroundTask("主窗口不存在".to_owned()))?;
+            // R18 H-15:后台任务跑着的时候 Dock 图标上有进度条,干完自己清掉。
+            // 判定在 `dock::DockProgress`(峰值法,不回退);这里只负责每秒喂一次数。
+            dock::spawn_watcher(window.as_ref().window(), db_path.clone());
             // M-02:存下来的位置可能落在一块已经拔掉的屏上(实测 window.x=5000 → 窗口
             // 停在屏外,进程活着但用户什么都看不见)。恢复前先跟真实屏幕求交。
             // `available_monitors()` 给的是物理像素,按各自的 scale_factor 换成逻辑坐标再比。
@@ -3817,6 +3843,8 @@ pub fn run() {
             // R18 车道 settings:失败任务清单 / 清空全部失败 / 导出诊断包。
             list_failed_jobs,
             clear_failed_jobs,
+            inspect_paths,
+            download_cloud_file,
             pick_cache_folder,
             relocate_cache_dir,
             export_diagnostics_bundle
@@ -3825,6 +3853,18 @@ pub fn run() {
     let app = result.expect("旅剪工作台启动失败");
     // macOS 上退出走 process::exit,run() 之后的代码永不执行;必须在 Exit 事件里清哨兵。
     app.run(move |app_handle, event| {
+        // R18 M-06①:Dock 图标拖入 /「打开方式」/ 双击关联文件都走这一条。
+        // macOS 会在应用已经在跑的时候再发一次,所以这里只把路径转给前端——
+        // 由 `useGlobalDrop` 调同一个 `import_paths`,不另起第二条导入路径。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = &event {
+            let paths = opened::opened_paths_to_import_request(urls, |path| path.is_dir());
+            if paths.is_empty() {
+                tracing::info!(count = urls.len(), "打开请求里没有可导入的视频或文件夹");
+            } else if let Err(error) = tauri::Emitter::emit(app_handle, opened::OPENED_PATHS_EVENT, &paths) {
+                tracing::warn!(%error, "打开请求没能转给前端");
+            }
+        }
         if matches!(event, tauri::RunEvent::Exit) {
             // R17 车道 A:后台下载好的更新包在退出时才替换 bundle(运行中替换会混用两版资源)。
             update_flow::install_staged_on_exit(app_handle);

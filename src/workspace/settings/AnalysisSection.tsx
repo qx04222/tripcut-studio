@@ -15,6 +15,38 @@ const BEST_TAKE_AXES = [
   ["narrative", "Narrative", "D3 故事位置回填"],
 ] as const;
 
+/** 时刻分的第六项权重(R18 B-1)。整个 `moments.weights` 是一个 JSON 对象设置项,
+ *  这里只读写里面的 `interest` 一个键,其余五项保持用户/缺省原样。 */
+const MOMENT_WEIGHTS_KEY = "moments.weights";
+const DEFAULT_INTEREST_WEIGHT = "0.20";
+
+export function readInterestWeight(raw: string | undefined): string {
+  if (!raw) return DEFAULT_INTEREST_WEIGHT;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return DEFAULT_INTEREST_WEIGHT;
+    const value = (parsed as Record<string, unknown>).interest;
+    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : DEFAULT_INTEREST_WEIGHT;
+  } catch {
+    return DEFAULT_INTEREST_WEIGHT;
+  }
+}
+
+export function writeInterestWeight(raw: string | undefined, next: string): string {
+  let base: Record<string, unknown> = {};
+  if (raw) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      base = {};
+    }
+  }
+  return JSON.stringify({ ...base, interest: Number(next) });
+}
+
 export function AnalysisSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { settings, llmStatus, llmLedger } = form;
@@ -51,6 +83,23 @@ export function AnalysisSection(): JSX.Element {
           value={settings["analysis.jitter_threshold"]}
           defaultValue={DEFAULT_SETTINGS["analysis.jitter_threshold"]}
           min="0.00" max="1.00" step="0.01" onChange={save}
+        />
+      </div>
+
+      <div className="settings-sheet-subhead">
+        <strong>挑片段时有多看重「画面少见」</strong>
+        <small>调到 0 就只按画质挑。没有画面识别时这一项自动不算数,分数口径不变。</small>
+      </div>
+      <div className="settings-sheet-group">
+        <ThresholdRow
+          label="画面少见"
+          description="这一格的画面和你其它素材有多不一样——越不一样越值得剪进去"
+          settingKey={MOMENT_WEIGHTS_KEY}
+          value={readInterestWeight(settings[MOMENT_WEIGHTS_KEY])}
+          defaultValue={DEFAULT_INTEREST_WEIGHT}
+          min="0.00" max="1.00" step="0.01"
+          onChange={(_key, next) => save(MOMENT_WEIGHTS_KEY, writeInterestWeight(settings[MOMENT_WEIGHTS_KEY], next))}
+          deferCommit
         />
       </div>
 

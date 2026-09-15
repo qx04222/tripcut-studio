@@ -297,6 +297,11 @@ export interface SelectSegment {
   out_ticks: number;
   tb_num: number;
   tb_den: number;
+  /** "auto" = 自动挑选放进来的;手打的段是 null。后端永远给,前端按可选读
+   *  —— 理由同 `ClipSearchHit`:不把别的车道已有的测试替身判红。 */
+  source?: string | null;
+  /** R18 B-4「为什么选它」:白话短语,手打的段是空数组。 */
+  reasons?: string[];
 }
 
 export type AssetSafetyFlag = "normal" | "likely_unusable" | "rescue_candidate";
@@ -362,6 +367,13 @@ export interface PlayerStatus {
 export interface ClipSearchHit {
   clip_id: number;
   score: number;
+  /** R18 C-2:命中的是第几帧 / 第几秒(素材自己的时基)。老库只到素材级时是 null。
+   *  四个都写成可选:后端永远给,但别的车道已经在写只带 clip_id/score 的测试替身,
+   *  把它们标成必填会把那些替身一起判红 —— 缺的是新字段,不是契约破了。 */
+  best_t_ticks?: number | null;
+  best_frame_index?: number | null;
+  tb_num?: number;
+  tb_den?: number;
 }
 
 export type ClipDimensionKey =
@@ -2380,4 +2392,27 @@ export interface DiagnosticsBundle {
 
 export function exportDiagnosticsBundle(): Promise<DiagnosticsBundle | null> {
   return invoke<DiagnosticsBundle | null>("export_diagnostics_bundle");
+}
+
+/**
+ * R18 车道 native2 / M-10:导入前先分清「盘拔了」「在 iCloud 没下载到本机」「真没了」。
+ * 三件事看着都像"读不到",但对用户该说的话完全不同 —— 盘拔了插回去就好,
+ * 不该被说成"导入失败"。
+ */
+export type PathState = "ok" | "ejected" | "cloud_only" | "gone";
+
+export interface PathCondition {
+  path: string;
+  state: PathState;
+  /** 卷名,只有 `ejected` 时才有。 */
+  volume: string | null;
+}
+
+export function inspectPaths(paths: string[]): Promise<PathCondition[]> {
+  return invoke<PathCondition[]>("inspect_paths", { paths });
+}
+
+/** 「现在下载」。回来时可能还在下,判定要重新 `inspectPaths` 一次。 */
+export function downloadCloudFile(path: string): Promise<void> {
+  return invoke<void>("download_cloud_file", { path });
 }

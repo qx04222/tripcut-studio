@@ -1,0 +1,38 @@
+/*
+ * R18 车道 native2:整窗拖放高亮(M-06①)。
+ * 颜色全部走 token,不新增字面量;形状与导入抽屉里那层一致,只是盖住整个窗口。
+ */
+.global-drop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+
+.global-drop-card {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: center;
+  padding: var(--space-5) var(--space-6);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-10);
+  background: var(--surface-raised);
+  color: var(--accent-text);
+  text-align: center;
+}
+
+.global-drop-card strong {
+  font-size: var(--text-20);
+  font-weight: 600;
+  line-height: var(--lh-20);
+}
+
+.global-drop-card span {
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  color: var(--text-muted);
+}
