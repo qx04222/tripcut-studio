@@ -90,7 +90,7 @@ serde_json = "=1.0.151"
 tauri = { version = "=2.11.5", features = [] }
 thiserror = "=2.0.17"
 tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
-tracing = "=0.1.41"
+tracing = "=0.1.44"
 # R18 M-03:让 123 个 tracing 调用点真的落盘。只开 fmt + ansi 之外的最小特性集——
 # 不开 env-filter(它会拉 regex),级别用 TRIPCUT_LOG 自己解析成 LevelFilter。
 tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["fmt", "std"] }
