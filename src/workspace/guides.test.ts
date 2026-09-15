@@ -36,7 +36,7 @@ beforeEach(() => {
 /** 规格 §3:七个 guide、各只弹一次、同一时刻最多一个;键 `guide.<id>.viewed`。 */
 describe("guides 纯函数表", () => {
   it("首批七个 guide,键名 guide.<id>.viewed,每个都有一段话与锚点", () => {
-    expect(GUIDE_IDS).toEqual(["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay"]);
+    expect(GUIDE_IDS).toEqual(["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"]);
     for (const id of GUIDE_IDS) {
       expect(guideKey(id)).toBe(`guide.${id}.viewed`);
       expect(GUIDES[id].text.length).toBeGreaterThan(8);
@@ -75,12 +75,16 @@ describe("guides 纯函数表", () => {
       exportDrawerOpen: false,
       overlayOpen: false,
       playbackEnded: true,
+      backgroundRunning: true,
     };
     expect(GUIDE_ORDER[0]).toBe("nav");
     expect(nextGuide(all, new Set(), new Set(), new Set())).toBe("nav");
-    expect(nextGuide(all, new Set([guideKey("nav")]), new Set(), new Set())).toBe("heat");
-    expect(nextGuide(all, new Set([guideKey("nav")]), new Set(["heat"]), new Set())).toBe("autoselect");
-    expect(nextGuide(all, new Set([guideKey("nav")]), new Set(["heat"]), new Set(["autoselect"]))).toBe("shot");
+    // R18 F1:notify 排在 nav 之后(后台在分析时出),其后顺序不变。
+    expect(nextGuide(all, new Set([guideKey("nav")]), new Set(), new Set())).toBe("notify");
+    const seenTwo = new Set([guideKey("nav"), guideKey("notify")]);
+    expect(nextGuide(all, seenTwo, new Set(), new Set())).toBe("heat");
+    expect(nextGuide(all, seenTwo, new Set(["heat"]), new Set())).toBe("autoselect");
+    expect(nextGuide(all, seenTwo, new Set(["heat"]), new Set(["autoselect"]))).toBe("shot");
   });
 });
 

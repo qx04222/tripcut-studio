@@ -1,13 +1,54 @@
 import type { JSX } from "react";
 
-import { SectionHeader } from "../ui";
+import { NOTIFY_BATCH_COMPLETE_KEY, NOTIFY_EXPORT_COMPLETE_KEY, type SettingsMap } from "../../api";
+import { SectionHeader, Toggle } from "../ui";
 import { Note, SettingsRow } from "./SettingsControls";
+import { useSettingsFormContext } from "./SettingsFormContext";
+
+/**
+ * R18 车道 settings F1:两条系统通知的开关文案(AX 名冻结,测试按这两个串找控件)。
+ * 「没存过 = 开」与 Rust `settings::notification_enabled` 同一条规则:只有显式 "false" 才算关。
+ */
+export const NOTIFY_SWITCHES = {
+  exportComplete: "导出完成时通知我",
+  batchComplete: "批量分析完成时通知我",
+} as const;
+
+export function notifyOn(settings: SettingsMap, key: string): boolean {
+  return settings[key] !== "false";
+}
 
 export function PrivacySection(): JSX.Element {
+  const form = useSettingsFormContext();
+  const { settings } = form;
+
   return (
     <>
       <SectionHeader title="隐私与诊断" description="本地优先是默认状态，不是一个开关；这里列出确切留在本机的内容，以及诊断信息的去向。" />
       <div className="settings-sheet-group">
+        {/* R18 F1:两条通知各一个开关(默认开)。两条都关时,首次后台任务也不再去要系统通知权限。 */}
+        <SettingsRow
+          title={NOTIFY_SWITCHES.exportComplete}
+          help="导出跑完了用系统通知提醒一声;在安静的地方剪片可以关掉。"
+          align="end"
+        >
+          <Toggle
+            label={NOTIFY_SWITCHES.exportComplete}
+            checked={notifyOn(settings, NOTIFY_EXPORT_COMPLETE_KEY)}
+            onChange={(next) => void form.save(NOTIFY_EXPORT_COMPLETE_KEY, String(next))}
+          />
+        </SettingsRow>
+        <SettingsRow
+          title={NOTIFY_SWITCHES.batchComplete}
+          help="一批素材分析完了提醒一声。两条都关掉之后,软件不会再向系统要通知权限。"
+          align="end"
+        >
+          <Toggle
+            label={NOTIFY_SWITCHES.batchComplete}
+            checked={notifyOn(settings, NOTIFY_BATCH_COMPLETE_KEY)}
+            onChange={(next) => void form.save(NOTIFY_BATCH_COMPLETE_KEY, String(next))}
+          />
+        </SettingsRow>
         <SettingsRow title="崩溃报告" help="旅剪不内置崩溃上报；是否发送诊断数据由 macOS 系统设置的“隐私与安全性 › 分析与改进”控制。">
           <span className="settings-sheet-static">由系统设置控制</span>
         </SettingsRow>

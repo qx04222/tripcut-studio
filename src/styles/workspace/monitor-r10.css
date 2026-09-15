@@ -14,7 +14,7 @@
 .monitor .monitor-well--video > .monitor-well-backdrop {
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-base);
   display: grid;
   place-items: center;
   width: 100%;
@@ -73,7 +73,7 @@
   right: 0;
   left: 0;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
   background: var(--border-strong);
   content: "";
   transform: translateY(-50%);
@@ -83,7 +83,7 @@
   position: absolute;
   top: 50%;
   height: 7px;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
   background: color-mix(in srgb, var(--accent) 35%, transparent);
   transform: translateY(-50%);
 }
@@ -93,7 +93,7 @@
   top: 50%;
   left: 0;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
   background: var(--accent);
   transform: translateY(-50%);
 }
@@ -125,7 +125,7 @@
   border: 2px solid var(--surface-card);
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+  box-shadow: var(--shadow-media-thumb);
   transition: transform var(--motion-fast);
   appearance: none;
 }

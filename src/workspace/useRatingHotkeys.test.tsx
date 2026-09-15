@@ -14,6 +14,8 @@ vi.mock("../api", () => ({
   // X-04:状态条自己桥接 import_probe 完成事件。
   IMPORT_PROBE_DONE_EVENT: "tripcut:import-probe-done",
   bridgeImportProbeEvents: vi.fn(async () => () => undefined),
+  // R18 W-4:状态条订阅启动补扫事件。
+  onStartupBackfill: vi.fn(async () => () => undefined),
   setSetting: vi.fn(async () => undefined),
 }));
 

@@ -38,6 +38,45 @@
 深色只保证「不刺眼、不反色」，不做视觉走查（规格 §0 明确不做深色遍历）；R10 用
 `preview-shots --dark` 补一轮走查。
 
+### 1a. R18 车道 V1 新增令牌 + 门禁扩围到车道文件
+
+依据：`.superpowers/sdd/r18/brainstorm-visual.md` §3 车道 V1（V-01/V-02/V-23/V-25/V-26）。
+
+**新增令牌**（全部是纯新增，没有改动任何既有令牌的值）：
+
+| 组 | 令牌 | 值 | 用途 |
+|---|---|---|---|
+| 圆角 | `--radius-2` `--radius-4` `--radius-pill` | 2 / 4 / 999px | 收编车道文件里的 2-4px 小圆角与「做成胶囊/圆点」用的 999px |
+| 字号 / 行高 | `--text-28`/`--lh-28` `--text-40`/`--lh-40` | 28/34px、40/48px | 补 20 与旧壳 44px 之间的断层，首页 hero、大号数字用 |
+| 层级 | `--z-base/-sticky/-band-playhead/-overlay/-menu/-modal/-toast` | 0/10/20/30/40/60/70 | 替代车道文件里裸写的 `z-index` 数字；语义名是目标状态，不是每处现有用法的精确写照——部分旧值只是数值上精确落在某档（比如 toast 宿主与 `.ui-menu` 都恰好是 60→落在 `--z-modal`），命名与用途完全对齐留给后续车道 |
+| 动效 | `--motion-slow` | `240ms cubic-bezier(.2,.7,.2,1)` | 只给 sheet/drawer 一类的进出用，不给日常 hover/focus（那还是 `--motion-fast`） |
+| 阴影 | `--shadow-lift` `--shadow-select-inset/-hair/-glow/-tint` `--shadow-accent-hair` `--shadow-focus-hair` `--shadow-glow-lg` `--shadow-rail-warn` `--shadow-media-thumb` `--shadow-scrub-hair` `--shadow-playhead-hair/-glow` | 见源码 | 车道文件里手写阴影的原值收编——每个值和收编前逐字节相同，只是从字面量换成了引用 |
+| 焦点环 | `--ring`（深色三套主题） | 内圈从 `var(--surface-panel)` 改成 `var(--bg-solid)` | V-25：`--surface-panel` 在三套深色下都带透明度，焦点环内圈会透出底色 4%；浅色 `--ring` 本身没有改 |
+
+**门禁扩围**（`src/styles/tokens.test.ts`）：此前门禁只扫 `tokens.css` / `workspace.css` /
+`kit.css` + `kit/*.css`，`src/styles/workspace/`（R9→R17 逐轮叠加的车道文件，现在 43 个）完全
+不在门禁里。现在新增六条规则,扫描范围加上这个目录：
+
+1. `font-size` 不许出现字面量 `<数字>px`（只认 `var(--text-*)`）。
+2. `border-radius` 每一段（含四值简写）只允许 `var(--radius-*)` / `50%` / `0` / `inherit`。
+3. `box-shadow` 必须整体是 `none`，或包含 `var(--shadow-*)` / `var(--ring*)` 中的一个。
+4. `transition` 必须包含 `var(--motion-*)`。
+5. `z-index` 必须是 `auto` 或 `var(--z-*)`。
+6. `!important` 出现次数钉在当前基线（R18 时是 5，`monitor-r10.css` 的两条焦点环覆盖），
+   门禁断言「只降不升」——下一轮想拆掉这两条覆盖就把基线数字往下改。
+
+**新代码的纪律**：`--font-xs/sm/base/lg/xl/display` 那一套旧 rem 字号（`styles.css` 顶层，
+12/13/15/16/19px 梯子）**不再允许在新代码里使用**——新写的组件/车道文件一律用本节表里的
+`--text-*`/`--space-*`/`--radius-*` 这套 px 令牌。旧引用（`styles.css` 自己的 225 处、
+`workspace.css` 的 28 处、`PlayerOverlay.css` 的 1 处）本轮**不收敛**，留给 R19；这一条只是
+「从现在起別再新增」的规则，门禁尚未对旧文件里的 `--font-*` 用量下断言。
+
+### 1b. 2x 截图
+
+`npm run preview:shots` 默认跑两遍剧本：`deviceScaleFactor` 1（文件名不变）与 2（文件名
+统一加 `@2x` 后缀）。业主真机是 2x，1x 截图看不出描边毛刺（V-26）——走查图标/圆角/发丝线一类
+的像素级问题时应该看 `@2x` 那一份。`--dpr <n>` 可以只跑一遍（调试单张更快）。
+
 ## 2. 组件套件（`src/workspace/ui/`）
 
 16 个组件文件（每个 < 200 行）+ 14 份 vitest（`*.test.tsx`）+ `KitPreview.tsx` 里各一个
@@ -46,7 +85,7 @@
 
 | 组件 | 文件 | Props 摘要 | 行为 / 视觉 |
 |---|---|---|---|
-| `Icon` | `icons.tsx` | `name: IconName`，`size?: 12\|16\|20\|32`，`filled?`，`className?` | `<svg viewBox="0 0 16 16">`，1.5px 描边、`currentColor`、`aria-hidden`；`filled` 只对 `star`/`heart` 生效 |
+| `Icon` | `icons.tsx` | `name: IconName`，`size?: 12\|16\|20\|32`，`filled?`，`className?` | `<svg viewBox="0 0 16 16">`、`currentColor`、`aria-hidden`；描边按尺寸补偿（`STROKE_BY_SIZE` = 12:1.75 / 16:1.5 / 20:1.4 / 32:0.95）；`filled` 只对 `star`/`heart` 生效。几何规范见下节 |
 | `Button` | `Button.tsx` | `variant?: primary\|secondary\|ghost\|icon`（默认 secondary），`size?: sm\|md`，`icon?`，`busy?`，`tone?: neutral\|danger` + `<button>` 全部透传 | `icon` 变体没有 `aria-label` 会抛错；`busy` → `aria-busy` + disabled |
 | `Chip` | `Chip.tsx` | `selected?`，`count?`，`tone?: neutral\|accent\|warn\|danger`，`icon?`，`onClick?` | 有 `onClick` 渲染 `<button aria-pressed>`，否则 `<span>` |
 | `Badge` | `Badge.tsx` | `tone?: neutral\|accent\|warn\|danger\|ink`，`icon?` | 18px 角标；`ink` 用于压在封面缩略图上 |
@@ -65,15 +104,77 @@
 `ModalSurface`（内部，不对外导出）承担 `Drawer`/`Sheet` 共同的模态行为，打开时
 `containerRef.focus()`。
 
-### 图标集（34 个，命名冻结）
+### 图标规范（R18 立，`icons.geometry.test.ts` 钉住）
 
-规格 §2 原定「24 + 9 = 33」，实际按对（`volume`/`volume-off` 是两个独立名字）算出 34：
-`import deliver settings search play pause prev next volume volume-off fullscreen
-mark-in mark-out save star heart x check chevron-down chevron-right grip plus close
-info warning`（25 个基础图标）+ `settings-appearance settings-performance
-settings-timeline settings-tools settings-analysis settings-generation settings-privacy
-settings-about settings-cache`（9 个设置分区图标）。`ICON_NAMES.length === 34` 由
-`icons.test.tsx` 钉住。
+**全部手绘进 `icons.tsx`，不引图标库，不抄任何第三方（含剪映）资源。**
+
+| 规则 | 值 | 为什么 |
+|---|---|---|
+| 网格 | 16×16 视窗 | 与 `size` 四档共用一套坐标 |
+| 活动区 | **12.5×12.5**（四边各留 1.75），量的是**笔画中心线** | 1.5 描边向外再吃 0.75，实际墨边离画布还有 1.0 |
+| 描边 | 16px 下 1.5；其余尺寸查 `STROKE_BY_SIZE`（12:1.75 / 20:1.4 / 32:0.95） | 恒定 1.5 在 12px 渲染成 1.13（发虚）、32px 渲染成 3.0（发胖） |
+| 坐标 | **一律落 `.25 / .75` 四分格** | 1.5 描边的中心在 `.25/.75` 时，2x 下的三个设备像素正好落格 |
+| 居中 | 需要居中的单笔 / 奇数列取 **7.75**（不是 8） | 8 不在四分格上；整枚图标按 7.75 对齐 |
+| 相对指令 | 增量取 0.5 的整数倍 | 起点在格上，终点也就在格上 |
+| 端点 / 拐角 | `round` | — |
+| 内部间隙 | 两个子形状要么相接（≈0），要么中心线距离 **≥ 2.0** | 两条 1.5 描边之间至少留 0.5 的光 |
+| 点 | **只有一种**：填充圆 r=0.75（`dot` 形状），圆心落四分格 | 过去 `r<0.5 → 填充、否则描边` 的隐式分支把 r=0.75 的点画成直径 3px 的墨疙瘩，全套同时存在三种点直径 |
+| 描边圆 | 半径 ≥1.5 且是 0.5 的整数倍 | `cx ± r` 才落得回四分格 |
+| 实心 / 线稿 | 实心只给 `play`、`star`/`heart` 的收藏态、`settings-appearance` 的半圆；其余全线稿 | 实心与线稿混用会让同一排图标重量不齐 |
+
+> **注意（R18 修正）**：`icons.tsx` 旧注释写「端点落在 .5 上，1.5 描边在 1x 下仍是整像素边缘 ——
+> 这是图标要 crisp 的全部秘诀」。**这句话两处都错**：1.5 描边居中在 `.5` 时边缘落在 `x.25/x.75`，
+> 1x 下永远是半像素；真正对得齐的是 **2x（所有 M 系列 Mac）下把描边中心放在 `.25/.75`**。
+> R18 之前实际只有 20% 的坐标在 `.5` 上、21% 在 `.25/.75` 上，34% 两格都不沾。
+
+**几何门禁**：`src/workspace/ui/icons.geometry.test.ts` 渲染每个图标、解析真实 DOM 里的
+`d`/`circle`（不是读常量，所以渲染期的分支也管得住），断言四条：四分格、活动区、点径、内部间隙。
+2026-09-14 首次对旧图形跑这四条：**533 个坐标越格 / 2 枚越框 / 15 处点圆不合规 / 5 对间隙不合格**。
+
+### 图标集（43 个，命名冻结）+ 语义
+
+每个名字只能表示表里那一件事。要表达别的事 → **加新名字**，不要借用（R18 之前借了四处，
+代码注释自己写着「套件里没有 tag / copy 图标，标签用 search、Take 用 settings-cache 代」）。
+
+| 名字 | 语义（只能表示这个） |
+|---|---|
+| `import` | 把素材导进来 |
+| `deliver` | 导出 / 交付成品 |
+| `settings` | 设置（齿轮） |
+| `search` | 搜索 / 找 |
+| `play` `pause` `prev` `next` | 播放 / 暂停 / 上一条 / 下一条 |
+| `arrow-left` `arrow-right` | 往前 / 往后移动（镜块顺序） |
+| `volume` `volume-off` | 有声 / 静音 |
+| `fullscreen` | 全屏 |
+| `mark-in` `mark-out` | 打入点 / 打出点 |
+| `save` | 收起来 / 保存进列表（托盘 + 勾，不再是软盘） |
+| `star` `heart` | 评级 / 收藏 |
+| `x` `close` | 关掉这个东西 / 关掉这个浮层 |
+| `check` | 已完成、已通过 |
+| `chevron-down` `chevron-right` | 展开 / 进入下一层 |
+| `grip` | 可拖动的把手（**只**用在能拖的控件上） |
+| `plus` | 新增一条 |
+| `info` `warning` | 提示 / 警告 |
+| `film` | 影像素材本身（封面缺失、空章占位） |
+| `more` | 更多操作（菜单） |
+| `tag` | 标签 |
+| `similar` | 相似镜头（两张错开的卡） |
+| `takes` | 同一镜头的多条（层叠） |
+| `slot` | 槽位 / 待填的位置 |
+| `settings-appearance` | 外观与主题（半明半暗） |
+| `settings-performance` | 性能档位（仪表） |
+| `settings-timeline` | 时间 / 时长（时钟）——**不表示章节归属** |
+| `settings-tools` | 工具与模型（工具箱） |
+| `settings-analysis` | 分析结果（柱状） |
+| `settings-generation` | AI 生成（四角星） |
+| `settings-privacy` | 隐私与诊断（盾 + 勾） |
+| `settings-about` | 关于（问号） |
+| `settings-cache` | 缓存与占用（数据库桶）——**不表示「多条素材」** |
+| `settings-keymap` | 快捷键（键帽） |
+
+`ICON_NAMES.length === 43` 由 `icons.test.tsx` 钉住。R18 之前是 39
+（24+9 的任务书口径 + `film` + `settings-keymap` + `arrow-left/right` + `more`），
+R18 新增语义正确的 `tag` / `similar` / `takes` / `slot` 四枚，消灭四处「代用」。
 
 ### 怎么加一个组件（四步）
 

@@ -9,7 +9,7 @@
 .ui-guide {
   --guide-arrow-left: 24px;
   position: fixed;
-  z-index: 70;
+  z-index: var(--z-toast);
   box-sizing: border-box;
   width: 300px;
   max-width: calc(100vw - 16px);
@@ -159,7 +159,7 @@ html[data-theme="light"] .ui-guide-kicker {
 .home-screen {
   position: absolute;
   inset: var(--workspace-topbar-height, 44px) 0 0;
-  z-index: 30;
+  z-index: var(--z-overlay);
   overflow: auto;
   background:
     radial-gradient(1200px 420px at 18% -10%, var(--accent-tint), transparent 60%),
@@ -209,7 +209,7 @@ html[data-theme="light"] .ui-guide-kicker {
   justify-content: center;
   width: 22px;
   height: 22px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-family: var(--font-mono);
   font-size: var(--text-12);
   font-weight: 700;
@@ -283,8 +283,8 @@ html[data-theme="light"] .ui-guide-kicker {
   height: 44px;
   padding: 0 var(--space-5);
   font-size: var(--text-15);
-  border-radius: 999px;
-  box-shadow: 0 10px 24px var(--accent-glow);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-glow-lg);
 }
 
 .home-screen .home-start.ui-button .ui-icon {
@@ -350,7 +350,7 @@ html[data-theme="light"] .ui-guide-kicker {
 
 .home-episode-numeral {
   font-family: var(--font-mono);
-  font-size: 44px;
+  font-size: var(--text-40);
   font-weight: 700;
   letter-spacing: -0.04em;
   color: color-mix(in srgb, var(--media-ink) 32%, transparent);
@@ -361,7 +361,7 @@ html[data-theme="light"] .ui-guide-kicker {
   top: var(--space-2);
   left: var(--space-2);
   padding: 1px var(--space-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: var(--text-11);
   line-height: var(--lh-11);
   color: var(--media-ink);
@@ -407,7 +407,7 @@ html[data-theme="light"] .ui-guide-kicker {
   width: 18px;
   height: 18px;
   border: 1px solid var(--border-hair);
-  border-radius: 5px;
+  border-radius: var(--radius-6);
   font-family: var(--font-mono);
   font-size: var(--text-11);
   color: var(--text-faint);

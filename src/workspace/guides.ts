@@ -9,7 +9,7 @@ import type { PipelineStep } from "./pipelineModel";
  * 只弹一次(键 `guide.<id>.viewed`,Rust 白名单按前缀 `guide.` 放行);同一时刻最多一个。
  * 触发条件是下面这张纯函数表 —— 谁先满足谁先出,按 `GUIDE_ORDER` 定序。
  */
-export const GUIDE_IDS = ["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay"] as const;
+export const GUIDE_IDS = ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"] as const;
 export type GuideId = (typeof GUIDE_IDS)[number];
 
 export function guideKey(id: GuideId): string {
@@ -32,6 +32,8 @@ export interface GuideSignals {
   overlayOpen: boolean;
   /** 一条素材播到了末尾(锁存,见 notePlayerStatus)。 */
   playbackEnded: boolean;
+  /** R18 F1:后台真的在分析素材 —— 完成通知即将发出,也是要系统通知权限的时机。 */
+  backgroundRunning: boolean;
 }
 
 export const EMPTY_GUIDE_SIGNALS: GuideSignals = {
@@ -43,6 +45,7 @@ export const EMPTY_GUIDE_SIGNALS: GuideSignals = {
   exportDrawerOpen: false,
   overlayOpen: false,
   playbackEnded: false,
+  backgroundRunning: false,
 };
 
 export interface GuideSpec {
@@ -66,6 +69,15 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     anchor: '[data-guide="nav"], nav.pipeline-rail',
     side: "bottom",
     when: (s) => s.inWorkspace,
+  },
+  // R18 车道 settings F1:通知权限的前置说明。macOS 只在第一次 `show()` 时弹权限框,
+  // 那一刻用户如果没读过任何说明,本能就会点「不允许」,之后所有通知永久失效且软件不会再问。
+  // 所以在后台真的开始干活、第一条通知发出去之前,先用一只气泡把「会通知什么 / 系统会问你」说清楚。
+  notify: {
+    text: "导出和批量分析完成时,软件会用系统通知提醒你一声;接下来系统会问你要不要允许。不想被打扰,可以在「设置 › 隐私与诊断」里关掉。",
+    anchor: '[data-guide="notify"], .workspace-status',
+    side: "top",
+    when: (s) => s.inWorkspace && s.backgroundRunning,
   },
   heat: {
     text: "这条彩色条是「精彩程度」:越亮越精彩。软件已经框出几段建议,按 Enter 直接采用。",

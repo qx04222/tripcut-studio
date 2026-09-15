@@ -28,6 +28,17 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("summaryPhrases", () => {
+  // R18 W-4:启动补扫挪到开窗之后,补扫期间状态条要说人话(不出现「补扫」这种内部词)。
+  it("启动补扫期间排在最前,补扫结束后消失", () => {
+    const idle = { analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0 };
+    expect(summaryPhrases({ ...idle, startupBackfill: true })).toEqual(["正在整理素材库"]);
+    expect(summaryPhrases({ ...idle, startupBackfill: false })).toEqual(["后台空闲"]);
+    expect(summaryPhrases({ ...idle, analyzed: 12, analyzeTotal: 500, startupBackfill: true })).toEqual([
+      "正在整理素材库",
+      "正在分析 12/500",
+    ]);
+  });
+
   it("按存在性依次显示中文短语", () => {
     // R12 §3:「正在分析 12/500」,估得出剩余时间时再接「,大约还要 30 秒」。
     expect(summaryPhrases({ analyzed: 12, analyzeTotal: 500, transcribing: 3, generating: 1, missing: 2 }))
@@ -44,6 +55,8 @@ describe("summaryPhrases", () => {
     expect(summaryPhrases({ ...base, pausedReason: "thermal" })).toEqual(["正在分析 12/500", "电脑有点热,后台先慢下来"]);
     expect(summaryPhrases({ ...base, pausedReason: "idle_wait" })).toEqual(["正在分析 12/500", "等你不用电脑时继续"]);
     expect(summaryPhrases({ ...base, pausedReason: "memory" })).toEqual(["正在分析 12/500", "内存不足,后台先停一停"]);
+    // R18 W-6:低电量模式只是减速,不是暂停。
+    expect(summaryPhrases({ ...base, pausedReason: "low_power" })).toEqual(["正在分析 12/500", "电池在省电模式,后台先慢下来"]);
     expect(summaryPhrases({ ...base, pausedReason: "user" })).toEqual(["正在分析 12/500"]);
     expect(summaryPhrases({ ...base, analyzeTotal: 0, pausedReason: "thermal" })).toEqual(["后台空闲"]);
   });

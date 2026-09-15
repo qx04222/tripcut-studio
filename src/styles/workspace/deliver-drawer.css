@@ -162,7 +162,7 @@
 .deliver-progress-bar {
   height: var(--space-1);
   overflow: hidden;
-  border-radius: var(--space-1);
+  border-radius: var(--radius-pill);
   background: var(--surface-chrome-2);
 }
 

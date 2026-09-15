@@ -1,0 +1,447 @@
+/*
+ * R18 车道 layout(V3)· 版面打磨。本轮**全部**新样式只写在这一个文件里
+ * (头脑风暴 `.superpowers/sdd/r18/brainstorm-visual.md` §3 车道 V3 的硬约束)。
+ * `@import` 挂在 `src/styles/workspace.css` 头部 —— 尾部的 @import 会被 postcss 静默丢掉。
+ *
+ * 它是全部车道 CSS 里最先进 bundle 的一份,所以这里的每条选择器都要靠**特异性**压过
+ * 后进来的 chrome.css / shell-r12.css / pool.css …,不能靠声明顺序。手法两种:
+ *   ① 带壳根 `.workspace-shell` 前缀;② 同一个类名写两遍(`.x.x`)给非壳内的浮层抬级。
+ *
+ * 值只从 tokens.css 取:没有 font-size 字面量、border-radius 只用 --radius-*、
+ * box-shadow 只用 --shadow- 与 --ring、transition 只用 --motion-*、z-index 只用 --z-*、
+ * 一个 !important 都不加(门禁 src/styles/tokens.test.ts 会逐条扫这个目录)。
+ *
+ * 分节:
+ *   1. 顶栏:流水线胶囊 / 更新降级 / 齿轮小圆点(V-07 / V-08)
+ *   2. 引导条(PipelineHint)
+ *   3. 媒体池(V-18)
+ *   4. 监视器(V-19 / V-28)
+ *   5. 镜头带工具条(V-15)
+ *   6. 首页(V-20)
+ *   7. 状态条(V-27)
+ *   8. 折叠检查器(V-22)
+ */
+
+/* ---------- 1. 顶栏 ---------- */
+
+/* 集选择器与流水线条此前一高一矮、圆角也不一样(两种胶囊并排)。统一到 --control-md
+   + --radius-pill:同高、同圆角、同边框。 */
+.workspace-shell .workspace-topbar-center .workspace-episode-trigger.ui-button,
+.workspace-shell .workspace-topbar-center .pipeline-rail {
+  box-sizing: border-box;
+  height: var(--control-md);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-pill);
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .workspace-topbar-center .pipeline-rail .pipeline-rail-step {
+  height: 22px;
+}
+
+.workspace-shell .workspace-topbar-center .pipeline-rail .pipeline-rail-mark {
+  width: 16px;
+  height: 16px;
+}
+
+/* 折叠态(<1440):一颗有文字的胶囊 + 一个下拉菜单。 */
+.workspace-shell .pipeline-rail--collapsed {
+  position: relative;
+  padding: 0;
+}
+
+.workspace-shell .pipeline-rail--collapsed .pipeline-rail-trigger {
+  gap: var(--space-1);
+  height: 100%;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.workspace-shell .pipeline-rail--collapsed .pipeline-rail-trigger .pipeline-rail-name {
+  display: inline;
+}
+
+.workspace-shell .pipeline-rail-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+.workspace-shell .pipeline-rail-menuitem {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.workspace-shell .pipeline-rail-menuitem:hover {
+  background: var(--surface-chrome);
+  color: var(--text-primary);
+}
+
+.workspace-shell .pipeline-rail-menuitem:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.workspace-shell .pipeline-rail-menuitem .pipeline-rail-name {
+  flex: 1;
+}
+
+.workspace-shell .pipeline-rail-menuitem.pipeline-rail-item--current {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.workspace-shell .pipeline-rail-menuitem .pipeline-rail-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-size: var(--text-11);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.workspace-shell .pipeline-rail-menuitem.pipeline-rail-item--current .pipeline-rail-mark {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.workspace-shell .pipeline-rail-menuitem.pipeline-rail-item--done .pipeline-rail-mark {
+  border-color: transparent;
+  background: var(--ok-tint);
+  color: var(--accent-text);
+}
+
+/* V-08:更新就绪的胶囊降成 ghost 之后仍要看得见 —— 齿轮右上角一枚强调色小圆点。
+   顶栏右侧最后一个按钮就是齿轮(TopBar 的结构固定),用 :last-child 挂它。 */
+.workspace-shell .workspace-topbar-right[data-update-dot="true"] > .ui-button:last-child {
+  position: relative;
+}
+
+.workspace-shell .workspace-topbar-right[data-update-dot="true"] > .ui-button:last-child::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--surface-panel);
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ---------- 2. 引导条 ---------- */
+
+/* 「知道了」此前贴在 1440px 外的最右端,离它要读的那句话一整屏。移到文案右侧 12px;
+   整条高度对齐 --control-md。 */
+.workspace-shell .pipeline-hint {
+  min-height: var(--control-md);
+}
+
+.workspace-shell .pipeline-hint .pipeline-hint-text {
+  flex: 0 1 auto;
+}
+
+.workspace-shell .pipeline-hint > .ui-button {
+  flex: none;
+  margin-right: auto;
+  margin-left: var(--space-3);
+}
+
+/* ---------- 3. 媒体池(V-18) ---------- */
+
+/* 筛选芯片与「更多筛选⌄」并到一行:芯片行横向滚动,「更多筛选」钉在右端不跟着滚。 */
+.workspace-shell .media-pool .pool-chips {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-shell .media-pool .pool-chips > .ui-chip {
+  flex: none;
+}
+
+.workspace-shell .media-pool .pool-chip-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: 0;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.workspace-shell .media-pool .pool-chip-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-shell .media-pool .pool-chip-scroll > .ui-chip {
+  flex: none;
+}
+
+.workspace-shell .media-pool .pool-more {
+  flex: none;
+  margin-left: auto;
+}
+
+/* 卡片定高:行高早已由虚拟化钉在 POOL_ROW_HEIGHT(卡是 height:100%),波浪边其实来自
+   卡内溢出。封面与文件名都 flex:none,角标行只吃剩下的,谁也撑不动卡。 */
+.workspace-shell .media-pool .pool-card .pool-card-image,
+.workspace-shell .media-pool .pool-card .pool-card-name {
+  flex: none;
+  min-height: 0;
+}
+
+.workspace-shell .media-pool .pool-card .pool-card-badges {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 文件名 / 日期 / 评级挤在两条基线上一左一右,改成同一行左对齐的元信息条。 */
+.workspace-shell .media-pool .pool-card .pool-card-meta {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* 重复组:文字角标「同一镜头 n 条」换成左上角一枚 takes 图标 + 「×n」——
+   与全站其它角标同一套语言(AX 名不变:原文留在视觉隐藏的一段里)。 */
+.workspace-shell .media-pool .pool-card-stack {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-shell .media-pool .pool-card-stack .ui-icon {
+  flex: none;
+}
+
+/* 列数两档(≥1440 三列 / <1440 两列)是 JS 算的 —— 网格行的 grid-template-columns
+   写在内联 style 上(虚拟化要的),CSS 覆盖不了它。见 MediaPool.tsx 的 measure()。 */
+
+/* ---------- 4. 监视器(V-19 / V-28) ---------- */
+
+/* 井此前左右各留 ~28px 死沟。padding 降到 --space-3,井实际充满栏宽。 */
+.workspace-shell .monitor .monitor-stage {
+  padding: var(--space-3);
+}
+
+/* toast 此前固定在窗顶,正好盖住监视器栏标题条上的文件名(26-timeline.png)。
+   改到窗底居中,压在状态条上方一档。`.x.x` 抬特异性:宿主不在 .workspace-shell 里。 */
+.ui-toast-host.ui-toast-host {
+  inset: auto 0 calc(var(--workspace-status-height, 28px) + var(--space-3));
+  z-index: var(--z-toast);
+}
+
+/* ---------- 5. 镜头带工具条(V-15) ---------- */
+
+/* 三组控件(视图 / 动作 / 附属标签页)此前挤在一行没有节奏。组间距 --space-3 +
+   一条竖分隔线;同组按钮同一 variant(自动挑选降 ghost,主动作只留「一键排入」)。 */
+.workspace-shell .shot-band .workspace-pane-chrome .ui-section-header-actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.workspace-shell .shot-band .band-views {
+  gap: var(--space-1);
+  margin-left: auto;
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border-hair);
+}
+
+.workspace-shell .shot-band .band-toolbar-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border-hair);
+}
+
+/* 五个标签页:从五颗独立按钮改成一条 segmented control(同一个胶囊槽里分格)。 */
+.workspace-shell .shot-band .workspace-pane-head .band-tabs,
+.workspace-shell .shot-band .workspace-pane-chrome .band-tabs {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  margin-left: 0;
+  padding: 2px;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-pill);
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .shot-band .band-tabs > button {
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.workspace-shell .shot-band .band-tabs > button:hover {
+  color: var(--text-primary);
+}
+
+.workspace-shell .shot-band .band-tabs > button.active {
+  color: var(--text-primary);
+  font-weight: 600;
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-shell .shot-band .band-tabs > button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ---------- 6. 首页(V-20) ---------- */
+
+/* 三套卡片语言(四步卡 / 集卡 / 模板卡)收敛成一种:同圆角、同发丝边、同卡片阴影。 */
+.home-screen .home-pipeline-step,
+.home-screen .home-episode-card.ui-card,
+.home-screen .home-template-card.ui-card {
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+/* hero 下面那条孤立的虚线换成全站统一的实线发丝线。 */
+.home-screen .home-hero {
+  border-bottom: 1px solid var(--border-hair);
+}
+
+/* 40px hero → 28px 小标题 → 13px 正文,补上此前 40 与 15 之间的断层。 */
+.home-screen .home-title {
+  font-size: var(--text-40);
+  line-height: var(--lh-40);
+}
+
+.home-screen .home-section-title {
+  font-size: var(--text-28);
+  line-height: var(--lh-28);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+/* 「进行中」徽标从封面里搬到标题行左侧,不再压住封面里的大号集号。 */
+.home-screen .home-episode-heading {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.home-screen .home-episode-heading .home-episode-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.home-screen .home-episode-body .home-episode-state {
+  position: static;
+  flex: none;
+  order: -1;
+}
+
+/* ---------- 7. 状态条(V-27) ---------- */
+
+/* 五组信息此前无分组节奏。分三组:左 = 后台任务,中 = 更新,右 = 素材库;组间 --space-4。 */
+.workspace-shell .workspace-status {
+  gap: var(--space-4);
+}
+
+.workspace-shell .workspace-status-group {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-shell .workspace-status-group--tasks {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.workspace-shell .workspace-status-group--update {
+  flex: none;
+}
+
+.workspace-shell .workspace-status-group--library {
+  flex: none;
+  margin-left: 0;
+}
+
+/* ---------- 8. 折叠检查器(V-22) ---------- */
+
+/* 竖排中文「展开检查器」在 macOS 上几乎没人这么写,1280 下读不出来。
+   改成横排:一枚图标 + 一个「›」,栏名只留在 tooltip / AX 名里。 */
+.workspace-shell .workspace-rail--r18 {
+  align-items: stretch;
+  justify-content: stretch;
+  padding-top: 0;
+}
+
+.workspace-shell .workspace-rail--r18 .workspace-rail-button {
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  height: 100%;
+  padding: var(--space-3) 0;
+  border-radius: 0;
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+
+.workspace-shell .workspace-rail--r18 .workspace-rail-label {
+  writing-mode: horizontal-tb;
+  letter-spacing: 0;
+}
+
+.workspace-shell .workspace-rail--r18 .workspace-rail-button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}

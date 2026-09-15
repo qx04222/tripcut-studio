@@ -9,6 +9,7 @@ import { ActionKbd } from "./KeymapKbd";
 import { Button, Icon } from "./ui";
 import { usePipeline } from "./usePipeline";
 import { UpdateTopChip } from "./update/UpdateTopChip";
+import { useUpdateState } from "./update/updateStore";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
 /**
@@ -30,6 +31,9 @@ export function TopBar(): JSX.Element {
   const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
   const pipeline = usePipeline();
   const homeOpen = useHomeOpen();
+  // V-08:更新就绪时那颗按钮降成 ghost(唯一的实心主按钮留给「下一步」),
+  // 「还有更新等着」改由齿轮右上角一枚小圆点说 —— 降级不等于藏起来。
+  const updatePhase = useUpdateState().phase;
   const nextLabel = viewingEpisode ? RETURN_TO_EXPORT_LABEL : pipelineNextLabel(pipeline);
   // Z-03:段都排进去了但还有章没镜 → 主按钮已是「导出」,旁边给一颗 ghost「补缺口 n 章」(聚焦镜头带)。
   const gapLabel = viewingEpisode ? null : pipelineGapLabel(pipeline);
@@ -73,7 +77,7 @@ export function TopBar(): JSX.Element {
         <PipelineRail state={pipeline} />
       </div>
 
-      <div className="workspace-topbar-right">
+      <div className="workspace-topbar-right" data-update-dot={updatePhase === "ready" ? "true" : undefined}>
         <span className="workspace-topbar-hint" aria-hidden="true">
           命令面板
           <ActionKbd action="command-palette" />

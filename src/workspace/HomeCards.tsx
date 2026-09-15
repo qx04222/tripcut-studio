@@ -52,10 +52,16 @@ export function EpisodeCard({ episode, done, coverUrl, onOpen, onMore }: Episode
       <Card as="button" interactive className="home-episode-card" onClick={() => onOpen(episode)}>
         <span className="home-episode-cover" aria-hidden="true">
           {coverUrl ? <CoverImage src={coverUrl} crossOrigin="anonymous" className="home-episode-image" /> : <span className="home-episode-numeral">{numeral}</span>}
-          <span className={active ? "home-episode-state is-active" : "home-episode-state"}>{active ? "进行中" : "已封存"}</span>
         </span>
         <span className="home-episode-body">
-          <strong className="home-episode-title">{episode.title}</strong>
+          {/* R18 V-20:「进行中 / 已封存」此前压在封面上,和封面里的大号集号互相穿插。
+              搬到标题行左侧 —— 封面只管画面,状态跟着标题走。 */}
+          <span className="home-episode-heading">
+            {/* DOM 里标题在前、状态在后(卡片的 AX 名要以集名开头,冒烟与既有断言按这个找卡);
+                视觉上状态在左 —— 靠 polish-r18.css 的 `order: -1`。 */}
+            <strong className="home-episode-title">{episode.title}</strong>
+            <span className={active ? "home-episode-state is-active" : "home-episode-state"}>{active ? "进行中" : "已封存"}</span>
+          </span>
           <span className="home-episode-meta">
             {`${PLATFORM_LABELS[episode.target_platform]} · ${episode.clip_count} 条素材`}
           </span>

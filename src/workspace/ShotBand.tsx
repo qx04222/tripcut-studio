@@ -282,15 +282,19 @@ export function ShotBand(): JSX.Element {
     // 栏 landmark(规格 §7):`镜头带` 这个 AX 名是冒烟脚本的锚点,壳里不再包一层。
     <div className="shot-band workspace-pane" aria-label="镜头带" role="region" data-pane="band" tabIndex={-1}>
       <PaneHead title="镜头带" meta={chapters.length > 0 ? `${chapters.length} 章 · ${bandCountLabel(clipTotal, gapTotal)}` : "空"}>
+        {/* R18 V-15:工具条分三组(视图 / 动作 / 附属视图),组间一条竖分隔线 + --space-3。
+            此前三组控件 + 五个标签页平铺在 32px 里,没有主次也没有节奏。 */}
         <BandViewToggle value={view} onChange={setView} />
-        <BandAutoSelect disabled={readOnly} onOutcome={onAutoSelected} onError={(text) => showToast(text, { tone: "danger" })} />
-        {/* R12 §2:镜头带唯一的主动作 —— 把挑好的片段按章排进带上。带还是空的时候这个入口
-            由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。 */}
-        {chapters.length > 0 ? (
-          <Button variant="primary" size="sm" className="band-arrange" aria-label="一键排入" busy={arranging} disabled={readOnly} onClick={onArrange}>
-            一键排入
-          </Button>
-        ) : null}
+        <div className="band-toolbar-actions">
+          <BandAutoSelect disabled={readOnly} onOutcome={onAutoSelected} onError={(text) => showToast(text, { tone: "danger" })} />
+          {/* R12 §2:镜头带唯一的主动作 —— 把挑好的片段按章排进带上。带还是空的时候这个入口
+              由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。 */}
+          {chapters.length > 0 ? (
+            <Button variant="primary" size="sm" className="band-arrange" aria-label="一键排入" busy={arranging} disabled={readOnly} onClick={onArrange}>
+              一键排入
+            </Button>
+          ) : null}
+        </div>
         <BandTabs />
       </PaneHead>
       {/* R13 §4:刻度 + 视口 + 播放头同在一个 stage 里;音乐模式的刻度轨仍在带上方,与镜头带共用同一条时间轴(规格 §3.4)。 */}

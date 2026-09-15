@@ -403,7 +403,7 @@
 }
 
 .settings-sheet .settings-sheet-clock.needs-review {
-  box-shadow: inset 3px 0 0 var(--warn);
+  box-shadow: var(--shadow-rail-warn);
   padding-left: var(--space-3);
 }
 
@@ -754,7 +754,7 @@
 .settings-sheet .settings-whisper-model {
   padding: var(--space-3);
   border: 1px solid var(--border-hair);
-  border-radius: 8px;
+  border-radius: var(--radius-10);
   gap: var(--space-2);
 }
 

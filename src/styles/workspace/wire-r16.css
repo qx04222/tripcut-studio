@@ -50,13 +50,13 @@
   height: 20px;
   min-width: 0;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   background: var(--media-overlay);
   color: var(--media-ink);
   font-weight: 600;
   letter-spacing: 1px;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--motion-fast);
 }
 .workspace-shell .shot-band .band-segment:hover .band-segment-more,
 .workspace-shell .shot-band .band-segment.ui-card--selected .band-segment-more,

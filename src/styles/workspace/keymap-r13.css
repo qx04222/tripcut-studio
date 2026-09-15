@@ -81,7 +81,7 @@
 
 /* 撞键的行:左侧一道警告色细线 + 键帽下一行说明。 */
 .settings-keymap tr.is-conflict {
-  box-shadow: inset 3px 0 0 var(--warning);
+  box-shadow: var(--shadow-rail-warn);
 }
 
 .settings-keymap .settings-keymap-conflict {
@@ -108,7 +108,7 @@
   padding: var(--space-3) var(--space-4);
   border-left: 3px solid var(--accent);
   background: var(--accent-tint);
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 var(--radius-10) var(--radius-10) 0;
   color: var(--text-primary);
   font-size: var(--text-13);
   line-height: var(--lh-13);

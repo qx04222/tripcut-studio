@@ -197,7 +197,7 @@ describe("设置 sheet", () => {
   it("性能分区:后台并行任务数 Select、轻量预览文件 Toggle、内存档位(R11 术语清扫:worker 并发 / 540p 代理 → 白话)", async () => {
     const dialog = await openLoaded();
     const panel = await goSection(dialog, "performance");
-    expect(within(panel).getByRole("combobox", { name: "后台同时处理几条" })).toBeTruthy();
+    expect(within(panel).getByRole("combobox", { name: "后台干活的力度" })).toBeTruthy();
     expect(within(panel).getByRole("combobox", { name: "内存档位" })).toBeTruthy();
     const proxy = within(panel).getByRole("switch", { name: "预览用小文件" });
     expect(proxy.getAttribute("aria-checked")).toBe("true");

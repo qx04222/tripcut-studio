@@ -70,13 +70,21 @@ export function MediaPool(): JSX.Element {
     const measure = () => {
       setViewportHeight(Math.max(1, viewport.clientHeight));
       // 栏宽以实测为准,store 里的值是拖动落定后的值,拖动中途它还没更新。
-      setColumns(poolColumnCount(viewport.clientWidth || paneWidth));
+      // R18 V-18:列数两档 —— 1440 以下最多两列。此前池宽锁 320,1280 下仍排三列,
+      // 卡只是更挤;窗口窄的时候要的是更大的卡,不是更多的卡。
+      const byWidth = poolColumnCount(viewport.clientWidth || paneWidth);
+      const wide = typeof window === "undefined" || window.innerWidth >= 1440;
+      setColumns(wide ? byWidth : (Math.min(byWidth, 2) as 2 | 3 | 4));
     };
     measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(viewport);
-    return () => observer.disconnect();
+    // 池自己的宽度不随窗口变(默认锁 320),所以窗口变窄时 ResizeObserver 不会响 —— 另挂一个。
+    if (typeof window !== "undefined") window.addEventListener("resize", measure);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(viewport);
+    return () => {
+      if (typeof window !== "undefined") window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
   }, [paneWidth]);
 
   const clips = useMemo(() => [...feed.clips], [feed.clips]);
@@ -197,7 +205,42 @@ export function MediaPool(): JSX.Element {
     () => (expandedStackId === null ? null : items.find((item) => item.stack?.id === expandedStackId)?.stack ?? null),
     [expandedStackId, items],
   );
-  const toggleStack = (stackId: number) => setExpandedStackId(expandedStackId === stackId ? null : stackId);
+  // R18 W-5:`React.memo(PoolCard)` 此前被两个内联闭包打穿——`onToggleStack` 与
+  // `onSelect` 每次 MediaPool 渲染都是新函数,可见的 ~32 张卡全部重协调。
+  //
+  // 不能用自定义比较器忽略这两个回调(`onToggleStack` 捕获 `expandedStackId`,
+  // 忽略它会用旧状态切换),也不想改 PoolCard 的 props 形状。做法是:
+  // ① `toggleStack` 用函数式 setState,不再捕获 `expandedStackId`,本身恒定;
+  // ② `selectClip` 的身份每次选中都会变(它捕获 multiSelection / anchor),
+  //    所以放进 ref,外面包一层恒定的转发函数;
+  // ③ 每条素材 / 每个 Stack 的回调各缓存一份,按 id 记在 ref 里,永不换引用。
+  const toggleStack = useCallback(
+    (stackId: number) => setExpandedStackId((previous) => (previous === stackId ? null : stackId)),
+    [],
+  );
+  const selectClipRef = useRef(selectClip);
+  selectClipRef.current = selectClip;
+  const toggleHandlers = useRef(new Map<number, () => void>());
+  const selectHandlers = useRef(new Map<number, (modifiers: { shift?: boolean; meta?: boolean }) => void>());
+  const toggleHandler = useCallback(
+    (stackId: number) => {
+      const cached = toggleHandlers.current.get(stackId);
+      if (cached) return cached;
+      const handler = () => toggleStack(stackId);
+      toggleHandlers.current.set(stackId, handler);
+      return handler;
+    },
+    [toggleStack],
+  );
+  const selectHandler = useCallback((clipId: number) => {
+    const cached = selectHandlers.current.get(clipId);
+    if (cached) return cached;
+    const handler = (modifiers: { shift?: boolean; meta?: boolean }) => selectClipRef.current(clipId, modifiers);
+    selectHandlers.current.set(clipId, handler);
+    return handler;
+  }, []);
+  // 没有 clip_id 的卡片(占位)点了不该做事,但也不能每次渲染换一个新函数。
+  const noopSelect = useCallback(() => undefined, []);
   const hotkeys = useMediaPoolHotkeys({
     anchorId,
     anchorStack,
@@ -355,7 +398,7 @@ export function MediaPool(): JSX.Element {
                     semanticScore={item.semanticScore}
                     stackCount={item.stack ? item.stack.members.length : undefined}
                     stackExpanded={item.stack ? item.stack.id === expandedStackId : undefined}
-                    onToggleStack={item.stack ? () => toggleStack(item.stack!.id) : undefined}
+                    onToggleStack={item.stack ? toggleHandler(item.stack.id) : undefined}
                     // 选中的是 Stack 里某条候选时,代表卡也算选中 —— 网格里没有那条的卡。
                     selected={
                       item.clip.id === selectedId ||
@@ -365,9 +408,7 @@ export function MediaPool(): JSX.Element {
                     }
                     isAnchor={item.clip.id === anchorId}
                     inMultiSelection={item.clip.id !== null && multiSelection.includes(item.clip.id)}
-                    onSelect={(modifiers) => {
-                      if (item.clip.id !== null) selectClip(item.clip.id, modifiers);
-                    }}
+                    onSelect={item.clip.id === null ? noopSelect : selectHandler(item.clip.id)}
                   />
                 ))}
               </div>

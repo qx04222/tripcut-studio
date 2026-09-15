@@ -28,7 +28,14 @@
  * 产物里一条都没有 —— vite build 会警告),所以挂在这里;chrome.css 里的选择器
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
+/* R18 车道 native(F2 退出确认卡),同样只能在头部 @import。 */
+@import "./workspace/native-r18.css";
+/* R18 车道 layout(V3):版面打磨。本轮新样式全在这一份里,必须排在其它车道文件**之前**
+   进 bundle(靠选择器特异性压过它们,不靠声明顺序);@import 只能在头部。 */
+@import "./workspace/polish-r18.css";
 @import "./workspace/chrome.css";
+/* R18 车道 settings(失败任务清单 / 缓存位置行),同样只能在头部 @import。 */
+@import "./workspace/settings-r18.css";
 /* R17 车道 exportfix(交付结果卡的 ffmpeg 建议行),同样只能在头部 @import。 */
 @import "./workspace/exportfix-r17.css";
 /* R17 车道 epmove(素材「移到其他集…」的目标集菜单),同样只能在头部 @import。 */

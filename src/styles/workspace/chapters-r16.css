@@ -23,7 +23,7 @@
 }
 
 .workspace-shell .shot-band .band-chapter-title-input:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--shadow-select-tint);
 }
 
 /* ---------- 2. 章头「···」(章操作菜单) ---------- */
@@ -45,7 +45,7 @@
 
 .workspace-shell .shot-band .band-chapter-delete-confirm {
   position: absolute;
-  z-index: 6;
+  z-index: var(--z-overlay);
   top: 44px;
   left: 50%;
   display: grid;
@@ -109,5 +109,5 @@
 .home-screen .episode-rename-input:focus-visible {
   border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: var(--shadow-select-tint);
 }

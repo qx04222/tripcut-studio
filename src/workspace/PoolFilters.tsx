@@ -19,6 +19,10 @@ import { DIMENSION_FILTER_LABEL } from "./copy";
  *
  * 主屏不出现英文 kicker(规格 §6):旧壳的 `CHINESE-CLIP · LOCAL` 与 `LIBRARY`
  * 两块装饰文字在这里没有对应物,别顺手搬回来。
+ *
+ * R18 V-18:框外那颗「搜索」按钮删了 —— 框内已经有放大镜,两套「搜索」隐喻叠在一起。
+ * 回车即搜(`onKeyDown`),删光即复原(U-15,原路不变)。AX 上「搜索」这个词仍然留在
+ * 输入框自己的名字里(「搜索画面或对白关键词」),没有丢;搜索中由 `aria-busy` 说。
  */
 export interface PoolExtraFilters {
   dimensionLabel: string;
@@ -110,7 +114,7 @@ export function PoolFilters({
   return (
     <div className="pool-filters">
       <div className="pool-search">
-        <label className="pool-search-field">
+        <label className="pool-search-field" aria-busy={searching || undefined}>
           <span className="visually-hidden">搜索画面或对白关键词</span>
           <Icon name="search" size={12} className="pool-search-icon" />
           <input
@@ -137,29 +141,24 @@ export function PoolFilters({
             }}
           />
         </label>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="pool-search-submit"
-          disabled={searching || composing}
-          onClick={submit}
-        >
-          {searching ? "搜索中" : "搜索"}
-        </Button>
       </div>
 
       <div className="pool-chips" role="group" aria-label="评级筛选">
-        {(Object.keys(POOL_FILTER_LABELS) as SelectionFilter[]).map((candidate) => (
-          <Chip
-            key={candidate}
-            className="pool-chip"
-            selected={candidate === filter}
-            count={counts[candidate]}
-            onClick={() => dispatchWorkspace({ type: "set-filter", filter: candidate })}
-          >
-            {POOL_FILTER_LABELS[candidate]}
-          </Chip>
-        ))}
+        {/* R18 V-18:芯片与「更多筛选⌄」并到一行 —— 芯片这一段溢出时横向滚动,
+            「更多筛选」钉在右端不跟着滚(此前它单独占第二行,两行参差)。 */}
+        <div className="pool-chip-scroll">
+          {(Object.keys(POOL_FILTER_LABELS) as SelectionFilter[]).map((candidate) => (
+            <Chip
+              key={candidate}
+              className="pool-chip"
+              selected={candidate === filter}
+              count={counts[candidate]}
+              onClick={() => dispatchWorkspace({ type: "set-filter", filter: candidate })}
+            >
+              {POOL_FILTER_LABELS[candidate]}
+            </Chip>
+          ))}
+        </div>
         <div className="pool-more" ref={moreRef}>
           <Button
             variant="ghost"

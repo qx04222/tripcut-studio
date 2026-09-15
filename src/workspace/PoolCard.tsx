@@ -59,9 +59,10 @@ function RatingMark({ clip }: { clip: ClipListItem }): JSX.Element {
 /**
  * R16 车道 E(§3 ④):`React.memo` —— 空闲态的重渲染主要靠 `useClipsFeed` 不换引用挡在上游;
  * memo 挡的是父组件(MediaPool)因选中 / 滚动窗口等原因重渲染时,props 没变的卡片。
- * 注意 `onSelect` / `onToggleStack` 目前在 MediaPool 里是内联闭包(每次渲染新函数),
- * 那类重渲染 memo 挡不住 —— 要等 MediaPool 把回调稳定下来(不在本车道文件所有权内)。
- * 不能自定义比较器忽略回调:`onToggleStack` 捕获了 `expandedStackId`,忽略它会用旧状态切换。
+ * R18 W-5:`onSelect` / `onToggleStack` 已经由 MediaPool 按 id 缓存成恒定引用
+ * (`selectHandler` / `toggleHandler`),这条 memo 在「选中一条素材」这种交互态才真正生效。
+ * 仍然不能自定义比较器忽略回调:`onToggleStack` 的语义依赖当前展开态,
+ * 稳定的做法是让回调本身不捕获状态(函数式 setState),而不是让比较器装看不见。
  */
 export const PoolCard = memo(PoolCardInner);
 
@@ -165,7 +166,13 @@ function PoolCardInner({
             tone="ink"
             className={`pool-card-stack${onToggleStack ? " expandable" : ""}${stackExpanded ? " expanded" : ""}`}
           >
-            {stackCountLabel(stackCount)}
+            {/* R18 V-18:重复组此前是一条文字角标(和拒绝卡的斜线底纹一起,是全站唯二的孤立语言)。
+                改成「图标 + ×n」,与时长 / AI 生成 / 匹配度那一排角标同一套语言。
+                icons 车道还没加 `takes`(两张卡叠),先用 `film` 顶着 —— 车道报告里记了待换。
+                原文「同一镜头 n 条」留在视觉隐藏的一段里:AX 名与既有断言都靠它。 */}
+            <Icon name="film" size={12} />
+            <span aria-hidden="true">{`×${stackCount}`}</span>
+            <span className="visually-hidden">{stackCountLabel(stackCount)}</span>
           </Badge>
         ) : null}
         {semanticScore !== undefined ? (

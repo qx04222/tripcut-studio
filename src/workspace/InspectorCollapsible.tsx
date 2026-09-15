@@ -70,6 +70,7 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
       node: (
         <CollapsibleSection key="ai" id="ai" icon={sectionIcon("ai")} title="AI 描述" status={sectionStatusText("ai", ctx)}>
           <AiDescriptionSection
+            clipId={clip.id ?? undefined}
             aiDescription={aiDescription}
             llmEnabled={llmEnabled}
             llmBudgetExhausted={llmBudgetExhausted}

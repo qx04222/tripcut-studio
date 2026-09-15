@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.8.4"
+version = "0.9.0"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -91,6 +91,10 @@ tauri = { version = "=2.11.5", features = [] }
 thiserror = "=2.0.17"
 tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "=0.1.41"
+# R18 M-03:让 123 个 tracing 调用点真的落盘。只开 fmt + ansi 之外的最小特性集——
+# 不开 env-filter(它会拉 regex),级别用 TRIPCUT_LOG 自己解析成 LevelFilter。
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["fmt", "std"] }
+tracing-appender = "=0.2.3"
 ttf-parser = "=0.25.1"
 # 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
 # url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
@@ -106,3 +110,13 @@ tower = { version = "=0.5.3", features = ["util"] }
 # vendor 版先解除 mpv 侧回调再 free;上游修复后可移除。
 [patch.crates-io]
 libmpv2 = { path = "../vendor/libmpv2" }
+
+# R18 车道 native / M-09:默认 release 不 strip、不 LTO、codegen-units=16——
+# 主二进制里有 6 万个符号、__LINKEDIT 段 8 MB(brainstorm-holistic §1.10 实测)。
+# panic = "abort" **不能**用:player/mod.rs 与 contact_sheet.rs 有 5 处 catch_unwind。
+# strip = "symbols" 不影响崩溃日志的可读性:doctor.rs 写的是 PanicHookInfo
+# (文件:行号来自 panic location,不依赖符号表)。
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

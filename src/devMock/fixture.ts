@@ -1122,6 +1122,9 @@ const HANDLERS: Record<string, Handler> = {
     num(clipId, "clipId") % 4 === 0
       ? { clip_id: clipId, description: "清晨的古城街道,青石板路面反着微光,两侧店铺尚未开门,一位早起的居民提着篮子走过。", tags: ["古城", "清晨", "街景", "行人"], provider: "claude" }
       : null,
+  // R18 AI-A1:本地描述在 mock 里永远有(它不依赖云端),用来验证回落显示。
+  get_clip_brief: ({ clipId }) =>
+    `俯拍近景的食物,画面里的人在吃喝,手持拍摄,画面文字「城南面馆」。(#${num(clipId, "clipId")})`,
   ask_director: () => ({ answer: "先把洱海航拍那条当作本章开场,再接喜洲院子的细节。", provider: "claude" }),
   get_settings_status: () => SETTINGS_STATUS,
   clear_cache_and_rebuild: () => ({ removed_database_rows: 0, reset_jobs: 0, removed_disk_bytes: 0 }),
@@ -1991,7 +1994,7 @@ HANDLERS.skip_chapter = ({ chapterId, skipped }) => {
 // 功能气泡默认「都看过」—— 否则截图剧本每一步都会被一只气泡挡住;`?guides=1` 让七个按真实顺序出。
 // ---------------------------------------------------------------------------
 if (typeof location !== "undefined" && !new URLSearchParams(location.search).has("guides")) {
-  for (const id of ["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay"]) state.settings[`guide.${id}.viewed`] = "true";
+  for (const id of ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"]) state.settings[`guide.${id}.viewed`] = "true";
 }
 // R13 车道 C:「打开剪映」(open_app 白名单只放行剪映 bundle id)与拖边裁剪的顺序表重写。只追加不改上面的表。
 HANDLERS.open_app = ({ bundleId }) => {
@@ -2343,3 +2346,32 @@ HANDLERS.move_clips_to_episode = ({ clipIds, episodeId }) => {
   return { moved: from.length, skipped_missing: skippedMissing, from };
 };
 (MOCK_COMMANDS as string[]).push("move_clips_to_episode");
+
+// R18 车道 native / F2:`confirm_exit` 在 mock 模式下什么都不做(浏览器里没有进程可退)。
+// MOCK_COMMANDS 在上面按 HANDLERS 当时的键算好,所以这里补登记(fixture.test 按它对账 api.ts)。
+HANDLERS.confirm_exit = noop;
+(MOCK_COMMANDS as string[]).push("confirm_exit");
+// R18 F8:失败任务清单 + 「清空全部失败」。假后端里有两条失败;清空后列表空、按钮消失。
+import type { FailedJob } from "../api";
+const FAILED_JOBS: FailedJob[] = [
+  { id: 811, kind: "analyze_l1", status: "blocked", clip_id: 5, file_name: "DJI_20260812_091522_0005_D.MP4", summary: "连续失败 3 次:读不到这个文件", finished_at: "2026-09-14T08:40:00Z" },
+  { id: 812, kind: "proxy", status: "failed", clip_id: 8, file_name: "C0048.MP4", summary: "磁盘空间不足", finished_at: "2026-09-14T08:41:00Z" },
+];
+HANDLERS.list_failed_jobs = () => FAILED_JOBS.map((job) => ({ ...job }));
+HANDLERS.clear_failed_jobs = () => {
+  const cleared = FAILED_JOBS.length;
+  FAILED_JOBS.length = 0;
+  return cleared;
+};
+(MOCK_COMMANDS as string[]).push("list_failed_jobs", "clear_failed_jobs");
+// R18 F5:假后端里「更改缓存位置…」选到一个固定路径,搬迁直接成功(真后端搬完会重启)。
+HANDLERS.pick_cache_folder = () => "/Volumes/外接盘";
+HANDLERS.relocate_cache_dir = ({ folder }) => {
+  const root = `${String(folder)}/TripCut缓存`;
+  state.settings["cache.custom_dir"] = root;
+  return { new_root: root, moved_bytes: 1_234_567, moved_files: 42 };
+};
+(MOCK_COMMANDS as string[]).push("pick_cache_folder", "relocate_cache_dir");
+// R18 M-04:假后端直接报一个已存好的诊断包(真后端会弹保存面板)。
+HANDLERS.export_diagnostics_bundle = () => ({ path: "~/Desktop/旅剪诊断-20260914-1930.zip", log_files: 3, failed_jobs: 2 });
+(MOCK_COMMANDS as string[]).push("export_diagnostics_bundle");

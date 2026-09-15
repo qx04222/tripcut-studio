@@ -253,8 +253,9 @@ pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcr
 /// 其它(分析 / 缩略图 / 转写 / 向量…)一律不再认领,正在跑的跑完。
 pub(crate) const USER_INITIATED_KINDS_SQL: &str = "('export_package','cache_gc')";
 
-/// 大模型类同时只允许一个任务在跑。
-const HEAVY_MODEL_LIMIT: usize = 1;
+/// 大模型类同时允许几个任务在跑的兜底值(未经 `with_memory_profile` 接线时使用)。
+/// R18 W-3:真值由档位给(`MemoryProfile::heavy_model_limit`),高性能档是 2。
+const DEFAULT_HEAVY_MODEL_LIMIT: usize = 1;
 /// 解码许可数的兜底值(未经 `with_decode_limit` 接线时使用)。
 const DEFAULT_DECODE_LIMIT: usize = 4;
 /// 内存压力恢复阈值:暂停后必须回到该百分比才恢复认领(滞回)。
@@ -1050,6 +1051,13 @@ fn with_busy_retry<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
     }
 }
 
+/// R18 W-1:4K 解码任务的两档权重(8-bit / 10-bit)。1080p 恒占 1 份,不在这里。
+#[derive(Clone, Copy, Debug)]
+struct DecodeWeights {
+    uhd: usize,
+    uhd_ten_bit: usize,
+}
+
 struct WorkerPoolState {
     active_regular_jobs: usize,
     export_pending: bool,
@@ -1062,12 +1070,19 @@ struct WorkerPoolState {
     uhd_decode_weight: usize,
     /// R16:是否允许单条任务借走空闲许可分段并行(低配档关)。
     borrow_spare_slots: bool,
+    /// R18 W-1:4K 素材占几份许可,按 8-bit / 10-bit 分开记(1080p 恒 1)。
+    /// `set_decode_policy` 两项都设成同一个值 = R16 的老语义。
+    decode_weights: DecodeWeights,
+    /// R18 W-3:大模型类的并发上限(高性能档 2,其余 1)。
+    heavy_limit: usize,
     paused_for_memory: bool,
     /// R16 P1-6:用户按了状态条「全部暂停」——只认领 `USER_INITIATED_KINDS_SQL`,
     /// 优先于散热 / 空闲规则(用户此刻主动点的导出不能被「等你不用电脑」挡住)。
     paused_by_user: bool,
     /// R16 §3⑤:散热三档退避——有效解码上限 = `thermal.decode_limit(decode_limit)`。
     thermal: super::thermal::ThermalState,
+    /// R18 W-6:系统低电量模式开着——解码许可减半(与散热退避取更严的那个)。
+    low_power: bool,
     /// R16 §3⑤:「只在空闲时做后台工作」开关(用户 60 s 无输入才认领解码 / 大模型任务)。
     idle_only: bool,
     /// 开关开着且用户正在用电脑:不认领解码 / 大模型类(Light 类照常)。
@@ -1075,9 +1090,12 @@ struct WorkerPoolState {
 }
 
 impl WorkerPoolState {
-    /// 散热退避后的解码许可上限。
+    /// 散热退避 + 低电量模式之后的解码许可上限。两条都是「减速」方向,取更严的那个。
     fn effective_decode_limit(&self) -> usize {
-        self.thermal.decode_limit(self.decode_limit)
+        self.thermal
+            .decode_limit(self.decode_limit)
+            .min(super::power::decode_limit(self.low_power, self.decode_limit))
+            .max(1)
     }
 
     /// 解码 / 大模型类此刻不该认领(内存压力或等待空闲)。
@@ -1098,9 +1116,12 @@ impl Default for WorkerPoolState {
             decode_limit: DEFAULT_DECODE_LIMIT,
             uhd_decode_weight: 1,
             borrow_spare_slots: true,
+            decode_weights: DecodeWeights { uhd: 1, uhd_ten_bit: 1 },
+            heavy_limit: DEFAULT_HEAVY_MODEL_LIMIT,
             paused_for_memory: false,
             paused_by_user: false,
             thermal: super::thermal::ThermalState::Nominal,
+            low_power: false,
             idle_only: false,
             paused_for_activity: false,
         }
@@ -1163,7 +1184,7 @@ impl WorkerPoolCoordinator {
             let spare_decode = state.effective_decode_limit().saturating_sub(state.active_decode);
             (
                 spare_decode == 0,
-                state.active_heavy >= HEAVY_MODEL_LIMIT,
+                state.active_heavy >= state.heavy_limit,
                 // R16:4K 要占 `uhd_decode_weight` 份,剩得不够就先不认领 4K 的解码任务。
                 spare_decode < state.uhd_decode_weight,
             )
@@ -1173,6 +1194,7 @@ impl WorkerPoolCoordinator {
         // 但那几类本来就不在用户主动集合里,所以结果就是「只认领用户主动的」。
         let only_user_initiated = state.paused_by_user;
         let uhd_decode_weight = state.uhd_decode_weight;
+        let decode_weights = state.decode_weights;
         drop(state);
 
         let Some(job) = with_busy_retry(|| {
@@ -1190,8 +1212,11 @@ impl WorkerPoolCoordinator {
         };
 
         let class = resource_class(&job.kind);
-        let decode_weight = if class == ResourceClass::Decode && uhd_decode_weight > 1 && job_is_uhd(connection, &job) {
-            uhd_decode_weight
+        // R18 W-1:认领后按**素材真权重**记账(SQL 谓词只排除最贵的那一类,见
+        // `claim_next_for_owner_filtered`)。`uhd_decode_weight == 1` 的档位(省内存)
+        // 恒为 1,连查库都省了——这一支的行为与 R16 逐字相同。
+        let decode_weight = if class == ResourceClass::Decode && uhd_decode_weight > 1 {
+            job_decode_weight(connection, &job, decode_weights)
         } else {
             1
         };
@@ -1331,7 +1356,37 @@ impl WorkerControl {
         self.coordinator.state_changed.notify_all();
     }
 
+    /// R18 W-3:大模型类并发上限(档位给,启动接线时设置一次)。
+    pub fn set_heavy_model_limit(&self, limit: usize) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.heavy_limit = limit.max(1);
+        drop(state);
+        self.coordinator.state_changed.notify_all();
+    }
+
     /// R16:按内存档位接线「4K 占几份许可」与「是否借空闲许可」,启动接线时设置一次。
+    /// R18 W-1 起同时记下档位本身,认领后按素材真权重记账。
+    pub fn set_decode_policy_for_profile(
+        &self,
+        profile: super::memory_profile::MemoryProfile,
+        borrow_spare_slots: bool,
+    ) {
+        self.set_decode_policy(profile.uhd_decode_weight(), borrow_spare_slots);
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.decode_weights = DecodeWeights {
+            uhd: profile.decode_weight(3840, 2160, false),
+            uhd_ten_bit: profile.decode_weight(3840, 2160, true),
+        };
+    }
+
     pub fn set_decode_policy(&self, uhd_decode_weight: usize, borrow_spare_slots: bool) {
         let mut state = self
             .coordinator
@@ -1339,6 +1394,12 @@ impl WorkerControl {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         state.uhd_decode_weight = uhd_decode_weight.max(1);
+        // R16 老语义:4K 不分 8/10-bit,两档同值。`set_decode_policy_for_profile`
+        // 会在这之后按档位覆盖。
+        state.decode_weights = DecodeWeights {
+            uhd: uhd_decode_weight.max(1),
+            uhd_ten_bit: uhd_decode_weight.max(1),
+        };
         state.borrow_spare_slots = borrow_spare_slots;
         drop(state);
         self.coordinator.state_changed.notify_all();
@@ -1396,6 +1457,8 @@ impl WorkerControl {
             Some("idle_wait")
         } else if state.thermal >= super::thermal::ThermalState::Serious {
             Some("thermal")
+        } else if state.low_power {
+            Some("low_power")
         } else {
             None
         }
@@ -1490,21 +1553,52 @@ struct ExecutionPermit {
     decode_weight: usize,
 }
 
-/// 认领到的解码任务是不是 4K 素材(任一边 > 1920)。查不到素材 / 没有 clip_id 都按不是算。
-fn job_is_uhd(connection: &Connection, job: &Job) -> bool {
+/// R18 W-1:认领到的解码任务按素材类别占几份许可。
+/// 查不到素材 / 没有 clip_id 一律按 1(最轻),与 R16 「尺寸未知按 ≤1080p 算」同一口径。
+///
+/// **10-bit 的判据是代理,不是事实**:`clips` 表没有像素格式列(`artifacts.rs:537`
+/// 那条注释已经说过这件事),这里只能拿 `hdr_flag` 与 `color_transfer` 当 10-bit 的
+/// 近似。非 HDR 的 4K 10-bit HEVC(大疆默认档就是)会被算成 8-bit 的 2 份。
+/// 要拿到真值需要给 `clips` 加一列 `pix_fmt`——那是 migrations 的活,不在本车道。
+fn job_decode_weight(connection: &Connection, job: &Job, weights: DecodeWeights) -> usize {
     let Some(clip_id) = serde_json::from_str::<serde_json::Value>(&job.payload)
         .ok()
         .and_then(|payload| payload.get("clip_id").and_then(serde_json::Value::as_i64))
     else {
-        return false;
+        return 1;
     };
     connection
         .query_row(
-            "SELECT MAX(COALESCE(width, 0), COALESCE(height, 0)) > ?2 FROM clips WHERE id = ?1",
-            params![clip_id, UHD_EDGE_PIXELS],
-            |row| row.get::<_, bool>(0),
+            "SELECT COALESCE(width, 0), COALESCE(height, 0), COALESCE(hdr_flag, 0), COALESCE(color_transfer, '')
+               FROM clips WHERE id = ?1",
+            params![clip_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
-        .unwrap_or(false)
+        .map(|(width, height, hdr_flag, transfer)| {
+            if width.max(height) <= UHD_EDGE_PIXELS {
+                1
+            } else if likely_ten_bit(hdr_flag != 0, &transfer) {
+                weights.uhd_ten_bit
+            } else {
+                weights.uhd
+            }
+        })
+        .unwrap_or(1)
+}
+
+/// HDR 标志,或者 PQ / HLG 传输函数——两者都意味着 10-bit 解码缓冲。
+pub(crate) fn likely_ten_bit(hdr: bool, color_transfer: &str) -> bool {
+    hdr || matches!(
+        color_transfer.to_ascii_lowercase().as_str(),
+        "smpte2084" | "arib-std-b67" | "smpte428" | "bt2020-10" | "bt2020-12"
+    )
 }
 
 impl Drop for ExecutionPermit {
@@ -1631,7 +1725,9 @@ impl JobRunner {
     pub fn with_memory_profile(self, profile: super::memory_profile::MemoryProfile) -> Self {
         self.control().set_decode_limit(profile.decode_permits());
         self.control()
-            .set_decode_policy(profile.uhd_decode_weight(), profile.borrows_spare_decode_slots());
+            .set_decode_policy_for_profile(profile, profile.borrows_spare_decode_slots());
+        // R18 W-3:大模型并发上限随档位(高性能档 2)。
+        self.control().set_heavy_model_limit(profile.heavy_model_limit());
         self
     }
 
@@ -2245,10 +2341,14 @@ pub const IDLE_THRESHOLD_SECONDS: f64 = 60.0;
 /// `thermal::seconds_since_user_input()`;任一位变了就唤醒等待的认领。
 fn poll_backoff_once(coordinator: &Arc<WorkerPoolCoordinator>) {
     let thermal = super::thermal::thermal_state();
+    // R18 W-6:低电量模式与散热是同一次采样里的两位,都往「慢下来」的方向走。
+    let low_power = super::power::low_power_enabled();
     let mut state = coordinator.state.lock().unwrap_or_else(|error| error.into_inner());
     let paused_for_activity =
         state.idle_only && super::thermal::seconds_since_user_input() < IDLE_THRESHOLD_SECONDS;
-    let changed = state.thermal != thermal || state.paused_for_activity != paused_for_activity;
+    let changed = state.thermal != thermal
+        || state.low_power != low_power
+        || state.paused_for_activity != paused_for_activity;
     if !changed {
         return;
     }
@@ -2262,7 +2362,15 @@ fn poll_backoff_once(coordinator: &Arc<WorkerPoolCoordinator>) {
             tracing::info!("用户已空闲 60 s,恢复认领后台重活");
         }
     }
+    if state.low_power != low_power {
+        if low_power {
+            tracing::info!(decode_limit = super::power::decode_limit(true, state.decode_limit), "系统进入低电量模式,后台减速");
+        } else {
+            tracing::info!("低电量模式已关闭,后台恢复");
+        }
+    }
     state.thermal = thermal;
+    state.low_power = low_power;
     state.paused_for_activity = paused_for_activity;
     drop(state);
     coordinator.state_changed.notify_all();
@@ -3402,6 +3510,64 @@ mod tests {
         assert_eq!(job.kind, "waveform");
     }
 
+    /// R18 W-1:标准档(预算 8、4K 8-bit 占 2、10-bit 占 3、1080p 占 1)下的记账。
+    /// 这条在改动前是红的——那时标准档预算 4、4K 权重 1,四条 4K 会同时跑。
+    #[test]
+    fn standard_profile_counts_decode_permits_by_material_class() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO clips(id, rel_path, width, height, hdr_flag) VALUES
+                   (1, 'uhd8.mov', 3840, 2160, 0),
+                   (2, 'uhd10.mov', 3840, 2160, 1),
+                   (3, 'hd.mov', 1920, 1080, 0)",
+            )
+            .unwrap();
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(super::super::memory_profile::MemoryProfile::Standard.decode_permits());
+        control.set_decode_policy_for_profile(super::super::memory_profile::MemoryProfile::Standard, true);
+
+        enqueue(&mut connection, "thumbnail", r#"{"clip_id":3}"#, "hd").unwrap();
+        let hd = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(control.active_decode(), 1, "1080p 占 1 份");
+        drop(hd);
+
+        enqueue(&mut connection, "strip", r#"{"clip_id":1}"#, "uhd8").unwrap();
+        let uhd8 = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(control.active_decode(), 2, "4K 8-bit 占 2 份");
+        drop(uhd8);
+
+        enqueue(&mut connection, "analyze_l1", r#"{"clip_id":2}"#, "uhd10").unwrap();
+        let uhd10 = coordinator.claim_for_owner(&mut connection, "w").unwrap().unwrap();
+        assert_eq!(control.active_decode(), 3, "4K 10-bit(HDR)占 3 份");
+        drop(uhd10);
+        assert_eq!(control.active_decode(), 0, "释放要把同样的份数还回去");
+    }
+
+    /// R18 W-3:大模型并发上限按档位分裂——标准档仍是 1(第二条被跳过),
+    /// 高性能档 2(whisper 与 CLIP 可以同时)。这条的后半段在改动前是红的。
+    #[test]
+    fn heavy_model_limit_follows_memory_profile() {
+        use super::super::memory_profile::MemoryProfile;
+        for (profile, expected) in [(MemoryProfile::Standard, 1usize), (MemoryProfile::HighPerf, 2usize)] {
+            let directory = TestDirectory::new();
+            let mut connection = db::open_project(&directory.db_path()).unwrap();
+            enqueue(&mut connection, "clip_embed", r#"{"clip_id":1}"#, "e1").unwrap();
+            enqueue(&mut connection, "transcribe", r#"{"clip_id":2}"#, "t1").unwrap();
+            enqueue(&mut connection, "classify_dims", r#"{"clip_id":3}"#, "c1").unwrap();
+            let coordinator = Arc::new(WorkerPoolCoordinator::default());
+            let control = WorkerControl::new(coordinator.clone());
+            control.set_heavy_model_limit(profile.heavy_model_limit());
+            let mut held = Vec::new();
+            while let Some(claimed) = coordinator.claim_for_owner(&mut connection, "w").unwrap() {
+                held.push(claimed);
+            }
+            assert_eq!(held.len(), expected, "档位 {} 应同时跑 {expected} 个大模型任务", profile.as_str());
+        }
+    }
+
     #[test]
     fn resource_classes_map_each_job_kind() {
         assert!(matches!(resource_class("thumbnail"), ResourceClass::Decode));
@@ -3850,6 +4016,57 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("协调器没有在 2 s 内看到注入的散热 / 空闲值");
+    }
+
+    /// R18 W-6:低电量模式把解码许可减半(8 → 4),关掉又回到 8;
+    /// 与散热同时生效时取更严的那个(低电量 4 与 serious 1 同时 → 1)。
+    /// 落地前 `TRIPCUT_LOW_POWER_FILE` 这条路根本不存在,整条是新的。
+    #[test]
+    fn low_power_mode_halves_the_decode_budget_and_loses_to_thermal() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let mut connection = db::open_project(&db_path).unwrap();
+        for clip_id in 1..=24 {
+            enqueue(&mut connection, "thumbnail", &format!(r#"{{"clip_id":{clip_id}}}"#), &format!("lp-{clip_id}")).unwrap();
+        }
+        let coordinator = Arc::new(WorkerPoolCoordinator::default());
+        let control = WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(8);
+        let low_power_file = directory.path().join("low-power");
+        let thermal_file = directory.path().join("thermal");
+        std::fs::write(&thermal_file, "nominal").unwrap();
+        let claim_all = |connection: &mut Connection| {
+            let mut held = Vec::new();
+            while let Some(claimed) = coordinator.claim_for_owner(connection, "t").unwrap() {
+                held.push(claimed);
+            }
+            held
+        };
+
+        for (low_power, thermal, expected, reason) in [
+            ("false", "nominal", 8usize, None),
+            ("true", "nominal", 4, Some("low_power")),
+            ("true", "serious", 1, Some("thermal")),
+            ("false", "nominal", 8, None),
+        ] {
+            poll_until(
+                &coordinator,
+                || {
+                    std::env::set_var("TRIPCUT_LOW_POWER_FILE", &low_power_file);
+                    std::env::set_var("TRIPCUT_THERMAL_STATE_FILE", &thermal_file);
+                    std::fs::write(&low_power_file, low_power).unwrap();
+                    std::fs::write(&thermal_file, thermal).unwrap();
+                },
+                || control.pause_reason() == reason && !control.decode_saturated(),
+            );
+            let held = claim_all(&mut connection);
+            assert_eq!(held.len(), expected, "低电量={low_power} 散热={thermal} 应放 {expected} 条");
+            assert_eq!(control.pause_reason(), reason, "低电量={low_power} 散热={thermal}");
+            drop(held);
+            assert_eq!(control.active_decode(), 0);
+        }
+        std::env::remove_var("TRIPCUT_LOW_POWER_FILE");
+        std::env::remove_var("TRIPCUT_THERMAL_STATE_FILE");
     }
 
     /// R16 §3⑤ 散热三档退避:上限 4 时 fair 只放 3 条解码任务、serious 只放 1 条、回到 nominal

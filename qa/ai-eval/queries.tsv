@@ -1,0 +1,24 @@
+# R18 AI 评测语料 · 中文检索词 20 条(画面搜索 Recall@5 / MRR 的真值)。
+# relevant = manifest.tsv 里 file 列的值,`|` 分隔;人工按抽帧画面标注,与文件名无关。
+# scope = broad(命中面宽,考召回)/ narrow(只有 1–3 条,考精确)。
+query	scope	relevant
+红色信封	narrow	IMG_0812_机场出发|IMG_0813_登机口|IMG_0815_落地
+手机屏幕短信	broad	IMG_0812_机场出发|IMG_0816_酒店入住|IMG_0817_街头夜景|IMG_0818_晚餐|IMG_0820_夜骑出发
+摩托车头灯特写	narrow	IMG_0820_夜骑出发
+夜晚城市天际线	broad	IMG_0815_落地|IMG_0816_酒店入住|IMG_0821_湖边|IMG_0822_市中心|IMG_0831_出门|IMG_0832_公园|IMG_0835_山路|IMG_0836_观景台
+戴头盔的骑手	broad	IMG_0813_登机口|IMG_0815_落地|IMG_0817_街头夜景|IMG_0818_晚餐|IMG_0830_早餐|IMG_0831_出门|IMG_0832_公园|IMG_0833_合影|IMG_0834_骑行|IMG_0835_山路|IMG_0836_观景台|IMG_0837_日落
+白色头盔的女骑手	narrow	IMG_0831_出门|IMG_0832_公园|IMG_0836_观景台
+停车场湿地反光	narrow	IMG_0815_落地|IMG_0816_酒店入住
+博物馆建筑外立面	narrow	IMG_0830_早餐
+铺红毯的宴会厅内景	narrow	IMG_0830_早餐|IMG_0834_骑行
+高速公路骑行	broad	IMG_0831_出门|IMG_0832_公园|IMG_0835_山路|IMG_0836_观景台
+品牌片尾卡	narrow	IMG_0823_回程|IMG_0833_合影|IMG_0837_日落
+不锈钢台面	narrow	IMG_0812_机场出发|IMG_0813_登机口
+皮革座垫上的手机	narrow	IMG_0816_酒店入住|IMG_0817_街头夜景|IMG_0818_晚餐
+两个人打招呼互动	narrow	IMG_0832_公园|IMG_0833_合影|IMG_0836_观景台|IMG_0837_日落
+摩托车轮毂细节	narrow	IMG_0821_湖边
+彩条测试图	narrow	DJI_0101_航拍4K|DJI_0102_航拍海岸|DJI_0103_航拍10bit
+加拿大国旗	narrow	IMG_0830_早餐|IMG_0831_出门|IMG_0835_山路
+骑手正面肖像	broad	IMG_0813_登机口|IMG_0833_合影|IMG_0836_观景台|IMG_0837_日落
+黑色皮衣	broad	IMG_0813_登机口|IMG_0815_落地|IMG_0817_街头夜景|IMG_0818_晚餐|IMG_0830_早餐|IMG_0832_公园|IMG_0833_合影|IMG_0834_骑行|IMG_0836_观景台|IMG_0837_日落
+戴手套的手	narrow	IMG_0813_登机口|IMG_0820_夜骑出发|IMG_0830_早餐|IMG_0834_骑行

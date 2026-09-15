@@ -19,7 +19,7 @@
 .deliver-drawer .deliver-missing-text {
   flex: 1;
   margin: 0;
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -31,7 +31,7 @@
   right: 3px;
   height: auto;
   padding: 2px var(--space-1);
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   font-size: var(--text-11);
   line-height: 1;
   font-weight: 500;
@@ -48,12 +48,12 @@
 }
 .deliver-drawer .deliver-readonly-title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--text-13);
   font-weight: 600;
 }
 .deliver-drawer .deliver-readonly-body {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1.45;
   color: var(--text-secondary);
 }

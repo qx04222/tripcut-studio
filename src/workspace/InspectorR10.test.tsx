@@ -31,6 +31,8 @@ const apiMocks = vi.hoisted(() => ({
   rateClip: vi.fn().mockResolvedValue({}),
   clearClipRating: vi.fn().mockResolvedValue(undefined),
   getAiDescription: vi.fn().mockResolvedValue(null),
+  // R18 AI-A1:检查器的「AI 描述」段现在还会取一句本地描述(不联网、不花预算)。
+  getClipBrief: vi.fn().mockResolvedValue(null),
   describeClipWithAi: vi.fn().mockResolvedValue(null),
   setClipTimeStage: vi.fn().mockResolvedValue(undefined),
   getSettings: vi.fn().mockResolvedValue({}),

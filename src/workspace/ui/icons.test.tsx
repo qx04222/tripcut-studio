@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { ICON_NAMES, Icon } from "./icons";
+import { ICON_NAMES, Icon, STROKE_BY_SIZE, type IconSize } from "./icons";
 
 afterEach(cleanup);
 
@@ -20,7 +20,9 @@ describe("icons", () => {
     expect(ICON_NAMES).toContain("arrow-left");
     expect(ICON_NAMES).toContain("arrow-right");
     expect(ICON_NAMES).toContain("more");
-    expect(ICON_NAMES.length).toBe(39);
+    // R18 加 tag / similar / takes / slot(消灭检查器里四处「借用」)= 43。
+    for (const n of ["tag", "similar", "takes", "slot"]) expect(ICON_NAMES).toContain(n);
+    expect(ICON_NAMES.length).toBe(43);
   });
   it("每个图标 16px 视窗、1.5 描边、currentColor、aria-hidden", () => {
     for (const name of ICON_NAMES) {
@@ -36,6 +38,21 @@ describe("icons", () => {
       unmount();
     }
   });
+  // V-10:描边按尺寸补偿(12 发虚 / 32 发胖)。四档各断言一次。
+  it("四档尺寸各自的描边宽度来自 STROKE_BY_SIZE", () => {
+    expect(STROKE_BY_SIZE).toEqual({ 12: 1.75, 16: 1.5, 20: 1.4, 32: 0.95 });
+    for (const size of [12, 16, 20, 32] as IconSize[]) {
+      const { container, unmount } = render(<Icon name="import" size={size} />);
+      const svg = container.querySelector("svg")!;
+      expect(svg.getAttribute("stroke-width"), `size=${size}`).toBe(String(STROKE_BY_SIZE[size]));
+      // 渲染后的实际描边宽度 = 描边 × size / 16,四档应落在 1.3–1.9 px 之间
+      const rendered = (STROKE_BY_SIZE[size] * size) / 16;
+      expect(rendered).toBeGreaterThanOrEqual(1.3);
+      expect(rendered).toBeLessThanOrEqual(1.9);
+      unmount();
+    }
+  });
+
   it("size 落到 width/height,className 透传", () => {
     const { container } = render(<Icon name="import" size={32} className="x" />);
     const svg = container.querySelector("svg")!;

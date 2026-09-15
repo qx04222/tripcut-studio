@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  R18 车道 native / M-07① + H-07 + H-23。
+  Tauri 会把与 tauri.conf.json 同目录的这份 Info.plist 合并进生成的那份
+  (tauri-bundler:"Tauri also looks for a Info.plist file in the same directory
+  as the Tauri configuration file")。所以这里只写**要覆盖或新增**的键。
+
+  - CFBundleDevelopmentRegion:实测 0.8.3 的包写的是 English —— 于是 NSOpenPanel、
+    系统弹框在一个通体中文的应用里说英文。改成 zh-Hans 立刻变中文。
+  - 五条 NS*UsageDescription:用户的素材最常放在桌面 / 文稿 / 下载 / 相机卡 / 网络盘,
+    缺了这五句,TCC 弹框只会说系统默认那句话,说不出旅剪要它干什么。文案是白话,
+    而且每句都说清"原片只读"。
+  - LSRequiresCarbon:Tauri 模板遗留。合并只能改值不能删键(键由 tauri-bundler 自己写),
+    所以这里把它按成 false;真要从包里消失得在打包脚本里后处理。
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
+	<key>LSRequiresCarbon</key>
+	<false/>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>旅剪要读桌面上的视频来导入素材;原片只读,不会被改动。</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>旅剪要读文稿文件夹里的视频来导入素材;原片只读,不会被改动。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>旅剪要读下载文件夹里的视频来导入素材;原片只读,不会被改动。</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>旅剪要读相机卡或 U 盘上的视频来导入素材;原片只读,不会被改动。</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>旅剪要读网络磁盘上的视频来导入素材;原片只读,不会被改动。</string>
+</dict>
+</plist>

@@ -114,9 +114,27 @@ export interface SettingsStatus {
     /** R16:预览小文件合计与目录上限(字节);旧后端没有这两项。 */
     proxy_bytes?: number;
     proxy_limit_bytes?: number;
+    /** R18 W-7:快照目录合计占用与总量上限(字节);旧后端没有这两项。 */
+    snapshot_bytes?: number;
+    snapshot_limit_bytes?: number;
   };
   /** R10 U-22:首启引导已跳过/完成(settings `onboarding.first_run_done`)。 */
   first_run_done?: boolean;
+  /** R18:当前性能档位与力度(只读);旧后端没有这一项。 */
+  performance?: {
+    /** `low_spec` | `low` | `standard` | `high_perf` */
+    profile: string;
+    /** `base` | `pro` | `max` | `ultra` | `unknown` */
+    chip: string;
+    media_engines: number;
+    perf_cores: number;
+    decode_permits: number;
+    /** `eco` | `balanced` | `full`(设置键 `performance.background_effort`) */
+    background_effort: string;
+    /** 这一档是否提供「全速」第三挡(低配 / 省内存档只有两挡) */
+    allows_full_effort: boolean;
+    worker_count: number;
+  };
 }
 
 export interface CacheRebuildResult {
@@ -140,7 +158,8 @@ export interface ImportProgress {
   waiting_for_permit: number;
   paused_for_memory: boolean;
   /** R16 §3⑤:不认领重活的原因(memory / thermal / idle_wait);R16 P1-6 用户「全部暂停」报 user;旧后端缺省。 */
-  paused_reason?: "user" | "memory" | "thermal" | "idle_wait" | null;
+  /** R18 W-6:多一位 `low_power`(系统低电量模式,后台减速但不停)。 */
+  paused_reason?: "user" | "memory" | "thermal" | "idle_wait" | "low_power" | null;
   /** Z-01(R14 stress):当前集已登记的素材数 / 其中画质 + 运镜分析已落终态的数;旧后端缺省。 */
   analysis_total?: number;
   analysis_done?: number;
@@ -812,6 +831,14 @@ export function describeClipWithAi(clipId: number): Promise<AiDescriptionResult>
 
 export function getAiDescription(clipId: number): Promise<AiDescriptionResult | null> {
   return invoke<AiDescriptionResult | null>("get_ai_description", { clipId });
+}
+
+/**
+ * R18 AI-A1:本地生成的素材描述(画面标签 + 画面文字 + 对白拼出来的一句话)。
+ * 不调模型、不联网、不花预算 —— 云端描述没有或没开时,检查器显示这一句。
+ */
+export function getClipBrief(clipId: number): Promise<string | null> {
+  return invoke<string | null>("get_clip_brief", { clipId });
 }
 
 export function askDirector(
@@ -2236,4 +2263,121 @@ export async function moveClipsToEpisode(clipIds: readonly number[], episodeId: 
 /** R17 车道 epmove:`undo_story_change` 的结果 —— `skipped_moved` = 快照里已被移到别的集、这次没放回镜头带的镜数。 */
 export interface UndoStoryOutcome {
   skipped_moved: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * R18 车道 native / F2:关窗口时后台任务还没做完的确认(只追加,不改上面任何一行)。
+ * ------------------------------------------------------------------ */
+
+/** 后端 `exit_guard` 在 `CloseRequested` 里拦下这一次关闭后发的事件名。 */
+export const CLOSE_REQUESTED_EVENT = "tripcut:close-requested";
+
+export interface CloseRequestedEvent {
+  /** 值得拦一次的任务数(空闲缓存清理不算)。 */
+  running: number;
+}
+
+/**
+ * 把 `tripcut:close-requested` 转成同名 window CustomEvent,与
+ * `bridgeMusicAnalyzedEvents` 同一套约定;非 Tauri 环境静默退化为 no-op。
+ */
+export async function bridgeCloseRequestedEvents(): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<CloseRequestedEvent>(CLOSE_REQUESTED_EVENT, (event) => {
+      window.dispatchEvent(new CustomEvent<CloseRequestedEvent>(CLOSE_REQUESTED_EVENT, { detail: event.payload }));
+    });
+  } catch {
+    return () => undefined;
+  }
+}
+
+/**
+ * R18 W-4:启动补扫(12 个增量入队 + 启动快照)现在跑在窗口起来之后,
+ * 后端在开始 / 结束时各发一次 `tripcut:startup-backfill`(payload 为 boolean)。
+ * 状态条订阅它显示「正在整理素材库」,补扫结束时重新拉一次列表。
+ * 非 Tauri 环境静默退化为 no-op(与 `bridgeImportProbeEvents` 同一套约定)。
+ */
+export const STARTUP_BACKFILL_EVENT = "tripcut:startup-backfill";
+
+export async function onStartupBackfill(handler: (running: boolean) => void): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<boolean>(STARTUP_BACKFILL_EVENT, (event) => handler(Boolean(event.payload)));
+  } catch {
+    return () => undefined;
+  }
+}
+
+/** 用户点了「仍要退出」:后端设标志位后真正退出(第二次 CloseRequested 不再拦)。 */
+export function confirmExit(): Promise<void> {
+  return invoke<void>("confirm_exit");
+}
+
+/**
+ * R18 车道 settings F1:两条系统通知各自一个开关(默认开)。关掉后 Rust 的
+ * `notify::post_gated` 一次 `sink.notify` 都不调;两条都关时连首次那条
+ * 「引 macOS 权限弹框」的通知也不发。
+ */
+export const NOTIFY_EXPORT_COMPLETE_KEY = "notification.export_complete";
+export const NOTIFY_BATCH_COMPLETE_KEY = "notification.batch_complete";
+
+/** R18 F5/F6:缓存目录(空 = 内置位置)与缓存自动清理天数("0" = 从不)。 */
+export const CACHE_CUSTOM_DIR_KEY = "cache.custom_dir";
+export const CACHE_AUTO_CLEAN_DAYS_KEY = "cache.auto_clean_days";
+
+/**
+ * R18 车道 settings F8:后台任务页的「失败」清单。只收 `failed` / `blocked` 里
+ * **不是用户自己取消**的那些;`clearFailedJobs` 把它们标成已知晓(不删行,失败
+ * 原因留给诊断包),返回清掉几条。
+ */
+export interface FailedJob {
+  id: number;
+  kind: string;
+  status: "failed" | "blocked";
+  clip_id: number | null;
+  file_name: string | null;
+  summary: string | null;
+  finished_at: string | null;
+}
+
+export function listFailedJobs(): Promise<FailedJob[]> {
+  return invoke<FailedJob[]>("list_failed_jobs");
+}
+
+export function clearFailedJobs(): Promise<number> {
+  return invoke<number>("clear_failed_jobs");
+}
+
+/** R18 车道 settings F5:「更改缓存位置…」——先选文件夹,再整体搬迁(搬完应用会重启)。 */
+export interface CacheRelocation {
+  new_root: string;
+  moved_bytes: number;
+  moved_files: number;
+}
+
+export function pickCacheFolder(): Promise<string | null> {
+  return invoke<string | null>("pick_cache_folder");
+}
+
+/**
+ * 搬迁成功后后端直接重启应用,这个 Promise **不会 resolve**;调用方要把界面留在
+ * 「正在搬…」上,不要等它回来再收尾。失败时照常 reject,错误里带「现在怎么办」。
+ */
+export function relocateCacheDir(folder: string): Promise<CacheRelocation> {
+  return invoke<CacheRelocation>("relocate_cache_dir", { folder });
+}
+
+/**
+ * R18 车道 settings M-04:「导出诊断包…」。后端弹保存面板;用户取消返回 null。
+ * 包里没有原片、封面、转写、GPS,绝对路径一律脱敏。
+ */
+export interface DiagnosticsBundle {
+  path: string;
+  log_files: number;
+  failed_jobs: number;
+}
+
+export function exportDiagnosticsBundle(): Promise<DiagnosticsBundle | null> {
+  return invoke<DiagnosticsBundle | null>("export_diagnostics_bundle");
 }

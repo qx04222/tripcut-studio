@@ -10,6 +10,14 @@ const KIT_DIR = resolve(process.cwd(), "src/styles/kit");
 const KIT = [readFileSync(resolve(process.cwd(), "src/styles/kit.css"), "utf8")]
   .concat(readdirSync(KIT_DIR).filter((f) => f.endsWith(".css")).sort().map((f) => readFileSync(resolve(KIT_DIR, f), "utf8")))
   .join("\n");
+// R18 车道 V1 · V-01:43 个车道文件(R9→R17 逐轮叠加)此前完全不在门禁里,已经积下
+// px 字号 / 圆角字面量 / 非令牌阴影 / 非令牌 transition / 裸 z-index 数字。逐文件读,
+// 报错时能指回具体文件+行号,不是囫囵一坨。
+const WORKSPACE_LANES_DIR = resolve(process.cwd(), "src/styles/workspace");
+const WORKSPACE_LANE_FILES = readdirSync(WORKSPACE_LANES_DIR).filter((f) => f.endsWith(".css")).sort();
+function readLane(f: string): string {
+  return readFileSync(resolve(WORKSPACE_LANES_DIR, f), "utf8");
+}
 
 function declared(css: string): Set<string> {
   const names = new Set<string>();
@@ -37,6 +45,24 @@ describe("tokens.css", () => {
     for (const k of ["--border-hair", "--border-strong", "--ring", "--ring-selected", "--motion-fast", "--control-sm", "--control-md", "--well-bg"]) {
       expect(names.has(k), k).toBe(true);
     }
+  });
+  it("R18 车道 V1 新增令牌:圆角/字号/层级/慢动效都在,且只声明在 :root(三套主题都靠继承拿到,不会漏)", () => {
+    const NEW_TOKENS = [
+      "--radius-2", "--radius-4", "--radius-pill",
+      "--text-28", "--lh-28", "--text-40", "--lh-40",
+      "--z-base", "--z-sticky", "--z-band-playhead", "--z-overlay", "--z-menu", "--z-modal", "--z-toast",
+      "--motion-slow",
+    ];
+    for (const k of NEW_TOKENS) expect(names.has(k), k).toBe(true);
+    // 三套主题(浅色 :root、prefers-color-scheme 深色、data-theme=dark、jianying-dark)都不
+    // 重新定义这批令牌——只声明一次,靠层叠继承覆盖所有主题,不存在“某套主题漏了新令牌”。
+    const root = postcss.parse(TOKENS);
+    const themedOverrides = new Set<string>();
+    root.walkRules((rule) => {
+      if (rule.selector === ":root") return;
+      rule.walkDecls((d) => { themedOverrides.add(d.prop); });
+    });
+    for (const k of NEW_TOKENS) expect(themedOverrides.has(k), `${k} 不应被任何主题块重定义`).toBe(false);
   });
   it("间距六档就是 4/8/12/16/24/32", () => {
     const values: Record<string, string> = {};
@@ -95,6 +121,24 @@ describe("tokens.css", () => {
       "--surface-card", "--surface-raised", "--surface-chrome", "--surface-chrome-2", "--well-bg", "--shadow-card", "--shadow-raised", "--shadow-inset-well", "--playhead",
     ]) {
       expect(set.has(k), k).toBe(true);
+    }
+  });
+  it("V-25:深色下 --ring 内圈改用不透明的 --bg-solid(浅色 --surface-panel 半透明会透出底色 4%,三套深色主题都要盖住)", () => {
+    const root = postcss.parse(TOKENS);
+    const darkRingSelectors = [
+      ':root:not([data-theme="light"])',
+      'html[data-theme="dark"]',
+      'html[data-theme="jianying-dark"]',
+    ];
+    const found: Record<string, string> = {};
+    root.walkRules((rule) => {
+      if (!darkRingSelectors.includes(rule.selector)) return;
+      rule.walkDecls("--ring", (d) => { found[rule.selector] = d.value; });
+    });
+    for (const sel of darkRingSelectors) {
+      expect(found[sel], `${sel} 应重定义 --ring`).toBeDefined();
+      expect(found[sel]).toContain("var(--bg-solid)");
+      expect(found[sel]).not.toContain("var(--surface-panel)");
     }
   });
 });
@@ -165,4 +209,63 @@ describe.todo("workspace.css 只从令牌取值(规格 §1)", () => {
     expect(offenders).toEqual([]);
   });
 
+});
+
+/** R18 车道 V1 · 门禁扩围到 43 个车道文件(brainstorm-visual.md §3 车道 V1)。
+ *  六条规则,逐条给出违规清单(文件:行号 值),而不是只报数字。 */
+function laneOffenders(css: string, file: string) {
+  const root = postcss.parse(css);
+  const fontSize: string[] = [];
+  const radius: string[] = [];
+  const shadow: string[] = [];
+  const transition: string[] = [];
+  const zIndex: string[] = [];
+  let important = 0;
+  const radiusOk = (tok: string) => /^var\(--radius-[\w-]+\)$/.test(tok) || tok === "50%" || tok === "0" || tok === "inherit";
+  root.walkDecls((d) => {
+    if (d.important) important++;
+    const at = `${file}:${d.source?.start?.line ?? "?"}`;
+    if (d.prop === "font-size" && /^\d+(\.\d+)?px$/.test(d.value.trim())) fontSize.push(`${at} ${d.value}`);
+    if (d.prop === "border-radius") {
+      const parts = d.value.trim().split(/\s+/);
+      if (!parts.every(radiusOk)) radius.push(`${at} ${d.value}`);
+    }
+    if (d.prop === "box-shadow") {
+      const v = d.value.trim();
+      if (!(v === "none" || v.includes("var(--shadow-") || v.includes("var(--ring"))) shadow.push(`${at} ${d.value}`);
+    }
+    if (d.prop === "transition" && !d.value.includes("var(--motion-")) transition.push(`${at} ${d.value.replace(/\s+/g, " ")}`);
+    if (d.prop === "z-index") {
+      const v = d.value.trim();
+      if (!(v === "auto" || /^var\(--z-[\w-]+\)$/.test(v))) zIndex.push(`${at} ${d.value}`);
+    }
+  });
+  return { fontSize, radius, shadow, transition, zIndex, important };
+}
+
+describe("workspace/*.css(43 个车道文件)门禁扩围(V-01)", () => {
+  const perFile = WORKSPACE_LANE_FILES.map((f) => laneOffenders(readLane(f), f));
+  const totals = {
+    fontSize: perFile.flatMap((r) => r.fontSize),
+    radius: perFile.flatMap((r) => r.radius),
+    shadow: perFile.flatMap((r) => r.shadow),
+    transition: perFile.flatMap((r) => r.transition),
+    zIndex: perFile.flatMap((r) => r.zIndex),
+    important: perFile.reduce((n, r) => n + r.important, 0),
+  };
+  it("门禁自身会响:塞一个字面量圆角/裸 z-index 进去就红", () => {
+    const r = laneOffenders(".x { border-radius: 4px; z-index: 3; }", "self-test.css");
+    expect(r.radius).toEqual(["self-test.css:1 4px"]);
+    expect(r.zIndex).toEqual(["self-test.css:1 3"]);
+  });
+  it("没有 font-size: <数字>px 字面量", () => { expect(totals.fontSize).toEqual([]); });
+  it("border-radius 只允许 var(--radius-*) / 50% / 0 / inherit", () => { expect(totals.radius).toEqual([]); });
+  it("box-shadow 必须含 var(--shadow-*) 或 var(--ring*)(none 允许——它是「不要阴影」不是字面量)", () => {
+    expect(totals.shadow).toEqual([]);
+  });
+  it("transition 必须含 var(--motion-*)", () => { expect(totals.transition).toEqual([]); });
+  it("z-index 必须是 var(--z-*)(auto 允许——它是复位不是分配层级)", () => { expect(totals.zIndex).toEqual([]); });
+  it("!important 计数只降不升:钉在 5(R18 前的基线;下轮才拆 monitor-r10 那两条焦点环覆盖)", () => {
+    expect(totals.important).toBeLessThanOrEqual(5);
+  });
 });

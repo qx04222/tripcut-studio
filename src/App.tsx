@@ -5,6 +5,8 @@ import { RecoveryPage } from "./RecoveryPage";
 import { applyAppearanceSettings } from "./appearance";
 import { getDoctorReport, getSettings, type DoctorReport, type SettingsMap } from "./api";
 import { documentTitleForRoute, routeFromHash, type RoutePath } from "./routes";
+import { ExitConfirm } from "./workspace/ExitConfirm";
+import { useMenuBridge } from "./workspace/menuBridge";
 import { WorkspaceShell } from "./workspace/WorkspaceShell";
 import { dispatchWorkspace, type BandMode } from "./workspace/WorkspaceStore";
 
@@ -71,6 +73,8 @@ function useHashRoute(): RoutePath {
 
 export default function App() {
   const route = useHashRoute();
+  // R18 M-01:原生菜单栏(`src-tauri/src/menu.rs`)的点击落到已有的那些入口。
+  useMenuBridge();
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [doctorError, setDoctorError] = useState<string | undefined>();
   const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
@@ -144,6 +148,8 @@ export default function App() {
   return (
     <>
       <WorkspaceShell />
+      {/* R18 F2:关窗口时后台任务还没做完的确认(后端已经 prevent_close 了)。 */}
+      <ExitConfirm />
       <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
     </>
   );

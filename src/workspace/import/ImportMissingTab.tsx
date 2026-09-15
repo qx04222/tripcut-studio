@@ -6,6 +6,7 @@ import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
 import { MissingVolumeRemove } from "./MissingVolumeRemove";
 import { useMissingMedia } from "./useMissingMedia";
+import { PrivacyAccessHint } from "../PrivacyAccessHint";
 
 /** 缺失素材分页(规格 §4.1):按卷分组的卡 + 「重新定位」;结果行文案逐字沿用 MissingMediaPanel。 */
 export function ImportMissingTab(): JSX.Element {
@@ -82,6 +83,8 @@ export function ImportMissingTab(): JSX.Element {
       {notice ? (
         <p className={notice.startsWith("已找到") ? "import-note" : "import-note import-note--error"} role="status">
           {notice}
+          {/* R18 H-07:被系统拦下时,光说"被拒"没用,给一个去开权限的按钮。 */}
+          <PrivacyAccessHint text={notice} />
         </p>
       ) : null}
     </div>

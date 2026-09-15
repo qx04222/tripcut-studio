@@ -111,7 +111,7 @@
 
 .ui-menu {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-modal);
   display: flex;
   flex-direction: column;
   min-width: 160px;
@@ -138,7 +138,7 @@
 }
 .ui-menu .ui-menu-item:hover,
 .ui-menu .ui-menu-item:focus-visible { background: var(--surface-chrome); outline: none; }
-.ui-menu .ui-menu-item:focus-visible { box-shadow: 0 0 0 2px var(--border-focus); }
+.ui-menu .ui-menu-item:focus-visible { box-shadow: var(--shadow-focus-hair); }
 .ui-menu .ui-menu-item:disabled { color: var(--text-muted); cursor: default; }
 
 /* 检查器精选段区的「导出所选…」:靠右一颗 ghost。 */

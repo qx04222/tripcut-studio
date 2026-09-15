@@ -4,6 +4,7 @@ import { HelpOverlay } from "../../HelpOverlay";
 import { HELP_FAQS, KEYBOARD_SHORTCUT_GROUPS, WORKFLOW_STEPS } from "../../helpContent";
 import { GENERATED_LICENSES } from "../../licenses.generated";
 import { SETTINGS_ACTIONS } from "../copy";
+import { exportDiagnosticsBundle } from "../../api";
 import { copyDiagnostics } from "../diagnostics";
 import { failureText } from "../errorText";
 import { resetOnboarding } from "../onboardingReset";
@@ -17,9 +18,13 @@ const KEYBOARD_SHORTCUT_COUNT = KEYBOARD_SHORTCUT_GROUPS.reduce(
   0,
 );
 
+/** R18 M-04:AX 名冻结。 */
+export const EXPORT_DIAGNOSTICS_BUNDLE = "导出诊断包…";
+
 export function AboutSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { appInfo } = form;
+  const [bundling, setBundling] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const closeHelp = useCallback(() => setHelpOpen(false), []);
   const [licensesOpen, setLicensesOpen] = useState(false);
@@ -52,7 +57,7 @@ export function AboutSection(): JSX.Element {
           </Button>
         </SettingsRow>
         {/* R11 简化专项 #2:「打开日志目录」从隐私与诊断搬到关于 —— 出了问题要日志时不用翻高级。 */}
-        <SettingsRow title="诊断日志" help="出问题时先「复制诊断信息」贴给我们(只有版本、工具链、内存档和最近 3 条错误,不含任何路径);要日志再打开目录,日志只保留 7 天。" className="settings-sheet-row--stack">
+        <SettingsRow title="诊断日志" help="出问题时先「复制诊断信息」贴给我们(只有版本、工具链、内存档和最近 3 条错误,不含任何路径);要日志再打开目录,日志只保留 7 天;发给我们最省事的是「导出诊断包…」——一个 zip,里面没有原片、转写和 GPS。" className="settings-sheet-row--stack">
           <div className="settings-sheet-actions">
             {/* R16 P2-13:报 bug 时业主要的第一件事。 */}
             <Button
@@ -64,6 +69,23 @@ export function AboutSection(): JSX.Element {
               }}
             >
               {SETTINGS_ACTIONS.copyDiagnostics}
+            </Button>
+            {/* R18 M-04:求助时给一个 zip 比描述症状有用得多;包里没有原片、转写、GPS,路径已脱敏。 */}
+            <Button
+              variant="ghost"
+              disabled={form.busy || bundling}
+              busy={bundling}
+              onClick={() => {
+                setBundling(true);
+                void exportDiagnosticsBundle()
+                  .then((bundle) => {
+                    if (bundle) showToast(`诊断包已存好:${bundle.log_files} 份日志、${bundle.failed_jobs} 条失败任务;里面没有原片、转写和 GPS`, { tone: "success" });
+                  })
+                  .catch((error) => showToast(failureText(EXPORT_DIAGNOSTICS_BUNDLE, error), { tone: "danger" }))
+                  .finally(() => setBundling(false));
+              }}
+            >
+              {EXPORT_DIAGNOSTICS_BUNDLE}
             </Button>
             <Button variant="ghost" disabled={form.busy} onClick={() => void form.openLogs()}>
               打开日志目录

@@ -46,10 +46,12 @@ export function UpdateTopChip(): JSX.Element | null {
   if (state.phase === "ready") {
     return (
       <Button
-        variant="primary"
+        // R18 V-08:顶栏同一时刻只许一颗实心主按钮(那颗是「流水线下一步」)。
+        // 更新就绪降为 ghost;「还有更新等着」由顶栏齿轮上的小圆点继续说(TopBar)。
+        variant="ghost"
         size="sm"
         icon="check"
-        className="update-r17-topchip"
+        className="update-r17-topchip update-r17-topchip--ready"
         data-update-phase="ready"
         aria-label={UPDATE_TOP_CHIP.ready}
         title={UPDATE_TOP_CHIP.readyTitle}

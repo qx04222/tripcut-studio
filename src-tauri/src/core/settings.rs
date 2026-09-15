@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 use super::error::{CoreError, Result};
@@ -18,6 +18,15 @@ pub const LOW_SPEC_MODE_KEY: &str = "performance.low_spec_mode";
 /// R16 车道 E:预览小文件目录上限(GB,整数 1–500),超限按最久未播淘汰(`artifacts::enforce_proxy_cache_limit`)。
 pub const PROXY_CACHE_LIMIT_GB_KEY: &str = "performance.proxy_cache_limit_gb";
 pub const DEFAULT_PROXY_CACHE_LIMIT_GB: f64 = 10.0;
+/// R18 W-2:「后台干活的力度」——`eco`(省电 50% 预算)| `balanced`(平衡 100%,默认)
+/// | `full`(全速 150%,只在标准 / 高性能档有额外效果)。
+/// 取代旧的 `performance.worker_count`:那个 1–8 的旋钮在 4 以上完全没效果
+/// (R18 头脑风暴 §1.2 实测 workers 4 = 25.08 s、workers 8 = 25.09 s,差 17 ms),
+/// 因为绑住吞吐的是解码许可而不是 worker 数。旧键保留读兼容(见 `background_effort`),
+/// 不删老用户库里的值。
+pub const BACKGROUND_EFFORT_KEY: &str = "performance.background_effort";
+pub const DEFAULT_BACKGROUND_EFFORT: &str = "balanced";
+
 /// R16 车道 E §3⑤:「只在我不用电脑时做后台工作」("true" | "false");没存过时低配档默认开、其它档默认关。
 pub const BACKGROUND_ONLY_WHEN_IDLE_KEY: &str = "performance.background_only_when_idle";
 pub const FFMPEG_PATH_KEY: &str = "tools.ffmpeg_path";
@@ -117,6 +126,18 @@ pub const DEFAULT_MINIMAX_MONTHLY_BUDGET: f64 = 10.0;
 /// 应该被削平,不应该整条设置写入失败。
 pub const MINIMAX_MONTHLY_BUDGET_MAX: f64 = 500.0;
 
+/// R18 车道 settings F1:交付完成的系统通知开关("true" | "false",默认开)。
+/// 关掉之后 `notify::post_gated` 一条都不发——包括首次那条用来引出 macOS 权限弹框的。
+pub const NOTIFY_EXPORT_COMPLETE_KEY: &str = "notification.export_complete";
+/// R18 车道 settings F1:批量分析完成的系统通知开关("true" | "false",默认开)。
+pub const NOTIFY_BATCH_COMPLETE_KEY: &str = "notification.batch_complete";
+/// R18 车道 settings F5:缓存目录搬到了哪里(空 = 用应用支持目录下的内置位置)。
+pub const CACHE_CUSTOM_DIR_KEY: &str = "cache.custom_dir";
+/// R18 车道 settings F6:多少天没动过的缓存自动清掉;"0" = 从不(默认)。
+pub const CACHE_AUTO_CLEAN_DAYS_KEY: &str = "cache.auto_clean_days";
+/// F6 的可选天数——界面与白名单同一份,加一档只改这里。
+pub const CACHE_AUTO_CLEAN_DAY_CHOICES: &[&str] = &["0", "15", "30", "60", "90"];
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolStatus {
     pub configured_path: String,
@@ -152,6 +173,30 @@ pub struct CacheStats {
     /// R16:预览小文件合计与上限(字节),设置页显示「占用 / 上限」。
     pub proxy_bytes: u64,
     pub proxy_limit_bytes: u64,
+    /// R18 W-7:快照目录合计占用与总量上限(字节)。每次启动写一份整库副本 × 保留 5 份,
+    /// 此前用户看不见也删不掉(「清理缓存」不含快照)。
+    pub snapshot_bytes: u64,
+    pub snapshot_limit_bytes: u64,
+}
+
+/// R18 W-1 / W-2:设置页「性能」那一段需要知道的运行时事实——当前落到哪一档、
+/// 机器是什么芯片、解码预算多少、这一档能不能选「全速」。界面据此显示档位名与
+/// 三挡力度(低配 / 省内存档只显示两挡)。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PerformanceStatus {
+    /// `low_spec` | `low` | `standard` | `high_perf`。
+    pub profile: String,
+    /// `base` | `pro` | `max` | `ultra` | `unknown`。
+    pub chip: String,
+    pub media_engines: usize,
+    pub perf_cores: usize,
+    /// 当前力度下真正生效的解码许可数。
+    pub decode_permits: usize,
+    /// `eco` | `balanced` | `full`。
+    pub background_effort: String,
+    /// 这一档是否提供「全速」第三挡。
+    pub allows_full_effort: bool,
+    pub worker_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -161,6 +206,8 @@ pub struct SettingsStatus {
     pub whisper: WhisperStatus,
     pub clip_sidecar: ClipSidecarStatus,
     pub cache: CacheStats,
+    /// R18:当前性能档位与力度(只读,给设置页显示)。
+    pub performance: PerformanceStatus,
     /// R10 U-22:首启引导已跳过/完成。FirstRunGuide 只看这一位决定弹不弹。
     pub first_run_done: bool,
 }
@@ -188,8 +235,13 @@ fn defaults() -> BTreeMap<String, String> {
         (PROXY_ENABLED_KEY.to_owned(), "true".to_owned()),
         (MEMORY_PROFILE_KEY.to_owned(), "auto".to_owned()),
         (LOW_SPEC_MODE_KEY.to_owned(), "auto".to_owned()),
+        (BACKGROUND_EFFORT_KEY.to_owned(), DEFAULT_BACKGROUND_EFFORT.to_owned()),
         (PROXY_CACHE_LIMIT_GB_KEY.to_owned(), "10".to_owned()),
         (FIRST_RUN_DONE_KEY.to_owned(), "false".to_owned()),
+        (NOTIFY_EXPORT_COMPLETE_KEY.to_owned(), "true".to_owned()),
+        (NOTIFY_BATCH_COMPLETE_KEY.to_owned(), "true".to_owned()),
+        (CACHE_CUSTOM_DIR_KEY.to_owned(), String::new()),
+        (CACHE_AUTO_CLEAN_DAYS_KEY.to_owned(), "0".to_owned()),
         (UPDATER_AUTO_UPDATE_KEY.to_owned(), "true".to_owned()),
         (UPDATER_ASK_BEFORE_DOWNLOAD_KEY.to_owned(), "false".to_owned()),
         (UPDATER_LAST_CHECK_KEY.to_owned(), String::new()),
@@ -335,9 +387,13 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
         MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
         LOW_SPEC_MODE_KEY => matches!(value, "auto" | "on" | "off"),
+        BACKGROUND_EFFORT_KEY => matches!(value, "eco" | "balanced" | "full"),
         PROXY_CACHE_LIMIT_GB_KEY => value.parse::<u32>().is_ok_and(|gb| (1..=500).contains(&gb)),
         BACKGROUND_ONLY_WHEN_IDLE_KEY => matches!(value, "true" | "false"),
         FIRST_RUN_DONE_KEY => matches!(value, "true" | "false"),
+        NOTIFY_EXPORT_COMPLETE_KEY | NOTIFY_BATCH_COMPLETE_KEY => matches!(value, "true" | "false"),
+        CACHE_CUSTOM_DIR_KEY => value.len() <= 4_096,
+        CACHE_AUTO_CLEAN_DAYS_KEY => CACHE_AUTO_CLEAN_DAY_CHOICES.contains(&value),
         UPDATER_AUTO_UPDATE_KEY | UPDATER_ASK_BEFORE_DOWNLOAD_KEY => matches!(value, "true" | "false"),
         UPDATER_LAST_CHECK_KEY => value.is_empty() || value.parse::<u64>().is_ok(),
         UPDATER_SKIPPED_VERSION_KEY => {
@@ -433,6 +489,21 @@ pub fn setting_value(connection: &Connection, key: &str) -> Result<Option<String
         .map_err(CoreError::from)
 }
 
+/// R18 F1:通知开关的读侧。**没存过 / 读不出来一律当「开」**——默认行为与 F1 之前一字不差,
+/// 只有用户显式关掉才静音。调用方是 `notify::post_gated`。
+pub fn notification_enabled(connection: &Connection, key: &str) -> bool {
+    !matches!(setting_value(connection, key).ok().flatten().as_deref(), Some("false"))
+}
+
+/// F6:自动清理天数;"0"/非法 = 从不(`None`)。
+pub fn cache_auto_clean_days(connection: &Connection) -> Option<u32> {
+    let raw = setting_value(connection, CACHE_AUTO_CLEAN_DAYS_KEY).ok().flatten()?;
+    match raw.parse::<u32>() {
+        Ok(days) if days > 0 && CACHE_AUTO_CLEAN_DAY_CHOICES.contains(&raw.as_str()) => Some(days),
+        _ => None,
+    }
+}
+
 pub fn string_value(connection: &Connection, key: &str, default: &str) -> Result<String> {
     Ok(setting_value(connection, key)?.unwrap_or_else(|| default.to_owned()))
 }
@@ -454,6 +525,29 @@ pub fn worker_count(connection: &Connection) -> Result<usize> {
         .ok()
         .filter(|count| (1..=8).contains(count))
         .ok_or_else(|| CoreError::InvalidSchema("工作线程数设置已损坏".to_owned()))
+}
+
+/// R18 W-2:当前生效的「后台干活力度」。用户存过新键就用新键;没存过但老库里
+/// 存着 `performance.worker_count`,按最近的一挡映射(≤2 省电、3–5 平衡、≥6 全速)。
+/// 旧键不删——回退到旧版本时它还得管用。
+pub fn background_effort(connection: &Connection) -> Result<String> {
+    if let Some(stored) = setting_value(connection, BACKGROUND_EFFORT_KEY)? {
+        if matches!(stored.as_str(), "eco" | "balanced" | "full") {
+            return Ok(stored);
+        }
+    }
+    let legacy = setting_value(connection, WORKER_COUNT_KEY)?
+        .and_then(|value| value.parse::<usize>().ok());
+    Ok(effort_for_legacy_worker_count(legacy).to_owned())
+}
+
+/// 旧键 `performance.worker_count` → 新的三挡。没存过(`None`)就是默认「平衡」。
+pub fn effort_for_legacy_worker_count(worker_count: Option<usize>) -> &'static str {
+    match worker_count {
+        Some(count) if count <= 2 => "eco",
+        Some(count) if count >= 6 => "full",
+        _ => DEFAULT_BACKGROUND_EFFORT,
+    }
 }
 
 /// R16:当前生效的 Whisper 模型档——用户选过就用用户的,没选过按内存档位取默认
@@ -671,6 +765,7 @@ pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStat
     let sidecar_service_available = sidecar.service.is_file();
 
     Ok(SettingsStatus {
+        performance: performance_status(connection)?,
         ffmpeg,
         ffprobe,
         whisper: WhisperStatus {
@@ -821,6 +916,23 @@ fn sibling_ffprobe(ffmpeg: &str) -> String {
         .unwrap_or_else(|| "ffprobe".to_owned())
 }
 
+/// R18:当前档位 / 力度 / 机器的只读快照(设置页「性能」段用)。
+pub fn performance_status(connection: &Connection) -> Result<PerformanceStatus> {
+    let profile = super::memory_profile::resolve(connection)?;
+    let effort = background_effort(connection)?;
+    let machine = super::machine::current();
+    Ok(PerformanceStatus {
+        profile: profile.as_str().to_owned(),
+        chip: machine.chip.as_str().to_owned(),
+        media_engines: machine.media_engines(),
+        perf_cores: machine.perf_cores,
+        decode_permits: profile.decode_permits_for_effort(&effort),
+        background_effort: effort,
+        allows_full_effort: profile.allows_full_effort(),
+        worker_count: profile.max_worker_count(),
+    })
+}
+
 pub fn cache_stats(connection: &Connection, cache_root: &Path) -> Result<CacheStats> {
     let database_bytes = connection
         .query_row(
@@ -834,6 +946,12 @@ pub fn cache_stats(connection: &Connection, cache_root: &Path) -> Result<CacheSt
         disk_bytes: directory_bytes(cache_root)?,
         proxy_bytes: super::artifacts::proxy_cache_bytes(connection)?,
         proxy_limit_bytes: super::artifacts::proxy_cache_limit_bytes(connection)?,
+        // 快照不在 cache_root 里,它是 cache_root 的兄弟目录(<profile>/<project>/snapshots)。
+        snapshot_bytes: cache_root
+            .parent()
+            .map(|root| super::db::snapshot_bytes(&root.join("snapshots")))
+            .unwrap_or(0),
+        snapshot_limit_bytes: super::db::SNAPSHOT_TOTAL_LIMIT_BYTES,
     })
 }
 
@@ -856,6 +974,185 @@ fn directory_bytes(root: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+// ---------------------------------------------------------------------------
+// R18 车道 settings F5:「更改缓存位置…」
+// ---------------------------------------------------------------------------
+
+/// 搬过去之后在用户选的文件夹里建的那一层。**不直接把用户选的目录当缓存根** ——
+/// 否则「清理缓存」那条路径(整目录改名再删)会作用在用户自己的文件夹上。
+pub const RELOCATED_CACHE_DIR_NAME: &str = "TripCut缓存";
+
+/// 搬迁要留的余量:目标盘至少要有「缓存大小 + 10%」,且不少于 64 MB。
+/// 搬完就贴着满盘跑,下一次预览生成立刻又失败——那不叫搬成功。
+const RELOCATE_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CacheRelocation {
+    pub new_root: String,
+    pub moved_bytes: u64,
+    pub moved_files: usize,
+}
+
+/// 目标盘够不够。**拆成纯函数是为了能测那句文案** —— 「磁盘不足」这种分支在真机上
+/// 极难复现,靠真去装满一块盘来验证是不可能的。
+pub fn check_relocation_space(needed_bytes: u64, available_bytes: u64) -> Result<()> {
+    let required = needed_bytes.saturating_add(needed_bytes / 10).max(RELOCATE_MARGIN_BYTES);
+    if available_bytes >= required {
+        return Ok(());
+    }
+    Err(CoreError::InvalidTransition(format!(
+        "这块盘装不下缓存:要 {},只剩 {}。现在怎么办:先在这一页点「清理缓存并重新分析」把缓存清空再搬,或者换一块空间更大的盘。缓存都是可以再生成的,清掉不会丢素材。",
+        human_bytes(required),
+        human_bytes(available_bytes),
+    )))
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// 递归复制,返回(字节数, 文件数)。软链接不跟(缓存里不该有,有也不搬)。
+fn copy_tree(from: &Path, to: &Path) -> Result<(u64, usize)> {
+    std::fs::create_dir_all(to)?;
+    let mut bytes = 0_u64;
+    let mut files = 0_usize;
+    for entry in walkdir::WalkDir::new(from).follow_links(false) {
+        let entry = entry.map_err(|error| CoreError::Io(std::io::Error::other(format!("读取缓存目录失败:{error}"))))?;
+        let relative = entry.path().strip_prefix(from).unwrap_or(entry.path());
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = to.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            bytes = bytes.saturating_add(std::fs::copy(entry.path(), &target)?);
+            files += 1;
+        }
+    }
+    Ok((bytes, files))
+}
+
+fn count_files(root: &Path) -> Result<usize> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut files = 0;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| CoreError::Io(std::io::Error::other(format!("读取缓存目录失败:{error}"))))?;
+        if entry.file_type().is_file() {
+            files += 1;
+        }
+    }
+    Ok(files)
+}
+
+/// F5 搬迁事务:**先算够不够 → 复制到暂存 → 校验字节数与文件数 → 改名就位 →
+/// 写设置 → 删旧目录**。任何一步失败都把暂存目录删掉、设置一个字不改,错误里带
+/// 「现在怎么办」。缓存是可重建产物,最坏情况(旧目录已删、新目录坏了)重新生成即可,
+/// 不会丢素材。
+pub fn relocate_cache_dir(connection: &Connection, current_root: &Path, chosen_parent: &Path) -> Result<CacheRelocation> {
+    if !chosen_parent.is_dir() {
+        return Err(CoreError::InvalidTransition(
+            "选中的位置不是一个文件夹,或者它所在的磁盘没有接上。现在怎么办:接上外接盘、或换一个文件夹再试。".to_owned(),
+        ));
+    }
+    let target = chosen_parent.join(RELOCATED_CACHE_DIR_NAME);
+    if target == current_root {
+        return Err(CoreError::InvalidTransition("缓存已经放在这里了,不用再搬一次。".to_owned()));
+    }
+    if chosen_parent.starts_with(current_root) {
+        return Err(CoreError::InvalidTransition(
+            "不能把缓存搬进它自己里面。现在怎么办:换一个在缓存目录之外的文件夹。".to_owned(),
+        ));
+    }
+    if target.exists() && count_files(&target)? > 0 {
+        return Err(CoreError::InvalidTransition(format!(
+            "这个位置已经有一个「{RELOCATED_CACHE_DIR_NAME}」文件夹而且不是空的。现在怎么办:换一个文件夹,或先把那个文件夹清空。",
+        )));
+    }
+
+    let needed = directory_bytes(current_root)?;
+    let expected_files = count_files(current_root)?;
+    check_relocation_space(needed, super::doctor::available_bytes(chosen_parent)?)?;
+
+    let staging = chosen_parent.join(format!(".tripcut-cache-moving-{}", uuid::Uuid::new_v4().simple()));
+    let outcome = (|| -> Result<(u64, usize)> {
+        let (bytes, files) = copy_tree(current_root, &staging)?;
+        // 校验:字节数与文件数都要跟源对上。对不上就是搬了一半,绝不切设置。
+        if files != expected_files || bytes != needed {
+            return Err(CoreError::InvalidTransition(format!(
+                "搬迁中途出错:源有 {expected_files} 个文件 / {}, 搬过去只有 {files} 个 / {}。已经回滚,缓存还在原处,什么都没丢。现在怎么办:确认目标磁盘没有被拔掉、空间够,再试一次。",
+                human_bytes(needed),
+                human_bytes(bytes),
+            )));
+        }
+        Ok((bytes, files))
+    })();
+    let (moved_bytes, moved_files) = match outcome {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+
+    if target.exists() {
+        let _ = std::fs::remove_dir_all(&target);
+    }
+    if let Err(error) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(CoreError::Io(error));
+    }
+
+    let new_root = target.to_string_lossy().into_owned();
+    if let Err(error) = set_setting(connection, CACHE_CUSTOM_DIR_KEY, &new_root) {
+        // 设置没写成 = 这次搬迁不算数:把刚放好的目录撤掉,旧目录原封不动。
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(error);
+    }
+
+    // 到这里设置已经指向新目录,旧目录只是垃圾了。删不掉也不算失败(下次清理缓存会带走)。
+    if let Err(error) = std::fs::remove_dir_all(current_root) {
+        tracing::warn!(%error, old = %current_root.display(), "缓存已搬到新位置,但旧目录没删掉");
+    }
+    Ok(CacheRelocation { new_root, moved_bytes, moved_files })
+}
+
+/// 启动时决定缓存根在哪:设置里存了并且那个目录还在 → 用它;否则用内置位置。
+/// 外接盘没插的时候故意**退回内置位置**而不是报错 —— 缓存是可重建产物,退回去
+/// 只是重新生成一遍预览,总好过整个软件起不来。
+pub fn resolve_cache_root(db_path: &Path, builtin: &Path) -> PathBuf {
+    let Ok(connection) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return builtin.to_path_buf();
+    };
+    match setting_value(&connection, CACHE_CUSTOM_DIR_KEY) {
+        Ok(Some(stored)) if !stored.trim().is_empty() => {
+            let custom = PathBuf::from(stored.trim());
+            if custom.is_dir() {
+                custom
+            } else {
+                tracing::warn!(custom = %custom.display(), "设置里的缓存位置不在了(盘没插?),这次退回内置位置");
+                builtin.to_path_buf()
+            }
+        }
+        _ => builtin.to_path_buf(),
+    }
 }
 
 pub fn clear_cache_and_rebuild(
@@ -1061,6 +1358,91 @@ mod tests {
         (directory, connection)
     }
 
+    /// R18 F5:搬迁事务走完之后 —— 旧目录没了、新目录有全部内容、设置指向新目录、
+    /// `cache_stats().disk_bytes` 从新目录读、`resolve_cache_root` 也认新目录。
+    #[test]
+    fn relocate_cache_dir_moves_everything_and_repoints_the_settings() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let cache_root = directory.path().join("cache");
+        std::fs::create_dir_all(cache_root.join("12")).unwrap();
+        std::fs::write(cache_root.join("12/cover.jpg"), vec![7_u8; 2048]).unwrap();
+        std::fs::write(cache_root.join("note.txt"), b"hello").unwrap();
+        let elsewhere = directory.path().join("外接盘");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let moved = relocate_cache_dir(&connection, &cache_root, &elsewhere).unwrap();
+        let new_root = PathBuf::from(&moved.new_root);
+        assert_eq!(moved.moved_files, 2);
+        assert_eq!(moved.moved_bytes, 2048 + 5);
+        assert!(!cache_root.exists(), "旧目录必须已经不在了");
+        assert!(new_root.join("12/cover.jpg").is_file() && new_root.join("note.txt").is_file());
+        assert_eq!(setting_value(&connection, CACHE_CUSTOM_DIR_KEY).unwrap().as_deref(), Some(moved.new_root.as_str()));
+        assert_eq!(cache_stats(&connection, &new_root).unwrap().disk_bytes, 2048 + 5);
+        assert_eq!(resolve_cache_root(&directory.db_path(), &cache_root), new_root);
+    }
+
+    /// F5:目标盘装不下时什么都不做,错误里要有「现在怎么办」。
+    /// (真去装满一块盘是不可能的,所以空间判定拆成了纯函数,这里直接钉它。)
+    #[test]
+    fn relocation_refuses_when_the_disk_is_too_small_and_says_what_to_do() {
+        assert!(check_relocation_space(0, 0).is_err(), "余量门槛是绝对值,0 字节的盘也不许搬");
+        assert!(check_relocation_space(1024, 10 * 1024 * 1024 * 1024).is_ok());
+        let error = check_relocation_space(8 * 1024 * 1024 * 1024, 1024 * 1024 * 1024).unwrap_err().to_string();
+        assert!(error.contains("现在怎么办"), "磁盘不足的文案必须给出路:{error}");
+        assert!(error.contains("8.8 GB") && error.contains("1.0 GB"), "要把两个数字都摆出来:{error}");
+    }
+
+    /// F5:搬到一半失败 / 选了个非目录 —— 设置一个字不改,旧目录原封不动。
+    #[test]
+    fn relocation_failures_leave_the_old_cache_and_the_setting_untouched() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let cache_root = directory.path().join("cache");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(cache_root.join("a.bin"), b"x").unwrap();
+
+        // ① 选的不是文件夹(盘没插就是这个样子)。
+        let missing = directory.path().join("没插的盘");
+        assert!(relocate_cache_dir(&connection, &cache_root, &missing).is_err());
+
+        // ② 目标位置已经有一个非空的同名文件夹。
+        let occupied = directory.path().join("占用");
+        std::fs::create_dir_all(occupied.join(RELOCATED_CACHE_DIR_NAME)).unwrap();
+        std::fs::write(occupied.join(RELOCATED_CACHE_DIR_NAME).join("别人的.txt"), b"keep").unwrap();
+        let error = relocate_cache_dir(&connection, &cache_root, &occupied).unwrap_err().to_string();
+        assert!(error.contains("现在怎么办"), "{error}");
+        assert!(occupied.join(RELOCATED_CACHE_DIR_NAME).join("别人的.txt").is_file(), "别人的文件不许动");
+
+        // ③ 想把缓存搬进它自己里面。
+        assert!(relocate_cache_dir(&connection, &cache_root, &cache_root).is_err());
+
+        assert!(cache_root.join("a.bin").is_file(), "失败路径上旧缓存必须还在");
+        assert_eq!(setting_value(&connection, CACHE_CUSTOM_DIR_KEY).unwrap().as_deref(), None);
+        // 暂存目录不许留下来。
+        for parent in [&occupied, directory.path()] {
+            for entry in std::fs::read_dir(parent).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(!name.starts_with(".tripcut-cache-moving-"), "暂存目录没清干净:{name}");
+            }
+        }
+    }
+
+    /// R18 F1:两把通知键默认 "true",只认 true/false;`notification_enabled` 把「没存过」当开。
+    #[test]
+    fn notification_keys_default_on_and_only_accept_booleans() {
+        let (_directory, connection) = connection_with_settings();
+        let values = get_settings(&connection).unwrap();
+        assert_eq!(values[NOTIFY_EXPORT_COMPLETE_KEY], "true");
+        assert_eq!(values[NOTIFY_BATCH_COMPLETE_KEY], "true");
+        assert!(notification_enabled(&connection, NOTIFY_EXPORT_COMPLETE_KEY));
+
+        assert!(set_setting(&connection, NOTIFY_EXPORT_COMPLETE_KEY, "maybe").is_err());
+        set_setting(&connection, NOTIFY_EXPORT_COMPLETE_KEY, "false").unwrap();
+        assert!(!notification_enabled(&connection, NOTIFY_EXPORT_COMPLETE_KEY));
+        assert!(notification_enabled(&connection, NOTIFY_BATCH_COMPLETE_KEY));
+    }
+
     // R17 车道 A:四把 updater 键进白名单,默认「自动更新开、下载前不问」(业主拍板)。
     #[test]
     fn updater_keys_round_trip_with_silent_defaults() {
@@ -1203,6 +1585,30 @@ mod tests {
         );
     }
 
+    /// R18 W-2:新键默认「平衡」;老库里只有 `performance.worker_count` 时按最近一挡映射。
+    #[test]
+    fn background_effort_defaults_to_balanced_and_maps_the_legacy_worker_count() {
+        assert_eq!(effort_for_legacy_worker_count(None), "balanced");
+        assert_eq!(effort_for_legacy_worker_count(Some(1)), "eco");
+        assert_eq!(effort_for_legacy_worker_count(Some(2)), "eco");
+        assert_eq!(effort_for_legacy_worker_count(Some(3)), "balanced");
+        assert_eq!(effort_for_legacy_worker_count(Some(4)), "balanced");
+        assert_eq!(effort_for_legacy_worker_count(Some(5)), "balanced");
+        assert_eq!(effort_for_legacy_worker_count(Some(6)), "full");
+        assert_eq!(effort_for_legacy_worker_count(Some(8)), "full");
+
+        let (_directory, connection) = connection_with_settings();
+        assert_eq!(background_effort(&connection).unwrap(), "balanced");
+        // 老库:只写过 worker_count = 8 → 全速。新键不写就不算存过。
+        set_setting(&connection, WORKER_COUNT_KEY, "8").unwrap();
+        assert_eq!(background_effort(&connection).unwrap(), "full");
+        // 用户在新界面上选了「省电」,新键优先,旧键不删(回退旧版本还得用)。
+        set_setting(&connection, BACKGROUND_EFFORT_KEY, "eco").unwrap();
+        assert_eq!(background_effort(&connection).unwrap(), "eco");
+        assert_eq!(setting_value(&connection, WORKER_COUNT_KEY).unwrap().as_deref(), Some("8"));
+        assert!(set_setting(&connection, BACKGROUND_EFFORT_KEY, "turbo").is_err());
+    }
+
     #[test]
     fn cache_stats_compare_database_sum_with_directory_measurement() {
         let (directory, connection) = connection_with_settings();
@@ -1235,6 +1641,9 @@ mod tests {
                 disk_bytes: 4,
                 proxy_bytes: 0,
                 proxy_limit_bytes: 10 << 30,
+                // R18 W-7:快照目录是 cache_root 的兄弟目录,本例里不存在 → 0。
+                snapshot_bytes: 0,
+                snapshot_limit_bytes: super::super::db::SNAPSHOT_TOTAL_LIMIT_BYTES,
             }
         );
     }

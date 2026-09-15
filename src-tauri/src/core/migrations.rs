@@ -1385,6 +1385,18 @@ CREATE INDEX import_batches_episode_idx ON import_batches(episode_id);
 CREATE INDEX episode_archives_episode_idx ON episode_archives(episode_id);
 "#;
 
+// R18 AI-A1:本地描述(`core::clip_brief`)。
+//
+// 为什么新开一列而不是复用 `ai_descriptions` 加 source='local':
+// ① 那张表 `clip_id` 是主键 —— 一条素材只能有一行,本地描述与云端描述**要同时存在**
+//    (云端失败/禁用时回落到本地,云端成功后本地那句仍是回落兜底);
+// ② 那张表有 `provider IN ('claude','codex','kimi')` 的 CHECK 和 `tags_json NOT NULL`,
+//    本地描述没有 provider、也不产标签,塞进去要么撒谎要么放宽约束;
+// ③ 本地描述是**派生数据**,随时可由三张表重算,和"花过预算的云端产物"不是一类东西。
+pub const MIGRATION_0045: &str = r#"
+ALTER TABLE clips ADD COLUMN local_brief TEXT;
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1530,9 +1542,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 42, sql: MIGRATION_0042 },
     Migration { version: 43, sql: MIGRATION_0043 },
     Migration { version: 44, sql: MIGRATION_0044 },
+    Migration { version: 45, sql: MIGRATION_0045 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 44;
+pub const LATEST_SCHEMA_VERSION: i64 = 45;
 
 #[cfg(test)]
 mod tests {
@@ -1805,9 +1818,23 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_44() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 44);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 44);
+    fn schema_version_is_45() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 45);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 45);
+    }
+
+    #[test]
+    fn migration_0045_adds_clips_local_brief_column() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let found: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name = 'local_brief'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "0045 必须给 clips 加 local_brief 列");
     }
 
     #[test]

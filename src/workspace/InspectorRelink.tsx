@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX } from "react";
 
 import { pickRelinkFile, relinkClip } from "../api";
 import { failureText } from "./errorText";
+import { PrivacyAccessHint } from "./PrivacyAccessHint";
 import { Button } from "./ui";
 import { refreshClipsFeed } from "./useClipsFeed";
 
@@ -48,6 +49,8 @@ export function InspectorRelink({ clipId, fileName, missing }: { clipId: number;
       {notice ? (
         <p className="inspector-notice" role="status">
           {notice}
+          {/* R18 H-07:被系统拦下时,给一个去开权限的按钮,而不是只说被拒。 */}
+          <PrivacyAccessHint text={notice} />
         </p>
       ) : null}
     </div>

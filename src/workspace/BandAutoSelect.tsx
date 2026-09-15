@@ -142,7 +142,9 @@ export function BandAutoSelect({
   return (
     <div className="band-autoselect" ref={rootRef}>
       <Button
-        variant="secondary"
+        // R18 V-15:镜头带工具条同一组里此前两种按钮样式(这颗描边 + 「一键排入」实心)。
+        // 第 ③ 步的主动作只有「一键排入」一个,这颗降为 ghost。
+        variant="ghost"
         size="sm"
         aria-label="自动挑选精选段"
         aria-expanded={open}

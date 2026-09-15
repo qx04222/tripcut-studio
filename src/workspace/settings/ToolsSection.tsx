@@ -19,6 +19,9 @@ const TOOL_PATHS = [
 /** 排队命令本该毫秒级返回;超过这个时长还没回,先说一声,免得像没按到。 */
 export const RERUN_WATCHDOG_MS = 2_500;
 
+/** R18 F7:「清空 = 用内置」这件事此前只能靠用户自己把框选中删干净。AX 名是「恢复内置 <组件名>」。 */
+export const RESTORE_BUILTIN = "恢复内置";
+
 export function ToolsSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { settings, status, componentStatuses, busy, rollbackNotice } = form;
@@ -71,6 +74,24 @@ export function ToolsSection(): JSX.Element {
                 onBlur={(event) => void form.savePath(tool.key, event.currentTarget.value)}
               />
               <ToolReadout label={tool.readout} status={toolStatus(tool.readout)} />
+              {/* R18 F7:填过路径才有得恢复;空框按下去什么都不会变,所以直接禁用。 */}
+              <div className="settings-sheet-actions">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={`${RESTORE_BUILTIN} ${tool.readout}`}
+                  disabled={busy || (settings[tool.key] ?? "").trim() === ""}
+                  onClick={() => {
+                    form.setDraft(tool.key, "");
+                    void form
+                      .savePath(tool.key, "")
+                      .then(() => showToast(`${tool.readout}已恢复内置:留空时自动在本机搜索`, { tone: "success" }))
+                      .catch((error) => showToast(failureText(`${RESTORE_BUILTIN} ${tool.readout}`, error), { tone: "danger" }));
+                  }}
+                >
+                  {RESTORE_BUILTIN}
+                </Button>
+              </div>
               <RollbackControl componentStatus={component(tool.componentId)} busy={busy} onRollback={() => void form.rollbackTool(tool.componentId)} />
             </SettingsRow>
           );

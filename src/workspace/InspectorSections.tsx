@@ -140,7 +140,7 @@ export function GapInspector({ chapterId, slot }: { chapterId: number; slot: str
         </div>
       </Card>
       <Card padding={3} className="inspector-default-section">
-        <SectionHeader size="pane" title={<><Icon name="settings-timeline" />目标槽位</>} meta={gap.chapter_title} />
+        <SectionHeader size="pane" title={<><Icon name="slot" />目标槽位</>} meta={gap.chapter_title} />
         <div className="inspector-card-body">
           <p className="inspector-gap-text">{`目标槽位：${gap.slot_label_zh}`}</p>
         </div>

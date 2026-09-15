@@ -16,9 +16,9 @@ export const EMPTY_COPY = {
   poolFiltered: { icon: "search", title: "没有匹配的素材", body: "换个筛选条件或清空搜索。" },
   monitor: { icon: "play", title: "从左侧媒体池选一条素材", body: "选中后在这里预览,I / O 打点。" },
   // 镜头带空态按步分三句(BandEmpty 按 usePipeline 选):
-  band: { icon: "grip", title: "第 ① 步:先导入", body: "导入完成后会按拍摄时间自动生成章节。" },
+  band: { icon: "film", title: "第 ① 步:先导入", body: "导入完成后会按拍摄时间自动生成章节。" },
   bandPick: { icon: "star", title: "第 ② 步:按 F 收藏或点自动挑选", body: "挑出来的片段会成为镜头带的候选镜。" },
-  bandArrange: { icon: "grip", title: "第 ③ 步:把挑好的片段排进来", body: "一键按章节排好,顺序可以再拖。" },
+  bandArrange: { icon: "slot", title: "第 ③ 步:把挑好的片段排进来", body: "一键按章节排好,顺序可以再拖。" },
   inspector: { icon: "info", title: "选一条素材查看详情", body: "评级、标签与技术检查都在这里。" },
 } as const satisfies Record<string, { icon: IconName; title: string; body: string }>;
 

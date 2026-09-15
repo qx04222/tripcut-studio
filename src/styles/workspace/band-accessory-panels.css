@@ -24,7 +24,7 @@
 .workspace-shell .band-accessory .journey-day-header {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-sticky);
   padding: var(--space-1) var(--space-2);
   background: var(--surface-panel);
   color: var(--text-muted);
@@ -91,7 +91,7 @@
   width: var(--space-2);
   height: var(--space-2);
   margin: 0 var(--space-4) 0 var(--space-4);
-  border-radius: var(--space-2);
+  border-radius: var(--radius-pill);
   background: var(--accent);
   box-shadow: var(--ring-selected);
 }
@@ -143,7 +143,7 @@
   height: var(--control-sm);
   padding: 0 var(--space-2);
   border: 1px solid var(--warn);
-  border-radius: var(--control-sm);
+  border-radius: var(--radius-pill);
   background: var(--warn-tint);
   color: var(--warn);
   font-size: var(--text-11);
@@ -192,7 +192,7 @@
   margin: 0;
   padding: 0 var(--space-2);
   border: 1px solid var(--border-hair);
-  border-radius: var(--control-sm);
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-muted);
   font-size: var(--text-11);

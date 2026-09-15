@@ -4,6 +4,7 @@ import {
   bridgeImportProbeEvents,
   getImportProgress,
   getMusicAnalysisProgress,
+  onStartupBackfill,
   listGenerationRequests,
   listLibraries,
   listMissingClips,
@@ -35,6 +36,8 @@ export interface BackgroundSummary {
   cleanup?: number;
   /** R15:还没生成完的预览文件任务数;分析短语不在场时(清理缓存后重新生成)报出来。可选。 */
   regenerating?: number;
+  /** R18 W-4:启动补扫(增量入队 + 启动快照)还在跑。可选:旧调用方不传。 */
+  startupBackfill?: boolean;
   /** R16 §3⑤:后台不认领重活的原因;`user` 由 StatusPause 的「后台已暂停」负责,这里不再重复。可选。 */
   pausedReason?: ImportProgress["paused_reason"];
 }
@@ -125,6 +128,8 @@ const isAnalysisPhrase = (phrase: string): boolean => phrase.startsWith("正在�
 /** 纯函数:按存在性依次生成中文短语,全 0 时返回 ["后台空闲"]。`eta` 是估好的剩余时间文案(估不出传 null)。 */
 export function summaryPhrases(summary: BackgroundSummary, eta: string | null = null): string[] {
   const phrases: string[] = [];
+  // R18 W-4:启动补扫挪到开窗之后,这段时间要说人话——不说「补扫」这种内部词。
+  if (summary.startupBackfill) phrases.push("正在整理素材库");
   if (summary.analyzeTotal > 0) phrases.push(analysisPhrase(summary.analyzed, summary.analyzeTotal, eta, summary.analyzeFailed ?? 0));
   // 音乐分析只在还有轨排队 / 进行中时报数;全部落终态就不占位(失败的在音乐面板里看)。
   if ((summary.musicActive ?? 0) > 0) phrases.push(`音乐分析 ${summary.musicDone ?? 0}/${summary.musicTotal ?? 0}`);
@@ -154,6 +159,9 @@ export function pauseReasonPhrase(reason: ImportProgress["paused_reason"] | unde
       return "电脑有点热,后台先慢下来";
     case "idle_wait":
       return "等你不用电脑时继续";
+    // R18 W-6:低电量模式只是慢下来,不是停;文案别说「已暂停」。
+    case "low_power":
+      return "电池在省电模式,后台先慢下来";
     default:
       return null;
   }
@@ -273,6 +281,23 @@ function useBackgroundSummary(): { summary: BackgroundSummary; eta: string | nul
       if (active) unbridge = stop;
       else stop();
     });
+    // R18 W-4:启动补扫现在跑在开窗之后,后端在开始 / 结束各发一次事件。
+    // 结束时顺手再 poll 一次:补扫入队的活这时才出现在队列里。
+    // 测试桩 / 旧后端可能根本没有这个出口,也可能 resolve 出非函数——两种都当没订阅。
+    let unlistenBackfill: (() => void) | null = null;
+    void Promise.resolve(
+      onStartupBackfill?.((running) => {
+        if (!active) return;
+        setSummary((previous) => ({ ...previous, startupBackfill: running }));
+        if (!running) void poll();
+      }),
+    )
+      .then((stop) => {
+        if (typeof stop !== "function") return;
+        if (active) unlistenBackfill = stop;
+        else stop();
+      })
+      .catch(() => undefined);
     return () => {
       active = false;
       if (timer !== undefined) clearTimeout(timer);
@@ -280,6 +305,7 @@ function useBackgroundSummary(): { summary: BackgroundSummary; eta: string | nul
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener(IMPORT_PROBE_DONE_EVENT, onProbeDone);
       unbridge?.();
+      unlistenBackfill?.();
     };
   }, []);
 
@@ -323,6 +349,10 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
 
   return (
     <div role="status" aria-label="后台状态" className="workspace-status">
+      {/* R18 V-27:五组信息此前平铺无节奏(警告色与强调色同排)。分三组:
+          左 = 后台任务、中 = 更新、右 = 素材库,组间 --space-4。分组容器都是
+          `display: contents` 之外的普通 span —— role=status 的可读文本顺序不变。 */}
+      <span className="workspace-status-group workspace-status-group--tasks">
       <Button
         variant="ghost"
         size="sm"
@@ -357,8 +387,6 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
             );
           })}
       </span>
-      {/* R17 车道 B:「正在下载更新 42%」/「更新已下载 · 重启完成更新」。 */}
-      <UpdateStatusChip />
       {summary.missing > 0 ? (
         <Button
           variant="ghost"
@@ -370,15 +398,22 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
           {`缺失素材 ${summary.missing}`}
         </Button>
       ) : null}
-      {/* 规格 §3.2 的「中文输入法组合中」提示条槽位;真值由 useRatingHotkeys 灌入。 */}
-      <span className="workspace-status-ime" data-slot="ime-composing" aria-live="polite">
-        {imeComposing ? "中文输入法组合中" : null}
       </span>
-      <span className="workspace-status-library" title="当前素材库">
-        <span className="workspace-status-check" aria-hidden="true">
-          <Icon name="check" size={12} />
+      <span className="workspace-status-group workspace-status-group--update">
+        {/* R17 车道 B:「正在下载更新 42%」/「更新已下载 · 重启完成更新」。 */}
+        <UpdateStatusChip />
+      </span>
+      <span className="workspace-status-group workspace-status-group--library">
+        {/* 规格 §3.2 的「中文输入法组合中」提示条槽位;真值由 useRatingHotkeys 灌入。 */}
+        <span className="workspace-status-ime" data-slot="ime-composing" aria-live="polite">
+          {imeComposing ? "中文输入法组合中" : null}
         </span>
-        {libraryName}
+        <span className="workspace-status-library" title="当前素材库">
+          <span className="workspace-status-check" aria-hidden="true">
+            <Icon name="check" size={12} />
+          </span>
+          {libraryName}
+        </span>
       </span>
     </div>
   );

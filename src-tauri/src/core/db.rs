@@ -12,6 +12,11 @@ use super::migrations::{Migration, LATEST_SCHEMA_VERSION, MIGRATIONS};
 
 static READ_ONLY_PROJECTS: OnceLock<RwLock<HashSet<PathBuf>>> = OnceLock::new();
 pub const SNAPSHOT_RETENTION: usize = 5;
+/// R18 W-7:快照目录的总量上限(1 GiB)。每次启动写一份整库副本 × 保留 5 份,
+/// 50 MB 的库就是 250 MB,用户看不见也删不掉(「清理缓存」不含快照)。
+/// 超了从**最旧**的删起,**至少留最新那一份**——快照是崩溃恢复的最后一道,
+/// 上限逻辑不许把它清空。
+pub const SNAPSHOT_TOTAL_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ProjectFileLock {
@@ -183,7 +188,7 @@ fn create_snapshot_at(
     }
     connection.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
     validate_database_file(&target)?;
-    rotate_snapshots(snapshots_root, SNAPSHOT_RETENTION)?;
+    rotate_snapshots(snapshots_root, SNAPSHOT_RETENTION, SNAPSHOT_TOTAL_LIMIT_BYTES)?;
     Ok(target)
 }
 
@@ -241,12 +246,38 @@ pub fn list_snapshots(snapshots_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(snapshots)
 }
 
-fn rotate_snapshots(snapshots_root: &Path, keep: usize) -> Result<()> {
+fn rotate_snapshots(snapshots_root: &Path, keep: usize, limit_bytes: u64) -> Result<()> {
     let snapshots = list_snapshots(snapshots_root)?;
-    for expired in snapshots.into_iter().skip(keep) {
+    let sizes = snapshots
+        .iter()
+        .map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
+        .collect::<Vec<_>>();
+    let survivors = snapshots_to_keep(&sizes, keep, limit_bytes);
+    for expired in snapshots.into_iter().skip(survivors) {
         std::fs::remove_file(expired)?;
     }
     Ok(())
+}
+
+/// R18 W-7 纯函数:`sizes` 按**新到旧**排好,返回该留几份。
+/// 先按份数截到 `keep`,再从最旧的开始丢到合计 ≤ `limit_bytes`;**最少留 1 份**
+/// (哪怕它自己就超了上限——留一份超限的快照比一份都没有强)。
+pub fn snapshots_to_keep(sizes: &[u64], keep: usize, limit_bytes: u64) -> usize {
+    let mut survivors = sizes.len().min(keep);
+    while survivors > 1 && sizes[..survivors].iter().sum::<u64>() > limit_bytes {
+        survivors -= 1;
+    }
+    survivors
+}
+
+/// R18 W-7:快照目录合计占用(字节)。设置 › 项目与缓存 显示这一行。
+pub fn snapshot_bytes(snapshots_root: &Path) -> u64 {
+    list_snapshots(snapshots_root)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
 }
 
 pub fn validate_database_file(path: &Path) -> Result<i64> {
@@ -1055,6 +1086,41 @@ mod tests {
         assert_eq!(names.len(), SNAPSHOT_RETENTION);
         assert_eq!(names.first().map(String::as_str), Some("project-007.db"));
         assert_eq!(names.last().map(String::as_str), Some("project-003.db"));
+    }
+
+    /// R18 W-7 上限逻辑的真值表(sizes 按新到旧):份数先截到 keep,再从最旧的丢到合计达标;
+    /// **最少留 1 份**,哪怕最新那一份自己就超上限——留一份超限的快照比一份都没有强。
+    #[test]
+    fn snapshot_cap_trims_oldest_but_always_keeps_the_newest() {
+        // 10 份 × 1 MB,上限 1 MB:只剩最新那一份。
+        assert_eq!(snapshots_to_keep(&[1_000_000; 10], 5, 1_000_000), 1);
+        // 5 份 × 1 MB,上限 10 MB:份数是唯一约束,留 5 份。
+        assert_eq!(snapshots_to_keep(&[1_000_000; 5], 5, 10_000_000), 5);
+        // 10 份 × 1 MB,上限 3.5 MB:留 3 份。
+        assert_eq!(snapshots_to_keep(&[1_000_000; 10], 5, 3_500_000), 3);
+        // 最新那一份自己就 2 GB、上限 1 GB:仍然留 1 份,不清空。
+        assert_eq!(snapshots_to_keep(&[2 << 30, 1 << 20], 5, 1 << 30), 1);
+        // 一份都没有时返回 0(不是 1)。
+        assert_eq!(snapshots_to_keep(&[], 5, 1 << 30), 0);
+    }
+
+    /// 真删文件那一侧:11 份假快照 + 上限 3 KB,落盘后只剩最新的 3 份。
+    #[test]
+    fn rotate_snapshots_enforces_the_total_size_cap_on_disk() {
+        let directory = crate::core::test_support::TestDirectory::new();
+        let root = directory.path().join("snapshots");
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 1..=11 {
+            std::fs::write(root.join(format!("project-{index:03}.db")), vec![b'x'; 1000]).unwrap();
+        }
+        rotate_snapshots(&root, SNAPSHOT_RETENTION, 3_000).unwrap();
+        let names = list_snapshots(&root)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["project-011.db", "project-010.db", "project-009.db"]);
+        assert_eq!(snapshot_bytes(&root), 3_000);
     }
 
     #[test]

@@ -3,10 +3,31 @@ import type { JSX } from "react";
 import { SectionHeader, Select, Toggle } from "../ui";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
+import type { SettingsStatus } from "../../api";
 import { bytesLabel } from "./settingsModel";
 
 /** R16:预览小文件目录上限可选档(GB)。 */
 export const PROXY_CACHE_LIMIT_OPTIONS_GB = [5, 10, 20, 50, 100] as const;
+
+const PROFILE_LABEL: Record<string, string> = { low_spec: "省电 / 低配档", low: "省内存档", standard: "标准档", high_perf: "高性能档" };
+const CHIP_LABEL: Record<string, string> = { base: "Apple 基础款芯片", pro: "Apple Pro 芯片", max: "Apple Max 芯片", ultra: "Apple Ultra 芯片" };
+
+/** 「后台干活的力度」的说明:带上当前档位与芯片,让人知道为什么只有两挡 / 三挡。 */
+export function effortHelp(performance: SettingsStatus["performance"] | undefined): string {
+  const base = "省电:后台只用一半力气,风扇更安静;平衡:按这台电脑的档位来;全速:插着电、想尽快处理完时用。改完立刻生效。";
+  if (!performance) return base;
+  const profile = PROFILE_LABEL[performance.profile] ?? performance.profile;
+  const chip = CHIP_LABEL[performance.chip] ?? "";
+  const engines = performance.media_engines > 0 ? ` · ${performance.media_engines} 个媒体引擎` : "";
+  return `当前:${profile}${chip ? ` · ${chip}` : ""}${engines}。${base}`;
+}
+
+/** 旧库只存过 `worker_count` 时,按后端同一条映射(≤2 省电 / 3–5 平衡 / ≥6 全速)显示;没资格全速的档位回落到平衡。 */
+export function currentEffort(saved: string | undefined, performance: SettingsStatus["performance"] | undefined): string {
+  const value = saved || performance?.background_effort || "balanced";
+  if (value === "full" && performance?.allows_full_effort === false) return "balanced";
+  return ["eco", "balanced", "full"].includes(value) ? value : "balanced";
+}
 
 export function PerformanceSection(): JSX.Element {
   const form = useSettingsFormContext();
@@ -18,15 +39,19 @@ export function PerformanceSection(): JSX.Element {
     <>
       <SectionHeader title="性能" description="控制后台处理速度与预览小文件的占用;原片始终保持只读。" />
       <div className="settings-sheet-group">
-        <SettingsRow title="后台同时处理几条" help="可选 1–8,默认 4 就好:视频解码器大约 4 路并行到顶,再多不会更快;只导一条大文件时也会自动把空闲的几路用上。保存后在下次重启时生效。" htmlFor="settings-worker-count">
+        {/* R18 W-2:「后台同时处理几条」1–8 旋钮实测在 4 以上是安慰剂(4 与 8 只差 17 ms),
+            换成三挡力度 —— 写 `performance.background_effort`;低配 / 省内存档只给两挡(全速画出来就是骗人)。
+            旧键 `performance.worker_count` 不删,回退旧版本还要靠它。 */}
+        <SettingsRow title="后台干活的力度" help={effortHelp(status?.performance)} htmlFor="settings-background-effort">
           <Select
-            id="settings-worker-count"
-            value={settings["performance.worker_count"]}
-            onChange={(event) => void form.save("performance.worker_count", event.currentTarget.value)}
+            id="settings-background-effort"
+            aria-label="后台干活的力度"
+            value={currentEffort(settings["performance.background_effort"], status?.performance)}
+            onChange={(event) => void form.save("performance.background_effort", event.currentTarget.value)}
           >
-            {Array.from({ length: 8 }, (_, index) => index + 1).map((count) => (
-              <option value={count} key={count}>{count}</option>
-            ))}
+            <option value="eco">省电</option>
+            <option value="balanced">平衡(推荐)</option>
+            {status?.performance?.allows_full_effort !== false ? <option value="full">全速(插电时)</option> : null}
           </Select>
         </SettingsRow>
         {/* R16 车道 E:「省电 / 低配模式」三态。自动 = 8 GB 及以下的电脑自动开;开 = 任何电脑都用
@@ -85,6 +110,15 @@ export function PerformanceSection(): JSX.Element {
             ))}
           </Select>
         </SettingsRow>
+        {/* R18 W-7:启动快照有了总量上限(后端 1 GiB),这一行让它可见;旧后端没有这两个字段就不显示。 */}
+        {status?.cache.snapshot_bytes !== undefined ? (
+          <SettingsRow
+            title="启动快照占用"
+            help={`现在占 ${bytesLabel(status.cache.snapshot_bytes ?? 0)} / 上限 ${bytesLabel(status.cache.snapshot_limit_bytes ?? 0)}。每次启动留一份数据库快照,超过上限时从最旧的清起,至少留一份。`}
+          >
+            <span className="settings-sheet-static">{bytesLabel(status.cache.snapshot_bytes ?? 0)}</span>
+          </SettingsRow>
+        ) : null}
         <SettingsRow title="内存档位" help="自动按本机内存选择；省内存档会放慢后台处理，避免大项目时卡顿。" htmlFor="settings-memory-profile">
           <Select
             id="settings-memory-profile"

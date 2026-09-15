@@ -12,6 +12,7 @@ import { GuideHost } from "./GuideHost";
 import { HomeScreen } from "./HomeScreen";
 import { useHomeVisible } from "./homeModel";
 import { ToolchainBanner } from "./ToolchainBanner";
+import { InspectorCollapsed } from "./InspectorCollapsed";
 import { ToastHost } from "./ui/Toast";
 import { UpdateHost } from "./update/UpdateHost";
 import { ClipRemovalHost } from "./ClipRemovalHost";
@@ -75,32 +76,6 @@ export function drawerForLegacyHash(hash: string): DrawerKind {
   if (route === "deliver") return "deliver";
   if (route === "settings") return "settings";
   return null; // #/review 与其它一律落到工作区本体
-}
-
-function CollapsedRail({
-  label,
-  icon,
-  onExpand,
-}: {
-  label: string;
-  icon: string;
-  onExpand: () => void;
-}): JSX.Element {
-  return (
-    <div className="workspace-rail">
-      <button
-        type="button"
-        className="workspace-rail-button"
-        title={`展开${label}`}
-        onClick={onExpand}
-      >
-        <span className="workspace-rail-icon" aria-hidden="true">
-          {icon}
-        </span>
-        <span className="workspace-rail-label">{`展开${label}`}</span>
-      </button>
-    </div>
-  );
 }
 
 export function WorkspaceShell(): JSX.Element {
@@ -312,8 +287,8 @@ export function WorkspaceShell(): JSX.Element {
         */}
         {poolCollapsed ? (
           <Panel key="pool-rail" id="pool-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-pool collapsed">
-            <CollapsedRail
-              icon="▤"
+            <InspectorCollapsed
+              icon="chevron-right"
               label="媒体池"
               onExpand={() => dispatchWorkspace({ type: "toggle-pane", pane: "pool" })}
             />
@@ -413,8 +388,7 @@ export function WorkspaceShell(): JSX.Element {
 
         {inspectorCollapsed ? (
           <Panel key="inspector-rail" id="inspector-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-inspector collapsed">
-            <CollapsedRail
-              icon="▥"
+            <InspectorCollapsed
               label="检查器"
               onExpand={() => dispatchWorkspace({ type: "toggle-pane", pane: "inspector" })}
             />

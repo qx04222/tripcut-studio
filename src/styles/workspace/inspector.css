@@ -144,7 +144,7 @@
 }
 
 .workspace-shell .inspector .inspector-rating-segment .ui-button:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  box-shadow: var(--shadow-select-inset);
 }
 
 .workspace-shell .inspector .inspector-rating-segment .ui-button.is-on {
@@ -208,7 +208,7 @@
 
 .workspace-shell .inspector .inspector-tag-add {
   border: 1px dashed var(--border-strong);
-  border-radius: var(--control-sm);
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
 }
 

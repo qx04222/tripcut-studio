@@ -39,7 +39,7 @@
 .import-drawer-drop {
   position: absolute;
   inset: var(--space-3);
-  z-index: 2;
+  z-index: var(--z-overlay);
   display: grid;
   place-items: center;
   border: 2px dashed var(--accent);

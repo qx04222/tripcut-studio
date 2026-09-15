@@ -213,6 +213,20 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "tracing-appender",
+    "version": "=0.2.3",
+    "license": "MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "tracing-subscriber",
+    "version": "=0.3.20",
+    "license": "MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
     "name": "ttf-parser",
     "version": "=0.25.1",
     "license": "MIT OR Apache-2.0",

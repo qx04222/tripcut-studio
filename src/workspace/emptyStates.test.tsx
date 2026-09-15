@@ -59,10 +59,12 @@ describe("四栏空状态(EmptyState)", () => {
     expect(screen.getByText("从左侧媒体池选一条素材").tagName).toBe("P");
     expect(document.querySelector(".ui-empty.ui-empty--dark svg[data-icon=\"play\"]")).not.toBeNull();
   });
-  it("镜头带 · 第 ① 步:「先导入」+ 「打开导入」(grip)", () => {
+  // R18 V-21:图标由 grip 改为 film —— grip 是「可拖动的把手」,不是空态。断言跟着迁移。
+  it("镜头带 · 第 ① 步:「先导入」+ 「打开导入」(film)", () => {
     render(<BandEmpty />);
     expect(screen.getByText("第 ① 步:先导入")).toBeTruthy();
-    expect(document.querySelector(".ui-empty svg[data-icon=\"grip\"]")).not.toBeNull();
+    expect(document.querySelector(".ui-empty svg[data-icon=\"film\"]")).not.toBeNull();
+    expect(document.querySelector(".ui-empty svg[data-icon=\"grip\"]")).toBeNull();
     screen.getByRole("button", { name: "打开导入" }).click();
     expect(getWorkspaceSnapshot().openDrawer).toBe("import");
   });

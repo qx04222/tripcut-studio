@@ -138,13 +138,13 @@
   /* 行高固定 146,而 16:9 封面随列宽长高:4 列(池 ≥ 420 宽)时封面 ≈ 63px,把文件名
      第三行挤出卡片(R9 真机 1280 宽验收)。封上限 56px,超出部分靠 object-fit 裁。 */
   max-height: 56px;
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   background: var(--media-well);
   transition: box-shadow var(--motion-fast);
 }
 
 .media-pool .pool-card.ui-card--selected .pool-card-image {
-  box-shadow: 0 0 0 1px var(--accent);
+  box-shadow: var(--shadow-accent-hair);
 }
 
 /* 压在封面上的角标:统一 ink 角标,时长右下、候选 / AI 生成左上、匹配度左下。 */
@@ -156,7 +156,7 @@
   position: absolute;
   height: auto;
   padding: 2px var(--space-1);
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   font-size: var(--text-11);
   line-height: 1;
 }
@@ -295,7 +295,7 @@
 .media-pool .pool-card-rating.ui-badge {
   height: var(--lh-11);
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   font-weight: 600;
 }
 

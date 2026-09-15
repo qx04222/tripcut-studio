@@ -35,6 +35,34 @@ pub fn post(sink: &impl NotificationSink, title: &str, body: &str) -> bool {
     sink.notify(title, body)
 }
 
+/// R18 F1:这条标题归哪个开关管。没登记的标题 = 不受开关约束(永远发)。
+pub fn setting_key_for_title(title: &str) -> Option<&'static str> {
+    match title {
+        EXPORT_COMPLETE_TITLE => Some(crate::core::settings::NOTIFY_EXPORT_COMPLETE_KEY),
+        BATCH_ANALYSIS_COMPLETE_TITLE => Some(crate::core::settings::NOTIFY_BATCH_COMPLETE_KEY),
+        _ => None,
+    }
+}
+
+/// R18 F1:查一次开关再发。关掉的那条**一次 `sink.notify` 都不调**(不是发了再丢),
+/// 所以 `MockSink::calls` 必须是空的——这正是 `post_gated_stays_silent_when_switched_off` 钉的事。
+/// 数据库读不出来时按「开」走:通知宁可多一条,也不能因为一次读失败把用户配置好的提醒静默吞掉。
+pub fn post_gated(sink: &impl NotificationSink, connection: &rusqlite::Connection, title: &str, body: &str) -> bool {
+    if let Some(key) = setting_key_for_title(title) {
+        if !crate::core::settings::notification_enabled(connection, key) {
+            return false;
+        }
+    }
+    post(sink, title, body)
+}
+
+/// R18 F1:两条完成通知都关掉时,首次后台任务那条「引权限弹框」的通知也不该发——
+/// 用户已经说了不要通知,再去要一次系统权限是骚扰。
+pub fn any_completion_enabled(connection: &rusqlite::Connection) -> bool {
+    crate::core::settings::notification_enabled(connection, crate::core::settings::NOTIFY_EXPORT_COMPLETE_KEY)
+        || crate::core::settings::notification_enabled(connection, crate::core::settings::NOTIFY_BATCH_COMPLETE_KEY)
+}
+
 /// 交付完成通知的标题;正文是交付目标文件夹名。
 pub const EXPORT_COMPLETE_TITLE: &str = "交付完成";
 /// 批量分析完成通知的标题;正文由调用方按批次信息拼。
@@ -62,6 +90,40 @@ impl NotificationSink for MockSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::core::{db, settings, test_support::TestDirectory};
+
+    /// F1:关掉开关之后 `MockSink` 一次都不该被调到(零调用,不是"调了但返回 false")。
+    #[test]
+    fn post_gated_stays_silent_when_switched_off() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let sink = MockSink::default();
+
+        // 默认开:照发。
+        assert!(post_gated(&sink, &connection, EXPORT_COMPLETE_TITLE, "包"));
+        assert_eq!(sink.calls.lock().unwrap().len(), 1);
+
+        settings::set_setting(&connection, settings::NOTIFY_EXPORT_COMPLETE_KEY, "false").unwrap();
+        assert!(!post_gated(&sink, &connection, EXPORT_COMPLETE_TITLE, "包"));
+        // 批量分析那条还开着,互不牵连。
+        assert!(post_gated(&sink, &connection, BATCH_ANALYSIS_COMPLETE_TITLE, "12 条"));
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "关掉的那条必须零调用");
+        assert_eq!(calls[1].0, BATCH_ANALYSIS_COMPLETE_TITLE);
+    }
+
+    /// F1:两条都关 → 连首次那条引权限的通知也不发。
+    #[test]
+    fn first_job_primer_is_suppressed_when_both_switches_are_off() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        assert!(any_completion_enabled(&connection));
+        settings::set_setting(&connection, settings::NOTIFY_EXPORT_COMPLETE_KEY, "false").unwrap();
+        assert!(any_completion_enabled(&connection));
+        settings::set_setting(&connection, settings::NOTIFY_BATCH_COMPLETE_KEY, "false").unwrap();
+        assert!(!any_completion_enabled(&connection));
+    }
 
     #[test]
     fn post_records_exactly_one_call_on_the_mock_sink() {

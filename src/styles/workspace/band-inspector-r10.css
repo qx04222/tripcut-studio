@@ -64,7 +64,7 @@
 .workspace-shell .shot-band .band-link:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
 }
 
 /* 提示行里的链接不许被 line-clamp 吃掉:hint 单行不换行、超出省略,链接紧跟在短句后。 */
@@ -124,7 +124,7 @@
 
 .workspace-shell .shot-band .band-slot-reason.is-open {
   position: absolute;
-  z-index: 2;
+  z-index: var(--z-sticky);
   inset: var(--space-2);
   display: block;
   overflow: auto;
@@ -155,7 +155,7 @@
 
 .workspace-shell .shot-band .band-picker {
   position: absolute;
-  z-index: 5;
+  z-index: var(--z-overlay);
   top: calc(var(--workspace-pane-head-height) + var(--space-2));
   left: var(--space-3);
   display: flex;
@@ -166,9 +166,9 @@
   max-height: min(320px, calc(100% - var(--workspace-pane-head-height) - var(--space-4)));
   padding: var(--space-2) var(--space-3) var(--space-3);
   border: 1px solid var(--border-hair);
-  border-radius: var(--workspace-radius);
+  border-radius: var(--radius-10);
   background: var(--surface-raised);
-  box-shadow: var(--workspace-lift);
+  box-shadow: var(--shadow-lift);
 }
 
 .workspace-shell .shot-band .band-picker-head {
@@ -235,7 +235,7 @@
   overflow: hidden;
   width: 48px;
   height: 27px;
-  border-radius: 3px;
+  border-radius: var(--radius-4);
   background: var(--surface-chrome-2);
 }
 
@@ -263,7 +263,7 @@
 .workspace-shell .shot-band .band-segment--over-before::before,
 .workspace-shell .shot-band .band-segment--over-after::after {
   width: 3px;
-  box-shadow: 0 0 0 2px var(--accent-glow);
+  box-shadow: var(--shadow-select-glow);
 }
 
 .workspace-shell .shot-band .band-segment--over-before::before { left: -6px; }
@@ -469,7 +469,7 @@
 .workspace-shell .workspace-episode-popover .workspace-episode-input:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-glow);
+  box-shadow: var(--shadow-select-glow);
 }
 
 .workspace-shell .workspace-episode-popover .workspace-episode-orientation {

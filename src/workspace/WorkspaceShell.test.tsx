@@ -147,7 +147,10 @@ describe("工作区骨架", () => {
       expect(button.closest(".workspace-rail")).not.toBeNull();
       // 图标只给眼睛看,AX 名里一个字都不许多出来。
       expect(button.querySelector(".workspace-rail-icon")?.getAttribute("aria-hidden")).toBe("true");
-      expect(button.textContent).toContain(name);
+      // R18 V-22:可见文字缩成栏名本身(40px 竖条里横排排得下「检查器」三个字),
+      // 「展开…」这句话搬进 aria-label 与 tooltip —— AX 名一字不变,断言随之迁移。
+      expect(button.getAttribute("aria-label")).toBe(name);
+      expect(name).toContain(button.querySelector(".workspace-rail-label")?.textContent ?? "");
     }
     expect(WORKSPACE_CSS).toContain("--workspace-rail-width: 44px");
   });

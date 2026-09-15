@@ -1,4 +1,5 @@
-import type { AiDescriptionResult, ClipListItem, ShotStack } from "../api";
+import { useEffect, useState } from "react";
+import { getClipBrief, type AiDescriptionResult, type ClipListItem, type ShotStack } from "../api";
 import { activeRatingValue, ratingLabelFor, sortTakeMembers, takeDateLabel, type SlotOption } from "./inspectorModel";
 import { ActionKbd } from "./KeymapKbd";
 import { Badge, Button, Card, Chip, CoverImage, Field, Icon, Select } from "./ui";
@@ -38,6 +39,7 @@ export function AiDescriptionSection({
   aiBusy,
   onDescribe,
   onOpenSettings,
+  clipId,
 }: {
   aiDescription: AiDescriptionResult | null;
   llmEnabled: boolean;
@@ -46,7 +48,31 @@ export function AiDescriptionSection({
   onDescribe: () => void;
   /** R10 U-14:未启用时旁边给「去设置」(新壳传 openSettings("analysis");旧壳不传就不显示)。 */
   onOpenSettings?: () => void;
+  /** R18 AI-A1:给了就去取本地那句描述;不给就完全不取(旧调用点不受影响)。 */
+  clipId?: number;
 }) {
+  // 本地描述:不调模型、不联网、不花预算,所以无条件取(不看 llmEnabled)。
+  // 云端描述有了就不显示它 —— 但仍然留着,云端失败/禁用时是回落。
+  const [localBrief, setLocalBrief] = useState<string | null>(null);
+  useEffect(() => {
+    if (clipId === undefined) {
+      setLocalBrief(null);
+      return;
+    }
+    let cancelled = false;
+    void getClipBrief(clipId)
+      .then((brief) => {
+        if (!cancelled) setLocalBrief(brief && brief.trim() ? brief : null);
+      })
+      .catch(() => {
+        // 取不到就当没有 —— 这一段是锦上添花,不该把整个检查器拖红。
+        if (!cancelled) setLocalBrief(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clipId]);
+
   return (
     <div className="inspector-section inspector-ai-description">
       <span>AI 描述 · 可选的增强分析</span>
@@ -59,6 +85,13 @@ export function AiDescriptionSection({
             ))}
           </div>
           <small>由 {aiDescription.provider} 返回;3 个标签已写入</small>
+        </div>
+      ) : localBrief ? (
+        <div className="ai-description-result ai-description-local">
+          <p>{localBrief}</p>
+          <small>
+            <Badge tone="neutral">本地生成</Badge> 由画面标签、画面文字和对白在这台电脑上拼出来,没有联网
+          </small>
         </div>
       ) : (
         <p>

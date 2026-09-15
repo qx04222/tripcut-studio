@@ -64,7 +64,7 @@
   top: var(--space-3);
   right: var(--space-3);
   left: var(--space-3);
-  z-index: 1;
+  z-index: var(--z-sticky);
   display: flex;
   gap: var(--space-2);
   justify-content: space-between;
@@ -111,7 +111,7 @@
   right: 0;
   bottom: 0;
   left: 0;
-  z-index: 1;
+  z-index: var(--z-sticky);
   height: 28px;
   background: linear-gradient(180deg, transparent, rgb(0 0 0 / 40%));
   pointer-events: none;
@@ -123,7 +123,7 @@
   bottom: var(--space-2);
   left: var(--space-3);
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
   background: color-mix(in srgb, var(--media-ink) 18%, transparent);
 }
 
@@ -131,7 +131,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  border-radius: 2px;
+  border-radius: var(--radius-2);
   background: var(--accent);
 }
 
@@ -163,7 +163,7 @@
   height: 11px;
   margin-left: -1px;
   background: var(--media-ink);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 40%);
+  box-shadow: var(--shadow-scrub-hair);
 }
 
 /* 退化路径(MONITOR_EMBEDDED_PLAYBACK = false):井里只放封面 + 一行「点击进入全屏沉浸」。 */

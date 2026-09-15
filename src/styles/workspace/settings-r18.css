@@ -1,0 +1,55 @@
+/*
+ * R18 车道 settings 自己的样式。只写本车道新增的类,不改任何既有选择器。
+ * 颜色/间距一律用既有 token,不新增颜色字面量。
+ */
+
+/* F8:「后台任务」页的失败清单(与 P1-6 的「正在处理」同一副骨架,尾部换成状态徽标)。 */
+.import-jobs .import-failed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.import-jobs .import-failed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.import-jobs .import-failed-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: var(--text-12);
+}
+.import-jobs .import-failed-file {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.import-jobs .import-failed-reason {
+  flex: 1 0 100%;
+  color: var(--text-muted);
+}
+
+/* F5:缓存位置一行(路径省略在左、「更改…」贴右)。 */
+.settings-sheet-cache-location {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.settings-sheet-cache-location code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}

@@ -46,16 +46,16 @@ export const INSPECTOR_SECTIONS: readonly { id: InspectorSectionId; title: strin
   { id: "dimensions", title: INSPECTOR_TITLES.dimensions, icon: "settings-analysis" },
   { id: "ai", title: "AI 描述", icon: "settings-generation" },
   { id: "audio", title: INSPECTOR_TITLES.audio, icon: "volume" },
-  { id: "similar", title: "相似镜头", icon: "search" },
+  { id: "similar", title: "相似镜头", icon: "similar" },
 ];
 
-/** 默认层五张卡的标题与图标(套件里没有 tag / copy 图标,标签用 search、Take 用 settings-cache 代)。 */
+/** 默认层五张卡的标题与图标(R18:tag / slot / takes 是各自的图标,不再借用别的名字)。 */
 const DEFAULT_SECTION_META: Record<DefaultSectionId, { title: string; icon: IconName }> = {
   rating: { title: "评级与收藏", icon: "star" },
-  tags: { title: "标签", icon: "search" },
-  chapter: { title: "所属章节 / 槽位", icon: "settings-timeline" },
+  tags: { title: "标签", icon: "tag" },
+  chapter: { title: "所属章节 / 槽位", icon: "slot" },
   segments: { title: "精选段", icon: "mark-in" },
-  takes: { title: "同一镜头的多条", icon: "settings-cache" },
+  takes: { title: "同一镜头的多条", icon: "takes" },
 };
 
 /**

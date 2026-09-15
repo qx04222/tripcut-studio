@@ -187,3 +187,156 @@ mod tests {
         assert_eq!(payload, r#"{"dirs":["3","4"]}"#);
     }
 }
+
+// ---------------------------------------------------------------------------
+// R18 车道 settings F6:按天数自动清理缓存
+// ---------------------------------------------------------------------------
+
+/// 一次自动清理的结果。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StaleSweep {
+    pub removed: usize,
+    pub bytes: u64,
+}
+
+/// 「多久没用就自动清掉」:把 `days` 天没再被读写过的预览小文件删掉,连同它在
+/// `cache_artifacts` 里的行。只碰 `kind='proxy'` —— 这是唯一一类「删了会自动重建、
+/// 删了也不影响任何已有判断」的缓存;封面、指纹这些删掉会让界面出现空白格。
+///
+/// 判据用文件自己的 mtime(`enforce_proxy_cache_limit` 用的也是它当「最近播过」),
+/// 不用数据库里的 created_at:用户上周又看了一遍的片子不该被当成「一个月没动过」。
+/// `now` 是参数,好让测试不用真的等 30 天。
+pub fn sweep_stale_proxies(
+    connection: &Connection,
+    cache_root: &Path,
+    days: u32,
+    now: std::time::SystemTime,
+) -> Result<StaleSweep> {
+    let mut report = StaleSweep::default();
+    if days == 0 {
+        return Ok(report);
+    }
+    let max_age = std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60);
+    let stale: Vec<(i64, String, u64)> = {
+        let mut statement = connection
+            .prepare("SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind = 'proxy'")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u64))
+        })?;
+        rows.filter_map(std::result::Result::ok)
+            .filter(|(_, rel_path, _)| {
+                // 读不到 mtime(文件已经不在了)也算过期:那一行本来就该清掉。
+                match std::fs::metadata(cache_root.join(rel_path)).and_then(|m| m.modified()) {
+                    Ok(modified) => now.duration_since(modified).is_ok_and(|age| age > max_age),
+                    Err(_) => true,
+                }
+            })
+            .collect()
+    };
+    for (clip_id, rel_path, bytes) in stale {
+        let path = cache_root.join(&rel_path);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(CoreError::Io)?;
+        }
+        connection.execute(
+            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy' AND rel_path = ?2",
+            rusqlite::params![clip_id, rel_path],
+        )?;
+        report.removed += 1;
+        report.bytes = report.bytes.saturating_add(bytes);
+    }
+    if report.removed > 0 {
+        tracing::info!(removed = report.removed, bytes = report.bytes, days, "按天数自动清理了预览小文件");
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod stale_sweep_tests {
+    use super::*;
+    use crate::core::{db, settings, test_support::TestDirectory};
+
+    fn insert_clip(connection: &Connection, name: &str) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO volumes(uuid) SELECT 'vol-cache-gc'
+                 WHERE NOT EXISTS (SELECT 1 FROM volumes WHERE uuid='vol-cache-gc')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO clips(volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
+                                   duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                                   imported_at, episode_id)
+                 VALUES ('vol-cache-gc', ?1, 1, ?1, 1, 1000, 1000, 30, 1, 0, 'h264', 1920, 1080,
+                         strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                         (SELECT id FROM episodes WHERE status='active'))",
+                [name],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    fn seed_proxy(connection: &Connection, cache_root: &Path, name: &str, rel_path: &str, age_days: u64) {
+        let clip_id = insert_clip(connection, name);
+        let path = cache_root.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![1_u8; 100]).unwrap();
+        // 用 std 的 set_modified 造「几天没动过」,不为一条测试引入 filetime 依赖。
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_days * 24 * 60 * 60);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(when).unwrap();
+        connection
+            .execute(
+                "INSERT INTO cache_artifacts (clip_id, kind, rel_path, source_hash, bytes, created_at)
+                 VALUES (?1, 'proxy', ?2, 'hash', 100, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                rusqlite::params![clip_id, rel_path],
+            )
+            .unwrap();
+    }
+
+    /// F6:设 15 天 → 20 天没动的那条被清掉(文件和数据库行都没了),3 天前动过的留着;
+    /// 设「从不」一条都不清。
+    #[test]
+    fn sweep_removes_only_files_older_than_the_chosen_window() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let cache_root = directory.path().join("cache");
+        seed_proxy(&connection, &cache_root, "old.mp4", "1/proxy.mp4", 20);
+        seed_proxy(&connection, &cache_root, "fresh.mp4", "2/proxy.mp4", 3);
+        let now = std::time::SystemTime::now();
+
+        // 「从不」= 一条都不动。
+        assert_eq!(sweep_stale_proxies(&connection, &cache_root, 0, now).unwrap().removed, 0);
+        assert!(cache_root.join("1/proxy.mp4").is_file());
+
+        let swept = sweep_stale_proxies(&connection, &cache_root, 15, now).unwrap();
+        assert_eq!(swept.removed, 1);
+        assert_eq!(swept.bytes, 100);
+        assert!(!cache_root.join("1/proxy.mp4").exists(), "20 天没动的要被清掉");
+        assert!(cache_root.join("2/proxy.mp4").is_file(), "3 天前动过的必须留着");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cache_artifacts WHERE kind='proxy'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "数据库行要跟着文件一起走,不能留孤儿");
+
+        // 再跑一次不重复计数。
+        assert_eq!(sweep_stale_proxies(&connection, &cache_root, 15, now).unwrap().removed, 0);
+    }
+
+    /// F6:天数从设置里读,"0"/没存过 = 从不。
+    #[test]
+    fn auto_clean_days_setting_defaults_to_never() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        assert_eq!(settings::cache_auto_clean_days(&connection), None);
+        settings::set_setting(&connection, settings::CACHE_AUTO_CLEAN_DAYS_KEY, "30").unwrap();
+        assert_eq!(settings::cache_auto_clean_days(&connection), Some(30));
+        assert!(
+            settings::set_setting(&connection, settings::CACHE_AUTO_CLEAN_DAYS_KEY, "7").is_err(),
+            "档位之外的天数不许存进来",
+        );
+        settings::set_setting(&connection, settings::CACHE_AUTO_CLEAN_DAYS_KEY, "0").unwrap();
+        assert_eq!(settings::cache_auto_clean_days(&connection), None);
+    }
+}

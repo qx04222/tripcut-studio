@@ -53,7 +53,107 @@ fn chrono_now() -> String {
     format!("unix:{secs}")
 }
 
+/// R18 W-4:开窗前耗时的尺子。同一个库、同一台机器上量两件事:
+/// - `legacy`:R18 之前 `setup()` 里开窗**之前**跑完的那一整段(14 步,含整库 `VACUUM INTO`);
+/// - `deferred`:R18 之后开窗前只剩的两步(原片存活检查 + library_census)。
+///
+/// 每一轮都从一份干净副本开跑(入队是幂等的,第二轮就没活干了,不换副本量出来的是假数)。
+fn startup_bench(source_db: &std::path::Path, cache_root: &std::path::Path, rounds: usize, clips: usize) {
+    let scratch = source_db.parent().expect("db 的父目录").join("startup-bench");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("建 bench 目录");
+
+    // 先把库灌到目标条数:复制现有 clips 行(rel_path 唯一,加后缀)。
+    let seed = scratch.join("seed.db");
+    std::fs::copy(source_db, &seed).expect("复制种子库");
+    {
+        let mut connection = core::db::open_project(&seed).expect("open seed");
+        let existing: i64 = connection
+            .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
+            .unwrap();
+        let mut next = existing;
+        let mut round = 0;
+        while (next as usize) < clips {
+            round += 1;
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO clips(volume_uuid, rel_path, byte_size, quick_hash, tb_num, tb_den,
+                                       duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                                       captured_at, imported_at, hdr_flag, color_transfer)
+                       SELECT volume_uuid, rel_path || '-bench' || ?1, byte_size, quick_hash || ?1, tb_num, tb_den,
+                              duration_ticks, fps_num, fps_den, is_vfr, codec, width, height,
+                              captured_at, imported_at, hdr_flag, color_transfer
+                         FROM clips WHERE rel_path NOT LIKE '%-bench%'",
+                    rusqlite::params![round],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+            next = connection
+                .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
+                .unwrap();
+        }
+        eprintln!("startup-bench: 库里 {next} 条素材");
+    }
+
+    let mut legacy_ms = Vec::new();
+    let mut deferred_ms = Vec::new();
+    for round in 0..rounds {
+        for legacy in [true, false] {
+            let working = scratch.join(format!("round-{round}-{}.db", if legacy { "legacy" } else { "deferred" }));
+            std::fs::copy(&seed, &working).expect("复制工作副本");
+            let snapshots_root = scratch.join(format!("snap-{round}-{legacy}"));
+            std::fs::create_dir_all(&snapshots_root).unwrap();
+            let mut connection = core::db::open_project(&working).expect("open working");
+            let started = Instant::now();
+            // 两条路都要跑的:原片存活检查(首屏的「文件不见了」标记)。
+            let _ = core::media_source::refresh_missing_flags_throttled(&connection, Duration::from_secs(60));
+            if legacy {
+                let _ = core::import::enqueue_metadata_backfill(&mut connection);
+                let _ = core::artifacts::enqueue_missing_strips(&mut connection);
+                if core::memory_profile::sidecars_enabled(&connection) {
+                    let _ = core::clip_search::enqueue_missing(&mut connection, cache_root);
+                }
+                let _ = core::analysis::enqueue_missing(&mut connection);
+                let _ = core::motion::enqueue_missing(&mut connection);
+                let _ = core::moments::enqueue_missing(&mut connection);
+                let _ = core::clip_dimensions::enqueue_missing(&mut connection, cache_root);
+                let _ = core::similar::enqueue_if_ready(&mut connection);
+                let _ = core::story::enqueue_if_import_complete(&mut connection);
+                let _ = core::canonical_time::enqueue_align_if_ready(&mut connection);
+                let _ = core::asset_safety::refresh_all(&mut connection);
+                let _ = core::shot_stack::rebuild(&mut connection);
+            }
+            // 两条路都要跑的:A16-02 的取证判据。
+            let _ = core::db::library_census(&connection, &snapshots_root);
+            if legacy {
+                let _ = core::db::create_snapshot(&connection, &snapshots_root);
+            }
+            let elapsed = started.elapsed().as_millis() as u64;
+            if legacy {
+                legacy_ms.push(elapsed);
+            } else {
+                deferred_ms.push(elapsed);
+            }
+        }
+    }
+    legacy_ms.sort_unstable();
+    deferred_ms.sort_unstable();
+    println!(
+        "startup-bench rounds={rounds} legacy_ms={legacy_ms:?} median={} deferred_ms={deferred_ms:?} median={}",
+        legacy_ms[legacy_ms.len() / 2],
+        deferred_ms[deferred_ms.len() / 2]
+    );
+}
+
 fn main() {
+    if let Some(source) = arg("--startup-bench") {
+        let cache_root = PathBuf::from(arg("--cache-root").unwrap_or_else(|| "/tmp/tripcut-bench-cache".to_owned()));
+        let rounds: usize = arg("--rounds").and_then(|r| r.parse().ok()).unwrap_or(3);
+        let clips: usize = arg("--clips").and_then(|c| c.parse().ok()).unwrap_or(1344);
+        startup_bench(std::path::Path::new(&source), &cache_root, rounds, clips);
+        return;
+    }
     let db = PathBuf::from(arg("--db").expect("--db"));
     let folder = PathBuf::from(arg("--folder").expect("--folder"));
     let workers: usize = arg("--workers").and_then(|w| w.parse().ok()).unwrap_or(4);
@@ -63,9 +163,12 @@ fn main() {
     }
     // R16:`--low-spec auto|on|off` 写 `performance.low_spec_mode`,与设置页同一把键。
     let low_spec_mode = arg("--low-spec").unwrap_or_else(|| "auto".to_owned());
+    // R18 W-2:`--effort eco|balanced|full` 写 `performance.background_effort`,与设置页同一把键。
+    let effort = arg("--effort").unwrap_or_else(|| core::settings::DEFAULT_BACKGROUND_EFFORT.to_owned());
     let mut conn = core::db::open_project(&db).expect("open_project");
     core::settings::set_setting(&conn, core::settings::WORKER_COUNT_KEY, &workers.to_string()).unwrap();
     core::settings::set_setting(&conn, core::settings::LOW_SPEC_MODE_KEY, &low_spec_mode).unwrap();
+    core::settings::set_setting(&conn, core::settings::BACKGROUND_EFFORT_KEY, &effort).unwrap();
     let started = Instant::now();
     let started_at = chrono_now();
     let swap_before = swapouts();
@@ -83,8 +186,27 @@ fn main() {
     let profile = core::memory_profile::profile_for_budget_and_mode(budget, "auto", &low_spec_mode);
     // R16:worker 数按档位封顶(低配档 2),与 lib.rs 一致;整套解码策略走 `with_memory_profile`。
     let workers = workers.min(profile.max_worker_count());
-    eprintln!("memory profile: {} (budget {} MiB, workers {workers})", profile.as_str(), budget >> 20);
-    let runner = Arc::new(core::jobs::JobRunner::new(db.clone(), workers).with_memory_profile(profile));
+    // R18 W-1:把新档位的四个数字打出来,别让它们只活在代码里。
+    let machine = core::machine::current();
+    let permits = profile.decode_permits_for_effort(&effort);
+    eprintln!(
+        "machine: chip={} media_engines={} perf_cores={} eff_cores={} memory={} MiB",
+        machine.chip.as_str(),
+        machine.media_engines(),
+        machine.perf_cores,
+        machine.efficiency_cores,
+        machine.memory_bytes >> 20
+    );
+    eprintln!(
+        "memory profile: {} (effort {effort} → decode_permits {permits}, heavy_model_limit {}, workers {workers})",
+        profile.as_str(),
+        profile.heavy_model_limit()
+    );
+    let runner = Arc::new(
+        core::jobs::JobRunner::new(db.clone(), workers)
+            .with_memory_profile(profile)
+            .with_decode_limit(permits),
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     // R15-perf:每条任务记 (kind, 距开跑的起点 ms, 耗时 ms),result.json 里多一份 `timeline`,
@@ -140,15 +262,43 @@ fn main() {
     let mut samples: Vec<u64> = Vec::new();
     let mut first_screen_ms: Option<u64> = None;
     let mut all_cover_ms: Option<u64> = None;
-    let fixtures = std::fs::read_dir(&folder)
-        .unwrap()
-        .filter(|e| e.as_ref().unwrap().path().extension().map(|x| x == "mp4").unwrap_or(false))
-        .count() as i64;
+    // R18:原来只数 `.mp4`,`.mov` 为主的夹具上 `fixtures` 恒为 0、`first_screen_cover_ms`
+    // 恒为 null(阈值写死 24 也大于夹具条数)——两个字段静默失效。现在递归数所有
+    // 常见视频后缀,首屏阈值取「一屏 12 张与夹具总数的较小者」。
+    fn count_media(directory: &std::path::Path) -> i64 {
+        const MEDIA_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "avi", "mkv", "mts"];
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    return count_media(&path);
+                }
+                let matches = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        MEDIA_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(extension))
+                    });
+                i64::from(matches)
+            })
+            .sum()
+    }
+    let fixtures = count_media(&folder);
+    let first_screen_target = fixtures.clamp(1, 12);
+    // R18:采样循环原来**每 500 ms 新开一次 `open_project`**。8 个 worker 正在狂写同一个
+    // 库时,这一次打开要等写锁(busy_timeout 5 s),于是 `total_ms` 被量化成 5 s 的整数倍
+    // (实测 20 083 / 25 095 / 30 104 / 35 120 ms),而且采样自己还在给被测系统加写锁竞争。
+    // 现在整个循环共用一条只读连接。
+    let poll = core::db::open_project(&db).unwrap();
     loop {
         samples.push(pgid_rss_bytes());
-        let c = core::db::open_project(&db).unwrap();
+        let c = &poll;
         let covers: i64 = c.query_row("SELECT COUNT(*) FROM cache_artifacts WHERE kind='cover'", [], |r| r.get(0)).unwrap();
-        if first_screen_ms.is_none() && covers >= 24 {
+        if first_screen_ms.is_none() && covers >= first_screen_target {
             first_screen_ms = Some(started.elapsed().as_millis() as u64);
         }
         if all_cover_ms.is_none() && covers >= fixtures {
@@ -168,6 +318,7 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+    drop(poll);
 
     let c = core::db::open_project(&db).unwrap();
     // clip_embed 依赖单独打包/下载的 Chinese-CLIP 模型(TRIPCUT_CLIP_MODEL_DIR)。
@@ -206,6 +357,8 @@ fn main() {
     let result = json!({
         "schema_version": 1, "started_at": started_at, "finished_at": chrono_now(),
         "workers": workers, "fixtures": fixtures,
+        "profile": profile.as_str(), "effort": effort, "decode_permits": permits,
+        "chip": machine.chip.as_str(), "media_engines": machine.media_engines(),
         "rss_bytes": {"peak": samples.last().copied().unwrap_or(0), "p95": percentile(&samples, 0.95)},
         "swapouts_delta": swapouts().saturating_sub(swap_before),
         "first_screen_cover_ms": first_screen_ms, "all_cover_ms": all_cover_ms,

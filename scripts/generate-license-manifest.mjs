@@ -43,6 +43,8 @@ const cargoLicenses = {
   tokio: "MIT",
   tower: "MIT",
   tracing: "MIT",
+  "tracing-subscriber": "MIT",
+  "tracing-appender": "MIT",
   "ttf-parser": "MIT OR Apache-2.0",
   url: "MIT OR Apache-2.0",
   uuid: "Apache-2.0 OR MIT",

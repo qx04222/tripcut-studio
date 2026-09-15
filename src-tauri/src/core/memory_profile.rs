@@ -18,6 +18,13 @@ use super::settings::{string_value, LOW_SPEC_MODE_KEY, MEMORY_PROFILE_KEY};
 const LOW_PROFILE_THRESHOLD_BYTES: u64 = 24 * 1024 * 1024 * 1024;
 /// 8 GiB(含),auto 档位落到「省电 / 低配」的上限:M1/M2 Air、mini 基础款。
 const LOW_SPEC_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// R18 W-1:64 GiB(含)起、且芯片带 ≥ 2 个媒体引擎才进「高性能」档。
+/// 两个条件缺一不可——M4 48 GB 只有 1 个引擎,M4 Pro 24 GB 内存又不够。
+const HIGH_PERF_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// R18 W-1:进「高性能」档要求的最少媒体引擎数。
+const HIGH_PERF_MIN_MEDIA_ENGINES: usize = 2;
+/// R18 W-1:一条 4K(任一边 > 1920)素材的边界,与 `jobs::UHD_EDGE_PIXELS` 同一口径。
+const UHD_EDGE_PIXELS: i64 = 1920;
 
 /// 内存压力探针:可用内存百分比低于该值时应当暂停新增重活。
 pub const PAUSE_BELOW_PERCENT: u32 = 15;
@@ -28,23 +35,90 @@ pub enum MemoryProfile {
     Low,
     /// R16:省电 / 低配档(≤ 8 GiB 或用户手选)。
     LowSpec,
+    /// R18 W-1:高性能档(≥ 64 GiB **且** ≥ 2 个媒体引擎)。解码预算按媒体引擎数放大,
+    /// 大模型可以两个并行(whisper 仍互斥,放开的是 whisper 与 CLIP 同时)。
+    HighPerf,
 }
 
 impl MemoryProfile {
-    /// 解码并发许可数。LowSpec 是 2 份许可,但 4K 素材占 2 份(`uhd_decode_weight`),
-    /// 所以「两条 1080p 并行」与「一条 4K 独占」内存相同。
+    /// 解码并发许可数(「预算」)。LowSpec 是 2 份许可,但 4K 素材占 2 份
+    /// (`decode_weight`),所以「两条 1080p 并行」与「一条 4K 独占」内存相同。
+    ///
+    /// R18 W-1:标准档从 4 提到 8。依据是 §1.3 的 VideoToolbox 标定表——1080p H.264
+    /// 的吞吐要到 8 路才封顶(4.38/s),4 路只拿到 3.33/s(76%);而 4K 8-bit 权重 2、
+    /// 预算 8 仍然只放 4 路(2.11/s,已是封顶的 96%),峰值内存与今天一模一样。
+    /// 高性能档按媒体引擎数放大(Pro/Max 2 个 → 16,Ultra 4 个 → 32)。
+    /// **省内存(16 GB)与低配(8 GB)两档逐字不动**,这是 R18 的回归锁。
     pub fn decode_permits(self) -> usize {
         match self {
-            Self::Standard => 4,
+            Self::Standard => 8,
+            Self::HighPerf => 8 * super::machine::current().media_engines().max(1),
             Self::Low | Self::LowSpec => 2,
         }
     }
 
-    /// 一条 4K(任一边 > 1920)解码任务占几份许可。
+    /// 一条 4K(任一边 > 1920)解码任务占几份许可。R18 起请优先用 `decode_weight`
+    /// (它还能区分 10-bit);这个方法保留为「最贵的那一类占几份」,认领 SQL 用它
+    /// 做排除判定。
     pub fn uhd_decode_weight(self) -> usize {
         match self {
-            Self::Standard | Self::Low => 1,
+            // R18:标准 / 高性能档最贵的一类是 4K 10-bit,占 3 份。
+            Self::Standard | Self::HighPerf => 3,
+            Self::Low => 1,
             Self::LowSpec => 2,
+        }
+    }
+
+    /// R18 W-1:一条解码任务按素材类别占几份许可。
+    /// 1080p(含竖拍 1080×1920)→ 1;4K 8-bit → 2;4K 10-bit → 3。
+    /// 每路实测内存(§1.3):1080p ~157 MB、4K 8-bit ~540 MB、4K 10-bit ~779 MB。
+    ///
+    /// 省内存 / 低配两档保持 R16 的口径(Low 恒 1、LowSpec 4K 占 2),
+    /// 因为 8/16 GB 的行为是本轮的回归锁。
+    pub fn decode_weight(self, width: i64, height: i64, ten_bit: bool) -> usize {
+        let is_uhd = width.max(height) > UHD_EDGE_PIXELS;
+        match self {
+            Self::Low => 1,
+            Self::LowSpec => {
+                if is_uhd {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::Standard | Self::HighPerf => match (is_uhd, ten_bit) {
+                (false, _) => 1,
+                (true, false) => 2,
+                (true, true) => 3,
+            },
+        }
+    }
+
+    /// R18 W-2:按「后台干活力度」缩放解码预算。省电 50%、平衡 100%、全速 150%。
+    /// 全速只在标准 / 高性能档有额外效果——8 GB / 16 GB 机器把并发再提 50% 只会进 swap,
+    /// 那两档的「全速」等同于「平衡」(界面上也不给选)。预算下限恒为 1。
+    pub fn decode_permits_for_effort(self, effort: &str) -> usize {
+        let base = self.decode_permits();
+        let percent = match effort {
+            "eco" => 50,
+            "full" if matches!(self, Self::Standard | Self::HighPerf) => 150,
+            _ => 100,
+        };
+        ((base * percent) / 100).max(1)
+    }
+
+    /// R18 W-2:这一档能不能选「全速」(界面据此显示 / 隐藏第三挡)。
+    pub fn allows_full_effort(self) -> bool {
+        matches!(self, Self::Standard | Self::HighPerf)
+    }
+
+    /// R18 W-3:大模型类(`clip_embed` / `classify_dims` / `transcribe`)同时能跑几个。
+    /// 高性能档 2(whisper 与 CLIP 可以同时),其余 1。**两个 whisper 仍然互斥**——
+    /// 那把锁在 `transcribe.rs`,这里放开的只是跨类别并行。
+    pub fn heavy_model_limit(self) -> usize {
+        match self {
+            Self::HighPerf => 2,
+            Self::Standard | Self::Low | Self::LowSpec => 1,
         }
     }
 
@@ -56,7 +130,7 @@ impl MemoryProfile {
     /// 软解码线程数(0 = 交给 ffmpeg 默认)。
     pub fn software_decode_threads(self) -> usize {
         match self {
-            Self::Standard => 0,
+            Self::Standard | Self::HighPerf => 0,
             Self::Low | Self::LowSpec => 4,
         }
     }
@@ -64,7 +138,7 @@ impl MemoryProfile {
     /// worker 线程数上限(设置值再 clamp 到这里)。
     pub fn max_worker_count(self) -> usize {
         match self {
-            Self::Standard | Self::Low => 8,
+            Self::Standard | Self::Low | Self::HighPerf => 8,
             Self::LowSpec => 2,
         }
     }
@@ -72,7 +146,7 @@ impl MemoryProfile {
     /// 用户没选过 Whisper 模型档时的默认档。
     pub fn default_whisper_tier(self) -> &'static str {
         match self {
-            Self::Standard | Self::Low => super::transcribe::DEFAULT_MODEL_TIER,
+            Self::Standard | Self::Low | Self::HighPerf => super::transcribe::DEFAULT_MODEL_TIER,
             Self::LowSpec => super::transcribe::LOW_POWER_MODEL_TIER,
         }
     }
@@ -84,7 +158,7 @@ impl MemoryProfile {
 
     /// 代理生成走「省内存」参数(码率上限 2.5M、软解限线程、realtime)。
     pub fn low_memory_proxy(self) -> bool {
-        !matches!(self, Self::Standard)
+        !matches!(self, Self::Standard | Self::HighPerf)
     }
 
     /// 播放器用低配 mpv 参数表。
@@ -98,6 +172,7 @@ impl MemoryProfile {
             Self::Standard => "standard",
             Self::Low => "low",
             Self::LowSpec => "low_spec",
+            Self::HighPerf => "high_perf",
         }
     }
 }
@@ -140,6 +215,24 @@ fn hw_memsize() -> Option<u64> {
 /// `on` 直接 LowSpec;`auto` 且预算 ≤ 8 GiB 也是 LowSpec(不管 `memory_profile`
 /// 选了什么——8 GB 机器手选「标准」只会把自己拖进 swap,想关就把开关拨到 `off`)。
 pub fn profile_for_budget_and_mode(budget: u64, setting_value: &str, low_spec_mode: &str) -> MemoryProfile {
+    profile_for_machine(&super::machine::for_memory(budget), setting_value, low_spec_mode)
+}
+
+/// R18 W-1:档位的三个输入——内存、芯片档次(→ 媒体引擎数)、`low_spec_mode` 开关。
+/// 四档:
+/// - 低配 `LowSpec`:`low_spec_mode = on`,或 `auto` 且 ≤ 8 GiB;
+/// - 省内存 `Low`:< 24 GiB;
+/// - 标准 `Standard`:24–64 GiB,或 ≥ 64 GiB 但只有 1 个媒体引擎(M4 48/64 GB 就是这种);
+/// - 高性能 `HighPerf`:≥ 64 GiB **且** ≥ 2 个媒体引擎(Pro / Max / Ultra)。
+///
+/// 两个维度取较低的那个:内存够但引擎不够,或引擎够但内存不够,都不进高性能档。
+/// 芯片认不出来(`Chip::Unknown` → 1 个引擎)自然落回标准档——失败朝保守。
+pub fn profile_for_machine(
+    machine: &super::machine::MachineClass,
+    setting_value: &str,
+    low_spec_mode: &str,
+) -> MemoryProfile {
+    let budget = machine.memory_bytes;
     match low_spec_mode {
         "on" => return MemoryProfile::LowSpec,
         "off" => {}
@@ -149,16 +242,23 @@ pub fn profile_for_budget_and_mode(budget: u64, setting_value: &str, low_spec_mo
             }
         }
     }
+    let auto_tier = || {
+        if budget >= HIGH_PERF_THRESHOLD_BYTES && machine.media_engines() >= HIGH_PERF_MIN_MEDIA_ENGINES {
+            MemoryProfile::HighPerf
+        } else if budget < LOW_PROFILE_THRESHOLD_BYTES {
+            MemoryProfile::Low
+        } else {
+            MemoryProfile::Standard
+        }
+    };
     match setting_value {
         "low" => MemoryProfile::Low,
-        "standard" => MemoryProfile::Standard,
-        _ => {
-            if budget < LOW_PROFILE_THRESHOLD_BYTES {
-                MemoryProfile::Low
-            } else {
-                MemoryProfile::Standard
-            }
-        }
+        // 手选「标准」不该把高性能机器降下来——标准是下限不是上限。
+        "standard" => match auto_tier() {
+            MemoryProfile::HighPerf => MemoryProfile::HighPerf,
+            _ => MemoryProfile::Standard,
+        },
+        _ => auto_tier(),
     }
 }
 
@@ -350,8 +450,11 @@ mod tests {
         assert_eq!(profile.max_worker_count(), 2);
         assert!(profile.low_spec_player());
         assert!(profile.low_memory_proxy());
+        // R18 W-1:`uhd_decode_weight` 现在是「最贵的一类占几份」(认领 SQL 的排除判据)——
+        // 标准档最贵的是 4K 10-bit 占 3;省内存档仍是 1(回归锁)。
+        assert_eq!(MemoryProfile::Standard.uhd_decode_weight(), 3);
+        assert_eq!(MemoryProfile::Low.uhd_decode_weight(), 1);
         for other in [MemoryProfile::Standard, MemoryProfile::Low] {
-            assert_eq!(other.uhd_decode_weight(), 1);
             assert!(other.borrows_spare_decode_slots());
             assert_eq!(other.default_whisper_tier(), "large-v3-turbo");
             assert!(other.sidecars_enabled());
@@ -374,9 +477,106 @@ mod tests {
         assert!(available_percent() <= 100);
     }
 
+    /// R18 W-1 真值表:(内存, P 核, 芯片) → 档位。四档各一条,外加两条「两个维度
+    /// 取较低者」的边界。落地前这条是红的——今天 `(128 GiB, 12P, Max)` 返回 Standard/4。
+    #[test]
+    fn machine_truth_table_maps_memory_and_chip_to_four_tiers() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let machine = |memory: u64, perf_cores: usize, chip: super::super::machine::Chip| {
+            super::super::machine::MachineClass {
+                memory_bytes: memory,
+                perf_cores,
+                efficiency_cores: 4,
+                chip,
+            }
+        };
+        use super::super::machine::Chip;
+        // 高性能:≥64 GiB 且 ≥2 媒体引擎。
+        assert_eq!(profile_for_machine(&machine(128 * GIB, 12, Chip::Max), "auto", "auto"), MemoryProfile::HighPerf);
+        assert_eq!(profile_for_machine(&machine(64 * GIB, 10, Chip::Pro), "auto", "auto"), MemoryProfile::HighPerf);
+        assert_eq!(profile_for_machine(&machine(192 * GIB, 24, Chip::Ultra), "auto", "auto"), MemoryProfile::HighPerf);
+        // 内存够、引擎不够(M4 64 GB 只有 1 个媒体引擎)→ 标准。
+        assert_eq!(profile_for_machine(&machine(64 * GIB, 10, Chip::Base), "auto", "auto"), MemoryProfile::Standard);
+        // 引擎够、内存不够(M4 Pro 24 GB)→ 标准。
+        assert_eq!(profile_for_machine(&machine(24 * GIB, 10, Chip::Pro), "auto", "auto"), MemoryProfile::Standard);
+        // 认不出芯片 → 1 个引擎 → 标准(失败朝保守)。
+        assert_eq!(profile_for_machine(&machine(128 * GIB, 12, Chip::Unknown), "auto", "auto"), MemoryProfile::Standard);
+        // 16 GB / 8 GB 两档与 R16 逐字相同。
+        assert_eq!(profile_for_machine(&machine(16 * GIB, 8, Chip::Base), "auto", "auto"), MemoryProfile::Low);
+        assert_eq!(profile_for_machine(&machine(8 * GIB, 8, Chip::Base), "auto", "auto"), MemoryProfile::LowSpec);
+        // 手选「低配」在 128 GB Max 上照样生效;手选「标准」不该把高性能机降下来。
+        assert_eq!(profile_for_machine(&machine(128 * GIB, 12, Chip::Max), "auto", "on"), MemoryProfile::LowSpec);
+        assert_eq!(profile_for_machine(&machine(128 * GIB, 12, Chip::Max), "standard", "auto"), MemoryProfile::HighPerf);
+        assert_eq!(profile_for_machine(&machine(128 * GIB, 12, Chip::Max), "low", "auto"), MemoryProfile::Low);
+    }
+
+    /// R18 W-1 权重表:1080p → 1、4K 8-bit → 2、4K 10-bit → 3;
+    /// **竖拍 1080×1920 不算 4K**(R16 的判据是「任一边 > 1920」,1920 本身不算超)。
+    #[test]
+    fn decode_weight_counts_material_classes() {
+        let standard = MemoryProfile::Standard;
+        assert_eq!(standard.decode_weight(1920, 1080, false), 1);
+        assert_eq!(standard.decode_weight(1080, 1920, false), 1, "竖拍 1080p 不是 4K");
+        assert_eq!(standard.decode_weight(3840, 2160, false), 2);
+        assert_eq!(standard.decode_weight(2160, 3840, false), 2, "竖拍 4K 是 4K");
+        assert_eq!(standard.decode_weight(3840, 2160, true), 3);
+        assert_eq!(MemoryProfile::HighPerf.decode_weight(3840, 2160, true), 3);
+        // 回归锁:16 GB(Low)与 8 GB(LowSpec)两档的权重与 R16 逐字相同。
+        assert_eq!(MemoryProfile::Low.decode_weight(3840, 2160, true), 1);
+        assert_eq!(MemoryProfile::LowSpec.decode_weight(3840, 2160, true), 2);
+        assert_eq!(MemoryProfile::LowSpec.decode_weight(1920, 1080, false), 1);
+    }
+
+    /// R18 W-1:标准档 8 份预算下,4K 8-bit 仍然只放 4 路(与今天一样),
+    /// 1080p 放到 8 路(今天是 4 路)——这就是「吞吐 +31%、4K 峰值内存不变」的算术。
+    #[test]
+    fn standard_budget_keeps_uhd_concurrency_and_doubles_1080p() {
+        let budget = MemoryProfile::Standard.decode_permits();
+        assert_eq!(budget, 8);
+        assert_eq!(budget / MemoryProfile::Standard.decode_weight(3840, 2160, false), 4);
+        assert_eq!(budget / MemoryProfile::Standard.decode_weight(1920, 1080, false), 8);
+        assert_eq!(budget / MemoryProfile::Standard.decode_weight(3840, 2160, true), 2);
+    }
+
+    /// R18 W-2:三挡力度 → 预算。低配 / 省内存档的「全速」等同「平衡」(不给放大)。
+    #[test]
+    fn background_effort_scales_decode_budget() {
+        assert_eq!(MemoryProfile::Standard.decode_permits_for_effort("eco"), 4);
+        assert_eq!(MemoryProfile::Standard.decode_permits_for_effort("balanced"), 8);
+        assert_eq!(MemoryProfile::Standard.decode_permits_for_effort("full"), 12);
+        assert_eq!(MemoryProfile::Low.decode_permits_for_effort("eco"), 1);
+        assert_eq!(MemoryProfile::Low.decode_permits_for_effort("balanced"), 2);
+        assert_eq!(MemoryProfile::Low.decode_permits_for_effort("full"), 2, "16 GB 不给全速放大");
+        assert_eq!(MemoryProfile::LowSpec.decode_permits_for_effort("full"), 2, "8 GB 不给全速放大");
+        assert!(MemoryProfile::Standard.allows_full_effort());
+        assert!(MemoryProfile::HighPerf.allows_full_effort());
+        assert!(!MemoryProfile::Low.allows_full_effort());
+        assert!(!MemoryProfile::LowSpec.allows_full_effort());
+        // 认不出来的字符串按「平衡」处理(失败朝中间,不朝最快)。
+        assert_eq!(MemoryProfile::Standard.decode_permits_for_effort("nonsense"), 8);
+    }
+
+    /// R18 W-3:大模型并发只在高性能档放开到 2。
+    #[test]
+    fn heavy_model_limit_opens_only_on_high_perf() {
+        assert_eq!(MemoryProfile::HighPerf.heavy_model_limit(), 2);
+        for other in [MemoryProfile::Standard, MemoryProfile::Low, MemoryProfile::LowSpec] {
+            assert_eq!(other.heavy_model_limit(), 1, "{}", other.as_str());
+        }
+    }
+
+    /// R18 W-1(先红):标准档的解码预算从 4 提到 8——§1.3 标定表里 1080p 要 8 路才封顶
+    /// (4 路只有 3.33/s,封顶是 4.38/s)。今天这条断言是红的(返回 4)。
+    #[test]
+    fn standard_tier_decode_budget_is_eight() {
+        assert_eq!(MemoryProfile::Standard.decode_permits(), 8);
+    }
+
     #[test]
     fn decode_permits_and_threads_match_profile() {
-        assert_eq!(MemoryProfile::Standard.decode_permits(), 4);
+        // R18 W-1:标准档 4 → 8(见 `standard_tier_decode_budget_is_eight`);
+        // 省内存 / 低配两档是回归锁,逐字不动。
+        assert_eq!(MemoryProfile::Standard.decode_permits(), 8);
         assert_eq!(MemoryProfile::Low.decode_permits(), 2);
         assert_eq!(MemoryProfile::LowSpec.decode_permits(), 2);
         assert_eq!(MemoryProfile::Standard.software_decode_threads(), 0);

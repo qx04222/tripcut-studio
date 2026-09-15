@@ -1,0 +1,24 @@
+{
+  "label": "before1",
+  "clicks": 10,
+  "cells": 35,
+  "elapsed_ms": 3215,
+  "delta": {
+    "LayoutCount": 66,
+    "RecalcStyleCount": 304,
+    "ScriptDuration_ms": 465,
+    "TaskDuration_ms": 885,
+    "JSHeapUsedSize_delta_kb": 18587
+  },
+  "per_click": {
+    "ScriptDuration_ms": 47,
+    "LayoutCount": 7
+  },
+  "trace_events": {
+    "Commit": 216,
+    "Layout": 66,
+    "UpdateLayoutTree": 249,
+    "FunctionCall": 2104,
+    "Paint": 687
+  }
+}

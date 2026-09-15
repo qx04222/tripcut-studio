@@ -28,6 +28,19 @@ const timestamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}
 const outDir = resolve(argument("--out") ?? join(repoRoot, "qa/preview", timestamp));
 mkdirSync(outDir, { recursive: true });
 
+// R18 车道 V1(V-26):业主真机是 2x,1x 截图看不出描边毛刺。默认跑两遍剧本——
+// 一遍 deviceScaleFactor 1(文件名不变,向后兼容),一遍 deviceScaleFactor 2
+// (文件名统一加 @2x 后缀)。`--dpr 1` 可以只跑 1x(旧行为,调试单张时更快)。
+const DPR_ARG = argument("--dpr");
+const DPR_PASSES = DPR_ARG ? [{ scale: Number(DPR_ARG), suffix: Number(DPR_ARG) === 1 ? "" : "@2x" }] : [
+  { scale: 1, suffix: "" },
+  { scale: 2, suffix: "@2x" },
+];
+/** 当前这一遍剧本的文件名后缀(""或"@2x"),由 main() 在每一遍开始时切换。 */
+let dprSuffix = "";
+/** 所有截图文件名都从这里过一遍,保证 1x/2x 两份不会互相覆盖。 */
+const outFile = (name) => join(outDir, `${name}${dprSuffix}.png`);
+
 const WIDE = { width: 1440, height: 900 };
 const NARROW = { width: 1280, height: 800 };
 // R10 U-10:中栏被压到它的最小 520px。<1040 时媒体池与检查器都折成 44px 竖条,620 − 44 − 44 − 2×6 = 520。
@@ -86,7 +99,7 @@ async function startVite(port) {
 
 /** 每一步:找元素(找不到 = 记失败但继续),做动作,等一拍,截图。 */
 async function shot(page, name, { locate, act, settle = 400 } = {}) {
-  const file = join(outDir, `${name}.png`);
+  const file = outFile(name);
   try {
     if (locate) {
       const target = locate(page);
@@ -657,7 +670,7 @@ async function workspaceScript(page, context, viteUrl) {
     const text = await bubble.innerText();
     if (text.includes("精彩程度")) {
       sawHeat = true;
-      await bubble.screenshot({ path: join(outDir, "25-guide-bubble-heat.png") }).catch(() => undefined);
+      await bubble.screenshot({ path: outFile("25-guide-bubble-heat") }).catch(() => undefined);
     }
     await bubble.getByRole("button", { name: "知道了" }).click();
     await bubble.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
@@ -772,7 +785,7 @@ async function workspaceScript(page, context, viteUrl) {
         failures.push(`30-chapter-menu: 出现了原生弹窗 ${dialog.type()}`);
         void dialog.dismiss();
       });
-      await p.screenshot({ path: join(outDir, "30-chapter-menu-open.png"), fullPage: false });
+      await p.screenshot({ path: outFile("30-chapter-menu-open"), fullPage: false });
       await menu.getByRole("menuitem", { name: "重命名" }).click();
       const input = band.getByRole("textbox", { name: "章节名" });
       await input.waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("30-chapter-menu: 「重命名」后没有出现内联输入框「章节名」"));
@@ -980,44 +993,48 @@ async function main() {
   const consoleErrors = [];
   const pageErrors = [];
   try {
-    const context = await browser.newContext({ viewport: WIDE, deviceScaleFactor: 1, locale: "zh-CN" });
-    const page = await context.newPage();
-    page.on("console", (message) => {
-      if (message.type() === "error" || message.type() === "warning") {
-        consoleErrors.push(`[${message.type()}] ${message.text()}`);
+    for (const pass of DPR_PASSES) {
+      dprSuffix = pass.suffix;
+      log(`--- pass deviceScaleFactor=${pass.scale}${pass.suffix ? ` (文件名后缀 ${pass.suffix})` : ""} ---`);
+      const context = await browser.newContext({ viewport: WIDE, deviceScaleFactor: pass.scale, locale: "zh-CN" });
+      const page = await context.newPage();
+      page.on("console", (message) => {
+        if (message.type() === "error" || message.type() === "warning") {
+          consoleErrors.push(`[${message.type()}] ${message.text()}`);
+        }
+      });
+      page.on("pageerror", (error) => pageErrors.push(String(error)));
+      page.setDefaultTimeout(STEP_TIMEOUT_MS);
+
+      if (!KIT_ONLY) await workspaceScript(page, context, vite.url);
+
+      if (WITH_KIT) {
+        await page.setViewportSize(WIDE);
+        await page.goto(`${vite.url}kit.html`, { waitUntil: "domcontentloaded" });
+        await page.getByRole("region", { name: "按钮" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+        await page.waitForTimeout(400);
+        const file = outFile("10-kit");
+        await page.screenshot({ path: file, fullPage: true });
+        log(`PASS 10-kit → ${file}`);
+        // hover 态:把鼠标停在第一个 secondary 按钮上再截一张局部
+        const hover = page.getByRole("region", { name: "按钮" }).getByRole("button").nth(1);
+        await hover.hover();
+        await page.waitForTimeout(200);
+        await page.getByRole("region", { name: "按钮" }).screenshot({ path: outFile("11-kit-hover") });
+        log(`PASS 11-kit-hover → ${outFile("11-kit-hover")}`);
+        // 真实抽屉:打开右侧抽屉(表单语法 + 标题栏 actions)截一张视窗图,Esc 关掉。
+        await page.getByRole("button", { name: "打开右侧抽屉" }).click();
+        await page.getByRole("dialog", { name: "导出" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+        await page.waitForTimeout(300);
+        await page.screenshot({ path: outFile("12-kit-drawer"), fullPage: false });
+        log(`PASS 12-kit-drawer → ${outFile("12-kit-drawer")}`);
+        await page.keyboard.press("Escape");
+        await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
+        if ((await page.getByRole("dialog").count()) > 0) failures.push("kit: Esc did not close the drawer");
       }
-    });
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.setDefaultTimeout(STEP_TIMEOUT_MS);
 
-    if (!KIT_ONLY) await workspaceScript(page, context, vite.url);
-
-    if (WITH_KIT) {
-      await page.setViewportSize(WIDE);
-      await page.goto(`${vite.url}kit.html`, { waitUntil: "domcontentloaded" });
-      await page.getByRole("region", { name: "按钮" }).waitFor({ timeout: STEP_TIMEOUT_MS });
-      await page.waitForTimeout(400);
-      const file = join(outDir, "10-kit.png");
-      await page.screenshot({ path: file, fullPage: true });
-      log(`PASS 10-kit → ${file}`);
-      // hover 态:把鼠标停在第一个 secondary 按钮上再截一张局部
-      const hover = page.getByRole("region", { name: "按钮" }).getByRole("button").nth(1);
-      await hover.hover();
-      await page.waitForTimeout(200);
-      await page.getByRole("region", { name: "按钮" }).screenshot({ path: join(outDir, "11-kit-hover.png") });
-      log(`PASS 11-kit-hover → ${join(outDir, "11-kit-hover.png")}`);
-      // 真实抽屉:打开右侧抽屉(表单语法 + 标题栏 actions)截一张视窗图,Esc 关掉。
-      await page.getByRole("button", { name: "打开右侧抽屉" }).click();
-      await page.getByRole("dialog", { name: "导出" }).waitFor({ timeout: STEP_TIMEOUT_MS });
-      await page.waitForTimeout(300);
-      await page.screenshot({ path: join(outDir, "12-kit-drawer.png"), fullPage: false });
-      log(`PASS 12-kit-drawer → ${join(outDir, "12-kit-drawer.png")}`);
-      await page.keyboard.press("Escape");
-      await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
-      if ((await page.getByRole("dialog").count()) > 0) failures.push("kit: Esc did not close the drawer");
+      await context.close();
     }
-
-    await context.close();
   } finally {
     await browser.close();
     if (!process.argv.includes("--keep-server")) vite.child.kill("SIGTERM");

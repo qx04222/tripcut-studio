@@ -1,10 +1,17 @@
 pub mod core;
 mod app_paths;
 mod libraries;
+/// R18 车道 native / M-01:中文原生菜单栏(结构是纯数据,见 `menu::menu_spec`)。
+pub mod menu;
+mod logging;
 mod notify;
 mod packaging;
+/// R18 车道 native / F2:关窗口时后台任务还没做完的确认(判定是纯函数)。
+pub mod exit_guard;
 mod update_flow;
 mod updater;
+/// R18 车道 native / M-02:窗口几何钳制与全屏态(纯几何,单测判定)。
+pub mod window_state;
 #[cfg(target_os = "macos")]
 pub mod player;
 pub mod runtime;
@@ -14,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::core::analysis::ClipAnalysis;
 use crate::core::asset_safety::AssetSafetyInfo;
@@ -326,6 +333,46 @@ fn run_open_command<'a>(args: impl IntoIterator<Item = &'a std::ffi::OsStr>) -> 
     } else {
         Err(CoreError::BackgroundTask("访达未能打开目标位置".to_owned()))
     }
+}
+
+/// R18 车道 native:在系统里打开一个**白名单内**的链接。
+/// 白名单只有两条:手动下载页(自动更新失败的兜底,R17 的 `openExternalUrl` 一直在调它,
+/// 但后端从来没实现过——实测 `open_url` 全仓只有前端那一处)与「隐私与安全性 › 文件与文件夹」
+/// 深链(H-07:权限被拒之后得能一键去开)。别的 URL 一律拒绝——这个命令要是敞开,
+/// 就等于给前端一个任意 `open` 的口子。
+const ALLOWED_URL_PREFIXES: &[&str] = &[
+    "https://github.com/qx04222/tripcut-studio/releases",
+    "x-apple.systempreferences:com.apple.preference.security",
+];
+
+#[tauri::command]
+fn open_url(url: String) -> std::result::Result<(), String> {
+    if !ALLOWED_URL_PREFIXES.iter().any(|prefix| url.starts_with(prefix)) {
+        return Err("这个链接不在允许打开的名单里".to_owned());
+    }
+    run_open_command([std::ffi::OsStr::new(url.as_str())]).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    /// 白名单是这条命令唯一的守卫——放开了就是一个任意 `open` 的口子。
+    #[test]
+    fn only_the_two_allowed_prefixes_pass() {
+        let allowed = |url: &str| super::ALLOWED_URL_PREFIXES.iter().any(|prefix| url.starts_with(prefix));
+        assert!(allowed("https://github.com/qx04222/tripcut-studio/releases/latest"));
+        assert!(allowed("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"));
+        assert!(!allowed("https://example.com/"));
+        assert!(!allowed("file:///Users/xin/.ssh/id_rsa"));
+        assert!(!allowed("x-apple.systempreferences:com.apple.preference.other"));
+    }
+}
+
+/// F2:用户在确认框里点了「仍要退出」。设标志位后真正退出——
+/// 标志位是给第二次 `CloseRequested` 看的,没有它 `prevent_close()` 会把应用锁死在开着的状态。
+#[tauri::command]
+fn confirm_exit(app: tauri::AppHandle, state: tauri::State<'_, exit_guard::ExitState>) {
+    state.confirm();
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -837,6 +884,82 @@ fn set_episode_platform(
         .map_err(|error| error.to_string())
 }
 
+
+/// R18 W-4:窗口起来之后才跑的启动补扫(12 个增量入队 + 启动快照)。
+/// 见 `setup()` 末尾那段注释:开窗前只留存活检查与 census。
+const STARTUP_BACKFILL_EVENT: &str = "tripcut:startup-backfill";
+
+fn startup_backfill(
+    db_path: &std::path::Path,
+    cache_root: &std::path::Path,
+    snapshots_root: &std::path::Path,
+    report: &std::sync::Arc<std::sync::Mutex<core::doctor::DoctorReport>>,
+) -> core::error::Result<()> {
+    let mut connection = core::db::open_project(db_path)?;
+    let metadata_jobs = core::import::enqueue_metadata_backfill(&mut connection)?;
+    if metadata_jobs > 0 {
+        tracing::info!(metadata_jobs, "enqueued incremental temporal metadata backfill");
+    }
+    // R6 Task 7d 修复 High:补上封面已落盘、胶片条任务却从未存在过的窗口
+    // (进程在 `finalize_artifacts` 和 `enqueue_strip` 之间死掉)。
+    let strip_jobs = core::artifacts::enqueue_missing_strips(&mut connection)?;
+    if strip_jobs > 0 {
+        tracing::info!(strip_jobs, "enqueued missing film-strip jobs");
+    }
+    let clip_embeddings = if core::memory_profile::sidecars_enabled(&connection) {
+        core::clip_search::enqueue_missing(&mut connection, cache_root)?
+    } else {
+        0
+    };
+    if clip_embeddings > 0 {
+        tracing::info!(clip_embeddings, "enqueued missing Chinese-CLIP embeddings");
+    }
+    let analysis_jobs = core::analysis::enqueue_missing(&mut connection)?;
+    if analysis_jobs > 0 {
+        tracing::info!(analysis_jobs, "enqueued L1 re-analysis for outdated pipeline version");
+    }
+    let motion_jobs = core::motion::enqueue_missing(&mut connection)?;
+    if motion_jobs > 0 {
+        tracing::info!(motion_jobs, "enqueued motion v3 endpoint analysis");
+    }
+    // R11:老库已分析、没时刻分的素材增量补齐。
+    let moment_jobs = core::moments::enqueue_missing(&mut connection)?;
+    if moment_jobs > 0 {
+        tracing::info!(moment_jobs, "enqueued moment-score backfill");
+    }
+    let dimension_jobs =
+        core::clip_dimensions::enqueue_missing(&mut connection, cache_root)?;
+    if dimension_jobs > 0 {
+        tracing::info!(dimension_jobs, "enqueued missing eight-dimension labels");
+    }
+    if let Some(job_id) = core::similar::enqueue_if_ready(&mut connection)? {
+        tracing::info!(job_id, "enqueued similar clip clustering");
+    }
+    if let Some(job_id) = core::story::enqueue_if_import_complete(&mut connection)? {
+        tracing::info!(job_id, "enqueued automatic chapterization");
+    }
+    if let Some(job_id) = core::canonical_time::enqueue_align_if_ready(&mut connection)? {
+        tracing::info!(job_id, "enqueued multi-device clock alignment");
+    }
+    let safety_changes = core::asset_safety::refresh_all(&mut connection)?;
+    if safety_changes > 0 {
+        tracing::info!(safety_changes, "updated non-destructive asset safety flags");
+    }
+    let shot_stack_count = core::shot_stack::rebuild(&mut connection)?;
+    tracing::info!(shot_stack_count, "rebuilt semantic shot stacks");
+
+    let snapshot = core::db::create_snapshot(&connection, snapshots_root);
+    report
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record_snapshot(snapshots_root, &snapshot);
+    if let Err(error) = snapshot {
+        tracing::warn!(%error, "could not create startup database snapshot");
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn get_settings(
     state: tauri::State<'_, RuntimeState>,
@@ -947,6 +1070,16 @@ fn get_ai_description(
 ) -> std::result::Result<Option<AiDescriptionResult>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::llm::latest_ai_description(&connection, clip_id).map_err(|error| error.to_string())
+}
+
+/// R18 AI-A1:本地描述。不调模型、不联网、不花预算 —— 8 GB 机器上也有。
+#[tauri::command]
+fn get_clip_brief(
+    clip_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Option<String>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::clip_brief::get_clip_brief(&connection, clip_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1523,6 +1656,117 @@ fn get_jobs_paused(state: tauri::State<'_, RuntimeState>) -> bool {
 fn list_running_jobs(state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::jobs::RunningJob>, String> {
     let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::jobs::list_running_jobs(&connection).map_err(|error| error.to_string())
+}
+
+/// R18 车道 settings M-04:「导出诊断包…」。保存面板选位置 → 摊开 → ditto 打 zip。
+/// 包里没有原片、封面、转写、GPS,绝对路径一律脱敏(判据钉在
+/// `core::diagnostics::bundle_contains_no_absolute_paths_and_the_grep_would_have_caught_them`)。
+#[tauri::command]
+async fn export_diagnostics_bundle(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Option<core::diagnostics::DiagnosticsBundle>, String> {
+    let db_path = state.db_path.clone();
+    let cache_root = state.cache_root.clone();
+    let logs_dir = db_path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("logs");
+    let suggested = format!(
+        "旅剪诊断-{}.zip",
+        chrono_like_stamp(),
+    );
+    let Some(target) = rfd::AsyncFileDialog::new()
+        .set_title("把诊断包存到哪里")
+        .set_file_name(&suggested)
+        .save_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    let target = target.path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || -> Result<core::diagnostics::DiagnosticsBundle> {
+        let connection = core::db::open_project(&db_path)?;
+        core::diagnostics::export_diagnostics_bundle(
+            &connection,
+            &cache_root,
+            &logs_dir,
+            env!("CARGO_PKG_VERSION"),
+            &target,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map(Some)
+    .map_err(|error| error.to_string())
+}
+
+/// 诊断包文件名里的时间戳(本地时区)。仓里没有 chrono,用 SQLite 的 strftime 拿一个
+/// —— 反正这一步本来就要开库。
+fn chrono_like_stamp() -> String {
+    rusqlite::Connection::open_in_memory()
+        .and_then(|connection| {
+            connection.query_row("SELECT strftime('%Y%m%d-%H%M', 'now', 'localtime')", [], |row| row.get::<_, String>(0))
+        })
+        .unwrap_or_else(|_| "最新".to_owned())
+}
+
+/// R18 车道 settings F5:「更改缓存位置…」的文件夹选择(只选路径,搬迁在 relocate_cache_dir)。
+#[tauri::command]
+async fn pick_cache_folder() -> std::result::Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .set_title("选择缓存要放在哪个文件夹里")
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_string_lossy().into_owned()))
+}
+
+/// R18 车道 settings F5:把缓存整体搬到用户选的文件夹里。
+///
+/// 跟 `switch_library` 同一套做法:先用 `with_maintenance` 把后台静下来(搬迁期间不能
+/// 有人往旧目录写),搬完 + 写好设置之后**重启**——`cache_root` 是启动时定下来交给
+/// `RuntimeState` 的,不重启这一次会话还会往旧位置找。
+#[tauri::command]
+async fn relocate_cache_dir(
+    folder: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::settings::CacheRelocation, String> {
+    if state.read_only {
+        return Err("只读窗口不能更改缓存位置".into());
+    }
+    let control = state.worker_control.clone().ok_or("后台任务控制器不可用")?;
+    let db_path = state.db_path.clone();
+    let cache_root = state.cache_root.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<core::settings::CacheRelocation> {
+        let moved = control.with_maintenance(
+            || Ok(()),
+            || {
+                let connection = core::db::open_project(&db_path)?;
+                core::settings::relocate_cache_dir(&connection, &cache_root, std::path::Path::new(&folder))
+            },
+        )?;
+        tracing::warn!(new_root = %moved.new_root, files = moved.moved_files, "缓存已搬到新位置,重启使其生效");
+        app.restart()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+/// R18 车道 settings F8:后台任务页的「失败」清单(不含用户自己取消的)。
+#[tauri::command]
+fn list_failed_jobs(
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<Vec<core::diagnostics::FailedJob>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::diagnostics::list_failed_jobs(&connection, 200).map_err(|error| error.to_string())
+}
+
+/// R18 车道 settings F8:「清空全部失败」——标成已知晓,不删行(失败原因诊断包还要读)。
+#[tauri::command]
+fn clear_failed_jobs(state: tauri::State<'_, RuntimeState>) -> std::result::Result<usize, String> {
+    if state.read_only {
+        return Err("只读窗口不能清空失败任务".into());
+    }
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::diagnostics::clear_failed_jobs(&connection).map_err(|error| error.to_string())
 }
 
 /// R16 P2-4:检查器技术检查段「重新分析这条」——清这条的失败标记、按既有入队逻辑重排。
@@ -2786,22 +3030,35 @@ pub fn run() {
             );
         }
     }
+    // R18 W-4:开窗前耗时的尺子。进程入口到 `setup()` 结束(窗口已建好、
+    // 前端开始加载)之间的毫秒数,落到日志的 `startup_ms` 字段。
+    let process_started = std::time::Instant::now();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ProvisioningState::default())
+        .manage(exit_guard::ExitState::default())
         .manage(update_flow::UpdateFlowState::default())
         .setup(move |app| {
             packaging::configure(app);
+            // M-01:菜单建不起来不该拦住启动——没有菜单的应用仍然能用,少一条 warn 反而更糟。
+            if let Err(error) = menu::attach(app.handle()) {
+                tracing::warn!(%error, "中文菜单栏没能挂上");
+            }
             update_flow::spawn_selftest_if_requested(app.handle());
             *setup_signal_app_handle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app.handle().clone());
             let root = development_root()?;
             let db_path = root.join("project.db");
-            let cache_root = root.join("cache");
+            // R18 F5:缓存目录可以被搬到别的盘;设置里存了并且那个目录还在就用它,
+            // 否则(比如外接盘没插)退回内置位置——缓存是可重建产物,退回去只是重新生成。
+            let cache_root = core::settings::resolve_cache_root(&db_path, &root.join("cache"));
+            // R18 M-03:日志真落盘(按天滚动、保留 7 天、写之前脱敏)。装在 panic hook 旁边,
+            // 两者写同一个 logs 目录。
+            logging::init(&root.join("logs"));
             core::doctor::install_panic_hook(root.join("logs"));
 
             let project_lock = core::db::try_acquire_project_lock(&db_path)?.map(Arc::new);
@@ -2937,58 +3194,6 @@ pub fn run() {
                     Ok(_) => {}
                     Err(error) => tracing::warn!(%error, "missing-source refresh at startup failed"),
                 }
-                let metadata_jobs = core::import::enqueue_metadata_backfill(&mut connection)?;
-                if metadata_jobs > 0 {
-                    tracing::info!(metadata_jobs, "enqueued incremental temporal metadata backfill");
-                }
-                // R6 Task 7d 修复 High:补上封面已落盘、胶片条任务却从未存在过的窗口
-                // (进程在 `finalize_artifacts` 和 `enqueue_strip` 之间死掉)。
-                let strip_jobs = core::artifacts::enqueue_missing_strips(&mut connection)?;
-                if strip_jobs > 0 {
-                    tracing::info!(strip_jobs, "enqueued missing film-strip jobs");
-                }
-                let clip_embeddings = if core::memory_profile::sidecars_enabled(&connection) {
-                    core::clip_search::enqueue_missing(&mut connection, &cache_root)?
-                } else {
-                    0
-                };
-                if clip_embeddings > 0 {
-                    tracing::info!(clip_embeddings, "enqueued missing Chinese-CLIP embeddings");
-                }
-                let analysis_jobs = core::analysis::enqueue_missing(&mut connection)?;
-                if analysis_jobs > 0 {
-                    tracing::info!(analysis_jobs, "enqueued L1 re-analysis for outdated pipeline version");
-                }
-                let motion_jobs = core::motion::enqueue_missing(&mut connection)?;
-                if motion_jobs > 0 {
-                    tracing::info!(motion_jobs, "enqueued motion v3 endpoint analysis");
-                }
-                // R11:老库已分析、没时刻分的素材增量补齐。
-                let moment_jobs = core::moments::enqueue_missing(&mut connection)?;
-                if moment_jobs > 0 {
-                    tracing::info!(moment_jobs, "enqueued moment-score backfill");
-                }
-                let dimension_jobs =
-                    core::clip_dimensions::enqueue_missing(&mut connection, &cache_root)?;
-                if dimension_jobs > 0 {
-                    tracing::info!(dimension_jobs, "enqueued missing eight-dimension labels");
-                }
-                if let Some(job_id) = core::similar::enqueue_if_ready(&mut connection)? {
-                    tracing::info!(job_id, "enqueued similar clip clustering");
-                }
-                if let Some(job_id) = core::story::enqueue_if_import_complete(&mut connection)? {
-                    tracing::info!(job_id, "enqueued automatic chapterization");
-                }
-                if let Some(job_id) = core::canonical_time::enqueue_align_if_ready(&mut connection)? {
-                    tracing::info!(job_id, "enqueued multi-device clock alignment");
-                }
-                let safety_changes = core::asset_safety::refresh_all(&mut connection)?;
-                if safety_changes > 0 {
-                    tracing::info!(safety_changes, "updated non-destructive asset safety flags");
-                }
-                let shot_stack_count = core::shot_stack::rebuild(&mut connection)?;
-                tracing::info!(shot_stack_count, "rebuilt semantic shot stacks");
-
                 let snapshots_root = root.join("snapshots");
                 // A16-02:启动时数一遍主表与快照。库空而最新快照非空 = 上一程有东西把库清了,
                 // 这里用 warn 把两边的数字钉进日志(正常清库的路径各自也有带来源的 warn)。
@@ -3002,23 +3207,30 @@ pub fn run() {
                     }
                     Err(error) => tracing::warn!(%error, "startup library census failed"),
                 }
-                let snapshot = core::db::create_snapshot(&connection, &snapshots_root);
-                report
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .record_snapshot(&snapshots_root, &snapshot);
-                if let Err(error) = snapshot {
-                    tracing::warn!(%error, "could not create startup database snapshot");
-                }
             }
-            // R16 车道 E:档位一次解析,worker 数按档位封顶(低配档最多 2)。
+            // R16 车道 E:档位一次解析。R18 W-2:worker 数由档位自己定,不再从
+            // `performance.worker_count` 读——那个 1–8 的旋钮在 4 以上完全没效果
+            // (实测 workers 4 = 25.08 s、workers 8 = 25.09 s),绑住吞吐的是解码许可。
+            // 用户能调的是「后台干活的力度」(省电 / 平衡 / 全速),它缩放的是解码预算。
             let memory_profile = core::memory_profile::resolve(&connection)?;
-            let worker_count =
-                core::settings::worker_count(&connection)?.min(memory_profile.max_worker_count());
+            let worker_count = memory_profile.max_worker_count();
+            let background_effort = core::settings::background_effort(&connection)?;
+            let decode_permits = memory_profile.decode_permits_for_effort(&background_effort);
             let idle_only = core::settings::background_only_when_idle(&connection)?;
             // R16 §3⑥:播放器低配参数表随档位。
             crate::player::mpv_options::set_low_spec(memory_profile.low_spec_player());
-            tracing::info!(profile = memory_profile.as_str(), worker_count, idle_only, "memory profile resolved");
+            let machine = core::machine::current();
+            tracing::info!(
+                profile = memory_profile.as_str(),
+                chip = machine.chip.as_str(),
+                media_engines = machine.media_engines(),
+                perf_cores = machine.perf_cores,
+                worker_count,
+                effort = background_effort.as_str(),
+                decode_permits,
+                idle_only,
+                "memory profile resolved"
+            );
             let window_state = core::settings::window_state(&connection)?;
             drop(connection);
 
@@ -3035,15 +3247,27 @@ pub fn run() {
                 // `core::jobs::notify_on_completion` 那一侧,这里只需要把
                 // `notify::post` 的成功/失败原样透传回去。
                 let notifier_app = app.handle().clone();
+                // R18 F1:通知开关的查询点。`post_gated` 自己开库查一次
+                // `notification.*`——通知本来就稀疏(一批分析/一次交付一条),
+                // 这一次读比把设置缓存进 JobRunner 再管失效要简单得多。
+                let notifier_db_path = db_path.clone();
+                let primer_db_path = db_path.clone();
                 // R10 U-19:应用内事件出口——音乐分析等任务落到终态时 `app.emit`
                 // 给前端(`tripcut:music-analyzed`),前端不用等下次轮询/重启。
                 let event_app = app.handle().clone();
                 let permission_app = app.handle().clone();
                 let runner = core::jobs::JobRunner::new(db_path.clone(), worker_count)
                     .with_memory_profile(memory_profile)
+                    // R18 W-2:力度挡位缩放解码预算(省电 50% / 平衡 100% / 全速 150%),
+                    // 必须排在 `with_memory_profile` 之后——它会先按档位设一次基准值。
+                    .with_decode_limit(decode_permits)
                     .with_idle_only(idle_only)
                     .with_notifier(std::sync::Arc::new(move |title: &str, body: &str| {
-                        notify::post(&notifier_app, title, body)
+                        match core::db::open_project(&notifier_db_path) {
+                            Ok(connection) => notify::post_gated(&notifier_app, &connection, title, body),
+                            // 读不到设置不等于用户关掉了通知:照旧发(见 `notify::post_gated`)。
+                            Err(_) => notify::post(&notifier_app, title, body),
+                        }
                     }))
                     .with_event_sink(std::sync::Arc::new(move |name: &str, payload: serde_json::Value| {
                         if let Err(error) = tauri::Emitter::emit(&event_app, name, payload) {
@@ -3054,6 +3278,13 @@ pub fn run() {
                     // `request_permission` 是空实现,macOS 只在第一次 `show()` 时弹框,
                     // 所以这里发一条「已开始后台处理」把它引出来;之后完成通知不再突兀。
                     .with_first_job_hook(std::sync::Arc::new(move || {
+                        // R18 F1:两条完成通知都被关掉时不要权限——用户已经说了不想被通知。
+                        let wanted = core::db::open_project(&primer_db_path)
+                            .map(|connection| notify::any_completion_enabled(&connection))
+                            .unwrap_or(true);
+                        if !wanted {
+                            return;
+                        }
                         notify::post(
                             &permission_app,
                             notify::BACKGROUND_STARTED_TITLE,
@@ -3089,11 +3320,44 @@ pub fn run() {
             if let Some(hourly_control) = worker_control {
                 let hourly_db_path = db_path.clone();
                 let hourly_snapshots_root = root.join("snapshots");
+                let hourly_cache_root = cache_root.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
                     interval.tick().await;
+                    // R18 F6:缓存自动清理搭在这条 interval 上,每 24 拍走一次(默认「从不」,
+                    // 设置里没开就是一次空查询)。不另起一条定时器。
+                    let mut ticks_since_sweep = 0_u32;
                     loop {
                         interval.tick().await;
+                        ticks_since_sweep += 1;
+                        if ticks_since_sweep >= 24 {
+                            ticks_since_sweep = 0;
+                            let sweep_db_path = hourly_db_path.clone();
+                            let sweep_cache_root = hourly_cache_root.clone();
+                            let swept = tauri::async_runtime::spawn_blocking(move || {
+                                let connection = core::db::open_project(&sweep_db_path)?;
+                                let Some(days) = core::settings::cache_auto_clean_days(&connection) else {
+                                    return Ok(core::cache_gc::StaleSweep::default());
+                                };
+                                core::cache_gc::sweep_stale_proxies(
+                                    &connection,
+                                    &sweep_cache_root,
+                                    days,
+                                    std::time::SystemTime::now(),
+                                )
+                            })
+                            .await;
+                            match swept {
+                                Ok(Ok(report)) if report.removed > 0 => tracing::info!(
+                                    removed = report.removed,
+                                    bytes = report.bytes,
+                                    "daily cache sweep removed stale proxies"
+                                ),
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => tracing::warn!(%error, "daily cache sweep failed"),
+                                Err(error) => tracing::warn!(%error, "daily cache sweep task ended unexpectedly"),
+                            }
+                        }
                         let control = hourly_control.clone();
                         let db_path = hourly_db_path.clone();
                         let snapshots_root = hourly_snapshots_root.clone();
@@ -3118,19 +3382,62 @@ pub fn run() {
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| CoreError::BackgroundTask("主窗口不存在".to_owned()))?;
-            window.set_size(tauri::LogicalSize::new(
-                window_state.width,
-                window_state.height,
-            ))?;
-            if let (Some(x), Some(y)) = (window_state.x, window_state.y) {
-                window.set_position(tauri::LogicalPosition::new(x, y))?;
+            // M-02:存下来的位置可能落在一块已经拔掉的屏上(实测 window.x=5000 → 窗口
+            // 停在屏外,进程活着但用户什么都看不见)。恢复前先跟真实屏幕求交。
+            // `available_monitors()` 给的是物理像素,按各自的 scale_factor 换成逻辑坐标再比。
+            let monitors: Vec<window_state::Rect> = window
+                .available_monitors()
+                .unwrap_or_default()
+                .iter()
+                .map(|monitor| {
+                    let scale = monitor.scale_factor();
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    window_state::Rect {
+                        x: f64::from(position.x) / scale,
+                        y: f64::from(position.y) / scale,
+                        width: f64::from(size.width) / scale,
+                        height: f64::from(size.height) / scale,
+                    }
+                })
+                .collect();
+            let requested = window_state::Rect {
+                x: window_state.x.unwrap_or(0.0),
+                y: window_state.y.unwrap_or(0.0),
+                width: window_state.width,
+                height: window_state.height,
+            };
+            let placement = if window_state.x.is_some() && window_state.y.is_some() {
+                window_state::clamp_to_monitors(requested, &monitors)
             } else {
-                window.center()?;
+                window_state::Placement::Center { width: requested.width, height: requested.height }
+            };
+            match placement {
+                window_state::Placement::Keep(rect) => {
+                    window.set_size(tauri::LogicalSize::new(rect.width, rect.height))?;
+                    window.set_position(tauri::LogicalPosition::new(rect.x, rect.y))?;
+                }
+                window_state::Placement::Center { width, height } => {
+                    window.set_size(tauri::LogicalSize::new(width, height))?;
+                    window.center()?;
+                }
+            }
+            // 全屏是单独一个键:全屏尺寸永远不写回 window.width/height(见 window_state.rs)。
+            if let Ok(connection) = core::db::open_project(&db_path) {
+                match window_state::stored_fullscreen(&connection) {
+                    Ok(true) => {
+                        if let Err(error) = window.set_fullscreen(true) {
+                            tracing::warn!(%error, "全屏态没能恢复");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "读不到全屏态"),
+                }
             }
             let state_window = window.clone();
             let state_db_path = db_path.clone();
             let (window_state_sender, window_state_receiver) =
-                std::sync::mpsc::channel::<WindowState>();
+                std::sync::mpsc::channel::<window_state::WindowPersist>();
             std::thread::spawn(move || {
                 while let Ok(mut pending) = window_state_receiver.recv() {
                     loop {
@@ -3143,10 +3450,19 @@ pub fn run() {
                         }
                     }
                     if let Ok(mut connection) = core::db::open_project(&state_db_path) {
+                        // M-02:全屏时 geometry 是 None —— 全屏的 1800×1130 不是用户的窗口大小,
+                        // 写回去下次就打开一个几乎铺满屏幕的普通窗口(§1.3 实测)。
+                        if let Some(geometry) = pending.geometry {
+                            if let Err(error) =
+                                core::settings::save_window_state(&mut connection, geometry)
+                            {
+                                tracing::warn!(%error, "could not persist window state");
+                            }
+                        }
                         if let Err(error) =
-                            core::settings::save_window_state(&mut connection, pending)
+                            window_state::save_fullscreen(&connection, pending.fullscreen)
                         {
-                            tracing::warn!(%error, "could not persist window state");
+                            tracing::warn!(%error, "could not persist fullscreen state");
                         }
                     }
                 }
@@ -3160,21 +3476,57 @@ pub fn run() {
                 ) {
                     return;
                 }
+                let fullscreen = state_window.is_fullscreen().unwrap_or(false);
                 let scale = state_window.scale_factor().unwrap_or(1.0);
-                let Ok(size) = state_window.outer_size() else {
-                    return;
+                let geometry = if fullscreen {
+                    None
+                } else {
+                    match (state_window.outer_size(), state_window.outer_position()) {
+                        (Ok(size), Ok(position)) => Some(WindowState {
+                            width: f64::from(size.width) / scale,
+                            height: f64::from(size.height) / scale,
+                            x: Some(f64::from(position.x) / scale),
+                            y: Some(f64::from(position.y) / scale),
+                        }),
+                        _ => return,
+                    }
                 };
-                let Ok(position) = state_window.outer_position() else {
-                    return;
-                };
-                let saved = WindowState {
-                    width: f64::from(size.width) / scale,
-                    height: f64::from(size.height) / scale,
-                    x: Some(f64::from(position.x) / scale),
-                    y: Some(f64::from(position.y) / scale),
-                };
-                let _ = window_state_sender.send(saved);
+                let _ = window_state_sender.send(window_state::WindowPersist { geometry, fullscreen });
             });
+            // F2:关窗口时如果还有用户的活儿在跑,先问一句再退(空闲家务不算)。
+            {
+                let close_app = app.handle().clone();
+                let close_db_path = db_path.clone();
+                window.on_window_event(move |event| {
+                    let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                        return;
+                    };
+                    if close_app.state::<exit_guard::ExitState>().is_confirmed() {
+                        return; // 已经问过了,这一次放行
+                    }
+                    let Ok(connection) = core::db::open_project(&close_db_path) else {
+                        return; // 读不到库就别拦人——拦住退不掉比少问一句更糟
+                    };
+                    let Ok(running) = core::jobs::list_running_jobs(&connection) else {
+                        return;
+                    };
+                    let count = exit_guard::blocking_job_count(
+                        running.iter().map(|job| job.kind.as_str()),
+                    );
+                    if count == 0 {
+                        return;
+                    }
+                    api.prevent_close();
+                    if let Err(error) = close_app
+                        .emit("tripcut:close-requested", exit_guard::close_requested_payload(count))
+                    {
+                        // 前端没接住就没人能确认了 —— 宁可放它退出,也不要锁死窗口。
+                        tracing::warn!(%error, "退出确认没能送到前端,直接放行");
+                        close_app.state::<exit_guard::ExitState>().confirm();
+                        close_app.exit(0);
+                    }
+                });
+            }
             #[cfg(target_os = "macos")]
             {
                 let player = PlayerManager::new(window.clone());
@@ -3227,9 +3579,48 @@ pub fn run() {
                 };
                 app.manage(WakeObserver(observer));
             }
+            // R18 W-4:启动补扫挪到窗口之后。
+            //
+            // 原来这 12 步 + 一次整库 `VACUUM INTO` 全部同步跑在 `setup()` 里、开窗之前:
+            // 13 次全表扫加一次整库复制,全部按库大小线性增长,全部挡在第一帧前面。
+            // 现在开窗前只留两件事:`refresh_missing_flags_throttled`(首屏的「文件不见了」
+            // 标记要靠它)与 `library_census`(A16-02 那条 warn 的判据,必须在任何东西
+            // 动库之前数)。其余的进这个 `spawn_blocking`。
+            //
+            // 代价说清楚:启动快照从「开窗前一定写完」变成「开窗后几百毫秒写完」,
+            // 这中间崩溃就没有本次快照。`library_census` 仍在前面,所以「库被清空」
+            // 那条取证判据不受影响。
+            if !read_only {
+                let backfill_db_path = db_path.clone();
+                let backfill_cache_root = cache_root.clone();
+                let backfill_snapshots_root = root.join("snapshots");
+                let backfill_report = report.clone();
+                let backfill_app = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let _ = tauri::Emitter::emit(&backfill_app, STARTUP_BACKFILL_EVENT, true);
+                    let started = std::time::Instant::now();
+                    let outcome = startup_backfill(
+                        &backfill_db_path,
+                        &backfill_cache_root,
+                        &backfill_snapshots_root,
+                        &backfill_report,
+                    );
+                    if let Err(error) = outcome {
+                        tracing::warn!(%error, "startup backfill failed");
+                    }
+                    tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup backfill finished");
+                    let _ = tauri::Emitter::emit(&backfill_app, STARTUP_BACKFILL_EVENT, false);
+                });
+            }
+            tracing::info!(
+                startup_ms = process_started.elapsed().as_millis() as u64,
+                "setup finished; window is up"
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            confirm_exit,
+            open_url,
             get_doctor_report,
             restore_latest_snapshot,
             export_decision_data,
@@ -3284,6 +3675,7 @@ pub fn run() {
             generation_availability,
             generation_ledger_summary,
             get_ai_description,
+            get_clip_brief,
             describe_clip_with_ai,
             ask_director,
             get_settings_status,
@@ -3421,7 +3813,13 @@ pub fn run() {
             reveal_clip,
             list_tags,
             add_tag,
-            remove_tag
+            remove_tag,
+            // R18 车道 settings:失败任务清单 / 清空全部失败 / 导出诊断包。
+            list_failed_jobs,
+            clear_failed_jobs,
+            pick_cache_folder,
+            relocate_cache_dir,
+            export_diagnostics_bundle
         ])
         .build(context);
     let app = result.expect("旅剪工作台启动失败");

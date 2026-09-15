@@ -39,8 +39,10 @@ export function GuideHost(): JSX.Element | null {
       gapVisible,
       exportDrawerOpen: openDrawer === "deliver",
       overlayOpen: openDrawer !== null,
+      // R18 F1:还有素材在排队 / 分析 = 后台在干活,完成通知就在后面 —— 这只气泡要赶在它前面。
+      backgroundRunning: pipeline.counts.analysisPending > 0,
     });
-  }, [inWorkspace, selectedClipHasSuggestions, pipeline.step, bandHasShots, gapVisible, openDrawer]);
+  }, [inWorkspace, selectedClipHasSuggestions, pipeline.step, bandHasShots, gapVisible, openDrawer, pipeline.counts.analysisPending]);
 
   const onDismiss = useCallback(() => {
     if (active !== null) dismissGuide(active);

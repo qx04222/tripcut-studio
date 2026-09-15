@@ -280,7 +280,8 @@ describe("媒体池 —— 搜索与筛选条", () => {
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), {
       target: { value: "雪山" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    // R18 V-18:框外那颗「搜索」按钮删了(框内已有放大镜),断言迁移到「回车即搜」。
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "Enter" });
     await waitFor(() => expect(getWorkspaceSnapshot().query).toBe("雪山"));
     await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
     expect(screen.getByRole("gridcell", { name: /clip-2\.mov/ })).toBeTruthy();
@@ -523,7 +524,8 @@ describe("媒体池 —— 空态(U-06)", () => {
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), {
       target: { value: "没有这个词" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    // R18 V-18:框外那颗「搜索」按钮删了(框内已有放大镜),断言迁移到「回车即搜」。
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "Enter" });
     expect(await screen.findByText("没有匹配的素材")).toBeTruthy();
     expect(screen.queryByText("第 ① 步:先导入")).toBeNull();
     expect(screen.queryByRole("button", { name: "导入第一批素材" })).toBeNull();
@@ -545,13 +547,15 @@ describe("媒体池 —— 搜索并入文件名(U-15)", () => {
     await renderPool();
     const box = screen.getByRole("searchbox", { name: "搜索画面或对白关键词" });
     fireEvent.change(box, { target: { value: "登机" } });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    // R18 V-18:框外那颗「搜索」按钮删了(框内已有放大镜),断言迁移到「回车即搜」。
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "Enter" });
     await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
     expect(screen.getByRole("gridcell", { name: /IMG_0813_登机口\.mov/ })).toBeTruthy();
 
     // 大小写不敏感。
     fireEvent.change(box, { target: { value: "dji" } });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    // R18 V-18:框外那颗「搜索」按钮删了(框内已有放大镜),断言迁移到「回车即搜」。
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "Enter" });
     await waitFor(() => expect(screen.getByRole("gridcell", { name: /DJI_0101\.MP4/ })).toBeTruthy());
     expect(screen.getAllByRole("gridcell")).toHaveLength(1);
 
@@ -566,9 +570,68 @@ describe("媒体池 —— 搜索并入文件名(U-15)", () => {
     await renderPool();
     const box = screen.getByRole("searchbox", { name: "搜索画面或对白关键词" });
     fireEvent.change(box, { target: { value: "登机" } });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    // R18 V-18:框外那颗「搜索」按钮删了(框内已有放大镜),断言迁移到「回车即搜」。
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索画面或对白关键词" }), { key: "Enter" });
     await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
     dispatchWorkspace({ type: "set-query", query: "" });
     await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(2));
+  });
+});
+
+/** R18 车道 layout · V-18:搜索/筛选/角标/列数四条版面项的回归。 */
+describe("媒体池 —— R18 版面打磨(V-18)", () => {
+  it("框外那颗「搜索」按钮没有了;「搜索」这个词仍在输入框自己的 AX 名里,回车即搜", async () => {
+    apiMocks.searchClips.mockResolvedValue([{ clip_id: 2, score: 0.9 }]);
+    await renderPool();
+    expect(screen.queryByRole("button", { name: "搜索" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "搜索中" })).toBeNull();
+    const box = screen.getByRole("searchbox", { name: "搜索画面或对白关键词" });
+    expect(box.getAttribute("aria-label")).toContain("搜索");
+    fireEvent.change(box, { target: { value: "雪山" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(getWorkspaceSnapshot().query).toBe("雪山"));
+  });
+
+  it("筛选芯片与「更多筛选⌄」在同一行:芯片进可横向滚动的一段,「更多筛选」是它的兄弟", async () => {
+    await renderPool();
+    const chips = screen.getByRole("group", { name: "评级筛选" });
+    const scroll = chips.querySelector(".pool-chip-scroll");
+    expect(scroll).not.toBeNull();
+    // 四个评级芯片全在滚动段里,「更多筛选」在它外面(所以它不跟着滚)。
+    expect(scroll!.querySelectorAll(".ui-chip").length).toBeGreaterThanOrEqual(4);
+    const more = screen.getByRole("button", { name: "更多筛选" });
+    expect(more.closest(".pool-chip-scroll")).toBeNull();
+    expect(more.closest('[role="group"]')).toBe(chips);
+  });
+
+  it("重复组角标是「图标 + ×n」,原文「同一镜头 n 条」留在视觉隐藏的一段里(AX 不变)", async () => {
+    apiMocks.listClips.mockResolvedValue(Array.from({ length: 9 }, (_, index) => clip(index + 1)));
+    apiMocks.listShotStacks.mockResolvedValue([stackOf(7, [1, 2, 3, 4, 5, 6, 7, 8])]);
+    await renderPool();
+    const badge = await waitFor(() => {
+      const found = document.querySelector(".pool-card-stack");
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(badge.querySelector(".ui-icon")).not.toBeNull();
+    expect(badge.textContent).toContain("×8");
+    const hidden = badge.querySelector(".visually-hidden");
+    expect(hidden?.textContent).toBe("同一镜头 8 条");
+  });
+
+  it("列数两档:同一个栏宽(320)在 1440 下三列、窄到 1280 变两列", async () => {
+    // test-setup 把 window.innerWidth 钉在 1440。先看宽屏这一档,再把窗口调窄。
+    await renderPool();
+    const grid = screen.getByRole("grid", { name: "媒体池" });
+    expect(poolColumnCount(320)).toBe(3);
+    expect(grid.getAttribute("aria-colcount")).toBe("3");
+
+    Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true, writable: true });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(grid.getAttribute("aria-colcount")).toBe("2"));
+
+    Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(grid.getAttribute("aria-colcount")).toBe("3"));
   });
 });

@@ -6,6 +6,7 @@ import { EmptyState } from "../ui/EmptyState";
 import { SectionHeader } from "../ui/SectionHeader";
 import { batchStatusLabel, decodeQueueHint, lastPathSegment, ownedElsewhereLines, pausedByUserHint, pipelineHeadline, pipelineSegments, type PipelineSegment } from "./importModel";
 import { RemovalConfirm } from "./RemovalConfirm";
+import { ImportFailedJobs } from "./ImportFailedJobs";
 import { ImportRunningJobs } from "./ImportRunningJobs";
 import { useImportJobs } from "./useImportJobs";
 import { dispatchWorkspace } from "../WorkspaceStore";
@@ -76,6 +77,9 @@ export function ImportJobsTab({ onChanged }: { onChanged: () => void }): JSX.Ele
 
       {/* R16 P1-6:正在跑的任务逐行可取消。 */}
       <ImportRunningJobs jobs={jobs.runningJobs} busy={busy} onCancel={(id) => void jobs.cancelRunningJob(id)} />
+
+      {/* R18 F8:没干成的任务单独一段 + 「清空全部失败」;一条都没有时整段不画。 */}
+      <ImportFailedJobs onChanged={() => void jobs.refresh()} />
 
       <section className="import-section" aria-label="最近导入批次">
         <SectionHeader

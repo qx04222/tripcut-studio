@@ -18,6 +18,12 @@
   --lh-15: 20px;
   --lh-20: 26px;
 
+  /* R18 车道 V1:补两级(20 与 44 之间的断层,首页 hero / 大号数字用)。 */
+  --text-28: 28px;
+  --lh-28: 34px;
+  --text-40: 40px;
+  --lh-40: 48px;
+
   /* 间距六档。只允许这六档;不许写 padding: 10px。 */
   --space-1: 4px;
   --space-2: 8px;
@@ -41,9 +47,29 @@
   --shadow-raised: 0 8px 24px rgb(29 30 26 / 16%), 0 1px 3px rgb(29 30 26 / 8%);
   --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 45%), inset 0 0 0 1px rgb(255 255 255 / 5%);
 
+  /* R18 车道 V1(V-01):把车道文件里手写的阴影原样收进令牌——每个值一字不改,
+     只是从字面量换成引用,门禁才认得出来是「令牌」。 */
+  --shadow-lift: 0 1px 2px var(--sheen-line), 0 6px 18px var(--card-shadow);
+  --shadow-select-inset: inset 0 0 0 2px var(--accent);
+  --shadow-select-hair: inset 0 0 0 1px var(--accent);
+  --shadow-select-glow: 0 0 0 2px var(--accent-glow);
+  --shadow-select-tint: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+  --shadow-accent-hair: 0 0 0 1px var(--accent);
+  --shadow-focus-hair: 0 0 0 2px var(--border-focus);
+  --shadow-glow-lg: 0 10px 24px var(--accent-glow);
+  --shadow-rail-warn: inset 3px 0 0 var(--warn);
+  --shadow-media-thumb: 0 1px 2px rgb(0 0 0 / 25%);
+  --shadow-scrub-hair: 0 0 0 1px rgb(0 0 0 / 40%);
+  --shadow-playhead-hair: 0 0 0 1px color-mix(in srgb, var(--playhead) 35%, transparent);
+  --shadow-playhead-glow: 0 0 6px 1px color-mix(in srgb, var(--playhead) 55%, transparent);
+
   /* 圆角两档:控件 6,卡片 / 井 / 抽屉 10。 */
   --radius-6: 6px;
   --radius-10: 10px;
+  /* R18 车道 V1:门禁扩围到车道文件后收编的字面量圆角(2px / 3-4px / 999px 三档)。 */
+  --radius-2: 2px;
+  --radius-4: 4px;
+  --radius-pill: 999px;
 
   /* 边框。 */
   --border-hair: var(--border);
@@ -71,6 +97,17 @@
 
   /* 动效:唯一允许的 transition 时长。 */
   --motion-fast: 150ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* R18 车道 V1:sheet / drawer 进出专用的慢档,不给日常 hover/focus 用。 */
+  --motion-slow: 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* R18 车道 V1:层级令牌,替代车道文件里裸写的 z-index 数字。 */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-band-playhead: 20;
+  --z-overlay: 30;
+  --z-menu: 40;
+  --z-modal: 60;
+  --z-toast: 70;
 
   /* 控件高度两档 + 顶栏主按钮。 */
   --control-sm: 24px;
@@ -96,6 +133,8 @@
     --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
     --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
     --playhead: #ff5f56;
+    /* V-25:浅色 --ring 内圈借 --surface-panel(半透明),深色下会透出底色 4%——换成不透明的 --bg-solid。 */
+    --ring: 0 0 0 2px var(--bg-solid), 0 0 0 4px var(--focus-ring);
   }
 }
 
@@ -109,6 +148,8 @@ html[data-theme="dark"] {
   --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
   --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
   --playhead: #ff5f56;
+  /* V-25:同上。 */
+  --ring: 0 0 0 2px var(--bg-solid), 0 0 0 4px var(--focus-ring);
 }
 
 /* R13 §5「剪映风格深色」(设置 → 外观第四档,不默认)。自己配的一套:近黑的冷炭灰分四级、青绿强调、
@@ -154,4 +195,6 @@ html[data-theme="jianying-dark"] {
   --shadow-raised: 0 0 0 1px var(--border-strong), 0 14px 36px rgb(0 0 0 / 60%);
   --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 70%), inset 0 0 0 1px rgb(255 255 255 / 5%);
   --playhead: #ff4d4a;
+  /* V-25:同上。 */
+  --ring: 0 0 0 2px var(--bg-solid), 0 0 0 4px var(--focus-ring);
 }

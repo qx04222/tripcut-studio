@@ -1,0 +1,34 @@
+/*
+ * R18 车道 native:退出确认卡(F2)。只有这一个面板,选择器都带 `.exit-confirm` 根类。
+ * 令牌一律用 styles.css 顶部已有的那套,不新增颜色字面量。
+ */
+
+.exit-confirm {
+  position: fixed;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  z-index: var(--z-modal);
+  display: grid;
+  gap: var(--space-2);
+  width: min(420px, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-overlay, 0 8px 24px rgb(0 0 0 / 18%));
+  transform: translate(-50%, -50%);
+}
+
+.exit-confirm p {
+  margin: 0;
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  opacity: 0.85;
+}
+
+.exit-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}

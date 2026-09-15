@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { auditInfoPlist } from "./native-audit/infoPlist.mjs";
+
 const repoRoot = resolve(import.meta.dirname, "../..");
 
 function argument(name) {
@@ -267,7 +269,22 @@ function auditApp(appPath, workDirectory) {
     .filter((line) => runtimeStringPattern.test(line))
     .map((line) => `${entry.path}: ${line}`));
   const encoderSmoke = auditBundledH264(appPath, workDirectory);
-  const infoPlist = run("plutil", ["-extract", "LSMinimumSystemVersion", "raw", "-o", "-", join(appPath, "Contents/Info.plist")]);
+  const infoPlistPath = join(appPath, "Contents/Info.plist");
+  // R18 M-07① / H-07 / H-23:整份 plist 读成 JSON 再判(逐键 -extract 会把"缺键"和"读失败"混成一回事)。
+  let infoPlistValues = {};
+  let infoPlistError;
+  const infoPlistJson = run("plutil", ["-convert", "json", "-o", "-", infoPlistPath]);
+  if (infoPlistJson.exitCode === 0) {
+    try {
+      infoPlistValues = JSON.parse(infoPlistJson.stdout);
+    } catch (error) {
+      infoPlistError = `Info.plist 读出来不是 JSON:${String(error)}`;
+    }
+  } else {
+    infoPlistError = infoPlistJson.stderr || "plutil 读不了 Info.plist";
+  }
+  const infoPlistFindings = infoPlistError ? [infoPlistError] : auditInfoPlist(infoPlistValues);
+  const infoPlist = run("plutil", ["-extract", "LSMinimumSystemVersion", "raw", "-o", "-", infoPlistPath]);
   const declaredMinimumMacOS = infoPlist.exitCode === 0 ? infoPlist.stdout.trim() : undefined;
   let configuredMinimumMacOS;
   try {
@@ -286,6 +303,7 @@ function auditApp(appPath, workDirectory) {
       : [];
   });
   return {
+    infoPlistFindings,
     declaredMinimumMacOS,
     configuredMinimumMacOS,
     minimumMacOSViolations,
@@ -395,6 +413,14 @@ const checks = [
         : appAudit.minimumMacOSViolations.length > 0
           ? `${appAudit.minimumMacOSViolations.length}/${appAudit.macho.length} Mach-O newer than declared ${appAudit.declaredMinimumMacOS}:\n${appAudit.minimumMacOSViolations.join("\n")}`
           : `all ${appAudit.macho.length} Mach-O files load on macOS ${appAudit.declaredMinimumMacOS}`,
+  },
+  {
+    // R18 M-07①/H-07/H-23:中文本地化元数据 + 五条文件夹用途说明 + 不再声称需要 Carbon。
+    // 判定在 scripts/qa/native-audit/infoPlist.mjs(vitest 里对 0.8.3 实际发出去的那份报过红)。
+    id: "app.localization-and-file-access",
+    pass: (appAudit?.infoPlistFindings?.length ?? 1) === 0,
+    detail: appAudit?.infoPlistFindings?.join("\n")
+      || "CFBundleDevelopmentRegion=zh-Hans、CFBundleLocalizations、五条 NS*UsageDescription 齐全",
   },
   {
     id: "app.bundled-h264-videotoolbox",

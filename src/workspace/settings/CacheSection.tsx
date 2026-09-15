@@ -1,15 +1,38 @@
 import { useState, type JSX } from "react";
 
-import { resetProjectLibrary } from "../../api";
+import { CACHE_AUTO_CLEAN_DAYS_KEY, CACHE_CUSTOM_DIR_KEY, pickCacheFolder, relocateCacheDir, resetProjectLibrary } from "../../api";
 import { failureText } from "../errorText";
 import { pinHome } from "../homeStore";
-import { Button, Card, Icon, SectionHeader, showToast } from "../ui";
+import { Button, Card, Icon, SectionHeader, Select, showToast } from "../ui";
 import { dispatchWorkspace } from "../WorkspaceStore";
+import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 import { bytesLabel } from "./settingsModel";
 
 /** 重置项目库要打的那两个字。 */
 export const RESET_CONFIRM_WORD = "确认";
+
+/** R18 F5/F6:缓存位置与自动清理的文案(AX 名冻结)。 */
+export const CACHE_LOCATION = {
+  title: "缓存位置",
+  change: "更改缓存位置…",
+  autoClean: "多久没用就自动清掉",
+} as const;
+
+/** F6 的天数档,与 Rust `CACHE_AUTO_CLEAN_DAY_CHOICES` 同一份;"0" = 从不(默认)。 */
+export const AUTO_CLEAN_CHOICES: ReadonlyArray<readonly [value: string, label: string]> = [
+  ["0", "从不(默认)"],
+  ["15", "15 天前的"],
+  ["30", "30 天前的"],
+  ["60", "60 天前的"],
+  ["90", "90 天前的"],
+];
+
+/** 没搬过(空串)时说人话,不要给用户看一个空白。 */
+export function cacheLocationLabel(customDir: string | undefined): string {
+  const trimmed = (customDir ?? "").trim();
+  return trimmed === "" ? "应用内置位置(跟着素材库走)" : trimmed;
+}
 
 /**
  * R15:「项目与缓存」的两项危险操作,各一张卡、各一句「会发生什么」:
@@ -19,11 +42,30 @@ export const RESET_CONFIRM_WORD = "确认";
  */
 export function CacheSection(): JSX.Element {
   const form = useSettingsFormContext();
-  const { status, cacheConfirm, busy } = form;
+  const { settings, status, cacheConfirm, busy } = form;
+  const [relocating, setRelocating] = useState(false);
   const [resetDraft, setResetDraft] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
   const [resetNotice, setResetNotice] = useState<string | null>(null);
   const resetArmed = resetDraft.trim() === RESET_CONFIRM_WORD;
+
+  /**
+   * F5:先选文件夹,再整体搬。搬成功后**后端会重启应用**,所以这个 await 不会回来——
+   * 界面就留在「正在搬…」上,不做任何收尾。失败时把后端那句「现在怎么办」原样摆出来。
+   */
+  const relocate = async () => {
+    if (relocating) return;
+    const folder = await pickCacheFolder().catch(() => null);
+    if (!folder) return;
+    setRelocating(true);
+    try {
+      await relocateCacheDir(folder);
+      showToast("缓存已搬好,正在重启让新位置生效…", { tone: "success" });
+    } catch (error) {
+      setRelocating(false);
+      showToast(failureText(CACHE_LOCATION.change, error), { tone: "danger" });
+    }
+  };
 
   const resetLibrary = async () => {
     if (!resetArmed || resetBusy) return;
@@ -55,6 +97,39 @@ export function CacheSection(): JSX.Element {
       <p className="settings-sheet-note">
         预览用小文件(每条素材一份)占用通常不超过原片大小;清掉后需要时会自动重建,不影响原片。
       </p>
+      <div className="settings-sheet-group">
+        {/* R18 F5:缓存可以搬到外接盘 —— 8 GB 内置盘的机器最需要这一条。 */}
+        <SettingsRow
+          title={CACHE_LOCATION.title}
+          help="预览小文件和封面放在哪里。放到外接盘可以省内置盘;盘没插的时候会自动退回内置位置,重新生成一遍,不会丢素材。"
+          className="settings-sheet-row--stack"
+        >
+          <div className="settings-sheet-cache-location">
+            <code>{cacheLocationLabel(settings[CACHE_CUSTOM_DIR_KEY])}</code>
+            <Button size="sm" busy={relocating} disabled={busy || relocating} onClick={() => void relocate()}>
+              {CACHE_LOCATION.change}
+            </Button>
+          </div>
+        </SettingsRow>
+        {/* R18 F6:长期不用的缓存自己清掉,默认「从不」——不改变现状,想省盘的人自己开。 */}
+        <SettingsRow
+          title={CACHE_LOCATION.autoClean}
+          help="一直没再看过的预览小文件,超过这个天数就自动清掉;需要时会重新生成。"
+          htmlFor="settings-cache-auto-clean"
+        >
+          <Select
+            id="settings-cache-auto-clean"
+            aria-label={CACHE_LOCATION.autoClean}
+            value={settings[CACHE_AUTO_CLEAN_DAYS_KEY] ?? "0"}
+            disabled={busy}
+            onChange={(event) => void form.save(CACHE_AUTO_CLEAN_DAYS_KEY, event.currentTarget.value)}
+          >
+            {AUTO_CLEAN_CHOICES.map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </Select>
+        </SettingsRow>
+      </div>
       <Card className="settings-sheet-danger" padding={4}>
         <div className="settings-sheet-danger-copy">
           <Icon name="settings-cache" size={20} />

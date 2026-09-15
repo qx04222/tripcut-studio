@@ -38,6 +38,11 @@ export const DEFAULT_SETTINGS: SettingsMap = {
   minimax_model: "MiniMax-H3-Max",
   minimax_resolution: "768P",
   minimax_monthly_budget_usd: "10",
+  // R18 车道 settings F1/F5/F6:通知两开关默认开、缓存目录默认内置、自动清理默认「从不」。
+  "notification.export_complete": "true",
+  "notification.batch_complete": "true",
+  "cache.custom_dir": "",
+  "cache.auto_clean_days": "0",
 };
 
 const SCALE_DATA: Record<string, string> = {
