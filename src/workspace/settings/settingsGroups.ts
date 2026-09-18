@@ -71,6 +71,24 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   },
 ] as const;
 
+/**
+ * R19 P-05:「显示全部功能」关时设置只剩 项目 / 播放与导出 / 工具 / 关于(快捷键的键位预设、性能进开关后),
+ * 工具里的「云端补镜」段与左轨直达也进开关后。`keep` = 程序直落(`openSettings(section)`)到的那一块 / 那一段照样在。
+ * 不删代码:开关打开原样回来(showAllFeaturesR19.test 逐项证明)。
+ */
+const HIDDEN_GROUPS: ReadonlySet<SettingsGroupId> = new Set(["keymap", "performance"]);
+const HIDDEN_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["generation"]);
+
+export function visibleSettingsGroups(showAll: boolean, keep?: SettingsGroupId): readonly SettingsGroup[] {
+  if (showAll) return SETTINGS_GROUPS;
+  return SETTINGS_GROUPS.filter((group) => !HIDDEN_GROUPS.has(group.id) || group.id === keep);
+}
+
+export function visibleSettingsSections(group: SettingsGroup, showAll: boolean, keep?: SettingsSectionId | null): readonly SettingsSectionId[] {
+  if (showAll) return group.sections;
+  return group.sections.filter((section) => !HIDDEN_SECTIONS.has(section) || section === keep);
+}
+
 /** 旧分区 → 六块之一(`openSettings("analysis")` 落到「工具与模型」)。 */
 export function groupForSection(section: SettingsSectionId): SettingsGroupId {
   const group = SETTINGS_GROUPS.find((candidate) => candidate.sections.includes(section));
@@ -85,3 +103,8 @@ export const SETTINGS_QUICK_LINKS: readonly { label: string; section: SettingsSe
   { label: "云端补镜", section: "generation" },
   { label: "隐私与诊断", section: "privacy" },
 ];
+
+/** R19 P-05:直达里指向被藏段的那条(云端补镜)也跟开关走。 */
+export function visibleQuickLinks(showAll: boolean): readonly { label: string; section: SettingsSectionId }[] {
+  return showAll ? SETTINGS_QUICK_LINKS : SETTINGS_QUICK_LINKS.filter((link) => !HIDDEN_SECTIONS.has(link.section));
+}

@@ -32,9 +32,11 @@ export type GlobalHotkeyIntent =
   | { kind: "switch-episode" }
   | { kind: "undo" }
   | { kind: "cycle-pane"; direction: 1 | -1 }
-  | { kind: "escape"; target: "drawer" | "sheet" | "immersive" | "query" | null };
+  | { kind: "escape"; target: "drawer" | "sheet" | "immersive" | "query" | "inspector" | null };
 
-export type GlobalHotkeyState = Pick<WorkspaceState, "openDrawer" | "immersive" | "query">;
+export type GlobalHotkeyState = Pick<WorkspaceState, "openDrawer" | "immersive" | "query"> &
+  /** R19 V-04:Esc 第五级 —— 收起没钉住的检查器滑出层。旧调用点不传就当它没开着。 */
+  Partial<Pick<WorkspaceState, "inspectorPinned" | "inspectorDismissed" | "selection">>;
 
 /**
  * 焦点是不是落在能打字的地方。用 tagName + contenteditable,不用元素白名单 ——
@@ -59,7 +61,7 @@ export function isOrphanFocusTarget(target: EventTarget | null): boolean {
   return target === document.body || target === document.documentElement;
 }
 
-/** Esc 的四级优先级(规格 §3.2):抽屉 → 设置 sheet → 沉浸 → 清搜索。 */
+/** Esc 的五级优先级(规格 §3.2 + R19 V-04):抽屉 → 设置 sheet → 沉浸 → 清搜索 → 收起检查器滑出层。 */
 function escapeTarget(state: GlobalHotkeyState): GlobalHotkeyIntent {
   if (state.openDrawer === "import" || state.openDrawer === "deliver") {
     return { kind: "escape", target: "drawer" };
@@ -67,6 +69,8 @@ function escapeTarget(state: GlobalHotkeyState): GlobalHotkeyIntent {
   if (state.openDrawer === "settings") return { kind: "escape", target: "sheet" };
   if (state.immersive) return { kind: "escape", target: "immersive" };
   if (state.query !== "") return { kind: "escape", target: "query" };
+  const inspectorOpen = state.inspectorDismissed !== true && (state.inspectorPinned === true || (state.selection ?? null) !== null);
+  if (inspectorOpen && state.inspectorPinned !== true) return { kind: "escape", target: "inspector" };
   return { kind: "escape", target: null };
 }
 
@@ -133,6 +137,9 @@ export function useGlobalHotkeys(): void {
   const openDrawer = useWorkspace((state) => state.openDrawer);
   const immersive = useWorkspace((state) => state.immersive);
   const query = useWorkspace((state) => state.query);
+  const inspectorPinned = useWorkspace((state) => state.inspectorPinned);
+  const inspectorDismissed = useWorkspace((state) => state.inspectorDismissed);
+  const selection = useWorkspace((state) => state.selection);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -153,7 +160,7 @@ export function useGlobalHotkeys(): void {
       }
       const intent = globalHotkeyIntent(
         event,
-        { openDrawer, immersive, query },
+        { openDrawer, immersive, query, inspectorPinned, inspectorDismissed, selection },
         isTextFieldTarget(event.target),
       );
       if (intent === null) return;
@@ -167,6 +174,9 @@ export function useGlobalHotkeys(): void {
           } else if (intent.target === "query") {
             event.preventDefault();
             dispatchWorkspace({ type: "set-query", query: "" });
+          } else if (intent.target === "inspector") {
+            event.preventDefault();
+            dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
           }
           return;
         }
@@ -221,5 +231,5 @@ export function useGlobalHotkeys(): void {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openDrawer, immersive, query]);
+  }, [openDrawer, immersive, query, inspectorPinned, inspectorDismissed, selection]);
 }

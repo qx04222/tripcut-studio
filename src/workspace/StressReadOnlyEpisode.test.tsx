@@ -15,11 +15,14 @@ import { RETURN_TO_EXPORT_LABEL, TopBar } from "./TopBar";
 import { __resetClipsFeedForTests, getClipsFeedSnapshot, refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 const activeBoard = { chapters: [{ id: 20, title: "第 1 章", start_at: null, end_at: null, clip_count: 1 }], candidates: [], items: [{ key: "whole:9", item_kind: "whole", clip_id: 9, segment_id: null, chapter_id: 20, file_name: "IMG_0833.mov", in_ticks: 0, out_ticks: 1000, tb_num: 1, tb_den: 1000, position: 0 }] } as unknown as Storyboard;
 const archivedBoard = { chapters: [{ id: 10, title: "第 1 章", start_at: null, end_at: null, clip_count: 1 }], candidates: [], items: [{ key: "whole:1", item_kind: "whole", clip_id: 1, segment_id: null, chapter_id: 10, file_name: "IMG_0830_早餐.mov", in_ticks: 0, out_ticks: 1000, tb_num: 1, tb_den: 1000, position: 0 }] } as unknown as Storyboard;
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   vi.clearAllMocks();
   __resetWorkspaceForTests();
   __resetClipsFeedForTests();

@@ -18,7 +18,7 @@ vi.mock("@dnd-kit/sortable", () => ({
   }),
 }));
 
-import { SegmentCard } from "./BandSegment";
+import { bandTileNameLabel, bandTileTooltip, SegmentCard } from "./BandSegment";
 import type { BandSegment } from "./shotBandModel";
 
 const segment: BandSegment = {
@@ -74,5 +74,56 @@ describe("SegmentCard 拖动手柄", () => {
     expect(sortable.onPointerDown).not.toHaveBeenCalled();
     expect(tile.className).not.toContain("band-segment--draggable");
     expect((screen.getByRole("button", { name: "拖动 镜头 1：A.MP4" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+/* ---------- R19 V-06:镜块三元素 —— 常显只留封面 + 时长 + 一行名 ---------- */
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+describe("V-06 镜块常显名 / tooltip", () => {
+  it("bandTileNameLabel 去掉拍摄日期前缀,原名仍在 title 里", () => {
+    expect(bandTileNameLabel("20260812_昆明长水机场_到达.MP4")).toBe("昆明长水机场_到达.MP4");
+    expect(bandTileNameLabel("2026-08-12_昆明长水机场.MP4")).toBe("昆明长水机场.MP4");
+    // 没有日期前缀就原样走 fileNameLines 的断点逻辑,不瞎切。
+    expect(bandTileNameLabel("A.MP4")).toBe("A.MP4");
+    expect(bandTileNameLabel(null)).toBe("");
+  });
+
+  it("bandTileTooltip 把第 n/m 条、AI 生成、槽位、角色拼成一句", () => {
+    expect(bandTileTooltip({ ...segment, takeCount: 2, takeIndex: 1, isGenerated: true, roleLabel: "叙事" })).toBe(
+      "第 1/2 条 · AI 生成 · 槽位 01 · 叙事",
+    );
+    expect(bandTileTooltip(segment)).toBe("槽位 01");
+  });
+
+  it("常显镜块上,取景 badge / 槽位角色 meta 挪进 title——渲染出的可见文字只剩缩略图、时长与一行名", () => {
+    render(
+      <SegmentCard
+        segment={{ ...segment, takeCount: 2, takeIndex: 1, roleLabel: "叙事" }}
+        selected={false}
+        dragging={false}
+        overSide={null}
+        dragDisabled={false}
+        onSelect={() => undefined}
+        onStep={() => undefined}
+      />,
+    );
+    const tile = screen.getByRole("gridcell", { name: /镜头 1/ });
+    const thumb = tile.querySelector(".band-tile-thumb")!;
+    // 第 n/m 条 / 角色不再是各自可见的 badge 文案,而是缩略图 title 里的一句话。
+    expect(thumb.getAttribute("title")).toBe("第 1/2 条 · 槽位 01 · 叙事");
+    expect(tile.querySelector(".band-tile-name")?.textContent).toBe("A.MP4");
+  });
+
+  it("band-r19.css 把 band-tile-badges / band-tile-meta 隐藏,且由 workspace.css 头部 @import(尾部会被丢掉)", () => {
+    const workspaceCss = readFileSync(resolve(process.cwd(), "src/styles/workspace.css"), "utf8");
+    const importLine = workspaceCss.indexOf('@import "./workspace/band-r19.css";');
+    const firstRule = workspaceCss.search(/^[.@a-z][^\n]*\{/m);
+    expect(importLine).toBeGreaterThan(-1);
+    expect(importLine).toBeLessThan(firstRule);
+    const bandR19 = readFileSync(resolve(process.cwd(), "src/styles/workspace/band-r19.css"), "utf8");
+    expect(bandR19).toMatch(/\.band-tile-badges,\s*\n\.workspace-shell \.shot-band \.band-tile-meta \{\s*\n\s*display: none;/);
   });
 });

@@ -41,7 +41,7 @@ describe("首页在壳里", () => {
     render(<WorkspaceShell />);
     const home = await screen.findByRole("region", { name: "首页" });
     expect(home).toBeTruthy();
-    expect(screen.getByRole("button", { name: "开始一个新旅程" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "新建一集" })).toBeTruthy();
     await waitFor(() => expect(document.querySelector(".workspace-columns")?.hasAttribute("inert")).toBe(true));
     expect(screen.getByRole("button", { name: "首页" }).getAttribute("aria-pressed")).toBe("true");
     // 首页顶部是四步条;旧的监视器四步卡不再是入口(在 inert 的三栏里)。
@@ -69,7 +69,7 @@ describe("首页在壳里", () => {
     expect(document.querySelector(".workspace-columns")?.hasAttribute("inert")).toBe(false);
   });
 
-  it("有素材时从首页点「开始一个新旅程」:首页让位、导入抽屉打开", async () => {
+  it("有素材时从首页点「继续上次」:首页让位回工作区;「新建一集」先问一句(会封存当前集)", async () => {
     apiMocks.listClips.mockResolvedValue([CLIP] as never);
     render(<WorkspaceShell />);
     await screen.findByRole("gridcell");
@@ -77,9 +77,13 @@ describe("首页在壳里", () => {
       screen.getByRole("button", { name: "首页" }).click();
     });
     await act(async () => {
-      (await screen.findByRole("button", { name: "开始一个新旅程" })).click();
+      (await screen.findByRole("button", { name: "新建一集" })).click();
+    });
+    expect(screen.getByRole("status", { name: "新建确认" })).toBeTruthy();
+    await act(async () => {
+      screen.getByRole("button", { name: "继续上次" }).click();
     });
     expect(screen.queryByRole("region", { name: "首页" })).toBeNull();
-    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

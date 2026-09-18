@@ -11,7 +11,8 @@ export const UI_SETTING_DEFAULTS = {
   "ui.pane.inspector_width": "340",
   "ui.pane.monitor_height": "0.55",
   "ui.pane.pool_collapsed": "false",
-  "ui.pane.inspector_collapsed": "false",
+  // R19 V-04:检查器是滑出层,没有折叠位;📌 钉住是唯一落盘的偏好(旧键 ui.pane.inspector_collapsed 不再读)。
+  "ui.inspector.pinned": "false",
   "ui.band.mode": "story",
   "ui.inspector.sections_open": "[]",
   "ui.pool.filter": "all",
@@ -38,6 +39,8 @@ export const UI_SETTING_DEFAULTS = {
   "pipeline.hint_seen.2": "false",
   "pipeline.hint_seen.3": "false",
   "pipeline.hint_seen.4": "false",
+  // R19 P-05:「显示全部功能」(设置 › 关于),默认关;流水线之外的功能(技术检查 / 八维 / LUT / 旅程 / 地点卡 / 键位预设 / 性能 / 云端补镜)进开关后。
+  "ui.show_all_features": "false",
 } as const satisfies Readonly<Record<string, string>>;
 
 export const WORKSPACE_FLAG_KEY = "ui.workspace_v2";

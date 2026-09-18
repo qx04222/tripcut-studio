@@ -52,7 +52,8 @@ export function BandJianyingButton({ disabled = false }: { disabled?: boolean })
   return (
     <Button
       // 镜头带上一次只许一个 primary(R11 简化专项 #4);草稿可用时它才是主动作,素材包是稳妥的次选。
-      variant={jianying.supported ? "primary" : "secondary"}
+      // R19 V-01(shell 车道一行改动):栏内不再有 primary;band 车道 V-07 会把这颗收进「···」。
+      variant="secondary"
       size="sm"
       icon="deliver"
       className="band-jianying"

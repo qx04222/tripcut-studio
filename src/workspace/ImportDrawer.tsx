@@ -3,6 +3,7 @@ import { ImportJobsTab } from "./import/ImportJobsTab";
 import { ImportMissingTab } from "./import/ImportMissingTab";
 import { ImportSourcesTab } from "./import/ImportSourcesTab";
 import { useImportSources } from "./import/useImportSources";
+import { useImportTabCounts, type ImportTabCounts } from "./import/useImportTabCounts";
 import { Drawer } from "./ui/Drawer";
 import { Tabs, type TabItem } from "./ui/Tabs";
 import { dispatchWorkspace, useWorkspace, type WorkspaceState } from "./WorkspaceStore";
@@ -14,6 +15,14 @@ const TABS: readonly TabItem[] = [
   { id: "jobs", label: "任务" },
   { id: "missing", label: "缺失素材" },
 ];
+
+/**
+ * R19 U-05:分页按计数出现 —— 来源永远在;任务要导过东西(`jobs > 0`),缺失素材要真有缺失;
+ * 程序直落到某个分页(状态条「缺失素材 n」、交付抽屉「去缺失素材页」)时那个分页照样在,不出现「选中了一个不存在的 tab」。
+ */
+export function visibleImportTabs(counts: ImportTabCounts, activeTab: ImportDrawerTab): readonly TabItem[] {
+  return TABS.filter((tab) => tab.id === "source" || tab.id === activeTab || (tab.id === "jobs" ? counts.jobs > 0 : counts.missing > 0));
+}
 
 /** 素材表变了(导入 / 撤销 / 清理)——媒体池、集面板照旧靠这个事件刷新(逐字沿用 ImportPage)。 */
 function notifyLibraryChanged(): void {
@@ -35,6 +44,7 @@ export function ImportDrawer(): JSX.Element | null {
 
 function ImportDrawerBody({ activeTab }: { activeTab: ImportDrawerTab }): JSX.Element {
   const sources = useImportSources({ onImported: notifyLibraryChanged });
+  const counts = useImportTabCounts();
 
   return (
     <Drawer
@@ -46,7 +56,7 @@ function ImportDrawerBody({ activeTab }: { activeTab: ImportDrawerTab }): JSX.El
     >
       <div className={`import-drawer${sources.dragActive ? " import-drawer--drop-target" : ""}`}>
         <Tabs
-          items={TABS}
+          items={visibleImportTabs(counts, activeTab)}
           value={activeTab}
           ariaLabel="导入分页"
           className="import-drawer-tabs"

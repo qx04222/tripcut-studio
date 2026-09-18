@@ -40,7 +40,7 @@ describe("四栏空状态(EmptyState)", () => {
     // R10 U-06:AX 名改为「导入第一批素材」(「导入素材」是顶栏冻结名,空池时不能撞名);可见文字仍是「导入素材」。
     const button = screen.getByRole("button", { name: "导入第一批素材" });
     expect(button.textContent).toBe("导入素材");
-    expect(button.className).toContain("ui-button--primary");
+    expect(button.className).toContain("ui-button--secondary"); // R19 V-01:空态入口不再是 primary
     button.click();
     expect(getWorkspaceSnapshot().openDrawer).toBe("import");
     expect(getWorkspaceSnapshot().importTab).toBe("source");
@@ -75,7 +75,7 @@ describe("四栏空状态(EmptyState)", () => {
     render(<BandEmpty />);
     expect(screen.getByText("第 ② 步:按 F 收藏或点自动挑选")).toBeTruthy();
     const button = screen.getByRole("button", { name: "去自动挑选" });
-    expect(button.className).toContain("ui-button--primary");
+    expect(button.className).toContain("ui-button--secondary"); // R19 V-01
     button.click();
     expect(heard).toHaveBeenCalledTimes(1);
     window.removeEventListener(OPEN_AUTO_SELECT_EVENT, heard);

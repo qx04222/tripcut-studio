@@ -13,6 +13,9 @@ import {
   parseKeymapCustom,
   resolveKeymap,
   withOverride,
+  KEYMAP_ACTION_BY_ID,
+  KEYMAP_COMMON_ACTIONS,
+  isCommonAction,
 } from "./keymap";
 
 const ev = (over: Partial<KeyboardEvent> & { key: string; code?: string }) => ({ code: "", ...over });
@@ -115,5 +118,17 @@ describe("R13 §1 keymap:冲突、事件与显示", () => {
     expect(formatKey("f6")).toBe("F6");
     expect(formatKey("?")).toBe("?");
     expect(formatAction(resolveKeymap("jianying", undefined), "frame-back")).toBe("← / ,");
+  });
+});
+
+/** R19 P-12:默认键位表收敛 —— 常用表 ≤ 15 条(剪映用户学 F 就够);全表不删,`?` 里切「全部」。 */
+describe("R19 P-12:常用键位表", () => {
+  it("KEYMAP_COMMON_ACTIONS ≤ 15 条、每条都是真动作、不重复;收藏 / 入出点 / 播放 / 导入 / 帮助 在内", () => {
+    expect(KEYMAP_COMMON_ACTIONS.length).toBeLessThanOrEqual(15);
+    expect(new Set(KEYMAP_COMMON_ACTIONS).size).toBe(KEYMAP_COMMON_ACTIONS.length);
+    for (const action of KEYMAP_COMMON_ACTIONS) expect(KEYMAP_ACTION_BY_ID.has(action)).toBe(true);
+    for (const action of ["favorite", "mark-in", "mark-out", "play-pause", "import", "help"] as const) expect(KEYMAP_COMMON_ACTIONS).toContain(action);
+    expect(isCommonAction("lock-stack")).toBe(false);
+    expect(isCommonAction("favorite")).toBe(true);
   });
 });

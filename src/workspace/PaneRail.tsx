@@ -3,7 +3,8 @@ import type { JSX } from "react";
 import { Icon, type IconName } from "./ui";
 
 /**
- * R18 车道 layout · V-22:栏折叠后的 40px 竖条。
+ * R18 车道 layout · V-22:栏折叠后的 40px 竖条。R19 V-04 起只有媒体池会折成竖条
+ * (检查器改成滑出层),文件从 InspectorCollapsed 改名 PaneRail,组件与 AX 名「展开<栏名>」不变。
  *
  * 旧版把栏名写成**竖排中文**(`writing-mode: vertical-rl`)——macOS 上几乎没人这么排,
  * 1280 下(13" MacBook,主力机型)那一条基本读不出来(08-narrow-1280.png)。
@@ -12,7 +13,7 @@ import { Icon, type IconName } from "./ui";
  *
  * AX 名不动:仍然是「展开<栏名>」—— 冒烟脚本与既有断言按这个找它。
  */
-export function InspectorCollapsed({
+export function PaneRail({
   label,
   icon = "chevron-right",
   onExpand,

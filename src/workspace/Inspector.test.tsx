@@ -81,6 +81,7 @@ import type { ClipAudioTrack, ClipListItem, ShotStack, SimilarGroup, StoryGap, S
 import { Inspector, INSPECTOR_SECTIONS, sectionStatusText, type InspectorStatusContext } from "./Inspector";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
@@ -270,6 +271,8 @@ const gap: StoryGap = {
 };
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetClipsFeedForTests();
   __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 1 } });
   apiMocks.getClipsRevision.mockResolvedValue("rev-1");

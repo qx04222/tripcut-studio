@@ -202,34 +202,4 @@
   }
 }
 
-/* ---------- 4. 工具链横幅(顶栏下,只在 ffmpeg/ffprobe 缺失时出现) ---------- */
-
-.workspace-shell .toolchain-banner {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  min-height: 36px;
-  padding: var(--space-1) var(--space-4);
-  border-bottom: 1px solid var(--border-hair);
-  background: var(--warn-tint);
-  color: var(--text-primary);
-  font-size: var(--text-12);
-  line-height: var(--lh-12);
-}
-
-.workspace-shell .toolchain-banner-icon {
-  flex: none;
-  color: var(--warn);
-}
-
-.workspace-shell .toolchain-banner-text {
-  display: flex;
-  flex: 1;
-  gap: var(--space-2);
-  min-width: 0;
-  margin: 0;
-}
-
-.workspace-shell .toolchain-banner-text span {
-  color: var(--text-secondary);
-}
+/* ---------- 4. 工具链横幅:R19 V-02 降为状态条红点(shell-r19.css .toolchain-status),样式随之清空 ---------- */

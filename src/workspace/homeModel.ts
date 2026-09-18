@@ -64,3 +64,16 @@ export function templateEpisodeTitle(template: HomeTemplate, now: Date = new Dat
 
 /** 首页记住「预选模板」的设置键(`ui.` 前缀走白名单;镜头带的模板面板据此高亮)。 */
 export const TEMPLATE_PRESELECT_KEY = "ui.home.template_preselect";
+
+/**
+ * R19 U-03:首轮词表 —— 首页(用户第一眼)不许出现的内部词;剪映用户没有现成心智。
+ * `homeR19.test` 渲染首页 DOM 逐词断言;`terminology.test` 静态扫首页三个文件。
+ */
+export const FIRST_ROUND_VOCABULARY: readonly string[] = ["镜头带", "章节", "精选段", "交付", "模板", "旅程"];
+
+/** R19 U-03:「新建一集」默认集名:「新的一集 · 09-18」(与模板集名同一格式,进工作区后可改名)。 */
+export function newEpisodeTitle(now: Date = new Date()): string {
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `新的一集 · ${month}-${day}`;
+}

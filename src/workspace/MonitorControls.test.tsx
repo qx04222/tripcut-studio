@@ -143,7 +143,8 @@ describe("MonitorControls · 最小宽度(U-10)", () => {
     expect(current.textContent).toBe("00:35.9");
     expect(current.getAttribute("title")).toBe("00:00:35.900");
     const total = screen.getByLabelText("素材总时长");
-    expect(total.textContent?.trim()).toBe("/ 00:36.0");
+    // R19 V-05:总时长站在 seek 右端,不再带「/」前缀。
+    expect(total.textContent?.trim()).toBe("00:36.0");
   });
 
   it("入出点值用短格式,按钮 title 保留精确时码", () => {
@@ -154,14 +155,13 @@ describe("MonitorControls · 最小宽度(U-10)", () => {
     expect(screen.getByRole("button", { name: "出点" }).querySelector(".monitor-mark-value")!.textContent).toBe("00:06.0");
   });
 
-  it("结构:时间码与滑杆在自己的一行(monitor-seek),工具条最后一项永远是「全屏 ⌘⏎」", () => {
+  it("结构:时间码与滑杆成组(monitor-seek,R19 起并进工具条中段),工具条最后一项永远是「全屏 ⌘⏎」", () => {
     renderControls({ inPoint: 5, outPoint: 6, notice: "已设置出点" });
-    const seekRow = document.querySelector(".monitor-controls > .monitor-seek")!;
+    const toolbar = screen.getByRole("toolbar", { name: "走带与打点" });
+    const seekRow = toolbar.querySelector(".monitor-seek")!;
     expect(seekRow).not.toBeNull();
     expect(seekRow.querySelector(".monitor-timecode")).not.toBeNull();
     expect(seekRow.querySelector("input[type=range]")).not.toBeNull();
-    const toolbar = screen.getByRole("toolbar", { name: "走带与打点" });
-    expect(toolbar.querySelector(".monitor-timecode")).toBeNull();
     const last = toolbar.lastElementChild as HTMLElement;
     expect(last.getAttribute("aria-label")).toBe("全屏沉浸");
     expect(last.textContent).toContain("全屏");
@@ -185,10 +185,55 @@ describe("MonitorControls · 最小宽度(U-10)", () => {
 });
 
 describe("四栏焦点环(U-37)", () => {
-  it("[data-pane]:focus-visible 画在栏内(负 outline-offset),用强调色,盖过 styles.css 的 !important 偏移", () => {
+  it("[data-pane]:focus-visible 画在栏内(负 outline-offset),用强调色——R19 起不再靠 !important 硬压,而是改 styles.css 通用环读的两个变量", () => {
     const rule = R10_CSS.match(/\.workspace-shell \[data-pane\]:focus-visible\s*\{([^}]*)\}/);
     expect(rule).not.toBeNull();
-    expect(rule![1]).toMatch(/outline:\s*[^;]*var\(--accent\)[^;]*!important/);
-    expect(rule![1]).toMatch(/outline-offset:\s*calc\(-1 \* var\(--focus-ring-width\)\)\s*!important/);
+    expect(rule![1]).toMatch(/--focus-ring:\s*var\(--accent\)/);
+    expect(rule![1]).toMatch(/--focus-ring-offset:\s*calc\(-1 \* var\(--focus-ring-width\)\)/);
+    expect(rule![1]).not.toContain("!important");
+    // 通用环必须仍然读这两个变量,否则上面的覆盖是空话。
+    const GLOBAL = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    const g = GLOBAL.match(/:where\(a, button, input, select, textarea, summary, \[tabindex\]\):focus-visible\s*\{([^}]*)\}/);
+    expect(g).not.toBeNull();
+    expect(g![1]).toMatch(/outline:\s*var\(--focus-ring-width\) solid var\(--focus-ring\)/);
+    expect(g![1]).toMatch(/outline-offset:\s*var\(--focus-ring-offset\)/);
+  });
+});
+
+describe("R19 shell · V-05 单检视器:传输条并成一行,热力画进 seek 轨", () => {
+  const suggestions = {
+    points: [{ at: 0, width: 0.5, score: 0.4 }, { at: 0.5, width: 0.5, score: 0.9 }],
+    ranges: [{ inSeconds: 1, outSeconds: 4 }, { inSeconds: 6, outSeconds: 9 }],
+    index: 0,
+    current: { inSeconds: 1, outSeconds: 4 },
+    bestStart: 6,
+    momentsLoaded: true,
+    statusLine: "建议 1/2 · 3.0 s · 清晰·运动适中",
+    step: () => null,
+  } as unknown as NonNullable<Parameters<typeof MonitorControls>[0]["suggestions"]>;
+
+  it("根节点下直接子元素 ≤ 2:走带 / 时码 + seek / 打点 / 保存 / 建议 / 全屏都在同一条 toolbar 里,最后一项仍是「全屏沉浸」", () => {
+    renderControls({ suggestions, inPoint: 1, outPoint: 4, onStepSuggestion: () => undefined });
+    const root = document.querySelector(".monitor-controls")!;
+    expect(root.children.length).toBeLessThanOrEqual(2);
+    const toolbar = screen.getByRole("toolbar", { name: "走带与打点" });
+    expect(toolbar.querySelector(".monitor-seek input[type=range]")).not.toBeNull();
+    expect(toolbar.querySelector(".monitor-timecode")).not.toBeNull();
+    for (const name of ["播放位置", "入点", "出点", "保存片段", "全屏沉浸"]) {
+      expect(toolbar.querySelector(`[aria-label="${name}"]`), name).not.toBeNull();
+    }
+    expect((toolbar.lastElementChild as HTMLElement).getAttribute("aria-label")).toBe("全屏沉浸");
+  });
+  it("热力条画在 seek 轨道里(.monitor-seek-track 之内),没有假时码占位行;「按 Enter 采用这段」进 tooltip 不占版面", () => {
+    renderControls({ suggestions, inPoint: 1, outPoint: 4, onStepSuggestion: () => undefined });
+    expect(document.querySelector(".monitor-heat-row")).toBeNull();
+    expect(document.querySelector(".monitor-heat-spacer")).toBeNull();
+    const heat = screen.getByRole("img", { name: "时刻热力" });
+    expect(heat.closest(".monitor-seek-track")).not.toBeNull();
+    expect(screen.queryByText("按 Enter 采用这段")).toBeNull();
+    const suggestion = screen.getByTestId("monitor-suggestion");
+    expect(suggestion.textContent).toContain("建议 1/2");
+    expect(suggestion.getAttribute("title")).toContain("按 Enter 采用这段");
+    expect(suggestion.getAttribute("title")).toContain("清晰·运动适中");
   });
 });

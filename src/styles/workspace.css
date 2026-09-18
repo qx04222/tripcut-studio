@@ -28,6 +28,10 @@
  * 产物里一条都没有 —— vite build 会警告),所以挂在这里;chrome.css 里的选择器
  * 因此都比这份文件里的同名规则高一级特异性,不靠声明顺序取胜。
  */
+/* R19 车道 flow(首页「新建一集 / 继续上次」),同样只能在头部 @import。 */
+@import "./workspace/flow-r19.css";
+/* R19 车道 deliver(U-06/P-04 导出首屏三卡),同样只能在头部 @import。 */
+@import "./workspace/deliver-r19.css";
 /* R18 车道 aiscore(精选段「为什么选它」/ 搜索结果「第 n 秒」),同样只能在头部 @import。 */
 @import "./workspace/aiscore-r18.css";
 /* R18 车道 native(F2 退出确认卡),同样只能在头部 @import。 */
@@ -37,6 +41,8 @@
 /* R18 车道 layout(V3):版面打磨。本轮新样式全在这一份里,必须排在其它车道文件**之前**
    进 bundle(靠选择器特异性压过它们,不靠声明顺序);@import 只能在头部。 */
 @import "./workspace/polish-r18.css";
+/* R19 shell 车道(方案 B 两层壳 / 检查器滑出层 / 单检视器 / 全局 reduced-motion),同样只能在头部 @import。 */
+@import "./workspace/shell-r19.css";
 @import "./workspace/chrome.css";
 /* R18 车道 settings(失败任务清单 / 缓存位置行),同样只能在头部 @import。 */
 @import "./workspace/settings-r18.css";
@@ -112,6 +118,10 @@
 @import "./workspace/guides-r13.css";
 /* R13 车道 C(镜头带时间线化 + 交接感):时间刻度 / 播放头 / 轨头折叠 / 拖边把手 / 导入剪映。同样只能在这里 @import。 */
 @import "./workspace/timeline-r13.css";
+/* R19 车道 band(V-06 镜块三元素 / V-07 工具条二级化 / V-08 状态条静默化)。放在所有既有
+   镜头带 / 状态条车道文件之后,靠导入顺序(相同特异性时后来者赢)压过它们的默认值,
+   不用碰那些文件本身。同样只能在这里 @import。 */
+@import "./workspace/band-r19.css";
 
 /* ---------- 1. 壳与设计令牌 ---------- */
 
@@ -1684,12 +1694,8 @@
   cursor: pointer;
 }
 
-.inspector-gap-actions button:first-child {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-weight: 600;
-}
+/* R19 V-01:原「第一颗填强调色」的规则删了 —— 它绕过套件的 variant 把「生成候选」画成实心主按钮
+   (类名却是 secondary),同屏只留顶栏「下一步」一颗实心;preview-shots 现在还按像素数实心按钮。 */
 
 .inspector-empty-note {
   display: grid;

@@ -1,41 +1,36 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
-import { bridgeMusicAnalyzedEvents } from "../api";
 import { Inspector } from "./Inspector";
 import { Monitor } from "./Monitor";
 import { MediaPool } from "./MediaPool";
 import { ShotBand } from "./ShotBand";
 import { bandMinHeight, bandPanelHeight, bandPanelMinHeight } from "./shotBandModel";
 import { StatusStrip } from "./StatusStrip";
-import { PipelineHint } from "./PipelineHint";
 import { GuideHost } from "./GuideHost";
 import { HomeScreen } from "./HomeScreen";
 import { useHomeVisible } from "./homeModel";
-import { ToolchainBanner } from "./ToolchainBanner";
-import { InspectorCollapsed } from "./InspectorCollapsed";
+import { ToolchainStatusProbe } from "./ToolchainBanner";
+import { PaneRail } from "./PaneRail";
 import { ToastHost } from "./ui/Toast";
 import { UpdateHost } from "./update/UpdateHost";
 import { ClipRemovalHost } from "./ClipRemovalHost";
 import { LAYOUT_RESET_EVENT } from "./layoutReset";
 import { TopBar } from "./TopBar";
 import { popModal, pushModal } from "./modalStack";
-import { getClipsFeedSnapshot } from "./useClipsFeed";
 import { loadKeymap } from "./keymapStore";
 import { useGlobalHotkeys } from "./useGlobalHotkeys";
-import { selectionBelongsToEpisode } from "./useSelection";
 import { autoCollapseTransition, useRestoreSelection } from "./shellLayout";
+import { useShellWindowEvents } from "./useShellWindowEvents";
 import { returnToActiveEpisode } from "../historyView";
 import { Button } from "./ui";
 import {
-  INSPECTOR_WIDTH_MAX,
-  INSPECTOR_WIDTH_MIN,
   POOL_WIDTH_MAX,
   POOL_WIDTH_MIN,
   dispatchWorkspace,
   getWorkspaceSnapshot,
+  isInspectorOpen,
   isPaneCollapsed,
   useWorkspace,
-  type DrawerKind,
 } from "./WorkspaceStore";
 
 // 三个模态各自懒加载(规格 §1.1 的 chunk 预算):`lazy()` 的 dynamic import()
@@ -55,7 +50,7 @@ const LazyHelpOverlay = lazy(() =>
   import("../HelpOverlay").then((module) => ({ default: module.HelpOverlay })),
 );
 
-export { INSPECTOR_AUTO_COLLAPSE_WIDTH, autoCollapseFor, autoCollapseTransition } from "./shellLayout";
+export { autoCollapseFor, autoCollapseTransition } from "./shellLayout";
 
 /**
  * 镜头带栏的最小高只有 `shotBandModel.bandMinHeight` 一份(故事 184 = 视口内容高,
@@ -63,27 +58,16 @@ export { INSPECTOR_AUTO_COLLAPSE_WIDTH, autoCollapseFor, autoCollapseTransition 
  */
 export { bandMinHeight };
 
-/** 转接完就该被 `#/` 覆盖掉的那几条旧 hash(规格 §7 的"不留旧路由")。 */
-const LEGACY_HASHES: readonly string[] = ["#/import", "#/deliver", "#/settings", "#/review"];
-export function isLegacyHash(hash: string): boolean {
-  return LEGACY_HASHES.includes(hash.startsWith("#/") ? hash : `#/${hash.replace(/^#/, "")}`);
-}
-
-/** 旧 hash → 新壳动作;无法识别的 hash 落到工作区本体。 */
-export function drawerForLegacyHash(hash: string): DrawerKind {
-  const route = hash.replace(/^#\/?/, "");
-  if (route === "import") return "import";
-  if (route === "deliver") return "deliver";
-  if (route === "settings") return "settings";
-  return null; // #/review 与其它一律落到工作区本体
-}
+export { drawerForLegacyHash, isLegacyHash } from "./useShellWindowEvents";
 
 export function WorkspaceShell(): JSX.Element {
   const poolWidth = useWorkspace((state) => state.poolWidth);
   const inspectorWidth = useWorkspace((state) => state.inspectorWidth);
   const monitorRatio = useWorkspace((state) => state.monitorRatio);
   const poolCollapsed = useWorkspace((state) => isPaneCollapsed(state, "pool"));
-  const inspectorCollapsed = useWorkspace((state) => isPaneCollapsed(state, "inspector"));
+  // R19 V-04:检查器是监视器栏内的滑出层 —— 选中即出、Esc / 点空白收、📌 钉住常驻。
+  const inspectorOpen = useWorkspace(isInspectorOpen);
+  const inspectorPinned = useWorkspace((state) => state.inspectorPinned);
   const bandMode = useWorkspace((state) => state.bandMode);
   const openDrawer = useWorkspace((state) => state.openDrawer);
   const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
@@ -97,7 +81,7 @@ export function WorkspaceShell(): JSX.Element {
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
-    for (const node of shell.querySelectorAll<HTMLElement>(".workspace-columns, .workspace-status")) node.toggleAttribute("inert", homeOpen);
+    for (const node of shell.querySelectorAll<HTMLElement>(".workspace-columns, .workspace-status-row")) node.toggleAttribute("inert", homeOpen);
   }, [homeOpen]);
 
   // 拖动期间只改 CSS 变量,不 setState —— 三栏不重渲染(规格 §10);
@@ -116,6 +100,8 @@ export function WorkspaceShell(): JSX.Element {
   const paint = useCallback((name: string, value: string) => {
     shellRef.current?.style.setProperty(name, value);
   }, []);
+  // R19 V-04:滑出层宽从 store 来(没有 Panel 再 onResize 了),画成壳根上的变量给层与监视器的让位读。
+  useEffect(() => paint("--inspector-width", `${Math.round(inspectorWidth)}px`), [inspectorWidth, paint]);
 
   // 松手(onLayoutChanged 在布局落定后才响)才把最终尺寸交给 store,由它的 400ms
   // debounce + 串行队列落 settings 表 —— 拖动中途一次都不写。
@@ -132,7 +118,8 @@ export function WorkspaceShell(): JSX.Element {
   // Take 条 / toast 出现时它变高,Panel 跟着长;附属模式下它撑满 Panel,量到的就是 Panel 本身。
   const bandContentHeight = useRef(0);
   const fitBand = useCallback(() => {
-    const stack = shellRef.current?.querySelector<HTMLElement>(".workspace-center-stack");
+    // R19 V-03:带通栏后,「栈」= 外层竖向 Group(上层 + 带),不再是中栏。
+    const stack = shellRef.current?.querySelector<HTMLElement>(".workspace-columns");
     const mode = getWorkspaceSnapshot().bandMode;
     const target = bandPanelHeight(mode, {
       stackHeight: stack?.clientHeight ?? 0,
@@ -158,8 +145,8 @@ export function WorkspaceShell(): JSX.Element {
   }, [bandMode, fitBand]);
 
   useEffect(() => {
-    // 窄窗自动折叠只碰 store 的 auto 位(set-auto-collapse),不碰用户手动位,也就
-    // 不会被 persistedPairs 落盘——这正是 U-04 的根因:此前它派发 toggle-pane,把
+    // 窄窗自动折叠(只剩媒体池)只碰 store 的 auto 位(set-auto-collapse),不碰用户手动位,
+    // 也就不会被 persistedPairs 落盘——这正是 U-04 的根因:此前它派发 toggle-pane,把
     // 自动折叠写成了用户偏好。跨阈值才派发,见 autoCollapseTransition。
     let lastWidth: number | null = null;
     const apply = () => {
@@ -175,78 +162,13 @@ export function WorkspaceShell(): JSX.Element {
 
   useRestoreSelection();
 
-  useEffect(() => {
-    const apply = () => {
-      const hash = window.location.hash;
-      const drawer = drawerForLegacyHash(hash);
-      if (drawer !== null) dispatchWorkspace({ type: "open-drawer", drawer });
-      // 旧 hash 只用来"转接"一次,转接完就把地址栏收回 `#/`(R8 终审 L5)。
-      // 不收的话刷新一次又会把同一个抽屉重新弹开——用户关掉的东西自己回来了。
-      if (isLegacyHash(hash)) window.history.replaceState(null, "", "#/");
-    };
-    apply();
-    window.addEventListener("hashchange", apply);
-    return () => window.removeEventListener("hashchange", apply);
-  }, []);
-
-  useEffect(() => {
-    // 历史集只读查看(顶栏集切换里点一条已封存的集 → `openHistoricalEpisode`)。
-    // 旧壳靠 SelectPage 接这个事件;新壳里没有 SelectPage,不接就等于点了没反应
-    // (R8 终审 L6)。
-    const onViewEpisode = (event: Event) => {
-      const detail = (event as CustomEvent<{ id: number; title: string } | null>).detail;
-      if (!detail || typeof detail.id !== "number") {
-        // N-2:detail 为空 = 回到当前集(`returnToActiveEpisode`)。只读查看时选中的历史集素材
-        // 不能带回当前集,按当前集校验一次。
-        dispatchWorkspace({ type: "view-episode", episode: null });
-        const { selection } = getWorkspaceSnapshot();
-        const { clipsById, episode } = getClipsFeedSnapshot();
-        if (!selectionBelongsToEpisode(selection, episode.activeId, clipsById)) {
-          dispatchWorkspace({ type: "clear-selection" });
-        }
-        return;
-      }
-      dispatchWorkspace({ type: "view-episode", episode: { id: detail.id, title: detail.title } });
-    };
-    const onEpisodeChanged = (event: Event) => {
-      dispatchWorkspace({ type: "view-episode", episode: null });
-      // 新建 / 切换集后监视器与检查器不能还停在旧集的素材上(R-06):选中不在新集里就清掉。
-      // 用未按集裁的 clipsById 判归属 —— feed 自己也在听这个事件,裁过的列表这一刻可能已经空了。
-      const detail = (event as CustomEvent<{ id?: unknown } | null>).detail;
-      const episodeId = typeof detail?.id === "number" ? detail.id : null;
-      const { selection } = getWorkspaceSnapshot();
-      if (!selectionBelongsToEpisode(selection, episodeId, getClipsFeedSnapshot().clipsById)) {
-        dispatchWorkspace({ type: "clear-selection" });
-      }
-    };
-    window.addEventListener("tripcut:view-episode", onViewEpisode);
-    window.addEventListener("tripcut:episode-changed", onEpisodeChanged);
-    return () => {
-      window.removeEventListener("tripcut:view-episode", onViewEpisode);
-      window.removeEventListener("tripcut:episode-changed", onEpisodeChanged);
-    };
-  }, []);
+  useShellWindowEvents();
 
   // 规格 §3.2 的整张全局键位表(F6 轮栏、⌘1/⌘2 折叠、⌘⏎ 沉浸、⌘, 设置、⌘I 导入、
   // ? 帮助、Esc 四级优先级)都在这个 hook 里,壳本身不再各挂各的 keydown。
   useGlobalHotkeys();
   // R13 §1:键位表从 settings 水合一次(失败保持剪映默认)。
   useEffect(() => void loadKeymap(), []);
-
-  useEffect(() => {
-    // R10 U-19:后端的 `tripcut:music-analyzed` Tauri 事件在壳层桥接一次成同名 window 事件,
-    // 音乐面板 / 状态条各自 addEventListener。非 Tauri 环境里桥是 no-op。
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    void bridgeMusicAnalyzedEvents().then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
 
   useEffect(() => {
     // `?` 由 useGlobalHotkeys 广播;命令面板的「打开帮助」走同一个事件。
@@ -266,8 +188,9 @@ export function WorkspaceShell(): JSX.Element {
   return (
     <div className="workspace-shell" ref={shellRef}>
       <TopBar />
-      <ToolchainBanner />
-      {homeOpen ? null : <PipelineHint />}
+      {/* R19 V-02:顶部只有一行。步骤提示进「下一步」tooltip(与首页四步卡);工具链缺失不再是横幅,
+          这里只跑探针把状态发布出去,状态条左端的红点 + 一句由 StatusStrip 订阅 useToolchainStatus 渲染。 */}
+      <ToolchainStatusProbe />
       {/* R12 §3:全应用唯一的 toast 宿主(顶部居中、一条、3–5 秒);各栏只 showToast,不各自挂。 */}
       <ToastHost />
       {/* R17 车道 B:应用内自动升级(启动 30 秒后查;提示走上面那条 toast)。 */}
@@ -277,7 +200,25 @@ export function WorkspaceShell(): JSX.Element {
       {/* R13 §3:功能气泡宿主,全应用一份;首页(空库 / 点 logo)盖在三栏上。 */}
       <GuideHost />
       {homeOpen ? <HomeScreen /> : null}
-      <Group key={layoutEpoch} orientation="horizontal" className="workspace-columns" onLayoutChanged={commitSizes}>
+      {/*
+        R19 V-03(方案 B「Cut 页式两层」):外层竖向 Group = 上层(媒体池 | 监视器 | 检查器)/ 镜头带通栏;
+        带不再被两侧栏夹着,1440 下带宽从 ~740 涨到 ~1400。上层的高就是原来的「监视器占比」。
+      */}
+      <Group key={layoutEpoch} orientation="vertical" className="workspace-columns" onLayoutChanged={commitSizes}>
+        <Panel
+          id="upper"
+          className="workspace-upper"
+          defaultSize={`${Math.round(monitorRatio * 100)}%`}
+          minSize={240}
+          onResize={(size) => {
+            // 故事模式下带被钉在内容高,这个占比是算出来的,不是用户拖的 —— 不记,
+            // 否则切回附属模式时用户上次拖好的分法就被冲掉了。
+            if (bandMode === "story") return;
+            latest.current.monitor = size.asPercentage / 100;
+            paint("--monitor-ratio", `${size.asPercentage / 100}`);
+          }}
+        >
+      <Group orientation="horizontal" className="workspace-upper-row" onLayoutChanged={commitSizes}>
         {/*
           竖条与整栏是两个不同 id / key 的 Panel,而不是同一个 Panel 换 props:
           react-resizable-panels 按实例记尺寸,同一实例从 44px 竖条切成 minSize 280 的
@@ -287,7 +228,7 @@ export function WorkspaceShell(): JSX.Element {
         */}
         {poolCollapsed ? (
           <Panel key="pool-rail" id="pool-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-pool collapsed">
-            <InspectorCollapsed
+            <PaneRail
               icon="chevron-right"
               label="媒体池"
               onExpand={() => dispatchWorkspace({ type: "toggle-pane", pane: "pool" })}
@@ -334,91 +275,69 @@ export function WorkspaceShell(): JSX.Element {
           <span className="workspace-handle-grip" aria-hidden="true" />
         </Separator>
 
-        <Panel id="center" minSize={520} className="workspace-center">
-          <Group orientation="vertical" className="workspace-center-stack">
-            <Panel
-              defaultSize={`${Math.round(monitorRatio * 100)}%`}
-              minSize={240}
-              onResize={(size) => {
-                // 故事模式下带被钉在 184,这个占比是算出来的,不是用户拖的 —— 不记,
-                // 否则切回附属模式时用户上次拖好的分法就被冲掉了。
-                if (bandMode === "story") return;
-                latest.current.monitor = size.asPercentage / 100;
-                paint("--monitor-ratio", `${size.asPercentage / 100}`);
-              }}
-            >
-              <div
-                aria-label="预览监视器"
-                role="region"
-                data-pane="monitor"
-                tabIndex={-1}
-                className="workspace-pane"
-              >
-                <Monitor />
-              </div>
-            </Panel>
-            <Separator
-              className="workspace-handle horizontal"
-              aria-label="调整监视器高度"
-              aria-valuenow={Math.round(monitorRatio * 100)}
-            >
-              <span className="workspace-handle-grip" aria-hidden="true" />
-            </Separator>
-            <Panel
-              panelRef={bandPanelRef}
-              defaultSize={bandPanelMinHeight(bandMode)}
-              minSize={bandPanelMinHeight(bandMode)}
-              groupResizeBehavior="preserve-pixel-size"
-              className="workspace-band"
-            >
-              <div className={bandMode === "story" ? "workspace-band-fit workspace-band-fit--content" : "workspace-band-fit"}>
-                <ShotBand />
-              </div>
-            </Panel>
-          </Group>
+        <Panel
+          id="center"
+          minSize={520}
+          className="workspace-center"
+          onPointerDownCapture={(event) => {
+            // 点空白收(V-04):没钉住时,点到监视器栏里滑出层之外的任何地方都把它收起来 ——
+            // 看检查器的时刻不是看画面的时刻;点画面 / 走带就是要看画面。
+            if (!inspectorOpen || inspectorPinned) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest(".workspace-inspector-layer")) return;
+            dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
+          }}
+        >
+          <div
+            aria-label="预览监视器"
+            role="region"
+            data-pane="monitor"
+            tabIndex={-1}
+            // 滑出层盖住井右侧时画面缩小而不是被遮住:给监视器让出层宽(CSS 里封顶 60%,布局变化按动效总则 0ms)。
+            className={inspectorOpen && !inspectorPinned ? "workspace-pane is-shifted" : "workspace-pane"}
+          >
+            <Monitor />
+          </div>
+          {/*
+            R19 V-04:检查器不再是 Panel,是监视器栏内 `position:absolute; right:0` 的滑出层
+            (钉住时改成常驻的 flex 子项)。region「检查器」的 AX 名冻结不动;收起时 region 还在
+            (冒烟脚本按名找 landmark),里面不挂内容。开合都在中栏内部,中栏宽度不变。
+          */}
+          <div
+            aria-label="检查器"
+            role="region"
+            data-pane="inspector"
+            tabIndex={-1}
+            className={`workspace-pane workspace-inspector-layer${inspectorOpen ? " is-open" : ""}${inspectorPinned ? " is-pinned" : ""}`}
+          >
+            {inspectorOpen ? <Inspector /> : null}
+          </div>
         </Panel>
-
+      </Group>
+        </Panel>
         <Separator
-          className="workspace-handle"
-          aria-label="调整检查器宽度"
-          aria-valuenow={Math.round(inspectorWidth)}
+          className="workspace-handle horizontal"
+          aria-label="调整监视器高度"
+          aria-valuenow={Math.round(monitorRatio * 100)}
         >
           <span className="workspace-handle-grip" aria-hidden="true" />
         </Separator>
-
-        {inspectorCollapsed ? (
-          <Panel key="inspector-rail" id="inspector-rail" defaultSize={44} minSize={44} maxSize={44} className="workspace-inspector collapsed">
-            <InspectorCollapsed
-              label="检查器"
-              onExpand={() => dispatchWorkspace({ type: "toggle-pane", pane: "inspector" })}
-            />
-          </Panel>
-        ) : (
-          <Panel
-            key="inspector-pane"
-            id="inspector-pane"
-            defaultSize={inspectorWidth}
-            minSize={INSPECTOR_WIDTH_MIN}
-            maxSize={INSPECTOR_WIDTH_MAX}
-            onResize={(size) => {
-              latest.current.inspector = size.inPixels;
-              paint("--inspector-width", `${Math.round(size.inPixels)}px`);
-            }}
-            className="workspace-inspector"
-          >
-            <div
-              aria-label="检查器"
-              role="region"
-              data-pane="inspector"
-              tabIndex={-1}
-              className="workspace-pane"
-            >
-              <Inspector />
-            </div>
-          </Panel>
-        )}
+        <Panel
+          panelRef={bandPanelRef}
+          defaultSize={bandPanelMinHeight(bandMode)}
+          minSize={bandPanelMinHeight(bandMode)}
+          groupResizeBehavior="preserve-pixel-size"
+          className="workspace-band"
+        >
+          <div className={bandMode === "story" ? "workspace-band-fit workspace-band-fit--content" : "workspace-band-fit"}>
+            <ShotBand />
+          </div>
+        </Panel>
       </Group>
-      <StatusStrip />
+      {/* 状态条一行。工具链红点由 StatusStrip 自己在左端渲染(数据源是上面 ToolchainStatusProbe 发布的 useToolchainStatus)。 */}
+      <div className="workspace-status-row">
+        <StatusStrip />
+      </div>
       {openDrawer === "import" ? (
         <Suspense fallback={null}>
           <LazyImportDrawer />

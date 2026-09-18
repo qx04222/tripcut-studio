@@ -98,6 +98,11 @@ async function openDrawer(): Promise<HTMLElement> {
     await Promise.resolve();
   });
   const dialog = await screen.findByRole("dialog", { name: "导出" });
+  // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它。
+  await act(async () => {
+    within(dialog).getByRole("button", { name: "更多方式" }).click();
+    await Promise.resolve();
+  });
   await act(async () => {
     within(dialog).getByRole("button", { name: "导出片段" }).click();
     await Promise.resolve();
@@ -237,6 +242,11 @@ describe("R12 §6:导出步(车道 A)", () => {
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
     expect(within(dialog).getByText("第 4 步 · 导出")).toBeTruthy();
+    // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它。
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "更多方式" }).click();
+      await Promise.resolve();
+    });
     const group = within(dialog).getByRole("group", { name: "导出方式" });
     // R13 §5 → R14 §9 B:四模式顺序「剪映草稿 / 剪映素材包 / 导出片段 / 完整交付包」;剪映不可用时默认落在素材包。
     expect(within(group).getAllByRole("button").map((chip) => chip.getAttribute("aria-label"))).toEqual(["剪映草稿", "剪映素材包", "导出片段", "完整交付包"]);
@@ -260,6 +270,11 @@ describe("R12 §6:导出步(车道 A)", () => {
       await Promise.resolve();
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
+    // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它。
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "更多方式" }).click();
+      await Promise.resolve();
+    });
     const jianying = await within(dialog).findByRole("button", { name: "剪映草稿" });
     await waitFor(() => expect(jianying.textContent).toBe("剪映草稿"));
     await waitFor(() => expect(jianying.getAttribute("aria-pressed")).toBe("true"));

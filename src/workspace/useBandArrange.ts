@@ -8,9 +8,8 @@ import {
   undoArrange,
   undoAutoSelect,
   type ArrangeOutcome,
-  type AutoSelectOutcome,
 } from "../api";
-import { autoSelectToast } from "./BandAutoSelect";
+import { autoSelectToast, autoSelectToastActions, type AutoSelectResult } from "./BandAutoSelect";
 import { failureText } from "./errorText";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
 import type { BandChapter } from "./shotBandModel";
@@ -45,7 +44,7 @@ export function skippedChaptersFrom(settings: Readonly<Record<string, string>> |
 }
 
 /** R12 §3:自动挑选结果的 toast 文案 —— 挑了几段、排进去几段。 */
-export function autoSelectPlacedToast(outcome: AutoSelectOutcome): string {
+export function autoSelectPlacedToast(outcome: AutoSelectResult): string {
   const placed = outcome.placed ?? 0;
   if (placed > 0) return `${autoSelectToast(outcome)} · 已排进镜头带`;
   return `${autoSelectToast(outcome)} · 还没排进镜头带,点「一键排入」`;
@@ -57,7 +56,7 @@ export function useBandArrange(): {
   arranging: boolean;
   onArrange: () => void;
   onBackToSelect: () => void;
-  onAutoSelected: (outcome: AutoSelectOutcome) => void;
+  onAutoSelected: (outcome: AutoSelectResult) => void;
 } {
   // R12 §2「这章够了」:跳过的章 id 从 settings 读一次,点过之后就地更新。
   const [skipped, setSkipped] = useState<ReadonlySet<number>>(() => new Set());
@@ -129,10 +128,12 @@ export function useBandArrange(): {
   }, []);
 
   // R11 §1.2 / R12 §3:自动挑选的结果走全局 Toast,「撤销」撤这一批(段没了,带上的镜块级联消失)。
-  const onAutoSelected = useCallback((outcome: AutoSelectOutcome) => {
+  const onAutoSelected = useCallback((outcome: AutoSelectResult) => {
     showToast(autoSelectPlacedToast(outcome), {
       tone: "success",
       durationMs: UNDO_TOAST_MS,
+      // R19 U-09(flow 车道,一行):首次零决定跑完,给「改范围 / 改时长」入口(次要动作,排在「撤销」之后)。
+      actions: autoSelectToastActions(outcome),
       action: {
         label: "撤销",
         onClick: () => {

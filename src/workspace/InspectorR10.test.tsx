@@ -55,6 +55,7 @@ import { SEGMENT_AUTOFAVORITE_HINT, segmentSecondsLabel } from "./InspectorSegme
 import { ADD_LUT_OPTION } from "../TechCheckPanel";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
@@ -136,6 +137,8 @@ function segment(id: number, inSeconds: number, outSeconds: number): SelectSegme
 }
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetClipsFeedForTests();
   __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 1 } });
   apiMocks.getClipsRevision.mockResolvedValue("rev-1");

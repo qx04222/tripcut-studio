@@ -97,7 +97,14 @@ async function openDrawer(): Promise<HTMLElement> {
     dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
     await Promise.resolve();
   });
-  return screen.findByRole("dialog", { name: "导出" });
+  const dialog = await screen.findByRole("dialog", { name: "导出" });
+  // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它。
+  const more = await within(dialog).findByRole("button", { name: "更多方式" });
+  await act(async () => {
+    more.click();
+    await Promise.resolve();
+  });
+  return dialog;
 }
 
 async function click(name: string, root: HTMLElement | typeof screen): Promise<void> {
@@ -187,6 +194,8 @@ describe("交付抽屉 · 剪映素材包(R14 §9 B)", () => {
     const host = toast.closest(".ui-toast") as HTMLElement;
     await click("打开剪映", host);
     expect(apiMock.openApp).toHaveBeenCalledWith(JIANYING_BUNDLE_ID);
+    // J-07:素材包不是原生项目,「打开剪映」顺手把所在文件夹也带出来(不用再去 Finder 摸)。
+    expect(apiMock.revealExport).toHaveBeenCalledWith(42);
     // 结果卡:三步 + 「打开剪映」+「在 Finder 中显示」。
     const steps = within(dialog).getByRole("list", { name: "接下来在剪映里" });
     const lines = within(steps).getAllByRole("listitem").map((item) => item.textContent ?? "");
@@ -218,5 +227,48 @@ describe("交付抽屉 · 剪映素材包(R14 §9 B)", () => {
     expect(await within(dialog).findByText("镜头带上还没有片段")).toBeTruthy();
     expect(within(dialog).getByText(/一键排入/)).toBeTruthy();
     await waitFor(() => expect((within(dialog).getByRole("button", { name: "导出剪映素材包到上次文件夹" }) as HTMLButtonElement).disabled).toBe(true));
+  });
+});
+
+describe("R19 §6 交付:点「交给剪映」一次即出素材包", () => {
+  async function openCards(): Promise<HTMLElement> {
+    render(<WorkspaceShell />);
+    await act(async () => {
+      dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
+      await Promise.resolve();
+    });
+    return await screen.findByRole("dialog", { name: "导出" });
+  }
+
+  it("剪映版本未核对 + 记过文件夹:点卡即 exportJianyingKit(上次目录),不弹面板、不用再点第二颗按钮", async () => {
+    apiMock.getExportStatus.mockImplementation(async (jobId: number | null) => (jobId === 42 ? doneStatus : idleStatus));
+    const dialog = await openCards();
+    await click("交给剪映", dialog);
+    await waitFor(() => expect(apiMock.exportJianyingKit).toHaveBeenCalledWith("/Users/me/Desktop"));
+    expect(apiMock.exportJianyingKit).toHaveBeenCalledTimes(1);
+    expect(apiMock.pickExportFolder).not.toHaveBeenCalled();
+    expect(await screen.findByText("已导出 3 个片段", { selector: ".ui-toast-text" })).toBeTruthy();
+  });
+
+  it("没记过文件夹:点卡只落到素材包详情页(主按钮「导出素材包…」),不自己弹面板", async () => {
+    apiMock.getSettings.mockResolvedValue({});
+    const dialog = await openCards();
+    await click("交给剪映", dialog);
+    await within(dialog).findByRole("list", { name: "将导出的文件" });
+    expect(within(dialog).getByRole("button", { name: "导出剪映素材包到上次文件夹" }).textContent).toBe("导出素材包…");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(apiMock.exportJianyingKit).not.toHaveBeenCalled();
+    expect(apiMock.pickExportFolder).not.toHaveBeenCalled();
+  });
+
+  it("「更多方式」再点「剪映素材包」chip 进来的不自动导(只有那张卡是一次即出)", async () => {
+    const dialog = await openDrawer();
+    await within(dialog).findByRole("list", { name: "将导出的文件" });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(apiMock.exportJianyingKit).not.toHaveBeenCalled();
   });
 });

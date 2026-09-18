@@ -20,7 +20,7 @@
   box-shadow: var(--shadow-raised), 0 0 0 1px rgb(255 255 255 / 6%) inset;
   font-size: var(--text-13);
   line-height: var(--lh-13);
-  animation: ui-guide-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: ui-guide-in var(--motion-slow) both;
 }
 
 .ui-guide[data-side="top"] {
@@ -500,7 +500,7 @@ html[data-theme="light"] .ui-guide-kicker {
 
 @media (prefers-reduced-motion: no-preference) {
   .home-hero > * {
-    animation: ui-guide-in 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    animation: ui-guide-in var(--motion-slow) both;
   }
 
   .home-hero > :nth-child(2) { animation-delay: 40ms; }

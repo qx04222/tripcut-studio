@@ -11,8 +11,11 @@ vi.mock("../api", () => apiMocks);
 
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetWorkspaceForTests();
   vi.clearAllMocks();
   apiMocks.hasMinimaxKey.mockReset().mockResolvedValue(false);

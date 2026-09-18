@@ -153,14 +153,29 @@ export function pipelineStepCount(state: PipelineState, step: PipelineStep): str
   }
 }
 
-/** 顶栏主按钮的文案(规格 §1 第二条);四步全完成 → 「再导出一次」。 */
-export function pipelineNextLabel(state: PipelineState): string {
+/** R19 U-01:第 ② 步、素材还在分析、且一条都还没分析完 —— 主按钮此刻按了必然失败,禁用并说清进度。 */
+export function pipelineNextDisabled(state: PipelineState): boolean {
+  const { counts } = state;
+  return !state.complete && state.step === 2 && counts.analysisPending > 0 && counts.clips - counts.analysisPending <= 0;
+}
+
+/**
+ * 顶栏主按钮的文案(规格 §1 第二条);四步全完成 → 「再导出一次」。
+ * R19 U-01:分析中不吃闭门羹 —— 第 ② 步还有素材在分析时说「先挑已分析的 x/N 条」(点了只挑已分析的部分),
+ * 一条都没分析完时「等画面分析 0/N 条 · 约 30 秒」(`eta` 来自状态条同一套估算;估不出就只给进度)。
+ */
+export function pipelineNextLabel(state: PipelineState, eta: string | null = null): string {
   if (state.complete) return "再导出一次";
   switch (state.step) {
     case 1:
       return "下一步:导入素材";
-    case 2:
-      return "下一步:自动挑选";
+    case 2: {
+      const { clips, analysisPending } = state.counts;
+      if (analysisPending <= 0) return "下一步:自动挑选";
+      const analysed = clips - analysisPending;
+      if (analysed > 0) return `先挑已分析的 ${analysed}/${clips} 条`;
+      return eta ? `等画面分析 0/${clips} 条 · 约 ${eta}` : `等画面分析 0/${clips} 条`;
+    }
     case 3:
       return "下一步:排到镜头带";
     case 4:

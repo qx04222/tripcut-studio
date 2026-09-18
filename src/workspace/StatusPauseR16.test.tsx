@@ -49,7 +49,10 @@ describe("StatusPause", () => {
     expect(screen.getByText("后台已暂停")).toBeTruthy();
   });
 
-  it("状态条里主按钮旁就是它", async () => {
+  it("状态条里主按钮旁就是它(V-08:真闲着时两颗按钮都不占位,这里给一点后台活让它们出现)", async () => {
+    apiMocks.getImportProgress.mockResolvedValue({
+      total: 10, done: 3, failed: 0, running: 1, waiting_for_permit: 0, paused_for_memory: false,
+    });
     render(<StatusStrip />);
     await screen.findByRole("button", { name: "全部暂停" });
     expect(screen.getByRole("button", { name: "查看后台任务详情" })).toBeTruthy();

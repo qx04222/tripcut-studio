@@ -114,6 +114,7 @@ export function Guide({ anchor, text, side, tryLabel, onTry, onDismiss, onAnchor
       role="dialog"
       aria-label="新手引导"
       className="ui-guide"
+      data-teach="guide"
       data-side={placement?.side ?? side}
       style={style}
       ref={setBubble}
@@ -127,7 +128,7 @@ export function Guide({ anchor, text, side, tryLabel, onTry, onDismiss, onAnchor
       <div className="ui-guide-actions">
         {tryLabel && onTry ? (
           <Button
-            variant="primary"
+            variant="secondary"
             size="sm"
             onClick={() => {
               onTry();
@@ -137,7 +138,8 @@ export function Guide({ anchor, text, side, tryLabel, onTry, onDismiss, onAnchor
             {tryLabel}
           </Button>
         ) : null}
-        <Button variant={tryLabel && onTry ? "ghost" : "primary"} size="sm" className="ui-guide-ok" onClick={onDismiss}>
+        {/* R19 V-01:气泡不是主动作(不与顶栏「下一步」争同屏唯一的实心按钮),深底上用描边。 */}
+        <Button variant={tryLabel && onTry ? "ghost" : "secondary"} size="sm" className="ui-guide-ok" onClick={onDismiss}>
           知道了
         </Button>
       </div>

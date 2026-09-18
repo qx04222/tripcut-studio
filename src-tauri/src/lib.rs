@@ -110,6 +110,19 @@ struct AppInfo {
     read_only: bool,
 }
 
+/// R19 E-05(bench 车道):进程入口时间戳,供 `mark_first_paint` 命令算前端首次
+/// render 的耗时。只加这一条状态,不改 `process_started` 原有用法(它继续给
+/// `startup_ms`/`rust_setup_ms` 计时)。
+struct ProcessStartedAt(std::time::Instant);
+
+/// R19 E-05:前端 `main.tsx` 首次 render 完成后调用一次,把「进程入口 → 首帧画面」
+/// 的耗时落进日志的 `first_paint_ms` 字段。与既有的 `rust_setup_ms`(setup() 结束、
+/// 窗口已建好但前端还没画完)拼起来,就是启动时间的两段拆分(E-05)。
+#[tauri::command]
+fn mark_first_paint(state: tauri::State<'_, ProcessStartedAt>) {
+    tracing::info!(first_paint_ms = state.0.elapsed().as_millis() as u64, "first paint");
+}
+
 #[tauri::command]
 fn get_doctor_report(
     state: tauri::State<'_, DoctorRuntimeState>,
@@ -3063,6 +3076,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ProvisioningState::default())
         .manage(exit_guard::ExitState::default())
+        // R19 E-05:见 `ProcessStartedAt`/`mark_first_paint`。
+        .manage(ProcessStartedAt(process_started))
         .manage(update_flow::UpdateFlowState::default())
         .setup(move |app| {
             packaging::configure(app);
@@ -3642,11 +3657,19 @@ pub fn run() {
                 startup_ms = process_started.elapsed().as_millis() as u64,
                 "setup finished; window is up"
             );
+            // R19 E-05:同一个时间点再打一条 `rust_setup_ms`(与 `startup_ms` 数值相同,
+            // 命名对齐 E-05 的两段拆分:rust_setup_ms + 前端 mark_first_paint 报的
+            // first_paint_ms)。不改 startup_ms 原有读者。
+            tracing::info!(
+                rust_setup_ms = process_started.elapsed().as_millis() as u64,
+                "rust setup done"
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             confirm_exit,
             open_url,
+            mark_first_paint,
             get_doctor_report,
             restore_latest_snapshot,
             export_decision_data,

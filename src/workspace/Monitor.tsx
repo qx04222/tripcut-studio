@@ -14,10 +14,10 @@ export { monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
 import { notePlayerStatus } from "./guides";
 import { MonitorControls } from "./MonitorControls";
 import { MonitorIdle } from "./OnboardingCard";
-import { IoRail, MonitorFrame, Placeholder, monitorSpecLabel, slotPlaceholderCopy } from "./MonitorParts";
+import { IoRail, MonitorFrame, Placeholder, slotPlaceholderCopy } from "./MonitorParts";
 import { isAtEnd } from "./MonitorSeekBar";
 import { loadPlayerPrefs } from "./playerPrefs";
-import { Chip, CoverImage, Icon } from "./ui";
+import { CoverImage, Icon } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 import { useClipSuggestions } from "./useClipSuggestions";
 import { useMonitorHotkeys } from "./useMonitorHotkeys";
@@ -325,11 +325,7 @@ export function Monitor(): JSX.Element {
             onStatusChange={onStatusChange}
             controlsRef={controlsRef}
           />
-          {/* 两枚 chip 都是装饰:文件名在栏标题条里已经读过一遍,规格在检查器里。 */}
-          <span className="monitor-well-chips" aria-hidden="true">
-            <Chip className="monitor-well-name">{clip.file_name}</Chip>
-            <Chip className="monitor-well-spec">{monitorSpecLabel(clip)}</Chip>
-          </span>
+          {/* R19 V-05:井内不再挂文件名 / 规格 chip —— 文件名在栏标题条里,规格在检查器里,一件事只说一遍。 */}
           <IoRail status={status} inPoint={inPoint} outPoint={outPoint} />
         </div>
       </div>

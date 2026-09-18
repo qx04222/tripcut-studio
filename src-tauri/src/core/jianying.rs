@@ -788,6 +788,12 @@ fn selected_music(connection: &Connection, episode_id: i64) -> Result<Option<Dra
     }))
 }
 
+/// J-05:剪映素材包要「本集有没有配乐、原文件在哪」,不需要草稿那份微秒时长——直接包一层
+/// [`selected_music`],不重复它的查询/校验逻辑(最近一条、探到时长、原文件还在)。
+pub(crate) fn kit_selected_music_file(connection: &Connection, episode_id: i64) -> Result<Option<(String, PathBuf)>> {
+    Ok(selected_music(connection, episode_id)?.map(|music| (music.file_name, music.source_path)))
+}
+
 fn resolve_draft_sources(connection: &Connection, clips: &mut [ExportClip]) -> Result<()> {
     for clip in clips {
         clip.source_path = deliver::verified_export_source(connection, clip)?

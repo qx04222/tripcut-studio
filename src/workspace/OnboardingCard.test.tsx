@@ -35,9 +35,10 @@ describe("OnboardingCard", () => {
     const card = await screen.findByRole("group", { name: "四步上手" });
     expect(card.getAttribute("aria-modal")).toBeNull();
     expect(card.closest("[role='dialog']")).toBeNull();
-    for (const text of ["导入", "挑选", "排列", "导出"]) expect(screen.getByText(text)).toBeTruthy();
+    // R19 U-03:四步改成动作句(onboarding.ts 的 ONBOARDING_STEPS)。
+    for (const text of ["选文件夹", "软件挑 / 你按 F", "拖顺序", "交给剪映"]) expect(screen.getByText(text)).toBeTruthy();
     expect(card.querySelectorAll("li")).toHaveLength(4);
-    expect(card.querySelector("li[aria-current='step']")?.textContent).toContain("导入");
+    expect(card.querySelector("li[aria-current='step']")?.textContent).toContain("选文件夹");
     const start = screen.getByRole("button", { name: "开始使用" });
     expect(start.className).toContain("ui-button--primary");
     expect(card.querySelectorAll(".ui-button--primary").length).toBe(1);

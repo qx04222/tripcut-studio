@@ -43,6 +43,10 @@ beforeEach(() => {
   apiMocks.listWatchedFolders.mockResolvedValue([]);
   apiMocks.listImportBatches.mockResolvedValue([]);
   apiMocks.listMissingClips.mockResolvedValue([]);
+  // R19 U-05:任务 / 缺失素材分页要各自计数 >0 才出;这份文件的用例默认在「导过东西、有一条缺失」的库里
+  // (库空只一颗按钮的形态在 importR19.test 里钉住)。
+  apiMocks.getImportProgress.mockResolvedValue({ total: 12, done: 12, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false } as never);
+  apiMocks.listMissingClips.mockResolvedValue([{ clip_id: 9, file_name: "Z.MOV", volume_uuid: "vol-z", volume_label: null, rel_path: "Z.MOV", missing_since: "" }]);
 });
 afterEach(cleanup);
 
@@ -77,7 +81,7 @@ describe("导入抽屉", () => {
     render(<WorkspaceShell />);
     await openImportDrawer();
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
-    expect(within(dialog).getAllByRole("tab").map((t) => t.textContent)).toEqual(["来源", "任务", "缺失素材"]);
+    expect((await within(dialog).findAllByRole("tab")).map((t) => t.textContent)).toEqual(["来源", "任务", "缺失素材"]);
   });
 
   it("Esc 关闭且不改 hash", async () => {
@@ -113,7 +117,17 @@ describe("导入抽屉", () => {
   });
 
   it("状态条的「任务」入口直接落在「任务」分页", async () => {
+    // V-08:真闲着时状态条不再画「查看后台任务详情」——给一点后台活让它出现。
+    apiMocks.getImportProgress.mockResolvedValue({
+      total: 10, done: 3, failed: 0, running: 1, waiting_for_permit: 0, paused_for_memory: false,
+    });
     render(<WorkspaceShell />);
+    // 状态条现在要等 getImportProgress 的第一轮轮询落地才会画出「查看后台任务详情」
+    // (V-08:真闲着时它不占位)——先让挂载时的那次 poll() 走完,再等按钮出现。
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     await act(async () => {
       (await screen.findByRole("button", { name: "查看后台任务详情" })).click();
       await Promise.resolve();
@@ -162,11 +176,15 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     expect(apiMocks.removeWatchedFolder).toHaveBeenCalledWith(1);
   });
 
-  it("来源分页没有关注文件夹时显示 EmptyState", async () => {
+  it("来源分页没有关注文件夹时(第一次导入):不出「已关注的文件夹」那一段,拖放区的「选择文件夹」就是唯一的 primary(R19 U-05)", async () => {
     apiMocks.listWatchedFolders.mockResolvedValue([]);
     render(<WorkspaceShell />);
     await openImportDrawer();
-    expect(await screen.findByText("还没有关注的文件夹")).toBeTruthy();
+    const dialog = await screen.findByRole("dialog", { name: "导入素材" });
+    expect(within(dialog).queryByText("还没有关注的文件夹")).toBeNull();
+    expect(within(dialog).queryByText("已关注的文件夹")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "选择文件夹" }).className).toContain("ui-button--primary");
+    expect(dialog.querySelectorAll(".ui-button--primary")).toHaveLength(1);
   });
 
   it("来源分页:工具链缺失时出警告卡,「去设置」打开设置 sheet 而不改 hash", async () => {
@@ -323,6 +341,7 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     render(<WorkspaceShell />);
     await openImportDrawer();
     const list = await screen.findByRole("tablist", { name: "导入分页" });
+    await within(list).findByRole("tab", { name: "任务" });
     await act(async () => {
       within(list).getByRole("tab", { name: "任务" }).click();
       await Promise.resolve();

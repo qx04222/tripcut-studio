@@ -375,7 +375,7 @@ describe("Monitor", () => {
     expect(apiMocks.playerOpen).not.toHaveBeenCalled();
   });
 
-  it("井是 16:9、深底(--well-bg)、内阴影;文件名 chip 与规格 chip 在井内", async () => {
+  it("井是 16:9、深底(--well-bg)、内阴影;R19 V-05 起井内不再有文件名 / 规格 chip(一件事只说一遍)", async () => {
     __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 } });
     render(<Monitor />);
     await screen.findByRole("button", { name: "播放" });
@@ -384,9 +384,9 @@ describe("Monitor", () => {
     expect(POOL_MONITOR_CSS).toMatch(/\.monitor-well\s*\{[^}]*aspect-ratio:\s*16\s*\/\s*9/);
     expect(POOL_MONITOR_CSS).toMatch(/\.monitor-well\s*\{[^}]*var\(--well-bg\)/);
     expect(POOL_MONITOR_CSS).toMatch(/\.monitor-well\s*\{[^}]*var\(--shadow-inset-well\)/);
-    expect(well.querySelector(".monitor-well-name")!.className).toContain("ui-chip");
-    expect(well.querySelector(".monitor-well-name")!.textContent).toBe("clip-9.mov");
-    expect(well.querySelector(".monitor-well-spec")!.textContent).toBe("1080p · 30p · 2.0 KB");
+    expect(well.querySelector(".monitor-well-chips")).toBeNull();
+    expect(well.querySelector(".monitor-well-name")).toBeNull();
+    expect(well.querySelector(".monitor-well-spec")).toBeNull();
     // mpv 的画面节点还是 PlayerOverlay 的 .player-native-slot,viewport 代码盯的就是它。
     expect(well.querySelector(".player-native-slot")).not.toBeNull();
   });
@@ -400,7 +400,9 @@ describe("Monitor", () => {
       expect(button.querySelector("svg"), name).not.toBeNull();
       expect(button.textContent?.replace(/\s/g, "")).not.toMatch(/[▶❚🔇🔊]/u);
     }
-    expect(screen.getByRole("button", { name: "保存片段" }).className).toContain("ui-button--primary");
+    // R19 V-01:「保存片段」降为 secondary(一屏只留顶栏「下一步」一颗实心主按钮)。
+    expect(screen.getByRole("button", { name: "保存片段" }).className).toContain("ui-button--secondary");
+    expect(screen.getByRole("button", { name: "保存片段" }).className).not.toContain("ui-button--primary");
     expect(document.querySelector(".ui-toolbar.ui-toolbar--framed")).not.toBeNull();
     expect(screen.getByRole("toolbar", { name: "走带与打点" })).toBeTruthy();
   });

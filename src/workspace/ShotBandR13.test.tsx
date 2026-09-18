@@ -224,10 +224,10 @@ describe("§4 时间刻度", () => {
     await renderBand();
     const seen = seekEvents();
     const first = screen.getByRole("gridcell", { name: "镜头 1：A.MP4" });
-    vi.spyOn(first, "getBoundingClientRect").mockReturnValue({ left: 100, top: 0, width: 160, height: 130, right: 260, bottom: 130, x: 100, y: 0, toJSON: () => ({}) });
+    vi.spyOn(first, "getBoundingClientRect").mockReturnValue({ left: 100, top: 0, width: BAND_TILE_WIDTH, height: 112, right: 100 + BAND_TILE_WIDTH, bottom: 112, x: 100, y: 0, toJSON: () => ({}) });
     apiMocks.playerStatus.mockResolvedValue({ ...READY, clip_id: 1, pos: 0 });
     await act(async () => {
-      fireEvent.click(first, { clientX: 140, clientY: 10 });
+      fireEvent.click(first, { clientX: 100 + BAND_TILE_WIDTH / 4, clientY: 10 });
     });
     expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 1 });
     await waitFor(() => expect(seen.length).toBe(1));
@@ -285,7 +285,7 @@ describe("§4 拖边裁入出点(只改我们自己的精选段)", () => {
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已裁成 3.9 s"));
   });
 
-  it("拖出点:按下 → 左移 40px(= 段长 4 s 的 1/4 = −1 s)→ 拖动中显示「3 s」→ 松手建新段(2, 0.5, 3.5);顺序写不进去就把新段删掉、不删旧段", async () => {
+  it("拖出点:按下 → 左移 1/4 瓦片宽(= 段长 4 s 的 1/4 = −1 s)→ 拖动中显示「3 s」→ 松手建新段(2, 0.5, 3.5);顺序写不进去就把新段删掉、不删旧段", async () => {
     apiMocks.createSelectSegment.mockResolvedValue({ id: 79, clip_id: 2, in_ticks: 500, out_ticks: 3_500, tb_num: 1, tb_den: 1_000 });
     apiMocks.setStoryOrder.mockRejectedValueOnce(new Error("没有进行中的 Episode"));
     await renderBand();
@@ -293,11 +293,11 @@ describe("§4 拖边裁入出点(只改我们自己的精选段)", () => {
     const handle = within(second).getByRole("button", { name: "调整出点" });
     await act(async () => {
       fireEvent.pointerDown(handle, { clientX: 300, pointerId: 1 });
-      fireEvent.pointerMove(handle, { clientX: 260, pointerId: 1 });
+      fireEvent.pointerMove(handle, { clientX: 300 - BAND_TILE_WIDTH / 4, pointerId: 1 });
     });
     expect(within(second).getByRole("status").textContent).toBe("3 s");
     await act(async () => {
-      fireEvent.pointerUp(handle, { clientX: 260, pointerId: 1 });
+      fireEvent.pointerUp(handle, { clientX: 300 - BAND_TILE_WIDTH / 4, pointerId: 1 });
     });
     await waitFor(() => expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(2, 0.5, 3.5));
     await waitFor(() => expect(apiMocks.deleteSelectSegment).toHaveBeenCalledWith(79));
@@ -359,11 +359,12 @@ describe("§4 / §5 「导入剪映继续剪」常驻右上", () => {
     expect(takePendingExportMode()).toBe("kit");
   });
 
-  it("剪映可用(白名单版本):仍是「导入剪映继续剪」,primary、不带「(待验证)」;点它要求「剪映草稿」模式", async () => {
+  it("剪映可用(白名单版本):仍是「导入剪映继续剪」,secondary(R19 V-01)、不带「(待验证)」;点它要求「剪映草稿」模式", async () => {
     apiMocks.getJianyingAvailability.mockResolvedValue({ installed_version: "11.3.0", supported: true, reason: "" });
     await renderBand();
     const button = await screen.findByRole("button", { name: "导入剪映继续剪" });
-    await waitFor(() => expect(button.className).toContain("ui-button--primary"));
+    await waitFor(() => expect(button.className).toContain("ui-button--secondary"));
+    expect(button.className).not.toContain("ui-button--primary");
     expect(button.textContent).not.toContain("待验证");
     fireEvent.click(button);
     expect(getWorkspaceSnapshot().openDrawer).toBe("deliver");

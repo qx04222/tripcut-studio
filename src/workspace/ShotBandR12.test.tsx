@@ -60,6 +60,7 @@ import { ToastHost } from "./ui/Toast";
 import { __resetToastsForTests } from "./ui/toastStore";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 const MEMORY = {
   used_episode_badges: [],
@@ -141,6 +142,8 @@ const board: Storyboard = {
 };
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetToastsForTests();
   __resetClipsFeedForTests();
   __resetWorkspaceForTests();
@@ -168,10 +171,11 @@ async function renderBand(): Promise<void> {
 }
 
 describe("§2 一键排入", () => {
-  it("工具条「一键排入」是 primary;点它 → arrangeSelectedSegments(append) → toast「已排入 3 段 · 覆盖 2 章」带「撤销」→ undoArrange(batch)", async () => {
+  it("工具条「一键排入」是 secondary(R19 V-01 起栏内没有 primary);点它 → arrangeSelectedSegments(append) → toast「已排入 3 段 · 覆盖 2 章」带「撤销」→ undoArrange(batch)", async () => {
     await renderBand();
     const button = screen.getByRole("button", { name: "一键排入" });
-    expect(button.className).toContain("ui-button--primary");
+    expect(button.className).toContain("ui-button--secondary");
+    expect(button.className).not.toContain("ui-button--primary");
     await act(async () => {
       fireEvent.click(button);
     });
@@ -199,7 +203,7 @@ describe("§2 一键排入", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "一键排入" }));
     });
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("排入没成功:没有进行中的 Episode。先在第 2 步挑几条片段"));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("排入没成功:没有进行中的 Episode。先挑几条片段"));
   });
 });
 
@@ -270,6 +274,8 @@ describe("§2 「这章够了」", () => {
     await renderBand();
     const second = screen.getByRole("rowgroup", { name: "第 2 章 抵达" });
     await waitFor(() => expect(within(second).getByRole("gridcell", { name: "这章够了" })).toBeTruthy());
+    // V-07:视图三芯片收进「{当前} ⌄」触发钮下的浮层,先展开才摸得到。
+    fireEvent.click(screen.getByRole("button", { name: "按章节 ⌄" }));
     fireEvent.click(screen.getByRole("button", { name: "仅缺口" }));
     expect(screen.queryByRole("rowgroup", { name: "第 2 章 抵达" })).toBeNull();
   });

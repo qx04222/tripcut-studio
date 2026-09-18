@@ -1,17 +1,17 @@
 /* 镜头带空章占位瓦片(R9 D2)。band.css 已到 400 行,单独成文件;由 band-inspector.css 桶 @import。 */
 
-/* 空章占位瓦片:与真实瓦片同尺寸的虚线框,一章至少占这一格(R9 D2)。 */
+/* 空章占位瓦片:与真实瓦片同尺寸(R19 V-06:140×112)的虚线框,一章至少占这一格(R9 D2)。 */
 .workspace-shell .shot-band .band-chapter-empty {
   display: flex;
-  flex: 0 0 160px;
+  flex: 0 0 140px;
   flex-direction: column;
   gap: var(--space-1);
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 160px;
-  min-width: 160px;
-  height: 130px;
+  width: 140px;
+  min-width: 140px;
+  height: 112px;
   padding: var(--space-2);
   border: 1px dashed var(--border-hair);
   border-radius: var(--radius-6);

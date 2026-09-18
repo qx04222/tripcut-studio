@@ -88,44 +88,7 @@
   }
 }
 
-/* ---------- 6. 每步首次进入的提示(导航条下方一行,可关) ---------- */
-
-.workspace-shell .pipeline-hint {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  min-height: 32px;
-  padding: var(--space-1) var(--space-4);
-  border-bottom: 1px solid var(--border-hair);
-  background: var(--ok-tint);
-  color: var(--text-primary);
-  font-size: var(--text-12);
-  line-height: var(--lh-12);
-}
-
-.workspace-shell .pipeline-hint-icon {
-  flex: none;
-  color: var(--accent-text);
-}
-
-.workspace-shell .pipeline-hint-text {
-  display: flex;
-  flex: 1;
-  gap: var(--space-2);
-  min-width: 0;
-  margin: 0;
-}
-
-.workspace-shell .pipeline-hint-text strong {
-  color: var(--accent-text);
-}
-
-.workspace-shell .pipeline-hint-text span {
-  overflow: hidden;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
+/* ---------- 6. 每步首次进入的提示:R19 V-02 删了这一行(文案进顶栏「下一步」tooltip),样式随之清空 ---------- */
 
 /* ---------- 7. 导出抽屉:第 ④ 步头、三枚模式 chip 的提示、「也顺便…」 ---------- */
 

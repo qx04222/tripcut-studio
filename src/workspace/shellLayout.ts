@@ -8,34 +8,41 @@ import { dispatchWorkspace, getWorkspaceSnapshot, useWorkspace } from "./Workspa
  * 守 400 行;WorkspaceShell 原样 re-export 三个布局符号,旧测试的导入路径不变。
  */
 
-/** 检查器自动折叠的窗宽阈值(R10 U-04):低于它折成竖条,回到它以上自动展开。 */
-export const INSPECTOR_AUTO_COLLAPSE_WIDTH = 1400;
+/**
+ * R19 V-11:壳的唯一断点(tokens.css `--bp-compact` 同值;matchMedia 读不到 CSS 变量,所以这里再写一份,
+ * tokens.test / WorkspaceShell.test 钉住两边相等)。<1366 = 紧凑档:顶栏四步折成胶囊、媒体池最多两列。
+ */
+export const BP_COMPACT = 1366;
+export const COMPACT_WIDE_QUERY = `(min-width: ${BP_COMPACT}px)`;
+export function isCompactWidth(windowWidth: number): boolean {
+  return windowWidth < BP_COMPACT;
+}
 
-/** 窄窗收缩顺序的纯函数:先折检查器,再折媒体池,中栏永不折(规格 §2)。 */
-export function autoCollapseFor(windowWidth: number): { pool: boolean; inspector: boolean } {
-  // 1400 以下先让检查器让位(折成 44px 竖条),低于 1040 连媒体池也收起来,
-  // 好让中栏永远保住它的 min 520。阈值同时是「折」和「自动恢复」的分界,没有迟滞——
-  // 用户在窄窗里手动展开的检查器由 store 的 auto 位清零来保住,不靠迟滞。
-  return { pool: windowWidth < 1040, inspector: windowWidth < INSPECTOR_AUTO_COLLAPSE_WIDTH };
+/**
+ * 窄窗收缩的纯函数:只剩媒体池一档,中栏永不折(规格 §2)。
+ * R19 V-04 起检查器是监视器栏内的滑出层,不占横向空间,也就没有「窄窗自动折叠」这回事
+ * (旧的 1400 自动折叠阈值常量与竖条一起删了)。
+ */
+export function autoCollapseFor(windowWidth: number): { pool: boolean } {
+  // 低于 1040 把媒体池收成 44px 竖条,好让中栏永远保住它的 min 520。阈值同时是「折」和
+  // 「自动恢复」的分界,没有迟滞——用户在窄窗里手动展开的池由 store 的 auto 位清零来保住。
+  return { pool: windowWidth < 1040 };
 }
 
 /**
  * 两次窗宽之间该派发什么(纯函数,U-04 的回归测试对着它写):
- * 只在**跨过阈值**时改 auto 位。窄窗里用户点了「展开检查器」之后再拖一拖窗口
+ * 只在**跨过阈值**时改 auto 位。窄窗里用户点了「展开媒体池」之后再拖一拖窗口
  * (仍在阈值以下)不会把它重新折回去;放大到阈值以上才清 auto 位,再缩回去才重新折。
  * `previous === null` 是挂载:按当前窗宽一次到位(本来就开在 900px 的窗口等不到 resize)。
  */
 export function autoCollapseTransition(
   previous: number | null,
   next: number,
-): { pool?: boolean; inspector?: boolean } | null {
+): { pool?: boolean } | null {
   const target = autoCollapseFor(next);
   if (previous === null) return target;
   const before = autoCollapseFor(previous);
-  const patch: { pool?: boolean; inspector?: boolean } = {};
-  if (before.pool !== target.pool) patch.pool = target.pool;
-  if (before.inspector !== target.inspector) patch.inspector = target.inspector;
-  return Object.keys(patch).length === 0 ? null : patch;
+  return before.pool === target.pool ? null : { pool: target.pool };
 }
 
 /**

@@ -265,7 +265,64 @@ describe("workspace/*.css(43 个车道文件)门禁扩围(V-01)", () => {
   });
   it("transition 必须含 var(--motion-*)", () => { expect(totals.transition).toEqual([]); });
   it("z-index 必须是 var(--z-*)(auto 允许——它是复位不是分配层级)", () => { expect(totals.zIndex).toEqual([]); });
-  it("!important 计数只降不升:钉在 5(R18 前的基线;下轮才拆 monitor-r10 那两条焦点环覆盖)", () => {
-    expect(totals.important).toBeLessThanOrEqual(5);
+  it("R19 tokens-lite · V-10:!important 只降不升,基线 5 → 1(拆掉 monitor-r10 四条焦点环覆盖与 timeline-r13 那条;留下的唯一一条是全局 prefers-reduced-motion)", () => {
+    expect(totals.important).toBeLessThanOrEqual(1);
+  });
+  it("R19 tokens-lite · V-10:每条 animation 声明的时长都引 --motion-* 令牌(4 个 keyframes 的调用点不再写 220ms / 320ms 字面量)", () => {
+    const bad: string[] = [];
+    for (const f of WORKSPACE_LANE_FILES) {
+      postcss.parse(readLane(f)).walkDecls(/^animation(-duration)?$/, (d) => {
+        const v = d.value.trim();
+        if (v === "none") return;
+        if (!v.includes("var(--motion-")) bad.push(`${f}:${d.source?.start?.line ?? "?"} ${v}`);
+      });
+    }
+    expect(bad).toEqual([]);
+  });
+  it("R19 tokens-lite · V-10:全局 prefers-reduced-motion 规则存在于 shell-r19.css,且只用一条 !important 把 transition 时长压到 0.01ms", () => {
+    const css = readLane("shell-r19.css");
+    const root = postcss.parse(css);
+    let found = false;
+    let importantInside = 0;
+    root.walkAtRules("media", (at) => {
+      if (!/prefers-reduced-motion:\s*reduce/.test(at.params)) return;
+      at.walkRules((rule) => {
+        if (!/^\*|,\s*\*|\*::/.test(rule.selector.trim()) && rule.selector.trim() !== "*") return;
+        let hasTransition = false;
+        rule.walkDecls((d) => {
+          if (d.important) importantInside++;
+          if (d.prop === "transition-duration" && d.important && d.value.includes("0.01ms")) hasTransition = true;
+        });
+        if (hasTransition) found = true;
+      });
+    });
+    expect(found, "shell-r19.css 里要有 @media (prefers-reduced-motion: reduce) { * { transition-duration: 0.01ms !important } }").toBe(true);
+    expect(importantInside).toBe(1);
+  });
+});
+
+describe("R19 tokens-lite · V-10 动效令牌", () => {
+  const names = declared(TOKENS);
+  it("--motion-exit 存在,且比 --motion-slow 短(进比出慢:出场 120ms ease-in)", () => {
+    expect(names.has("--motion-exit")).toBe(true);
+    const values: Record<string, string> = {};
+    postcss.parse(TOKENS).walkDecls(/^--motion-(exit|slow)$/, (d) => { values[d.prop] = d.value; });
+    const ms = (v: string) => Number(/^(\d+)ms/.exec(v)?.[1] ?? NaN);
+    expect(ms(values["--motion-exit"]!)).toBe(120);
+    expect(ms(values["--motion-exit"]!)).toBeLessThan(ms(values["--motion-slow"]!));
+  });
+  it("R19 V-11:--bp-compact 是 1366px,且与 shellLayout.ts 的 BP_COMPACT 同值(matchMedia 读不到变量,两份必须钉在一起)", () => {
+    let value = "";
+    postcss.parse(TOKENS).walkDecls("--bp-compact", (d) => { value = d.value; });
+    expect(value).toBe("1366px");
+    const layout = readFileSync(resolve(process.cwd(), "src/workspace/shellLayout.ts"), "utf8");
+    expect(layout).toMatch(/export const BP_COMPACT = 1366;/);
+  });
+  it("--motion-exit 只声明在 :root(主题块不重定义)", () => {
+    const root = postcss.parse(TOKENS);
+    root.walkRules((rule) => {
+      if (rule.selector === ":root") return;
+      rule.walkDecls("--motion-exit", () => { throw new Error(`${rule.selector} 不应重定义 --motion-exit`); });
+    });
   });
 });

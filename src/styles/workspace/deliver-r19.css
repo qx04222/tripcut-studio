@@ -1,0 +1,66 @@
+/*
+ * R19 车道 deliver(U-06/P-04,规格 §3 deliver 行,业主拍板 §7 Q-6):导出抽屉首屏三张大卡
+ * 「交给剪映 / 导出视频文件 / 整包交付」。既有四模式 chip 选择器(`.deliver-mode`,见
+ * deliver-drawer.css)不动——它现在只在「更多方式 ⌄」展开后出现。这里只加三卡自己的样式,
+ * 颜色/圆角/间距全部走 tokens.css,不新增字面量。
+ */
+
+.deliver-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.deliver-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-10);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+  text-align: left;
+  cursor: pointer;
+}
+
+.deliver-card:hover,
+.deliver-card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-accent-hair);
+}
+
+.deliver-card-title {
+  font-size: var(--text-15);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.deliver-card-hint {
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  color: var(--text-muted);
+}
+
+.deliver-cards-downgrade {
+  margin: 0;
+  padding: 0 var(--space-1);
+  font-size: var(--text-12);
+  color: var(--text-secondary);
+}
+
+.deliver-cards-more {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--text-13);
+  cursor: pointer;
+}
+
+.deliver-cards-more:hover,
+.deliver-cards-more:focus-visible {
+  color: var(--accent-text);
+}

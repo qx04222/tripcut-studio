@@ -2380,3 +2380,11 @@ HANDLERS.inspect_paths = ({ paths }) =>
   (paths as string[]).map((path) => ({ path, state: "ok" as const, volume: null }));
 HANDLERS.download_cloud_file = () => undefined;
 (MOCK_COMMANDS as string[]).push("inspect_paths", "download_cloud_file");
+
+// ---------------------------------------------------------------------------
+// R19 flow 车道:P-05「显示全部功能」默认关。截图剧本里描述全功能形态的步骤(检查器技术检查段、
+// 设置六分区、快捷键分区)用 `?showall=1` 把开关预置为开;默认态另有一张 19b。只追加不改上面的表。
+// ---------------------------------------------------------------------------
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("showall")) {
+  state.settings["ui.show_all_features"] = "true";
+}

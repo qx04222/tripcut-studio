@@ -20,7 +20,7 @@ vi.mock("./DeliverDrawer", () => {
   return { DeliverDrawer: () => null };
 });
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WorkspaceShell, autoCollapseFor, autoCollapseTransition, bandMinHeight } from "./WorkspaceShell";
 import { bandMinHeight as modelBandMinHeight } from "./shotBandModel";
@@ -34,6 +34,7 @@ import {
 } from "./WorkspaceStore";
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import type { ClipListItem } from "../api";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 /** 挂壳用的最小素材夹具(字段齐全,不走 as unknown)。 */
 function shellClip(id: number): ClipListItem {
@@ -65,6 +66,8 @@ function resizeTo(width: number, height = 900): void {
 }
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   resizeTo(1440);
   __resetWorkspaceForTests();
 });
@@ -92,34 +95,24 @@ describe("工作区骨架", () => {
   it("两条分隔条是 ARIA separator 且带 aria-valuenow", () => {
     render(<WorkspaceShell />);
     const separators = screen.getAllByRole("separator");
-    expect(separators.length).toBeGreaterThanOrEqual(3); // 左、右、中栏上下
+    expect(separators.length).toBeGreaterThanOrEqual(2); // 池 | 中栏,上层 / 带(R19 起检查器不是 Panel,没有第三条)
     for (const sep of separators) expect(sep.getAttribute("aria-valuenow")).not.toBeNull();
   });
-  it("收缩顺序:先检查器,再媒体池,中栏永不折", () => {
-    expect(autoCollapseFor(1400)).toEqual({ pool: false, inspector: false });
-    expect(autoCollapseFor(1160)).toEqual({ pool: false, inspector: true });
-    expect(autoCollapseFor(900)).toEqual({ pool: true, inspector: true });
+  it("收缩:只剩媒体池一档(<1040),中栏永不折;检查器 R19 起是滑出层,不参与收缩", () => {
+    expect(autoCollapseFor(1400)).toEqual({ pool: false });
+    expect(autoCollapseFor(1160)).toEqual({ pool: false });
+    expect(autoCollapseFor(900)).toEqual({ pool: true });
+    // 旧的 1400 阈值与竖条一起删了(V-04):1399 / 1280 都不再折任何东西。
+    expect(autoCollapseFor(1399)).toEqual({ pool: false });
+    expect(autoCollapseFor(1280)).toEqual({ pool: false });
   });
-  it("U-04:检查器阈值 1400——1399 折、1400 恢复;1512 与 1704 都不折", () => {
-    expect(autoCollapseFor(1399).inspector).toBe(true);
-    expect(autoCollapseFor(1280).inspector).toBe(true);
-    expect(autoCollapseFor(1400).inspector).toBe(false);
-    expect(autoCollapseFor(1512).inspector).toBe(false);
-    expect(autoCollapseFor(1704).inspector).toBe(false);
-  });
-  it("折叠后剩 44px 竖条,带「展开检查器」按钮", () => {
-    __resetWorkspaceForTests({ inspectorCollapsed: true });
+  it("变窄不再折检查器(它不占横向空间),1040 以下折媒体池,中栏永不折", () => {
     render(<WorkspaceShell />);
-    expect(screen.getByRole("button", { name: "展开检查器" })).toBeTruthy();
-  });
-  it("变窄先折检查器,再折媒体池,中栏永不折", () => {
-    render(<WorkspaceShell />);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(false);
     expect(getWorkspaceSnapshot().poolCollapsed).toBe(false);
 
     resizeTo(1160);
-    expect(isPaneCollapsed(getWorkspaceSnapshot(), "inspector")).toBe(true);
     expect(isPaneCollapsed(getWorkspaceSnapshot(), "pool")).toBe(false);
+    expect(screen.getByRole("region", { name: "检查器" })).toBeTruthy();
 
     resizeTo(900);
     expect(isPaneCollapsed(getWorkspaceSnapshot(), "pool")).toBe(true);
@@ -128,21 +121,20 @@ describe("工作区骨架", () => {
     expect(screen.getByRole("region", { name: "镜头带" })).toBeTruthy();
   });
 
-  it("挂载在窄窗上时当场就按顺序折,不用等一次 resize", () => {
+  it("挂载在窄窗上时当场就折媒体池,不用等一次 resize", () => {
     resizeTo(900);
     __resetWorkspaceForTests();
     render(<WorkspaceShell />);
     expect(isPaneCollapsed(getWorkspaceSnapshot(), "pool")).toBe(true);
-    expect(isPaneCollapsed(getWorkspaceSnapshot(), "inspector")).toBe(true);
     // 自动折叠不是用户偏好:手动位不动,也就不会被落盘。
     expect(getWorkspaceSnapshot().poolCollapsed).toBe(false);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(false);
   });
 
-  it("折叠竖条宽 44px,带图标与「展开检查器」/「展开媒体池」按钮", () => {
-    __resetWorkspaceForTests({ poolCollapsed: true, inspectorCollapsed: true });
+  it("折叠竖条宽 44px,带图标与「展开媒体池」按钮(检查器没有竖条了)", () => {
+    __resetWorkspaceForTests({ poolCollapsed: true });
     render(<WorkspaceShell />);
-    for (const name of ["展开媒体池", "展开检查器"]) {
+    expect(screen.queryByRole("button", { name: "展开检查器" })).toBeNull();
+    for (const name of ["展开媒体池"]) {
       const button = screen.getByRole("button", { name });
       expect(button.closest(".workspace-rail")).not.toBeNull();
       // 图标只给眼睛看,AX 名里一个字都不许多出来。
@@ -167,10 +159,10 @@ describe("工作区骨架", () => {
     expect(/\.workspace-pane\s*\{[^}]*overflow:\s*auto/.test(WORKSPACE_CSS)).toBe(true);
   });
 
-  it("镜头带栏 min 高来自 shotBandModel(故事 184 = 内容高,附属 284),壳不再自己算一份", () => {
-    expect(bandMinHeight("story")).toBe(184);
+  it("镜头带栏 min 高来自 shotBandModel(故事 166 = 内容高,附属 266;R19 V-06 瓦片 112 高),壳不再自己算一份", () => {
+    expect(bandMinHeight("story")).toBe(166);
     for (const mode of ["music", "journey", "destination", "template"] as const) {
-      expect(bandMinHeight(mode)).toBe(284);
+      expect(bandMinHeight(mode)).toBe(266);
     }
     expect(bandMinHeight).toBe(modelBandMinHeight);
   });
@@ -181,99 +173,122 @@ describe("工作区骨架", () => {
   });
 });
 
-describe("U-04 检查器折叠状态机:自动折叠与手动折叠分开", () => {
-  const inspectorVisible = () => screen.queryByRole("region", { name: "检查器" }) !== null;
-  const railVisible = () => screen.queryByRole("button", { name: "展开检查器" }) !== null;
-  /** 走查里的「展开」:竖条在就点它;检查器已经在了就什么都不做(不是 toggle)。 */
-  const expandIfRail = () => {
-    const rail = screen.queryByRole("button", { name: "展开检查器" });
-    if (rail) act(() => rail.click());
-  };
+describe("R19 shell · V-04 检查器滑出层(取代 U-04 折叠状态机)", () => {
+  // 选中后检查器会挂起来拉 AI 描述;通用替身默认 resolve undefined,那里按 null 处理才不炸。
+  beforeEach(() => apiMocks.getAiDescription.mockResolvedValue(null));
+  const layer = () => screen.getByRole("region", { name: "检查器" });
+  const isOpen = () => layer().classList.contains("is-open");
+  const press = (init: KeyboardEventInit) => act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
+  });
 
-  it("跨阈值才派发:1512→1280 折、1280→1200 不再派发、→1704 恢复、挂载一次到位", () => {
-    expect(autoCollapseTransition(null, 1280)).toEqual({ pool: false, inspector: true });
-    expect(autoCollapseTransition(1512, 1280)).toEqual({ inspector: true });
+  it("跨阈值才派发(只剩媒体池):1512→1280 不派发、→900 折池、挂载一次到位", () => {
+    expect(autoCollapseTransition(null, 1280)).toEqual({ pool: false });
+    expect(autoCollapseTransition(1512, 1280)).toBeNull();
     expect(autoCollapseTransition(1280, 1200)).toBeNull();
-    expect(autoCollapseTransition(1200, 1704)).toEqual({ inspector: false });
-    expect(autoCollapseTransition(1704, 1512)).toBeNull();
     expect(autoCollapseTransition(1200, 900)).toEqual({ pool: true });
+    expect(autoCollapseTransition(900, 1704)).toEqual({ pool: false });
   });
 
-  it("自动折叠不落盘:set-auto-collapse 一对 ui.* 键值都不产出;手动折叠才落", () => {
+  it("自动折叠不落盘;📌 钉住是偏好(ui.inspector.pinned),收起是会话态(不落盘)", () => {
     const base = getWorkspaceSnapshot();
-    const auto = workspaceReducer(base, { type: "set-auto-collapse", inspector: true });
+    const auto = workspaceReducer(base, { type: "set-auto-collapse", pool: true });
     expect(persistedPairs(base, auto)).toEqual([]);
-    const manual = workspaceReducer(base, { type: "toggle-pane", pane: "inspector" });
-    expect(persistedPairs(base, manual)).toEqual([["ui.pane.inspector_collapsed", "true"]]);
+    const pinned = workspaceReducer(base, { type: "set-inspector-pinned", pinned: true });
+    expect(persistedPairs(base, pinned)).toEqual([["ui.inspector.pinned", "true"]]);
+    const withSelection = { ...base, selection: { kind: "clip" as const, clipId: 3 } };
+    const dismissed = workspaceReducer(withSelection, { type: "toggle-pane", pane: "inspector" });
+    expect(dismissed.inspectorDismissed).toBe(true);
+    expect(persistedPairs(withSelection, dismissed)).toEqual([]);
   });
 
-  it("走查序列 1512→1280→1704→展开→1512:检查器每一步该在就在,末了仍可见且是整栏 Panel", () => {
-    resizeTo(1512);
+  it("层挂在中栏里、不是 Panel:上层只有 池 / 中栏 两个 Panel,没有 inspector-pane / inspector-rail,也没有「调整检查器宽度」", () => {
     render(<WorkspaceShell />);
-    expect(inspectorVisible()).toBe(true);
-
-    resizeTo(1280);
-    expect(railVisible()).toBe(true);
-    expect(inspectorVisible()).toBe(false);
-
-    resizeTo(1704);
-    // 放大就自动展开——不用等用户点竖条(走查 75 那张图里它没展开)。
-    expect(inspectorVisible()).toBe(true);
-    expect(railVisible()).toBe(false);
-
-    expandIfRail();
-    resizeTo(1512);
-    expect(inspectorVisible()).toBe(true);
-    expect(railVisible()).toBe(false);
-    // 整栏是自己的 Panel(id 不同于竖条),minSize 280 不是竖条的 44——真机上「整个消失」
-    // 正是同一个 Panel 实例带着 44px 改成 min 280 + collapsible 后被库塌成 0。
-    const pane = document.getElementById("inspector-pane");
-    expect(pane).not.toBeNull();
+    const center = document.querySelector<HTMLElement>(".workspace-center")!;
+    expect(center.contains(layer())).toBe(true);
+    expect(layer().closest("[data-panel]")).toBe(center.closest("[data-panel]")); // 同一个 Panel(中栏)里,不是自己的 Panel
+    expect(document.querySelectorAll(".workspace-upper-row > [data-panel]")).toHaveLength(2);
+    expect(document.getElementById("inspector-pane")).toBeNull();
     expect(document.getElementById("inspector-rail")).toBeNull();
-    expect(pane?.contains(screen.getByRole("region", { name: "检查器" }))).toBe(true);
-    // 用户全程没折过:手动位从头到尾是 false。
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(false);
+    expect(screen.queryByRole("separator", { name: "调整检查器宽度" })).toBeNull();
   });
 
-  it("窄窗里手动展开后:再拖窗口(仍窄)不重新折;放大再缩回才重新折", () => {
-    resizeTo(1280);
+  it("无选中时 region「检查器」在(冒烟锚点)但收着、没有内容;选中即出(is-open + 内容);Esc 收;再选中又出", () => {
     render(<WorkspaceShell />);
-    expect(railVisible()).toBe(true);
+    expect(isOpen()).toBe(false);
+    expect(layer().querySelector(".inspector")).toBeNull();
 
-    expandIfRail();
-    expect(inspectorVisible()).toBe(true);
-    resizeTo(1200);
-    expect(inspectorVisible()).toBe(true);
-    resizeTo(1704);
-    expect(inspectorVisible()).toBe(true);
-    resizeTo(1280);
-    expect(railVisible()).toBe(true);
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 3 }));
+    expect(isOpen()).toBe(true);
+    expect(layer().querySelector(".inspector")).not.toBeNull();
+
+    press({ key: "Escape", code: "Escape" });
+    expect(isOpen()).toBe(false);
+    expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 3 }); // 收层不清选中
+    expect(layer().querySelector(".inspector")).toBeNull();
+
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 4 }));
+    expect(isOpen()).toBe(true);
   });
 
-  it("手动折叠是用户偏好:窗口放大不会替用户展开", () => {
-    resizeTo(1512);
+  it("点空白收:选中后在监视器栏里(层之外)按下指针 → 收起;在层内按下不收", () => {
     render(<WorkspaceShell />);
-    act(() => dispatchWorkspace({ type: "toggle-pane", pane: "inspector" }));
-    expect(railVisible()).toBe(true);
-    resizeTo(1704);
-    expect(railVisible()).toBe(true);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(true);
-  });
-
-  it("⌘2 在自动折叠状态下也能把检查器找回来", () => {
-    resizeTo(1280);
-    render(<WorkspaceShell />);
-    expect(railVisible()).toBe(true);
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 3 }));
+    expect(isOpen()).toBe(true);
+    const monitor = screen.getByRole("region", { name: "预览监视器" });
     act(() => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "2", code: "Digit2", metaKey: true, bubbles: true }));
+      monitor.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     });
-    expect(inspectorVisible()).toBe(true);
-    // 再按一次是手动折叠。
+    expect(isOpen()).toBe(false);
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 3 }));
     act(() => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "2", code: "Digit2", metaKey: true, bubbles: true }));
+      layer().dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     });
-    expect(railVisible()).toBe(true);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(true);
+    expect(isOpen()).toBe(true);
+  });
+
+  it("📌 钉住:标题条「钉住检查器」按下 → is-pinned、Esc 不收、清掉选中也常驻;再点取消", () => {
+    render(<WorkspaceShell />);
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 3 }));
+    const pin = screen.getByRole("button", { name: "钉住检查器" });
+    expect(pin.getAttribute("aria-pressed")).toBe("false");
+    act(() => pin.click());
+    expect(screen.getByRole("button", { name: "钉住检查器" }).getAttribute("aria-pressed")).toBe("true");
+    expect(layer().classList.contains("is-pinned")).toBe(true);
+    press({ key: "Escape", code: "Escape" });
+    expect(isOpen()).toBe(true);
+    act(() => dispatchWorkspace({ type: "clear-selection" }));
+    expect(isOpen()).toBe(true);
+    act(() => screen.getByRole("button", { name: "钉住检查器" }).click());
+    expect(layer().classList.contains("is-pinned")).toBe(false);
+    expect(isOpen()).toBe(false); // 没选中、没钉住 → 收着
+  });
+
+  it("⌘2 收起 / 找回:开着就收;收着且没选中 → 钉住找回(空态常驻);「收起检查器」按钮同义", () => {
+    render(<WorkspaceShell />);
+    act(() => dispatchWorkspace({ type: "select-clip", clipId: 3 }));
+    press({ key: "2", code: "Digit2", metaKey: true });
+    expect(isOpen()).toBe(false);
+    press({ key: "2", code: "Digit2", metaKey: true });
+    expect(isOpen()).toBe(true);
+    act(() => screen.getByRole("button", { name: "收起检查器" }).click());
+    expect(isOpen()).toBe(false);
+    act(() => dispatchWorkspace({ type: "clear-selection" }));
+    press({ key: "2", code: "Digit2", metaKey: true });
+    expect(isOpen()).toBe(true);
+    expect(getWorkspaceSnapshot().inspectorPinned).toBe(true);
+  });
+
+  it("旧机制真的删了:没有 InspectorCollapsed 模块与 INSPECTOR_AUTO_COLLAPSE_WIDTH 导出;层的 CSS 是 absolute + 令牌动效", () => {
+    expect(existsSync(resolve(process.cwd(), "src/workspace/InspectorCollapsed.tsx"))).toBe(false);
+    const shellModule = readFileSync(resolve(process.cwd(), "src/workspace/WorkspaceShell.tsx"), "utf8");
+    expect(shellModule).not.toContain("INSPECTOR_AUTO_COLLAPSE_WIDTH");
+    const layout = readFileSync(resolve(process.cwd(), "src/workspace/shellLayout.ts"), "utf8");
+    expect(layout).not.toContain("INSPECTOR_AUTO_COLLAPSE_WIDTH");
+    const css = readFileSync(resolve(process.cwd(), "src/styles/workspace/shell-r19.css"), "utf8");
+    expect(css).toMatch(/\.workspace-inspector-layer\s*\{[^}]*position:\s*absolute/);
+    expect(css).toMatch(/\.workspace-inspector-layer\.is-open\s*\{[^}]*var\(--motion-slow\)/);
+    expect(css).toMatch(/\.workspace-inspector-layer\s*\{[^}]*var\(--motion-exit\)/);
   });
 });
 
@@ -382,12 +397,14 @@ describe("R-06:换集清选中", () => {
 });
 
 describe("R9 主屏 chrome(Task 2)", () => {
-  it("顶栏三个按钮是套件按钮:导入素材 secondary、流水线下一步 primary、设置 icon,都带图标", () => {
+  it("顶栏三个按钮是套件按钮:导入素材 secondary、流水线下一步 primary(空库时首页盖着,它让位成 secondary)、设置 icon,都带图标", () => {
     render(<WorkspaceShell />);
     const importButton = screen.getByRole("button", { name: "导入素材" });
     expect(importButton.className).toContain("ui-button--secondary");
     expect(importButton.querySelector("svg")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "流水线下一步" }).className).toContain("ui-button--primary");
+    // R19 V-01:空库 → 首页自动盖上,首页的「开始一个新旅程」是那一颗实心主按钮,顶栏「下一步」降 secondary;
+    // 有素材(首页收起)时它是 primary —— 见「每屏一个主动作」那组。
+    expect(screen.getByRole("button", { name: "流水线下一步" }).className).toContain("ui-button--secondary");
     expect(screen.getByRole("button", { name: "设置" }).className).toContain("ui-button--icon");
     expect(screen.getByRole("button", { name: "切换集" }).querySelector("svg")).not.toBeNull();
   });
@@ -420,10 +437,10 @@ describe("R9 主屏 chrome(Task 2)", () => {
       if (/^\.workspace-(?!shell )/.test(line)) throw new Error(`chrome.css 选择器缺 .workspace-shell 前缀: ${line}`);
     }
   });
-  it("三条分隔条各有一个可见抓手,宽 6px 由令牌控制", () => {
+  it("两条分隔条各有一个可见抓手,宽 6px 由令牌控制(R19:检查器不是 Panel,第三条随之去掉)", () => {
     render(<WorkspaceShell />);
     const separators = screen.getAllByRole("separator");
-    expect(separators).toHaveLength(3);
+    expect(separators).toHaveLength(2);
     for (const sep of separators) {
       expect(sep.querySelector(".workspace-handle-grip")).not.toBeNull();
       expect(sep.querySelector(".workspace-handle-grip")?.getAttribute("aria-hidden")).toBe("true");
@@ -538,5 +555,137 @@ describe("R11 简化专项 #4:每屏一个主动作", () => {
     const counts = surfaces.map(([name, node]) => [name, node.querySelectorAll(".ui-button--primary").length] as const);
     for (const [name, count] of counts) expect(count, `${name} 有 ${count} 个 primary`).toBeLessThanOrEqual(1);
     expect(counts.find(([name]) => name === "顶栏")![1]).toBe(1);
+    // R19 V-01:整屏(不只是每栏)最多一颗,且就是顶栏「下一步」。
+    const all = document.querySelectorAll(".ui-button--primary:not([hidden])");
+    expect(all.length, [...all].map((n) => n.getAttribute("aria-label") ?? n.textContent).join(" | ")).toBe(1);
+    expect(all[0]!.getAttribute("aria-label")).toBe("流水线下一步");
+  });
+
+  it("R19 V-01:选中空槽位(检查器缺口分支「生成候选」)与无选中时,整屏实心主按钮同样 ≤ 1", async () => {
+    apiMocks.getAiDescription.mockResolvedValue(null);
+    apiMocks.getClipsRevision.mockResolvedValue("rev-primary-2" as never);
+    apiMocks.listClips.mockResolvedValue([shellClip(3)]);
+    __resetWorkspaceForTests({ selection: { kind: "slot", chapterId: 1, slot: "establishing" } });
+    render(<WorkspaceShell />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const list = () => [...document.querySelectorAll(".ui-button--primary:not([hidden])")].map((n) => n.getAttribute("aria-label") ?? n.textContent).join(" | ");
+    expect(document.querySelectorAll(".ui-button--primary:not([hidden])").length, list()).toBeLessThanOrEqual(1);
+    act(() => dispatchWorkspace({ type: "clear-selection" }));
+    expect(document.querySelectorAll(".ui-button--primary:not([hidden])").length, list()).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("R19 shell · V-03 镜头带通栏(方案 B 两层)", () => {
+  it("外层 Group 是竖向(上层 / 镜头带 / 状态条),镜头带不在上层里、媒体池与监视器在上层里横排", () => {
+    render(<WorkspaceShell />);
+    const columns = document.querySelector<HTMLElement>(".workspace-columns")!;
+    expect(columns.style.flexDirection).toBe("column");
+    const upper = columns.querySelector<HTMLElement>(".workspace-upper")!;
+    expect(upper).not.toBeNull();
+    const upperRow = upper.querySelector<HTMLElement>("[data-group]")!;
+    expect(upperRow.style.flexDirection).toBe("row");
+    const pool = screen.getByRole("region", { name: "媒体池" });
+    const monitor = screen.getByRole("region", { name: "预览监视器" });
+    const band = screen.getByRole("region", { name: "镜头带" });
+    expect(upper.contains(pool)).toBe(true);
+    expect(upper.contains(monitor)).toBe(true);
+    expect(upper.contains(band)).toBe(false);
+    // 带是外层竖向 Group 的直接子 Panel:通栏,不被池 / 检查器夹着。
+    expect(band.closest("[data-panel]")!.parentElement).toBe(columns);
+  });
+  it("三条分隔条的 AX 名不变(媒体池宽度 / 监视器高度 / 检查器宽度),监视器高度那条现在切的是上层与带", () => {
+    render(<WorkspaceShell />);
+    const names = screen.getAllByRole("separator").map((sep) => sep.getAttribute("aria-label"));
+    expect(names).toContain("调整媒体池宽度");
+    expect(names).toContain("调整监视器高度");
+    const bandSep = screen.getByRole("separator", { name: "调整监视器高度" });
+    expect(bandSep.parentElement).toBe(document.querySelector(".workspace-columns"));
+  });
+});
+
+describe("R19 shell · V-02 顶部只有一行", () => {
+  beforeEach(() => apiMocks.getAiDescription.mockResolvedValue(null));
+  it("没有「第 n 步提示」status 条;提示句进了顶栏「下一步」的 title;PipelineHint 模块已删", async () => {
+    apiMocks.getSettings.mockResolvedValue({}); // 四把 pipeline.hint_seen.* 都没看过 —— 0.9.1 会出提示条
+    apiMocks.getClipsRevision.mockResolvedValue("rev-v02" as never);
+    apiMocks.listClips.mockResolvedValue([shellClip(1)]);
+    render(<WorkspaceShell />);
+    await screen.findAllByRole("gridcell");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("status", { name: /^第 \d 步提示$/ })).toBeNull();
+    expect(document.querySelector(".pipeline-hint")).toBeNull();
+    const next = screen.getByRole("button", { name: "流水线下一步" });
+    const { PIPELINE_HINTS } = await import("./pipelineHints");
+    const step = Number(next.getAttribute("data-step")) as 1 | 2 | 3 | 4;
+    expect(next.getAttribute("title")).toContain(PIPELINE_HINTS[step]);
+    expect(existsSync(resolve(process.cwd(), "src/workspace/PipelineHint.tsx"))).toBe(false);
+  });
+  it("工具链横幅不再是顶部一行:壳里没有 .toolchain-banner;缺 ffmpeg 时 ToolchainBanner 只发布状态,红点由 StatusStrip 订阅后渲染一处", async () => {
+    const healthy = await apiMocks.getSettingsStatus();
+    const missingTool = { configured_path: "", resolved_path: "", available: false, version: null, note: "not found" };
+    apiMocks.getSettingsStatus.mockResolvedValue({ ...healthy, ffmpeg: missingTool, ffprobe: missingTool });
+    const { useToolchainStatus, TOOLCHAIN_STATUS_EVENT } = await import("./ToolchainBanner");
+    const heard: unknown[] = [];
+    window.addEventListener(TOOLCHAIN_STATUS_EVENT, (event) => heard.push((event as CustomEvent).detail));
+    render(<WorkspaceShell />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".toolchain-banner")).toBeNull();
+    expect(screen.queryByRole("region", { name: "视频处理组件缺失" })).toBeNull();
+    expect(heard.at(-1)).toEqual({ missing: true, text: "视频处理组件缺失" });
+    // R19 接线:红点只渲染一处 —— StatusStrip 左端的按钮(band V-08 形态,在 status「后台状态」之内),
+    // 它订阅的是壳里 ToolchainStatusProbe 发布的这同一份状态;壳里不再另画一颗。
+    const dot = await screen.findByRole("button", { name: "视频处理组件缺失" });
+    expect(dot.closest(".workspace-status-row")).not.toBeNull();
+    expect(dot.closest('[aria-label="后台状态"]')).not.toBeNull();
+    expect(dot.querySelector(".workspace-status-dot")).not.toBeNull();
+    expect(screen.getAllByText("视频处理组件缺失")).toHaveLength(1);
+    // 同一份状态谁都能订阅。
+    function Probe() {
+      const status = useToolchainStatus();
+      return <span data-testid="probe">{status.missing ? status.text : "ok"}</span>;
+    }
+    render(<Probe />);
+    expect(screen.getByTestId("probe").textContent).toBe("视频处理组件缺失");
+  });
+});
+
+describe("R19 shell · V-11 单一断点 --bp-compact: 1366px", () => {
+  it("tokens.css 声明 --bp-compact: 1366px,shellLayout 的 BP_COMPACT 与它同值;三处调用点不再有裸 1400 / 1440", async () => {
+    const tokens = readFileSync(resolve(process.cwd(), "src/styles/tokens.css"), "utf8");
+    expect(tokens).toMatch(/--bp-compact:\s*1366px;/);
+    const { BP_COMPACT, COMPACT_WIDE_QUERY, isCompactWidth } = await import("./shellLayout");
+    expect(BP_COMPACT).toBe(1366);
+    expect(COMPACT_WIDE_QUERY).toBe("(min-width: 1366px)");
+    expect(isCompactWidth(1365)).toBe(true);
+    expect(isCompactWidth(1366)).toBe(false);
+    for (const file of ["src/workspace/shellLayout.ts", "src/workspace/PipelineRail.tsx", "src/workspace/MediaPool.tsx"]) {
+      const source = readFileSync(resolve(process.cwd(), file), "utf8").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
+      expect(source, `${file} 里还有裸 1400 / 1440`).not.toMatch(/\b14[04]0\b/);
+    }
+  });
+  it("媒体池列数按 1366 分档:1366 三列、1365 两列(不再是 1440)", async () => {
+    apiMocks.getClipsRevision.mockResolvedValue("rev-bp" as never);
+    apiMocks.listClips.mockResolvedValue([shellClip(1), shellClip(2), shellClip(3)]);
+    resizeTo(1366);
+    render(<WorkspaceShell />);
+    await screen.findAllByRole("gridcell");
+    const grid = screen.getByRole("grid", { name: "媒体池" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(grid.getAttribute("aria-colcount")).toBe("3");
+    resizeTo(1365);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(grid.getAttribute("aria-colcount")).toBe("2");
   });
 });

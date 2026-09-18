@@ -1,0 +1,204 @@
+/*
+ * R19 shell 车道(方案 B「Cut 页式两层」):上层 媒体池 | 监视器,下层镜头带通栏,
+ * 检查器改成监视器栏内的滑出层。本文件只在 workspace.css 头部 @import 一次。
+ * 规则:字号 / 圆角 / 阴影 / transition / z-index 一律走 tokens.css 令牌(tokens.test.ts 会扫)。
+ *
+ * 分节:
+ *   0. 动效总则(V-10 tokens-lite):全局 prefers-reduced-motion
+ *   1. 两层壳(V-03):上层 池 | 监视器 | 检查器,下层镜头带通栏
+ *   2. 检查器滑出层(V-04)
+ *   3. 单检视器(V-05):井撑到栏边、传输条一行、热力在 seek 轨道下沿
+ *   4. 顶部一行(V-02):工具链缺失降为状态条红点 + 一句
+ */
+
+/* ---------- 0. 动效总则(V-10) ---------- */
+
+/* 三条规则:状态变化 --motion-fast(150ms,只动 opacity/color/shadow/scale≤1.02);
+   进出 --motion-slow 进、--motion-exit 出;布局变化 0ms(拖分栏时任何过渡都会让
+   react-resizable-panels 抖)。系统开了「减弱动态效果」时全局关掉:这一条 !important 是
+   整个 src/styles/workspace/ 目录里唯一允许的(tokens.test.ts 基线 = 1)。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation: none;
+  }
+}
+
+/* ---------- 1. 两层壳(V-03) ---------- */
+
+/* 上层 Panel:内部再横排一个 Group。min-height 0 让竖向 flex 能把它压到 minSize。 */
+.workspace-shell .workspace-upper {
+  min-height: 0;
+}
+
+.workspace-shell .workspace-upper-row {
+  min-height: 0;
+}
+
+/* 中栏 = 监视器 + 检查器滑出层;position:relative 给滑出层定位,overflow:hidden 把收起的层裁在栏外。 */
+.workspace-shell .workspace-center {
+  position: relative;
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workspace-shell .workspace-center > .workspace-pane[data-pane="monitor"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 滑出层开着(没钉住)时监视器让出层宽,画面缩小而不是被盖住;窄栏里最多让 60%,传输条永远有地方。 */
+.workspace-shell .workspace-center > .workspace-pane[data-pane="monitor"].is-shifted {
+  padding-right: min(var(--inspector-width, 340px), 60%);
+}
+
+/* ---------- 2. 检查器滑出层(V-04) ---------- */
+
+/* 收起态:贴在中栏右缘外面(translateX 整个宽度 + 8px 阴影余量),出场用 --motion-exit;
+   进场(.is-open)用 --motion-slow,≤ 300ms 到位。收起时不接指针,内容也不挂(壳只留空 region)。 */
+.workspace-shell .workspace-inspector-layer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: var(--z-overlay);
+  width: min(var(--inspector-width, 340px), 60%);
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-raised);
+  transform: translateX(calc(100% + var(--space-2)));
+  transition: transform var(--motion-exit);
+  pointer-events: none;
+}
+
+.workspace-shell .workspace-inspector-layer.is-open {
+  transform: none;
+  transition: transform var(--motion-slow);
+  pointer-events: auto;
+}
+
+/* 钉住:退回常驻三栏的样子 —— 但仍是中栏内的 flex 子项,不是 Panel,中栏宽度不因它变。 */
+.workspace-shell .workspace-inspector-layer.is-pinned {
+  position: static;
+  flex: 0 0 min(var(--inspector-width, 340px), 60%);
+  box-shadow: none;
+  transform: none;
+  transition: transform var(--motion-fast);
+}
+
+.workspace-shell .workspace-inspector-layer .inspector-pin {
+  white-space: nowrap;
+}
+
+.workspace-shell .workspace-inspector-layer .inspector-pin[aria-pressed="true"] {
+  color: var(--accent-text);
+  background: var(--accent-tint);
+}
+
+/* ---------- 3. 单检视器(V-05) ---------- */
+
+/* 井撑到栏边:舞台去掉四周留白,底色直接用井底色(letterbox 的黑边与井同色,看起来就是一整块画面区)。 */
+.workspace-shell .monitor .monitor-stage {
+  padding: 0;
+  background: var(--well-bg);
+}
+
+.workspace-shell .monitor .monitor-well {
+  margin: 0 auto;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* 传输条一行:时码 + seek 在走带与打点之间吃掉剩余宽度;状态字与建议按需收缩。 */
+.workspace-shell .monitor .monitor-transport {
+  min-width: 0;
+}
+
+.workspace-shell .monitor .monitor-transport .monitor-seek {
+  flex: 1 1 240px;
+  min-width: 210px; /* 时码 ~52 + 轨道 ≥ 90 + 总时长 ~52 + 两处间距 */
+  height: var(--control-sm);
+  padding: 0;
+}
+
+.workspace-shell .monitor .monitor-transport .monitor-timecode {
+  font-size: var(--text-11);
+  white-space: nowrap;
+}
+
+.workspace-shell .monitor .monitor-transport .monitor-marked {
+  flex: 0 1 auto;
+  max-width: 12em;
+}
+
+.workspace-shell .monitor .monitor-transport .monitor-suggestion {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.workspace-shell .monitor .monitor-suggestion-text {
+  font-size: var(--text-12);
+}
+
+/* 热力画在 seek 轨道下沿 6px:同一根轨道既是位置也是「哪里精彩」。 */
+.workspace-shell .monitor .monitor-seek-track .monitor-heat {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 6px;
+  border-radius: var(--radius-2);
+  background: transparent;
+  pointer-events: none;
+}
+
+/* 一行放不下时按「离画面最远的先走」让位:≤900 收入出点数值、状态字、「连播」与全屏键帽,
+   ≤800 「保存片段」只留图标,≤600 再收建议 ‹ ›(N / ⇧N / Enter 仍可用)与总时长。seek 永远在。 */
+@container monitor-controls (max-width: 900px) {
+  .workspace-shell .monitor .monitor-transport .monitor-mark-value,
+  .workspace-shell .monitor .monitor-transport .monitor-marked,
+  .workspace-shell .monitor .monitor-transport .monitor-auto-advance,
+  .workspace-shell .monitor .monitor-transport .monitor-fullscreen .ui-kbd {
+    display: none;
+  }
+}
+
+@container monitor-controls (max-width: 800px) {
+  .workspace-shell .monitor .monitor-transport .monitor-save-label {
+    display: none;
+  }
+}
+
+/* 中栏最小 520:总时长与建议也让位(当前时码 + 轨道仍在,总时长在轨道 title 与检查器里)。 */
+@container monitor-controls (max-width: 600px) {
+  .workspace-shell .monitor .monitor-transport .monitor-timecode:has(.monitor-duration),
+  .workspace-shell .monitor .monitor-transport .monitor-suggestion {
+    display: none;
+  }
+
+  .workspace-shell .monitor .monitor-transport .monitor-seek {
+    flex-basis: 150px;
+    min-width: 150px;
+  }
+}
+
+/* ---------- 4. 顶部一行(V-02):工具链状态红点 ---------- */
+
+/* 状态条一行:红点(有事才有)在左端,StatusStrip 吃掉剩余宽度。 */
+.workspace-shell .workspace-status-row {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  background: var(--surface-chrome);
+}
+
+.workspace-shell .workspace-status-row > .workspace-status {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+

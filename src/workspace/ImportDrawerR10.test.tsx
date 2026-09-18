@@ -49,8 +49,9 @@ describe("R10 U-07:来源分页按钮三态与路径中间省略", () => {
     render(<WorkspaceShell />);
     await openImportDrawer();
     const dialog = await screen.findByRole("dialog", { name: "导入素材" });
+    // R19 U-05:没有关注文件夹时只有拖放区的「选择文件夹」一颗(三态文案照旧落在它身上)。
     await act(async () => {
-      within(dialog).getByRole("button", { name: "添加素材文件夹" }).click();
+      within(dialog).getByRole("button", { name: "选择文件夹" }).click();
       await Promise.resolve();
     });
     expect(within(dialog).getByRole("button", { name: "选择中…" })).toBeTruthy();
@@ -65,7 +66,7 @@ describe("R10 U-07:来源分页按钮三态与路径中间省略", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(within(dialog).getByRole("button", { name: "添加素材文件夹" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "选择文件夹" })).toBeTruthy();
   });
 
   it("关注文件夹与「最近添加」的路径拆成头 / 尾两段(中间省略),AX 名仍是整条路径", async () => {

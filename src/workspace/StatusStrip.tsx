@@ -13,6 +13,7 @@ import {
 import { UpdateStatusChip } from "./update/UpdateStatusChip";
 import { StatusPause } from "./StatusPause";
 import { useComposingIndicator } from "./useRatingHotkeys";
+import { useToolchainStatus } from "./ToolchainBanner";
 import { Button, Icon } from "./ui";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
@@ -336,9 +337,14 @@ function useLibraryName(): string {
 export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.Element {
   const { summary, eta, showAnalysis } = useBackgroundSummary();
   const libraryName = useLibraryName();
+  // R19 接线:红点的数据源是壳里 ToolchainStatusProbe 发布的那一份(useToolchainStatus),
+  // 状态条不再自己轮询 getSettingsStatus;红点只在这里渲染一处。
+  const toolchainMissing = useToolchainStatus().missing;
   const visible = summaryPhrases(summary, eta).filter((phrase) => showAnalysis || !isAnalysisPhrase(phrase));
   // 「分析完成」收起后别留一条空的状态条。
   const phrases = visible.length > 0 ? visible : ["后台空闲"];
+  // V-08:真空闲(只剩兜底句「后台空闲」、没有缺失素材)时,「查看详情/全部暂停」都不占位。
+  const idle = phrases.every((phrase) => phrase === "后台空闲") && summary.missing === 0;
   // 默认读 useRatingHotkeys 的全局真值;显式传 prop 时以 prop 为准(便于单测与复用)。
   const indicator = useComposingIndicator();
   const imeComposing = composing ?? indicator;
@@ -353,17 +359,34 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
           左 = 后台任务、中 = 更新、右 = 素材库,组间 --space-4。分组容器都是
           `display: contents` 之外的普通 span —— role=status 的可读文本顺序不变。 */}
       <span className="workspace-status-group workspace-status-group--tasks">
-      <Button
-        variant="ghost"
-        size="sm"
-        icon="info"
-        className="workspace-status-main"
-        onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "jobs" })}
-      >
-        查看后台任务详情
-      </Button>
-      {/* R16 P1-6:主按钮旁「全部暂停 / 继续」。 */}
-      <StatusPause />
+      {toolchainMissing ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="workspace-status-toolchain"
+          aria-label="视频处理组件缺失"
+          title="导入和导出都要靠它;去设置里安装"
+          onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "settings", section: "tools" })}
+        >
+          <span className="workspace-status-dot" aria-hidden="true" />
+          视频处理组件缺失
+        </Button>
+      ) : null}
+      {!idle ? (
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="info"
+            className="workspace-status-main"
+            onClick={() => dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "jobs" })}
+          >
+            查看后台任务详情
+          </Button>
+          {/* R16 P1-6:主按钮旁「全部暂停 / 继续」。 */}
+          <StatusPause />
+        </>
+      ) : null}
       <span className="workspace-status-phrases">
         {phrases
           .filter((phrase) => !phrase.startsWith("缺失素材"))

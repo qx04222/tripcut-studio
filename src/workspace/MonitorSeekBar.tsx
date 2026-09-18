@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type JSX, type ReactNode } from "react";
 
 import type { PlayerStatus } from "../api";
 
@@ -22,6 +22,8 @@ export interface MonitorSeekBarProps {
   inPoint: number | null;
   outPoint: number | null;
   onSeek(seconds: number): void;
+  /** R19 V-05:时刻热力(MonitorHeatStrip)画在轨道下沿 6px,不再自成一行。 */
+  heat?: ReactNode;
 }
 
 /**
@@ -32,7 +34,7 @@ export interface MonitorSeekBarProps {
  * 松手时把最终值再发一次(节流窗口里最后那一下不能丢)。键盘左右键与点击轨道
  * 没有 pointerdown→拖动这段过程,一次一发,不节流。
  */
-export function MonitorSeekBar({ status, inPoint, outPoint, onSeek }: MonitorSeekBarProps): JSX.Element {
+export function MonitorSeekBar({ status, inPoint, outPoint, onSeek, heat }: MonitorSeekBarProps): JSX.Element {
   const ready = status?.phase === "ready" && status.duration > 0;
   const duration = ready ? status.duration : 0;
   const [scrubbing, setScrubbing] = useState<number | null>(null);
@@ -124,6 +126,7 @@ export function MonitorSeekBar({ status, inPoint, outPoint, onSeek }: MonitorSee
         />
       ) : null}
       <span className="monitor-seek-fill" aria-hidden="true" style={{ width: pct(value) }} />
+      {heat ?? null}
       <input
         type="range"
         className="monitor-seek-input"

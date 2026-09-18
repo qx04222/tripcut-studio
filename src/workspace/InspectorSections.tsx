@@ -5,6 +5,7 @@ import { GenerationDialog } from "../GenerationDialog";
 import { EmptyInspectorNote } from "./inspectorFields";
 import type { InspectorSectionId } from "./Inspector";
 import { Button, Card, Icon, SectionHeader, type IconName } from "./ui";
+import { useShowAllFeatures } from "./showAllFeatures";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
@@ -114,6 +115,8 @@ export function GapInspector({ chapterId, slot }: { chapterId: number; slot: str
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const gap = feed.gaps.find((candidate) => candidate.chapter_id === chapterId && candidate.slot === slot) ?? null;
+  // R19 P-05:云端补镜进「显示全部功能」后 —— 关时缺口卡不出「生成候选」,只留「忽略此缺口」(补镜的常规路是从挑好的片段里选)。
+  const showAll = useShowAllFeatures();
 
   const onDismiss = useCallback(() => {
     if (!gap || busy) return;
@@ -146,9 +149,12 @@ export function GapInspector({ chapterId, slot }: { chapterId: number; slot: str
         </div>
       </Card>
       <div className="inspector-gap-actions">
-        <Button variant="primary" icon="settings-generation" onClick={() => setDialogOpen(true)}>
-          生成候选
-        </Button>
+        {/* R19:flow P-05 —— 云端补镜进「显示全部功能」开关后;shell V-01 —— 栏内不再有 primary。 */}
+        {showAll ? (
+          <Button variant="secondary" icon="settings-generation" onClick={() => setDialogOpen(true)}>
+            生成候选
+          </Button>
+        ) : null}
         <Button disabled={busy} onClick={onDismiss}>
           忽略此缺口
         </Button>

@@ -89,6 +89,13 @@ async function openDeliverDrawer(): Promise<void> {
     button.click();
     await Promise.resolve();
   });
+  // R19 U-06/P-04:抽屉首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它,
+  // 行为与冻结 AX 名都不变(见 DeliverDrawerMoreWays.test.tsx)。
+  const more = await screen.findByRole("button", { name: "更多方式" });
+  await act(async () => {
+    more.click();
+    await Promise.resolve();
+  });
   // R11 车道 E:抽屉默认是「快速导出」;本文件测的是完整交付包那套表单,先切过去
   // (快速模式的用例在 DeliverDrawerQuick.test.tsx)。
   const fullChip = await screen.findByRole("button", { name: "完整交付包" });

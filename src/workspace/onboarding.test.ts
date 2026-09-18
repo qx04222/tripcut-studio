@@ -10,9 +10,9 @@ describe("onboarding 四步引导", () => {
     expect(UI_SETTING_DEFAULTS[STEPS_SEEN_KEY]).toBe("false");
   });
 
-  it("R12:四步固定,与流水线导航同名:导入 → 挑选 → 排列 → 导出", () => {
+  it("R12:四步固定,id 与流水线导航同序;R19 U-03:标题改成动作句 选文件夹 → 软件挑 / 你按 F → 拖顺序 → 交给剪映", () => {
     expect(ONBOARDING_STEPS.map((step) => step.id)).toEqual(["import", "pick", "arrange", "export"]);
-    expect(ONBOARDING_STEPS.map((step) => step.title)).toEqual(["导入", "挑选", "排列", "导出"]);
+    expect(ONBOARDING_STEPS.map((step) => step.title)).toEqual(["选文件夹", "软件挑 / 你按 F", "拖顺序", "交给剪映"]);
   });
 
   it("只在库空、设置已读且没看过、没关掉时可见", () => {

@@ -91,11 +91,14 @@ import type {
 } from "../api";
 import { MediaPool } from "./MediaPool";
 import { ShotBand } from "./ShotBand";
+import { BAND_TILE_WIDTH } from "./bandTimeline";
+import { BAND_TILE_HEIGHT, BAND_VIEWPORT_HEIGHT } from "./shotBandModel";
 // R12 §3:提示改走全局 Toast(壳里挂一次的 ToastHost);单独渲染镜头带时得自己带上宿主。
 import { ToastHost } from "./ui/Toast";
 import { __resetToastsForTests } from "./ui/toastStore";
 import { __resetClipsFeedForTests, getClipsFeedSnapshot } from "./useClipsFeed";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 /** 镜头带 / 检查器的样式在 `workspace/band.css` `workspace/inspector.css`,由 workspace.css `@import` 进来;结构断言两份一起看。 */
 const WORKSPACE_CSS = ["src/styles/workspace.css", "src/styles/workspace/band.css", "src/styles/workspace/band-empty.css", "src/styles/workspace/inspector.css"]
@@ -206,6 +209,8 @@ const stack: ShotStack = {
 } as unknown as ShotStack;
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetToastsForTests();
   __resetClipsFeedForTests();
   __resetWorkspaceForTests();
@@ -316,8 +321,8 @@ describe("镜头带", () => {
     const first = await screen.findByRole("rowgroup", { name: "第 1 章 出发" });
     const second = screen.getByRole("rowgroup", { name: "第 2 章 抵达" });
     // 空章的宽必须是一个瓦片节距,而不是 0 —— 0 宽的两章会叠在同一位置。
-    expect(parseInt(first.style.width, 10)).toBeGreaterThanOrEqual(160);
-    expect(parseInt(second.style.width, 10)).toBeGreaterThanOrEqual(160);
+    expect(parseInt(first.style.width, 10)).toBeGreaterThanOrEqual(BAND_TILE_WIDTH);
+    expect(parseInt(second.style.width, 10)).toBeGreaterThanOrEqual(BAND_TILE_WIDTH);
     for (const section of [first, second]) {
       const placeholder = within(section).getByText("本章还没有镜头");
       expect(placeholder).toBeTruthy();
@@ -329,9 +334,9 @@ describe("镜头带", () => {
       expect(within(section).queryByText(/个镜头/)).toBeNull();
     }
     expect(screen.getAllByText("本章还没有镜头")).toHaveLength(2);
-    // 占位瓦片有真实尺寸(160×130),不是一条竖排文字。
-    expect(WORKSPACE_CSS).toMatch(/\.band-chapter-empty\s*\{[^}]*width:\s*160px/);
-    expect(WORKSPACE_CSS).toMatch(/\.band-chapter-empty\s*\{[^}]*height:\s*130px/);
+    // 占位瓦片有真实尺寸(R19 V-06:140×112,与 BAND_TILE_WIDTH / BAND_TILE_HEIGHT 同源),不是一条竖排文字。
+    expect(WORKSPACE_CSS).toMatch(new RegExp(`\\.band-chapter-empty\\s*\\{[^}]*width:\\s*${BAND_TILE_WIDTH}px`));
+    expect(WORKSPACE_CSS).toMatch(new RegExp(`\\.band-chapter-empty\\s*\\{[^}]*height:\\s*${BAND_TILE_HEIGHT}px`));
   });
 
   it("拖排调 setStoryOrder 一次,顺序按 storyOrderRefs 生成", async () => {
@@ -697,7 +702,7 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
   it("带视口高度固定为内容高,不随中栏撑开(瓦片下方不留白)", async () => {
     await renderBand();
     const viewport = document.querySelector<HTMLElement>(".band-viewport")!;
-    expect(viewport.style.getPropertyValue("--band-content-height")).toBe("184px");
+    expect(viewport.style.getPropertyValue("--band-content-height")).toBe(`${BAND_VIEWPORT_HEIGHT}px`);
     expect(WORKSPACE_CSS).toMatch(/\.band-viewport\s*\{[^}]*height:\s*var\(--band-content-height\)/);
     expect(WORKSPACE_CSS).toMatch(/\.band-viewport\s*\{[^}]*overflow-x:\s*scroll/);
     expect(WORKSPACE_CSS).toMatch(/\.band-viewport\s*\{[^}]*scrollbar-gutter:\s*stable/);
@@ -783,9 +788,14 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
       clip(1, "A.MP4"), clip(2, "B.MP4"), clip(3, "C.MP4"), clip(4, "D.MP4"), clip(5, "E.MP4"), clip(6, "F.MP4"), clip(9, "GEN.MP4", true),
     ].map((c) => ({ ...c, captured_at: c.id === 6 ? "2026-08-01T00:00:00Z" : `2026-08-1${c.id}T00:00:00Z` })));
     await renderBand();
+    // V-07:两组控件此前平铺在标题条,现在收进各自的「… ⌄」触发钮,要先展开才摸得到里面
+    // 的东西;选中一项就收起(不常驻盖住下面的镜头带),所以每次都要重新展开。
+    const openViews = () => fireEvent.click(screen.getByRole("button", { name: /^(按章节|按时间|仅缺口) ⌄$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^附属：/ }));
     const tablist = screen.getByRole("tablist", { name: "镜头带附属视图" });
     expect(within(tablist).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["故事", "音乐", "旅程", "地点卡", "模板"]);
-    const views = screen.getByRole("group", { name: "镜头带视图" });
+    openViews();
+    let views = screen.getByRole("group", { name: "镜头带视图" });
     expect(within(views).getAllByRole("button").map((button) => button.textContent)).toEqual(["按章节", "按时间", "仅缺口"]);
     expect(within(views).getByRole("button", { name: "按章节" }).getAttribute("aria-pressed")).toBe("true");
 
@@ -793,6 +803,8 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
     expect(screen.getAllByRole("rowgroup").map((group) => group.getAttribute("aria-label"))).toEqual(["第 2 章 抵达"]);
     expect(screen.getByRole("gridcell", { name: "镜头 7：缺口 建立镜头" })).toBeTruthy();
 
+    openViews();
+    views = screen.getByRole("group", { name: "镜头带视图" });
     fireEvent.click(within(views).getByRole("button", { name: "按时间" }));
     expect(screen.getAllByRole("rowgroup")).toHaveLength(1);
     expect(screen.getAllByRole("gridcell").map((cell) => cell.getAttribute("aria-label"))).toEqual([
@@ -801,6 +813,8 @@ describe("镜头带 R9 视觉(规格 §3.7,基准稿 A)", () => {
     // 按时间的顺序是拍摄时间定的,不许拖排。
     expect(screen.getAllByRole("button", { name: /^拖动 镜头/ }).every((grip) => (grip as HTMLButtonElement).disabled)).toBe(true);
 
+    openViews();
+    views = screen.getByRole("group", { name: "镜头带视图" });
     fireEvent.click(within(views).getByRole("button", { name: "按章节" }));
     expect(screen.getAllByRole("rowgroup")).toHaveLength(2);
   });

@@ -4,7 +4,7 @@ import jsxA11y from "eslint-plugin-jsx-a11y";
 
 export default tseslint.config(
   {
-    ignores: ["sidecar/**", "scripts/**", "dist/**", "coverage/**", "src-tauri/target/**", ".superpowers/**", "qa/**"],
+    ignores: ["sidecar/**", "scripts/**", "dist/**", "coverage/**", "src-tauri/target/**", ".superpowers/**", "qa/**", "bench/**"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

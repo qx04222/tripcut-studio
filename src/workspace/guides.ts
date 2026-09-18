@@ -149,6 +149,56 @@ export function nextGuide(
 }
 
 // ---------------------------------------------------------------------------
+// R19 U-02:教学仲裁器。提示条 / 气泡 / 首启卡 / 空态卡四路教学归这一个 store,同一帧只出一个
+// (DOM 上只有一个 `[data-teach]`)。顺序 = 用户在流水线上遇到它们的顺序:首启卡(库空、第一眼)→
+// 当前步的空态卡 → 功能气泡;「知道了」把自己的 want 撤掉,槽就推进到下一路。
+// `hint`(导航条下的提示条)不再拿槽:它的四句文案由首页四步卡 + 主按钮 tooltip 承接(shell 车道删 PipelineHint)。
+// ---------------------------------------------------------------------------
+export const TEACHING_CHANNELS = ["onboarding", "empty", "guide", "hint"] as const;
+export type TeachingChannel = (typeof TEACHING_CHANNELS)[number];
+export type TeachingWants = Readonly<Record<TeachingChannel, boolean>>;
+
+/** 永远不拿槽的通道(文案已被别处承接)。 */
+const TEACHING_SUPERSEDED: ReadonlySet<TeachingChannel> = new Set(["hint"]);
+
+/** 纯判定:谁拿到这一帧的教学槽。 */
+export function activeTeaching(wants: TeachingWants): TeachingChannel | null {
+  for (const channel of TEACHING_CHANNELS) {
+    if (TEACHING_SUPERSEDED.has(channel)) continue;
+    if (wants[channel]) return channel;
+  }
+  return null;
+}
+
+const EMPTY_WANTS: TeachingWants = { onboarding: false, empty: false, guide: false, hint: false };
+let teachingWants: TeachingWants = EMPTY_WANTS;
+let teachingActive: TeachingChannel | null = null;
+const teachingListeners = new Set<() => void>();
+
+/** 某一路教学报「我现在想出 / 不想出」;guide 这一路由 store 自己按 nextGuide 报。 */
+export function reportTeachingWant(channel: Exclude<TeachingChannel, "guide">, wants: boolean): void {
+  if (teachingWants[channel] === wants) return;
+  teachingWants = { ...teachingWants, [channel]: wants };
+  recompute();
+}
+
+function getTeachingActive(): TeachingChannel | null {
+  return teachingActive;
+}
+
+function subscribeTeaching(listener: () => void): () => void {
+  teachingListeners.add(listener);
+  return () => {
+    teachingListeners.delete(listener);
+  };
+}
+
+/** 这一路此刻是否拿到槽(拿到才渲染、才挂 `data-teach`)。 */
+export function useTeaching(channel: TeachingChannel): boolean {
+  return useSyncExternalStore(subscribeTeaching, getTeachingActive, getTeachingActive) === channel;
+}
+
+// ---------------------------------------------------------------------------
 // store(模块级,useSyncExternalStore):信号 + 已看 + 本会话关过 + 暂缓 → 恰好一个 active。
 // ---------------------------------------------------------------------------
 export interface GuideSnapshot {
@@ -163,6 +213,8 @@ let dismissed: Set<GuideId> = new Set();
 let snoozed: Set<GuideId> = new Set();
 let signals: GuideSignals = EMPTY_GUIDE_SIGNALS;
 let snapshot: GuideSnapshot = { active: null, signals, seen: 0 };
+/** 气泡自己想出的那一只(仲裁前);`snapshot.active` 是仲裁后真正画出来的。 */
+let candidate: GuideId | null = null;
 const listeners = new Set<() => void>();
 
 function seenCount(): number {
@@ -173,8 +225,16 @@ function seenCount(): number {
 
 function recompute(): void {
   // 正在显示的气泡不被后来的信号换掉;只有它关掉 / 让位 / 被抽屉盖住后才重新挑。
-  const keep = snapshot.active !== null && !dismissed.has(snapshot.active) && !snoozed.has(snapshot.active) && eligible(snapshot.active, signals);
-  const active = keep ? snapshot.active : nextGuide(signals, viewed, dismissed, snoozed);
+  const keep = candidate !== null && !dismissed.has(candidate) && !snoozed.has(candidate) && eligible(candidate, signals);
+  candidate = keep ? candidate : nextGuide(signals, viewed, dismissed, snoozed);
+  // R19 U-02:气泡只是四路教学之一 —— 先过仲裁器,槽不在 guide 这一路时 active 为 null(候选保留,轮到时再画)。
+  teachingWants = teachingWants.guide === (candidate !== null) ? teachingWants : { ...teachingWants, guide: candidate !== null };
+  const nextTeaching = activeTeaching(teachingWants);
+  if (nextTeaching !== teachingActive) {
+    teachingActive = nextTeaching;
+    for (const listener of [...teachingListeners]) listener();
+  }
+  const active = teachingActive === "guide" ? candidate : null;
   const seen = seenCount();
   if (active === snapshot.active && signals === snapshot.signals && seen === snapshot.seen) return;
   snapshot = { active, signals, seen };
@@ -259,4 +319,7 @@ export function __resetGuidesForTests(): void {
   snoozed = new Set();
   signals = EMPTY_GUIDE_SIGNALS;
   snapshot = { active: null, signals, seen: 0 };
+  candidate = null;
+  teachingWants = EMPTY_WANTS;
+  teachingActive = null;
 }

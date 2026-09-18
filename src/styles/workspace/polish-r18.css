@@ -158,23 +158,7 @@
   background: var(--accent);
 }
 
-/* ---------- 2. 引导条 ---------- */
-
-/* 「知道了」此前贴在 1440px 外的最右端,离它要读的那句话一整屏。移到文案右侧 12px;
-   整条高度对齐 --control-md。 */
-.workspace-shell .pipeline-hint {
-  min-height: var(--control-md);
-}
-
-.workspace-shell .pipeline-hint .pipeline-hint-text {
-  flex: 0 1 auto;
-}
-
-.workspace-shell .pipeline-hint > .ui-button {
-  flex: none;
-  margin-right: auto;
-  margin-left: var(--space-3);
-}
+/* ---------- 2. 引导条:R19 V-02 删了顶部提示行(PipelineHint),这一节随之清空 ---------- */
 
 /* ---------- 3. 媒体池(V-18) ---------- */
 

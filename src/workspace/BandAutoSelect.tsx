@@ -9,6 +9,7 @@ import {
   type AutoSelectScope,
   type ClipListItem,
 } from "../api";
+import { PLATFORM_LABELS } from "../EpisodePanel";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { Button, Chip } from "./ui";
@@ -38,11 +39,45 @@ export function defaultScopeFor(clips: readonly Pick<ClipListItem, "binary_ratin
   return curated ? AUTO_SELECT_DEFAULT_SCOPE : "all";
 }
 
-/** toast 文案:「已挑选 n 段 · 共 m s · 覆盖 k 章」;后端降级到「全部」时先说明为什么。 */
-export function autoSelectToast(outcome: AutoSelectOutcome): string {
-  const tail = `共 ${Math.round(outcome.total_secs)} s · 覆盖 ${outcome.chapters_covered} 章`;
-  if (outcome.fell_back) return `你还没收藏或打星,已按全部素材挑了 ${outcome.created.length} 段 · ${tail}`;
-  return `已挑选 ${outcome.created.length} 段 · ${tail}`;
+/**
+ * R19 U-01:挑选结果再带一个「还有几条在分析」—— 分析没跑完也能先挑已分析的部分,toast 要说清剩余数。
+ * 只是给 toast 用的前端附加字段,后端 `AutoSelectOutcome` 不变。
+ */
+export type AutoSelectResult = AutoSelectOutcome & {
+  pending_left?: number;
+  /** R19 U-09:首次零决定 —— 没弹面板直接按全部 + 平台预算跑的;toast 要给「改范围 / 改时长」入口并写明预算来源。 */
+  first_run?: boolean;
+  budget_secs?: number;
+  platform_label?: string;
+};
+
+/** R19 U-09:第一次(库里无收藏、无星、还没挑过)不该让用户做决定 —— 直接跑。 */
+export function isFirstAutoSelect(clips: readonly Pick<ClipListItem, "binary_rating" | "star_rating" | "select_count">[]): boolean {
+  return clips.length > 0 && defaultScopeFor(clips) === "all" && clips.every((clip) => (clip.select_count ?? 0) === 0);
+}
+
+/** `tripcut:open-auto-select` 的可选 detail:toast 的「改范围 / 改时长」带 `panel: true` 直接开面板。 */
+export const OPEN_AUTO_SELECT_PANEL_DETAIL = { panel: true } as const;
+
+/** U-09:首次零决定的结果 toast 多一个次要动作「改范围 / 改时长」= 开面板(决定留在结果之后,不在结果之前)。 */
+export function autoSelectToastActions(outcome: AutoSelectResult): { label: string; onClick(): void }[] {
+  if (!outcome.first_run) return [];
+  return [{ label: "改范围 / 改时长", onClick: () => window.dispatchEvent(new CustomEvent(OPEN_AUTO_SELECT_EVENT, { detail: OPEN_AUTO_SELECT_PANEL_DETAIL })) }];
+}
+
+/** 还在排队 / 分析中的素材数(与 pipelineModel 同一条判定)。 */
+export function pendingAnalysisCount(clips: readonly Pick<ClipListItem, "analysis_status">[]): number {
+  return clips.filter((clip) => clip.analysis_status === "pending" || clip.analysis_status === "running").length;
+}
+
+/** toast 文案:「已挑选 n 段 · 共 m s · 覆盖 k 章」;后端降级到「全部」时先说明为什么;分析没跑完时补一句剩余数。 */
+export function autoSelectToast(outcome: AutoSelectResult): string {
+  // U-09:首次零决定时时长写明来源「共 45 s(本集平台:抖音)」—— 用户从没被问过平台,这里说清 30/45 秒从哪来。
+  const secs = outcome.first_run && outcome.budget_secs ? `共 ${outcome.budget_secs} s(本集平台:${outcome.platform_label ?? "通用"})` : `共 ${Math.round(outcome.total_secs)} s`;
+  const tail = `${secs}${outcome.first_run ? "" : " "}· 覆盖 ${outcome.chapters_covered} 章`;
+  const left = outcome.pending_left && outcome.pending_left > 0 ? ` · 还有 ${outcome.pending_left} 条在分析,分析完可再挑一次` : "";
+  if (outcome.fell_back) return `你还没收藏或打星,已按全部素材挑了 ${outcome.created.length} 段 · ${tail}${left}`;
+  return `已挑选 ${outcome.created.length} 段 · ${tail}${left}`;
 }
 
 /** X-02:失败时的「下一步」——分析真没跑完才劝等分析,否则用兜底「再试一次」。 */
@@ -55,17 +90,23 @@ export async function autoSelectNextStep(): Promise<string | undefined> {
   }
 }
 
-/** 当前集的平台预算(秒);拉不到就用兜底。 */
-export async function platformBudgetSecs(): Promise<number> {
+/** 当前集的平台预算(秒)与平台名;拉不到就用兜底(平台名「通用」)。 */
+export async function platformBudget(): Promise<{ seconds: number; platform: string }> {
   try {
     const [episode, presets] = await Promise.all([getCurrentEpisode(), listPlatformPresets()]);
+    const platform = PLATFORM_LABELS[episode.target_platform] ?? "通用";
     const preset = presets.find((item) => item.platform === episode.target_platform);
-    if (!preset || preset.tb_den <= 0) return AUTO_SELECT_FALLBACK_BUDGET_SECS;
+    if (!preset || preset.tb_den <= 0) return { seconds: AUTO_SELECT_FALLBACK_BUDGET_SECS, platform };
     const seconds = Math.round((preset.duration_budget_ticks * preset.tb_num) / preset.tb_den);
-    return seconds > 0 ? seconds : AUTO_SELECT_FALLBACK_BUDGET_SECS;
+    return { seconds: seconds > 0 ? seconds : AUTO_SELECT_FALLBACK_BUDGET_SECS, platform };
   } catch {
-    return AUTO_SELECT_FALLBACK_BUDGET_SECS;
+    return { seconds: AUTO_SELECT_FALLBACK_BUDGET_SECS, platform: "通用" };
   }
+}
+
+/** 当前集的平台预算(秒);拉不到就用兜底。 */
+export async function platformBudgetSecs(): Promise<number> {
+  return (await platformBudget()).seconds;
 }
 
 /**
@@ -78,7 +119,7 @@ export function BandAutoSelect({
   onError,
 }: {
   disabled?: boolean;
-  onOutcome(outcome: AutoSelectOutcome): void;
+  onOutcome(outcome: AutoSelectResult): void;
   onError(message: string): void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -90,15 +131,53 @@ export function BandAutoSelect({
   const [busy, setBusy] = useState(false);
   const budgetId = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // U-09:本会话已经零决定跑过一次 —— 之后再按主按钮就出面板(第二次才有「改一改」的需求)。
+  const ranOnceRef = useRef(false);
+
+  const run = useCallback(
+    async (chosen: AutoSelectScope, seconds: number | undefined, first: { budget: number; platform: string } | null) => {
+      setBusy(true);
+      try {
+        const outcome = await autoSelectEpisode({ scope: chosen, budgetSecs: seconds });
+        setOpen(false);
+        // Y-03:全新库(0 收藏 0 打星)按「全部」挑时,后端的 fell_back 永远走不到 —— 前端已经预选了「全部」。
+        // 「为什么按全部」由前端按同一份库状态说清,toast 文案与后端降级一致。
+        const uncurated = chosen === "all" && defaultScopeFor(clips) === "all";
+        // R19 U-01:分析没跑完也先挑已分析的部分,剩余数写进 toast。
+        const pendingLeft = pendingAnalysisCount(clips);
+        onOutcome({
+          ...outcome,
+          fell_back: uncurated ? true : outcome.fell_back,
+          pending_left: pendingLeft,
+          ...(first ? { first_run: true, budget_secs: first.budget, platform_label: first.platform } : {}),
+        });
+        await refreshClipsFeed(true);
+      } catch (error) {
+        onError(failureText("自动挑选", error, await autoSelectNextStep()));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [clips, onOutcome, onError],
+  );
 
   useEffect(() => {
     // R11 简化专项 #1:首启三步引导的「自动挑选」按钮从预览区广播这个事件,面板直接打开。
-    const onOpen = () => {
-      if (!disabled) setOpen(true);
+    // R19 U-09:第一次(无收藏无星没挑过)不弹面板 —— 直接按全部 + 平台预算跑,决定留给结果 toast 的「改范围 / 改时长」;
+    // 带 `panel: true` 的事件(就是那个入口)与第二次以后照旧开面板。
+    const onOpen = (event: Event) => {
+      if (disabled) return;
+      const wantsPanel = (event as CustomEvent<{ panel?: boolean } | undefined>).detail?.panel === true;
+      if (!wantsPanel && !ranOnceRef.current && isFirstAutoSelect(clips)) {
+        ranOnceRef.current = true;
+        void platformBudget().then((budget) => run("all", budget.seconds, { budget: budget.seconds, platform: budget.platform }));
+        return;
+      }
+      setOpen(true);
     };
     window.addEventListener(OPEN_AUTO_SELECT_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_AUTO_SELECT_EVENT, onOpen);
-  }, [disabled]);
+  }, [disabled, clips, run]);
 
   useEffect(() => {
     if (!open) return;
@@ -121,23 +200,10 @@ export function BandAutoSelect({
     };
   }, [open]);
 
-  const run = useCallback(async () => {
+  const runFromPanel = useCallback(() => {
     const seconds = Number.parseInt(budget, 10);
-    setBusy(true);
-    try {
-      const outcome = await autoSelectEpisode({ scope, budgetSecs: Number.isFinite(seconds) && seconds > 0 ? seconds : undefined });
-      setOpen(false);
-      // Y-03:全新库(0 收藏 0 打星)按「全部」挑时,后端的 fell_back 永远走不到 —— 前端已经预选了「全部」。
-      // 「为什么按全部」由前端按同一份库状态说清,toast 文案与后端降级一致。
-      const uncurated = scope === "all" && defaultScopeFor(clips) === "all";
-      onOutcome(uncurated ? { ...outcome, fell_back: true } : outcome);
-      await refreshClipsFeed(true);
-    } catch (error) {
-      onError(failureText("自动挑选", error, await autoSelectNextStep()));
-    } finally {
-      setBusy(false);
-    }
-  }, [budget, scope, onOutcome, onError]);
+    return run(scope, Number.isFinite(seconds) && seconds > 0 ? seconds : undefined, null);
+  }, [budget, scope, run]);
 
   return (
     <div className="band-autoselect" ref={rootRef}>
@@ -176,7 +242,7 @@ export function BandAutoSelect({
             />
             秒(按发布平台预填)
           </label>
-          <Button variant="primary" size="sm" busy={busy} disabled={busy} onClick={() => void run()}>
+          <Button variant="primary" size="sm" busy={busy} disabled={busy} onClick={() => void runFromPanel()}>
             开始挑选
           </Button>
         </div>

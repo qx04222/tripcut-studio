@@ -244,3 +244,26 @@ describe("R13 §1:帮助页键帽随预设变化", () => {
     }
   });
 });
+
+/** R19 P-12:`?` 键位表分「常用 / 全部」,默认常用 ≤ 15 行;「全部」是原来的整张表。 */
+describe("R19 P-12:快捷键总表 常用 / 全部", () => {
+  it("默认「常用」≤ 15 行;点「全部」回到全部 27 行;两颗切换钮 aria-pressed", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<HelpOverlay open onClose={() => undefined} />));
+    const rows = () => host.querySelectorAll(".shortcut-row").length;
+    const all = KEYBOARD_SHORTCUT_GROUPS.reduce((total, group) => total + group.shortcuts.length, 0);
+    expect(rows()).toBeLessThanOrEqual(15);
+    expect(rows()).toBeGreaterThan(0);
+    const common = host.querySelector<HTMLButtonElement>('button[aria-label="常用键位"]')!;
+    const full = host.querySelector<HTMLButtonElement>('button[aria-label="全部键位"]')!;
+    expect(common.getAttribute("aria-pressed")).toBe("true");
+    expect(full.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => full.click());
+    expect(rows()).toBe(all);
+    expect(full.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => root.unmount());
+    host.remove();
+  });
+});

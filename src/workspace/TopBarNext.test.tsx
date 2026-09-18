@@ -8,6 +8,8 @@ const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(async () => ({})),
   listEpisodes: vi.fn(async () => []),
   getCurrentEpisode: vi.fn(async () => null),
+  // R19 U-01:主按钮禁用期间顶栏自己轮询进度估预计时间(analysisEta)。
+  getImportProgress: vi.fn(async () => ({ total: 5, done: 0, failed: 0, running: 1, waiting_for_permit: 0, paused_for_memory: false })),
 }));
 vi.mock("../api", () => apiMocks);
 
@@ -48,10 +50,27 @@ describe("顶栏「下一步:…」主按钮(规格 §1 第二条)", () => {
     expect(document.querySelectorAll(".workspace-topbar .ui-button--primary")).toHaveLength(1);
   });
 
-  it("素材还在分析:不挡路,主按钮已是「下一步:自动挑选」且可点", () => {
+  it("素材还在分析、已有分析完的:不挡路,主按钮「先挑已分析的 3/5 条」可点,点了照样广播打开自动挑选(R19 U-01)", () => {
+    const heard = vi.fn();
+    window.addEventListener(OPEN_AUTO_SELECT_EVENT, heard);
     const button = mount({ clipCount: 5, analysisPending: 2 }) as HTMLButtonElement;
-    expect(button.textContent).toBe("下一步:自动挑选");
+    expect(button.textContent).toBe("先挑已分析的 3/5 条");
     expect(button.disabled).toBe(false);
+    button.click();
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_AUTO_SELECT_EVENT, heard);
+  });
+
+  it("一条都还没分析完:主按钮禁用、文案「等画面分析 0/5 条」,点了不广播(R19 U-01:0 次「画面分析还没跑完」)", () => {
+    const heard = vi.fn();
+    window.addEventListener(OPEN_AUTO_SELECT_EVENT, heard);
+    const button = mount({ clipCount: 5, analysisPending: 5 }) as HTMLButtonElement;
+    expect(button.textContent).toBe("等画面分析 0/5 条");
+    expect(button.disabled).toBe(true);
+    button.click();
+    expect(heard).not.toHaveBeenCalled();
+    expect(document.querySelectorAll(".workspace-topbar .ui-button--primary")).toHaveLength(1);
+    window.removeEventListener(OPEN_AUTO_SELECT_EVENT, heard);
   });
 
   it("① 打开导入抽屉的来源页", () => {

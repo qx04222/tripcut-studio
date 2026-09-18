@@ -334,10 +334,11 @@ fn empty_scope_reason(connection: &Connection, scope: AutoSelectScope) -> Result
         [active_episode_id(connection)?],
         |row| row.get(0),
     )?;
+    // R19 U-08:失败文案不说「第 n 步」(那是我们的编号,不是剪映的),直接给动作词。
     Ok(if analysed == 0 {
-        "还没有可挑的素材:先在第 1 步导入视频".to_owned()
+        "还没有可挑的素材:先导入视频".to_owned()
     } else {
-        "素材都已经挑过了:想重挑就先撤销上一批,或在第 2 步手动挑几条".to_owned()
+        "素材都已经挑过了:想重挑就先撤销上一批,或去媒体池手动挑几条".to_owned()
     })
 }
 

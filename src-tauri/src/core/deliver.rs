@@ -815,13 +815,15 @@ pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) ->
         None => kit_folder_name(&project_name, &date),
     };
     let missing = missing_source_names(connection, &clips)?;
+    let ordinals = kit_chapter_ordinals(&clips);
     Ok(KitExportOutcome {
         job_id: None,
         dir,
         files: clips
             .iter()
+            .zip(ordinals)
             .enumerate()
-            .map(|(index, clip)| kit_file_name(index + 1, &clip.chapter_title, &clip.file_name))
+            .map(|(index, (clip, ordinal))| kit_relative_name(index + 1, ordinal, &clip.chapter_title, &clip.file_name))
             .collect(),
         order_file: KIT_ORDER_FILE.to_owned(),
         missing,
@@ -976,6 +978,7 @@ fn enqueue_export(
         Some(job_id) if mode == MODE_QUICK => retry_context(&transaction, job_id)?,
         _ => None,
     };
+    let kit_ordinals = if mode == MODE_KIT { kit_chapter_ordinals(&clips) } else { Vec::new() };
     let items = clips
         .iter()
         .enumerate()
@@ -983,7 +986,7 @@ fn enqueue_export(
             clip_id: clip.clip_id,
             file_name: clip.file_name.clone(),
             output_name: if mode == MODE_KIT {
-                kit_file_name(index + 1, &clip.chapter_title, &clip.file_name)
+                kit_relative_name(index + 1, kit_ordinals[index], &clip.chapter_title, &clip.file_name)
             } else {
                 quick_output_name(retry.as_ref(), index, clip)
             },
@@ -1445,6 +1448,12 @@ fn run_export_package_with(
             persist_progress(connection, job, &payload)?;
             continue;
         }
+        // J-04:素材包按章节落进子目录时 output_name 带一段路径(`01_章名/文件.mp4`);
+        // 子目录还没建过就先建好(quick/full 没有子目录,create_dir_all 落在既有的
+        // staging 目录上是没有作用的空操作)。
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let temporary_path = jobs::temporary_output_path(&output_path, job.attempt);
         remove_file_if_exists(&temporary_path)?;
         match export_clip(
@@ -1486,6 +1495,12 @@ fn run_export_package_with(
     }
 
     if kit {
+        // J-05:字幕/音乐跟完整交付包判断同一份逻辑(见 copy_kit_subtitles / copy_kit_music
+        // 顶上的说明),只是抄到素材包自己的位置——同名同目录、根目录一份配乐。
+        copy_kit_subtitles(connection, &payload.clips, &payload.progress.items, &staging_path)?;
+        if let Some(episode_id) = payload.episode_id {
+            copy_kit_music(connection, episode_id, &staging_path)?;
+        }
         write_synced(
             &staging_path.join(KIT_ORDER_FILE),
             kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
@@ -3606,6 +3621,25 @@ fn check_cancelled(cancellation: &AtomicBool) -> Result<()> {
     }
 }
 
+/// 交付包 / 素材包共用的判断:这条 clip 有没有一份可用的 SRT——已转写、没被裁剪过
+/// (裁剪段的时间戳保证是错的,P3-D1 范围之外不做重新对时)、原文件此刻还在。两处只是
+/// 各自决定抄到哪儿,判断逻辑不重复。
+fn resolved_subtitle_source(cache_root: &Path, clip: &ExportClip, item: &ExportItemStatus) -> Option<PathBuf> {
+    if item.status != "done" {
+        return None;
+    }
+    let relative = clip.srt_rel_path.as_deref()?;
+    if clip.selection_kind == "select" {
+        return None;
+    }
+    let expected = PathBuf::from(clip.clip_id.to_string()).join(super::transcribe::SRT_FILE);
+    if Path::new(relative) != expected.as_path() {
+        return None;
+    }
+    let source = cache_root.join(&expected);
+    source.is_file().then_some(source)
+}
+
 fn copy_subtitles(
     connection: &Connection,
     clips: &[ExportClip],
@@ -3620,25 +3654,9 @@ fn copy_subtitles(
     let mut copied = 0_u64;
 
     for (clip, item) in clips.iter().zip(items) {
-        if item.status != "done" {
-            continue;
-        }
-        let Some(relative) = clip.srt_rel_path.as_deref() else {
+        let Some(source) = resolved_subtitle_source(&cache_root, clip, item) else {
             continue;
         };
-        // A whole-clip SRT would carry knowingly wrong timestamps after a cut.
-        // Segment subtitle trimming/retiming is outside P3-D1, so omit it.
-        if clip.selection_kind == "select" {
-            continue;
-        }
-        let expected = PathBuf::from(clip.clip_id.to_string()).join(super::transcribe::SRT_FILE);
-        if Path::new(relative) != expected.as_path() {
-            continue;
-        }
-        let source = cache_root.join(&expected);
-        if !source.is_file() {
-            continue;
-        }
         if copied == 0 {
             std::fs::create_dir(&subtitle_directory)?;
         }
@@ -3652,6 +3670,48 @@ fn copy_subtitles(
         copied += 1;
     }
     Ok(copied)
+}
+
+/// J-05:素材包里的 SRT 跟视频同名同目录(有章节子目录时也在同一个子目录里),不像完整
+/// 交付包那样收进单独的字幕文件夹——剪映用户把两个文件一起拖进时间线就能对上时间码。
+/// 判断复用 [`resolved_subtitle_source`],不重抄一遍。
+fn copy_kit_subtitles(
+    connection: &Connection,
+    clips: &[ExportClip],
+    items: &[ExportItemStatus],
+    staging_path: &Path,
+) -> Result<u64> {
+    let Some(db_path) = connection.path() else {
+        return Ok(0);
+    };
+    let cache_root = super::artifacts::cache_root_for_db(Path::new(db_path));
+    let mut copied = 0_u64;
+
+    for (clip, item) in clips.iter().zip(items) {
+        let Some(source) = resolved_subtitle_source(&cache_root, clip, item) else {
+            continue;
+        };
+        let output_path = staging_path.join(Path::new(&item.output_name).with_extension("srt"));
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = std::fs::read(&source)?;
+        write_synced(&output_path, &bytes)?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// J-05:本集有配乐(与剪映草稿同一份 `music_tracks` 挑选逻辑,见
+/// [`super::jianying::kit_selected_music_file`])就把原文件抄一份到素材包根目录;
+/// 没有配乐、或原文件此刻不在了,静默跳过(不是缺陷,只是没有可带的音乐)。
+fn copy_kit_music(connection: &Connection, episode_id: i64, staging_path: &Path) -> Result<()> {
+    let Some((file_name, source_path)) = super::jianying::kit_selected_music_file(connection, episode_id)? else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(&source_path)?;
+    write_synced(&staging_path.join(&file_name), &bytes)?;
+    Ok(())
 }
 
 /// R4 Task 3:一条素材的封面 JPEG,原样按 `cache_artifacts` 的产物有效性规则
@@ -4357,15 +4417,61 @@ fn kit_file_name(sequence: usize, chapter_title: &str, source_name: &str) -> Str
     format!("{sequence:02}_{}_{stem}.mp4", kit_chapter_name(chapter_title))
 }
 
+/// J-04:每个镜按镜头带顺序落在哪个章节目录(1 起);整集没有任何章节标记时全部返回 `None`
+/// (「无章节时保持拍平」——不建一个只装「未分章」的空壳子目录)。
+fn kit_chapter_ordinals(clips: &[ExportClip]) -> Vec<Option<usize>> {
+    if clips.iter().all(|clip| clip.chapter_title.trim().is_empty()) {
+        return vec![None; clips.len()];
+    }
+    let mut seen: Vec<String> = Vec::new();
+    clips
+        .iter()
+        .map(|clip| {
+            let key = kit_chapter_name(&clip.chapter_title);
+            let position = match seen.iter().position(|existing| existing == &key) {
+                Some(position) => position,
+                None => {
+                    seen.push(key);
+                    seen.len() - 1
+                }
+            };
+            Some(position + 1)
+        })
+        .collect()
+}
+
+/// J-04:章节目录名 `NN_<章名>`(NN = 章节在镜头带上第几个出现,两位起)。
+fn kit_chapter_directory(ordinal: usize, chapter_title: &str) -> String {
+    format!("{ordinal:02}_{}", kit_chapter_name(chapter_title))
+}
+
+/// J-04:落盘 / 显示用的相对路径——有章节就是 `NN_章名/<文件名>`,没有章节就是拍平的 `<文件名>`。
+fn kit_relative_name(sequence: usize, chapter_ordinal: Option<usize>, chapter_title: &str, source_name: &str) -> String {
+    let base = kit_file_name(sequence, chapter_title, source_name);
+    match chapter_ordinal {
+        Some(ordinal) => format!("{}/{base}", kit_chapter_directory(ordinal, chapter_title)),
+        None => base,
+    }
+}
+
 /// 顺序清单里的时长:`12.4 秒`(新手看得懂的形式,不用 HH:MM:SS.mmm)。
 fn kit_duration_label(seconds: f64) -> String {
     format!("{:.1} 秒", seconds.max(0.0))
 }
 
-/// 「顺序.txt」:每行 `NN 章名 素材名 时长`(与文件顺序一致;没导出来的行照写,编号不跳)。
+/// 「顺序.txt」:有章节就用 `— NN_章名 —` 标出章节边界(与目录结构一致),每行
+/// `NN 章名 素材名 时长`(与文件顺序一致;没导出来的行照写,编号不跳)。
 fn kit_order_text(clips: &[ExportClip], items: &[ExportItemStatus]) -> String {
+    let ordinals = kit_chapter_ordinals(clips);
     let mut text = String::new();
+    let mut last_ordinal: Option<usize> = None;
     for (index, clip) in clips.iter().enumerate() {
+        if let Some(ordinal) = ordinals[index] {
+            if last_ordinal != Some(ordinal) {
+                text.push_str(&format!("— {} —\n", kit_chapter_directory(ordinal, &clip.chapter_title)));
+                last_ordinal = Some(ordinal);
+            }
+        }
         let failed = items.get(index).is_some_and(|item| item.status == "failed");
         text.push_str(&format!(
             "{:02} {} {} {}{}\n",
@@ -6239,6 +6345,71 @@ esac
         assert!(std::fs::read_to_string(output).unwrap().contains("大家好"));
     }
 
+    /// J-05:素材包的 SRT 跟视频同名同目录——章节子目录也要跟上,不是像完整交付包
+    /// 那样收进单独的字幕文件夹。
+    #[test]
+    fn kit_subtitles_copied_beside_the_clip_including_chapter_subdirectory() {
+        let directory = TestDirectory::new();
+        let db_path = directory.db_path();
+        let connection = Connection::open(&db_path).unwrap();
+        let cache_source = directory.path().join("cache/1/transcript.srt");
+        std::fs::create_dir_all(cache_source.parent().unwrap()).unwrap();
+        std::fs::write(&cache_source, "1\n00:00:00,000 --> 00:00:01,000\n大家好\n").unwrap();
+        let staging = directory.path().join("kit.tmp");
+        std::fs::create_dir(&staging).unwrap();
+        let mut clip = export_clip_fixture("voice.mov", 0, 1_000, 1, 1_000);
+        clip.segment_id = None;
+        clip.selection_kind = "whole".to_owned();
+        clip.srt_rel_path = Some("1/transcript.srt".to_owned());
+        let clips = vec![clip];
+        let items = vec![ExportItemStatus {
+            clip_id: 1,
+            file_name: "voice.mov".to_owned(),
+            output_name: "01_海边/01_海边_voice.mp4".to_owned(),
+            status: "done".to_owned(),
+            note: None,
+            warning: false,
+        }];
+
+        assert_eq!(copy_kit_subtitles(&connection, &clips, &items, &staging).unwrap(), 1);
+        let output = staging.join("01_海边/01_海边_voice.srt");
+        assert!(output.is_file(), "SRT 应该跟视频挨着,不是单独收进字幕文件夹");
+        assert!(std::fs::read_to_string(output).unwrap().contains("大家好"));
+        assert!(!staging.join(SUBTITLE_DIRECTORY).exists());
+    }
+
+    /// J-05:本集选了配乐 → 原文件抄一份到素材包根目录(不进任何章节子目录);
+    /// 没有配乐就静默跳过,不报错。
+    #[test]
+    fn kit_music_copied_to_kit_root_when_episode_has_selected_track() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let episode_id: i64 = connection
+            .query_row("SELECT id FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+            .unwrap();
+        let staging = directory.path().join("kit.tmp");
+        std::fs::create_dir(&staging).unwrap();
+
+        // 没有配乐:静默跳过。
+        copy_kit_music(&connection, episode_id, &staging).unwrap();
+        assert!(std::fs::read_dir(&staging).unwrap().next().is_none());
+
+        let track = directory.path().join("bgm.mp3");
+        std::fs::write(&track, b"bgm-bytes").unwrap();
+        connection
+            .execute(
+                "INSERT INTO music_tracks(episode_id, file_name, rel_path, duration_ticks, analysis_status, created_at)
+                 VALUES (?1, 'bgm.mp3', ?2, 4_000_000, 'done', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![episode_id, track.to_string_lossy()],
+            )
+            .unwrap();
+
+        copy_kit_music(&connection, episode_id, &staging).unwrap();
+        let copied = staging.join("bgm.mp3");
+        assert!(copied.is_file());
+        assert_eq!(std::fs::read(copied).unwrap(), b"bgm-bytes");
+    }
+
     #[test]
     fn corrupt_source_is_red_but_does_not_interrupt_complete_package() {
         let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
@@ -7556,9 +7727,14 @@ esac
         put_in_story_order(&connection, a, None, 2);
 
         let plan = plan_jianying_kit(&connection, None).unwrap();
+        // J-04:两章 → 两个章节子目录,「01_山里」先出现(镜头带顺序),「02_海边」第二个出现。
         assert_eq!(
             plan.files,
-            vec!["01_山里_IMG_0003.mp4", "02_海边_IMG_0002.mp4", "03_海边_IMG_0001.mp4"]
+            vec![
+                "01_山里/01_山里_IMG_0003.mp4",
+                "02_海边/02_海边_IMG_0002.mp4",
+                "02_海边/03_海边_IMG_0001.mp4",
+            ]
         );
         assert_eq!(plan.order_file, KIT_ORDER_FILE);
         assert!(plan.dir.starts_with("EP01_剪映素材包_20"), "{}", plan.dir);
@@ -7568,7 +7744,7 @@ esac
         let items: Vec<ExportItemStatus> = Vec::new();
         assert_eq!(
             kit_order_text(&clips, &items),
-            "01 山里 IMG_0003.mov 2.0 秒\n02 海边 IMG_0002.mov 1.2 秒\n03 海边 IMG_0001.mov 2.0 秒\n"
+            "— 01_山里 —\n01 山里 IMG_0003.mov 2.0 秒\n— 02_海边 —\n02 海边 IMG_0002.mov 1.2 秒\n03 海边 IMG_0001.mov 2.0 秒\n"
         );
     }
 
@@ -7610,7 +7786,11 @@ esac
         let kit = plan_jianying_kit(&connection, None).unwrap();
         assert_eq!(
             kit.files,
-            vec!["01_第 1 章_clip_1.mp4", "02_第 7 章_IMG_0831.mp4", "03_第 7 章_IMG_0832.mp4"]
+            vec![
+                "01_第 1 章/01_第 1 章_clip_1.mp4",
+                "02_第 7 章/02_第 7 章_IMG_0831.mp4",
+                "02_第 7 章/03_第 7 章_IMG_0832.mp4",
+            ]
         );
         let quick = plan_quick_export(&connection, None, None).unwrap();
         assert_eq!(
@@ -7627,6 +7807,56 @@ esac
         assert_eq!(kit_file_name(7, "", "b:c.mp4"), "07_未分章_b_c.mp4");
         assert_eq!(kit_file_name(12, "第一天: 出发?", "x.mov"), "12_第一天 出发_x.mp4");
         assert_eq!(kit_file_name(100, "尾声", "y.mov"), "100_尾声_y.mp4");
+    }
+
+    /// J-04:章节目录 = `NN_章名`(NN 是章节在镜头带上第几个出现,不是文件序号);
+    /// `kit_relative_name` 落文件名前缀这段路径,`kit_order_text` 用同一个名字标边界。
+    #[test]
+    fn kit_chapter_directory_numbers_by_first_appearance_not_file_sequence() {
+        assert_eq!(kit_chapter_directory(1, "山里"), "01_山里");
+        assert_eq!(kit_chapter_directory(2, "海边"), "02_海边");
+        assert_eq!(
+            kit_relative_name(3, Some(2), "海边", "IMG_0001.MOV"),
+            "02_海边/03_海边_IMG_0001.mp4"
+        );
+        assert_eq!(kit_relative_name(3, None, "", "IMG_0001.MOV"), "03_未分章_IMG_0001.mp4");
+    }
+
+    /// J-04:整集一个章节标记都没有 → 全部拍平(不建「01_未分章」这种只有一个空壳的子目录)。
+    #[test]
+    fn kit_chapter_ordinals_is_all_none_when_episode_has_no_chapters() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let a = insert_clip(&connection, Path::new("IMG_0001.mov"), "2026-08-31T10:00:00Z", &[1], None);
+        let b = insert_clip(&connection, Path::new("IMG_0002.mov"), "2026-08-31T11:00:00Z", &[1], None);
+        put_in_story_order(&connection, a, None, 0);
+        put_in_story_order(&connection, b, None, 1);
+        let clips = selected_clips(&connection).unwrap();
+        assert_eq!(kit_chapter_ordinals(&clips), vec![None, None]);
+        let plan = plan_jianying_kit(&connection, None).unwrap();
+        assert_eq!(plan.files, vec!["01_未分章_IMG_0001.mp4", "02_未分章_IMG_0002.mp4"]);
+        assert!(plan.files.iter().all(|name| !name.contains('/')), "{:?}", plan.files);
+    }
+
+    /// J-04:真落盘(临时目录,不需要 ffmpeg)——章节子目录真的建出来了,`顺序.txt` 带 `— NN_章名 —`
+    /// 边界行,且落在根目录而不是某个章节子目录里。用 [`enqueue_export`] 走真实 `MODE_KIT` 分支,
+    /// 直接摆文件(不跑 ffmpeg),只验证目录结构 —— 编解码那部分已有
+    /// `jianying_kit_export_writes_numbered_files_and_order_file` 覆盖。
+    #[test]
+    fn kit_output_paths_create_chapter_subdirectories_on_disk() {
+        let sequence = [(Some(2_usize), "海边", "IMG_0001.mov"), (Some(1), "山里", "IMG_0002.mov")];
+        let temp = TestDirectory::new();
+        for (ordinal, chapter, source) in sequence {
+            let relative = kit_relative_name(1, ordinal, chapter, source);
+            let path = temp.path().join(&relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"placeholder").unwrap();
+            assert!(path.is_file(), "{relative} 应该已经落盘");
+        }
+        assert!(temp.path().join("02_海边").is_dir());
+        assert!(temp.path().join("01_山里").is_dir());
     }
 
     /// 真跑一遍(有 ffmpeg 才跑):两章三镜 → 文件夹 `<集名>_剪映素材包_<日期>` 里三个 mp4 编号连续、
@@ -7666,7 +7896,11 @@ esac
         std::fs::create_dir(&dest).unwrap();
 
         let outcome = start_jianying_kit(&mut connection, &dest).unwrap();
-        assert_eq!(outcome.files, vec!["01_山里_third.mp4", "02_海边_second.mp4", "03_海边_first.mp4"]);
+        // J-04:两章 → 两个章节子目录,「顺序.txt」仍在根目录。
+        assert_eq!(
+            outcome.files,
+            vec!["01_山里/01_山里_third.mp4", "02_海边/02_海边_second.mp4", "02_海边/03_海边_first.mp4"]
+        );
         let job_id = outcome.job_id.expect("kit export enqueues a job");
         let queued = get_export_status(&connection, Some(job_id)).unwrap();
         assert_eq!(queued.mode.as_deref(), Some("kit"));
@@ -7690,16 +7924,18 @@ esac
             .filter(|name| name != COMPLETION_MARKER_FILE)
             .collect();
         entries.sort();
-        assert_eq!(
-            entries,
-            vec!["01_山里_third.mp4", "02_海边_second.mp4", "03_海边_first.mp4", KIT_ORDER_FILE]
-        );
+        assert_eq!(entries, vec!["01_山里", "02_海边", KIT_ORDER_FILE]);
+        assert!(output.join("01_山里").join("01_山里_third.mp4").is_file());
+        assert!(output.join("02_海边").join("02_海边_second.mp4").is_file());
+        assert!(output.join("02_海边").join("03_海边_first.mp4").is_file());
         let order = std::fs::read_to_string(output.join(KIT_ORDER_FILE)).unwrap();
         let lines: Vec<&str> = order.lines().collect();
-        assert_eq!(lines.len(), 3, "{order}");
-        assert!(lines[0].starts_with("01 山里 third.mp4 "), "{order}");
-        assert!(lines[1].starts_with("02 海边 second.mp4 0.4 秒"), "{order}");
-        assert!(lines[2].starts_with("03 海边 first.mp4 "), "{order}");
+        assert_eq!(lines.len(), 5, "{order}");
+        assert_eq!(lines[0], "— 01_山里 —");
+        assert!(lines[1].starts_with("01 山里 third.mp4 "), "{order}");
+        assert_eq!(lines[2], "— 02_海边 —");
+        assert!(lines[3].starts_with("02 海边 second.mp4 0.4 秒"), "{order}");
+        assert!(lines[4].starts_with("03 海边 first.mp4 "), "{order}");
         assert!(!output.join(SELECTED_DIRECTORY).exists());
         assert!(!output.join(README_FILE).exists());
         let payload = parse_payload(&connection.query_row("SELECT payload FROM jobs WHERE id = ?1", [job_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 
 import { JourneyTimeline } from "../JourneyTimeline";
 import { MusicPanel } from "../MusicPanel";
@@ -7,11 +7,38 @@ import { listStoryTemplates, setStoryOrder, type StoryTemplate, type StoryTempla
 import { TEMPLATE_POOL_RULE, isTemplateCandidate, narrativeStoryOrder, storyOrderMatches } from "./bandTemplateModel";
 import { BAND_VIEWS, type BandView } from "./shotBandModel";
 import { Button, Card, Chip, EmptyState, SectionHeader } from "./ui";
+import { useShowAllFeatures } from "./showAllFeatures";
 import { getClipsFeedSnapshot, refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace, useWorkspace, type BandMode } from "./WorkspaceStore";
 import { failureText } from "./errorText";
 
 export { MusicRuler, rulerMarks, MUSIC_RULER_HEIGHT, RULER_SEGMENT_WIDTH } from "./MusicRuler";
+
+/**
+ * V-07 两颗触发钮共用的「展开/收起」:点选项即收(不是常驻菜单,别把浮层一直盖在
+ * 镜头带上方——留着不关会挡住下面视口的点击,`preview-shots` 的 22-band-arranged 步
+ * 就是这样撞出来的),点外面 / Esc 也收。
+ */
+function useDropdown(): { open: boolean; rootRef: React.RefObject<HTMLDivElement | null>; toggle: () => void; close: () => void } {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open]);
+  return { open, rootRef, toggle: () => setOpen((value) => !value), close: () => setOpen(false) };
+}
 
 /** 规格 §7 冻结的五个 tab 名,一字不差。 */
 export const BAND_TABS: readonly { mode: BandMode; label: string }[] = [
@@ -22,42 +49,80 @@ export const BAND_TABS: readonly { mode: BandMode; label: string }[] = [
   { mode: "template", label: "模板" },
 ];
 
-/** 分段控件本身。附属区展不展开由 `BandAccessory` 决定,这一条永远在。 */
+/** R19 P-05:「显示全部功能」关时附属只剩 故事 / 音乐(旅程 / 地点卡 / 模板进开关后);当前选中的照样在。 */
+export const BAND_TABS_BASIC: ReadonlySet<BandMode> = new Set(["story", "music"]);
+
+/**
+ * V-07:五个附属标签平铺在栏标题条里此前是「第二套导航」(brainstorm N5)。收进一颗
+ * 「附属：{当前} ⌄」触发钮,tablist 本体收在触发钮下方的浮层里——role=tab / aria-selected /
+ * tablist 的 AX 名「镜头带附属视图」一字不改(规格冻结),只是平时不占标题条的版面。
+ * 选中一个 tab 就收起(`useDropdown`),不常驻盖住下面的镜头带。
+ */
 export function BandTabs(): JSX.Element {
   const bandMode = useWorkspace((state) => state.bandMode);
+  const { open, rootRef, toggle, close } = useDropdown();
+  // R19 P-05(flow 车道,一行):关时只画 故事 / 音乐;五个 tab 名与 role 冻结不变,开关打开原样回来。
+  const visibleTabs = useShowAllFeatures() ? BAND_TABS : BAND_TABS.filter((tab) => BAND_TABS_BASIC.has(tab.mode) || tab.mode === bandMode);
+  const current = visibleTabs.find((tab) => tab.mode === bandMode)?.label ?? visibleTabs[0]!.label;
   return (
-    <div className="band-tabs" role="tablist" aria-label="镜头带附属视图">
-      {BAND_TABS.map((tab) => (
-        <button
-          type="button"
-          role="tab"
-          key={tab.mode}
-          id={`band-tab-${tab.mode}`}
-          aria-selected={bandMode === tab.mode}
-          aria-controls="band-accessory"
-          tabIndex={bandMode === tab.mode ? 0 : -1}
-          className={bandMode === tab.mode ? "active" : undefined}
-          onClick={() => dispatchWorkspace({ type: "set-band-mode", mode: tab.mode })}
-        >
-          {tab.label}
-        </button>
-      ))}
+    <div className="band-accessory-select" ref={rootRef}>
+      <Button variant="secondary" size="sm" className="band-accessory-select-trigger" aria-haspopup="true" aria-expanded={open} onClick={toggle}>
+        {`附属：${current} ⌄`}
+      </Button>
+      <div className="band-accessory-panel" hidden={!open}>
+        <div className="band-tabs" role="tablist" aria-label="镜头带附属视图">
+          {visibleTabs.map((tab) => (
+            <button
+              type="button"
+              role="tab"
+              key={tab.mode}
+              id={`band-tab-${tab.mode}`}
+              aria-selected={bandMode === tab.mode}
+              aria-controls="band-accessory"
+              tabIndex={bandMode === tab.mode ? 0 : -1}
+              className={bandMode === tab.mode ? "active" : undefined}
+              onClick={() => {
+                dispatchWorkspace({ type: "set-band-mode", mode: tab.mode });
+                close();
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
 /**
- * C 稿的镜头带视图切换「按章节 / 按时间 / 仅缺口」:一组 `Chip` 按钮(aria-pressed),
- * 挨着附属 tablist 放。它不是 tab —— tablist 名与五个 tab 是冻结的 AX 锚点,不往里加。
+ * V-07:视图三芯片「按章节 / 按时间 / 仅缺口」同样收进一颗「{当前} ⌄」触发钮
+ * (brainstorm N5 与「附属」同一条噪音,同一套收法)。它不是 tab —— tablist 名与
+ * 五个 tab 是冻结的 AX 锚点,这里的 `role="group"` 名「镜头带视图」也不改,只是挪进了
+ * 触发钮下方的浮层;选中一个视图就收起,不常驻盖住下面的镜头带。
  */
 export function BandViewToggle({ value, onChange }: { value: BandView; onChange: (view: BandView) => void }): JSX.Element {
+  const { open, rootRef, toggle, close } = useDropdown();
+  const current = BAND_VIEWS.find((item) => item.view === value)?.label ?? BAND_VIEWS[0]!.label;
   return (
-    <div className="band-views" role="group" aria-label="镜头带视图">
-      {BAND_VIEWS.map((item) => (
-        <Chip key={item.view} selected={value === item.view} onClick={() => onChange(item.view)}>
-          {item.label}
-        </Chip>
-      ))}
+    <div className="band-view-select" ref={rootRef}>
+      <Button variant="secondary" size="sm" className="band-view-select-trigger" aria-haspopup="true" aria-expanded={open} onClick={toggle}>
+        {`${current} ⌄`}
+      </Button>
+      <div className="band-views band-view-menu" role="group" aria-label="镜头带视图" hidden={!open}>
+        {BAND_VIEWS.map((item) => (
+          <Chip
+            key={item.view}
+            selected={value === item.view}
+            onClick={() => {
+              onChange(item.view);
+              close();
+            }}
+          >
+            {item.label}
+          </Chip>
+        ))}
+      </div>
     </div>
   );
 }

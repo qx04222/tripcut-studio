@@ -1,7 +1,7 @@
 {
   "name": "tripcut-studio",
   "private": true,
-  "version": "0.9.1",
+  "version": "0.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,13 @@
     "test": "vitest run",
     "preview:workspace": "node scripts/qa/make-mock-covers.mjs && vite --mode mock --port 1421",
     "preview:shots": "node scripts/qa/preview-shots.mjs",
-    "preview:kit": "node scripts/qa/preview-shots.mjs --kit-only"
+    "preview:kit": "node scripts/qa/preview-shots.mjs --kit-only",
+    "bench": "node bench/run-import-bench.mjs --fixtures 100",
+    "bench:full": "node bench/run-import-bench.mjs --fixtures 500 --out-dir bench/runs/full-500 && node bench/run-import-bench.mjs --fixtures 2000 --out-dir bench/runs/full-2000",
+    "bench:startup": "node bench/check-startup.mjs",
+    "bench:size": "node bench/check-binary-size.mjs",
+    "bench:history": "node scripts/qa/perf-history-report.mjs",
+    "qa:first5min": "node scripts/qa/first-five-minutes.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -25,24 +31,24 @@
     "pinyin-pro": "3.29.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-resizable-panels": "^4.12.3"
+    "react-resizable-panels": "4.12.3"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@tauri-apps/cli": "2.11.4",
     "@testing-library/react": "^16.3.3",
-    "@types/node": "24.3.0",
+    "@types/node": "24.13.4",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
+    "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.1.1",
-    "eslint": "10.9.1",
+    "eslint": "10.10.0",
     "eslint-plugin-jsx-a11y": "6.10.2",
     "jsdom": "^30.0.1",
     "playwright-core": "^1.62.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.68.0",
+    "typescript-eslint": "8.70.0",
     "vite": "8.2.2",
-    "vitest": "4.1.11"
+    "vitest": "5.0.0"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

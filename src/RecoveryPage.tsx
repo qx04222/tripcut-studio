@@ -157,9 +157,10 @@ export function RecoveryPage({ report, loadError, onContinue, onReport }: Recove
                   placeholder="确认"
                   onChange={(event) => setResetDraft(event.target.value)}
                 />
+                {/* R19 V-01:破坏性动作不做实心主按钮;这一页唯一的 primary 是「进入工作台」。 */}
                 <Button
                   tone="danger"
-                  variant="primary"
+                  variant="secondary"
                   icon="warning"
                   busy={busy === "重置项目库"}
                   disabled={Boolean(busy) || !resetArmed}

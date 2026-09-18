@@ -5,8 +5,8 @@ import { dispatchWorkspace, getWorkspaceSnapshot, isPaneCollapsed } from "./Work
 /** 壳听这个事件换 key 重挂三栏(Panel 只认 defaultSize)。 */
 export const LAYOUT_RESET_EVENT = "tripcut:layout-reset";
 
-/** `ui.pane.*` 五个键的默认值(与 UI_SETTING_DEFAULTS 同一份)。 */
-export const PANE_LAYOUT_KEYS = ["ui.pane.pool_width", "ui.pane.inspector_width", "ui.pane.monitor_height", "ui.pane.pool_collapsed", "ui.pane.inspector_collapsed"] as const;
+/** 布局五个键的默认值(与 UI_SETTING_DEFAULTS 同一份)。R19:检查器折叠位换成「钉住」偏好。 */
+export const PANE_LAYOUT_KEYS = ["ui.pane.pool_width", "ui.pane.inspector_width", "ui.pane.monitor_height", "ui.pane.pool_collapsed", "ui.inspector.pinned"] as const;
 
 /**
  * R16 P2-12「恢复默认布局」:栏宽 / 监视器占比 / 两侧折叠位全部写回默认,store 同步,壳重挂三栏。
@@ -19,6 +19,8 @@ export async function resetLayout(): Promise<void> {
   dispatchWorkspace({ type: "set-pane-size", pane: "inspector", value: Number(UI_SETTING_DEFAULTS["ui.pane.inspector_width"]) });
   dispatchWorkspace({ type: "set-pane-size", pane: "monitor", value: Number(UI_SETTING_DEFAULTS["ui.pane.monitor_height"]) });
   if (isPaneCollapsed(state, "pool")) dispatchWorkspace({ type: "toggle-pane", pane: "pool" });
-  if (isPaneCollapsed(state, "inspector")) dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
+  // R19 V-04:检查器回到默认 = 不钉住、不收起(选中即出)。
+  if (state.inspectorPinned) dispatchWorkspace({ type: "set-inspector-pinned", pinned: false });
+  if (state.inspectorDismissed) dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
   window.dispatchEvent(new CustomEvent(LAYOUT_RESET_EVENT));
 }

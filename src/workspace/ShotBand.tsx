@@ -288,9 +288,10 @@ export function ShotBand(): JSX.Element {
         <div className="band-toolbar-actions">
           <BandAutoSelect disabled={readOnly} onOutcome={onAutoSelected} onError={(text) => showToast(text, { tone: "danger" })} />
           {/* R12 §2:镜头带唯一的主动作 —— 把挑好的片段按章排进带上。带还是空的时候这个入口
-              由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。 */}
+              由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。
+              R19 V-01:降为 secondary —— 一屏只留顶栏「下一步」一颗实心主按钮。 */}
           {chapters.length > 0 ? (
-            <Button variant="primary" size="sm" className="band-arrange" aria-label="一键排入" busy={arranging} disabled={readOnly} onClick={onArrange}>
+            <Button variant="secondary" size="sm" className="band-arrange" aria-label="一键排入" busy={arranging} disabled={readOnly} onClick={onArrange}>
               一键排入
             </Button>
           ) : null}

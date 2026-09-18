@@ -203,6 +203,8 @@ describe("U-29:章节头与栏标题条把镜与缺口分列", () => {
 describe("U-17:空章算缺口,占位上有可点的入口", () => {
   it("「仅缺口」视图包含 0 镜的章,而不是「所有章节都没有缺口」", async () => {
     await renderBand();
+    // V-07:视图三芯片收进「{当前} ⌄」触发钮下的浮层,先展开才摸得到。
+    fireEvent.click(screen.getByRole("button", { name: "按章节 ⌄" }));
     fireEvent.click(screen.getByRole("button", { name: "仅缺口" }));
     expect(screen.getAllByRole("rowgroup").map((group) => group.getAttribute("aria-label"))).toEqual(["第 2 章 抵达"]);
     expect(screen.queryByText("所有章节都没有缺口。")).toBeNull();

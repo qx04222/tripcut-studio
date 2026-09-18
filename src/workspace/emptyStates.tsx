@@ -1,4 +1,5 @@
-import type { JSX } from "react";
+import { useEffect, type JSX } from "react";
+import { reportTeachingWant, useTeaching } from "./guides";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
 import { arrangeIntoBand } from "./pipelineActions";
 import { Button, EmptyState, type IconName } from "./ui";
@@ -23,7 +24,7 @@ export const EMPTY_COPY = {
 } as const satisfies Record<string, { icon: IconName; title: string; body: string }>;
 
 /**
- * 媒体池无素材(U-06):大号 primary「导入素材」入口。AX 名是**新名**「导入第一批素材」——
+ * 媒体池无素材(U-06):大号「导入素材」入口(R19 V-01 起 secondary,顶栏「下一步」才是实心主按钮)。AX 名是**新名**「导入第一批素材」——
  * 「导入素材」是顶栏按钮的冻结名,壳测试与真机冒烟按名字找它,空池时两颗同名会撞。
  */
 export function PoolEmpty(): JSX.Element {
@@ -36,7 +37,7 @@ export function PoolEmpty(): JSX.Element {
       className="pool-empty-state"
       action={
         <Button
-          variant="primary"
+          variant="secondary" // R19 V-01:空态入口降 secondary,首页 / 顶栏才是那颗实心主按钮
           icon="import"
           aria-label="导入第一批素材"
           aria-haspopup="dialog"
@@ -89,6 +90,14 @@ export function MonitorEmpty(): JSX.Element {
  */
 export function BandEmpty({ variant = "no-chapters", onAction }: { variant?: "no-chapters" | "no-gaps"; onAction?: () => void } = {}): JSX.Element {
   const pipeline = usePipeline();
+  // R19 U-02:②③ 两句是教学(「按 F 收藏或点自动挑选」),归仲裁器;没拿到槽时卡片照在、按钮照在,只不带教学句。
+  const teaching = variant === "no-chapters" && pipeline.step >= 2;
+  useEffect(() => {
+    reportTeachingWant("empty", teaching);
+    return () => reportTeachingWant("empty", false);
+  }, [teaching]);
+  const slot = useTeaching("empty") && teaching;
+  const teach = slot ? "empty" : undefined;
   if (variant === "no-gaps") {
     return (
       <EmptyState
@@ -109,13 +118,14 @@ export function BandEmpty({ variant = "no-chapters", onAction }: { variant?: "no
     const copy = EMPTY_COPY.bandArrange;
     return (
       <EmptyState
+        teach={teach}
         icon={copy.icon}
         size="inline"
         title={copy.title}
-        body={copy.body}
+        body={slot ? copy.body : undefined}
         className="band-empty-state"
         action={
-          <Button variant="primary" size="sm" icon="grip" onClick={() => void arrangeIntoBand().catch(() => undefined)}>
+          <Button variant="secondary" size="sm" icon="grip" onClick={() => void arrangeIntoBand().catch(() => undefined)}>
             一键排入
           </Button>
         }
@@ -126,13 +136,14 @@ export function BandEmpty({ variant = "no-chapters", onAction }: { variant?: "no
     const copy = EMPTY_COPY.bandPick;
     return (
       <EmptyState
+        teach={teach}
         icon={copy.icon}
         size="inline"
         title={copy.title}
-        body={copy.body}
+        body={slot ? copy.body : undefined}
         className="band-empty-state"
         action={
-          <Button variant="primary" size="sm" icon="star" onClick={() => window.dispatchEvent(new CustomEvent(OPEN_AUTO_SELECT_EVENT))}>
+          <Button variant="secondary" size="sm" icon="star" onClick={() => window.dispatchEvent(new CustomEvent(OPEN_AUTO_SELECT_EVENT))}>
             去自动挑选
           </Button>
         }

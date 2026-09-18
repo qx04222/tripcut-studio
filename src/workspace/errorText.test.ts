@@ -1,6 +1,9 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { describeError, failureText } from "./errorText";
+import { describeError, failureText, stripStepNumbers } from "./errorText";
 
 describe("errorText(R11 简化专项 #5:错误一句话,不带内部代码)", () => {
   it("R12 术语 v2(B-列表 27):后端 CoreError 的英文前缀「export failed:」也剥掉", () => {
@@ -53,5 +56,36 @@ describe("errorText(R11 简化专项 #5:错误一句话,不带内部代码)", ()
     expect(describeError("No space left on device (os error 28)")).toBe("磁盘已满");
     expect(describeError("写文件失败: Read-only file system (os error 30)")).toBe("写文件失败:这个磁盘是只读的");
     expect(describeError("No such file or directory (os error 2)")).toBe("文件或文件夹不存在");
+  });
+});
+
+/** R19 U-08:错误文案不说「第 n 步」—— 那是我们的编号,不是剪映的;用户不该先学编号才能读懂错误。 */
+describe("R19 U-08:失败文案去「第 n 步」", () => {
+  it("后端旧文案里的「第 1 步 / 第 2 步」被改写成动作词;新后端文案本来就没有编号,原样通过", () => {
+    expect(failureText("自动挑选", "rating failed: 还没有可挑的素材:先在第 1 步导入视频")).toBe("自动挑选没成功:还没有可挑的素材:先导入视频");
+    expect(failureText("自动挑选", "素材都已经挑过了:想重挑就先撤销上一批,或在第 2 步手动挑几条")).toBe("自动挑选没成功:素材都已经挑过了:想重挑就先撤销上一批,或去媒体池手动挑几条");
+    expect(failureText("排入", "没有挑好的片段", "先在第 2 步挑几条片段")).toBe("排入没成功:没有挑好的片段。先挑几条片段");
+    expect(failureText("排入", "没有挑好的片段", "回到第 ② 步挑几条")).toBe("排入没成功:没有挑好的片段。回去挑几条");
+    expect(stripStepNumbers("在第 3 步把片段排进来")).toBe("把片段排进来");
+    expect(failureText("自动挑选", "还没有可挑的素材:先导入视频")).toBe("自动挑选没成功:还没有可挑的素材:先导入视频");
+  });
+
+  it("src-tauri/src/core 的用户可见文案里没有「第 n 步」", () => {
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith(".rs")) {
+          readFileSync(path, "utf8").split("\n").forEach((line, index) => {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("//")) return;
+            if (/"[^"]*第\s*[\d①②③④]\s*步[^"]*"/.test(trimmed)) hits.push(`${path}:${index + 1}`);
+          });
+        }
+      }
+    };
+    walk(join(process.cwd(), "src-tauri/src/core"));
+    expect(hits).toEqual([]);
   });
 });

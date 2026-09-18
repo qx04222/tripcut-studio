@@ -95,6 +95,22 @@ export const KEYMAP_ACTIONS: readonly KeymapActionMeta[] = [
 
 export const KEYMAP_ACTION_BY_ID: ReadonlyMap<KeymapAction, KeymapActionMeta> = new Map(KEYMAP_ACTIONS.map((meta) => [meta.id, meta]));
 
+/**
+ * R19 P-12:默认给用户看的键位表只留这 15 条「常用」(剪映用户学一个 F 就够;其余在 `?` 里切「全部」)。
+ * 只裁**表的默认视图**,不裁键本身 —— 全部动作照旧生效,自定义 / 预设不受影响。
+ */
+export const KEYMAP_COMMON_ACTIONS: readonly KeymapAction[] = [
+  "play-pause", "frame-back", "frame-forward", "mark-in", "mark-out", "save-range",
+  "favorite", "reject", "adopt-suggestion",
+  "undo", "export", "import", "command-palette", "help", "escape",
+];
+
+const COMMON_SET: ReadonlySet<KeymapAction> = new Set(KEYMAP_COMMON_ACTIONS);
+
+export function isCommonAction(action: KeymapAction): boolean {
+  return COMMON_SET.has(action);
+}
+
 export type KeymapPresetId = "jianying" | "premiere" | "fcp" | "custom";
 export type KeymapTable = Readonly<Record<KeymapAction, readonly string[]>>;
 

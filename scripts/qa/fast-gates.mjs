@@ -77,6 +77,8 @@ const commands = [
   },
   { id: "cargo-audit", command: "cargo", args: ["audit", "--file", "src-tauri/Cargo.lock"] },
   { id: "npm-audit", command: "npm", args: ["audit", "--audit-level=high"] },
+  // R19 E-02(bench 车道):100 条固定夹具跑一次导入基准 + 对基线报告(不拦截,Q-13 头两周只报告)。
+  { id: "perf-bench-100", command: "node", args: ["bench/gate.mjs"] },
 ];
 
 const results = commands.map((entry) => {

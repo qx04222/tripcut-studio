@@ -74,13 +74,15 @@ export function segmentRangeLabel(inTicks: number, outTicks: number, tbNum: numb
 }
 
 /**
- * 一个分段在镜头带上占的像素宽(160px 瓦片 + 8px 间距)。章节偏移、虚拟化窗口与
+ * 一个分段在镜头带上占的像素宽(140px 瓦片 + 8px 间距)。章节偏移、虚拟化窗口与
  * 音乐刻度轨的序号轴都按它算 —— 三处必须是同一个数,刻度才真的落在镜头上。
+ * R19 V-06:镜块由 160×130(节距 168)收成 140×112(节距 148);CSS 侧的实宽 / 高在
+ * `band-r19.css` 同步改,`bandTimeline.ts` 的 BAND_TILE_WIDTH = 节距 − 8。
  */
-export const BAND_SEGMENT_PITCH = 168;
+export const BAND_SEGMENT_PITCH = 148;
 
-/** 瓦片 160 × 130(规格 §3.7)。 */
-export const BAND_TILE_HEIGHT = 130;
+/** 瓦片 140 × 112(R9 规格 §3.7 的 160 × 130,R19 V-06 收小)。 */
+export const BAND_TILE_HEIGHT = 112;
 /** 章节头一行(`Toolbar dense`,28px)。 */
 export const BAND_CHAPTER_HEAD_HEIGHT = 28;
 /** 常显横向滚动条的高度。 */
@@ -88,7 +90,7 @@ export const BAND_SCROLLBAR_HEIGHT = 10;
 /** 视口上下 padding 之和(8 + 8)。 */
 export const BAND_VIEWPORT_PADDING = 16;
 /**
- * 镜头带视口的**内容高**:章节头 + 瓦片 + 滚动条 + padding = 184。视口高度就钉在这个
+ * 镜头带视口的**内容高**:章节头 + 瓦片 + 滚动条 + padding = 166(R19 前 184)。视口高度就钉在这个
  * 数上,中栏再高也不会在瓦片下方留出一片白(规格 §3.7);多出的高度归监视器。
  */
 export const BAND_VIEWPORT_HEIGHT =

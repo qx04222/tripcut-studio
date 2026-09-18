@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
 
-import { createEpisode, deleteEpisode, listEpisodes, setSetting, type EpisodeSummary } from "../api";
+import { createEpisode, deleteEpisode, listEpisodes, type EpisodeSummary } from "../api";
 import { episodeErrorMessage } from "../EpisodePanel";
 import { EPISODES_UPDATED_EVENT } from "./copy";
 import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
 import { EpisodeMenu, EpisodeRenameInline, type EpisodeMenuState } from "./EpisodeMenu";
-import { EpisodeCard, TemplateCard } from "./HomeCards";
-import { HOME_TEMPLATES, TEMPLATE_PRESELECT_KEY, episodeProgress, recentEpisodes, templateEpisodeTitle, type HomeTemplate } from "./homeModel";
+import { EpisodeCard } from "./HomeCards";
+import { episodeProgress, newEpisodeTitle, recentEpisodes } from "./homeModel";
 import { pinHome } from "./homeStore";
 import { ONBOARDING_STEPS } from "./onboarding";
 import { Button, Icon } from "./ui";
@@ -16,11 +16,11 @@ import { useOccludesPlayer } from "./usePlayerOcclusion";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
 /**
- * R13 §3(车道 B):剪映式首页。空库时自动出现,或点顶栏 logo 进来(homeStore)。
- * 一屏三件事:「开始一个新旅程」大按钮(= 打开导入抽屉)、「最近的集」卡片(切集并进工作区)、
- * 三个模板卡(新建集 + 预选模板 → 进工作区并打开导入)。R12 的四步卡并入顶部。
- * 唯一的 primary 是「开始一个新旅程」;卡片都是 Card as="button"。
- * AX:region「首页」/ button「开始一个新旅程」/ list「最近的集」/ group「从模板开始」/ status「模板确认」。
+ * R13 §3(车道 B)→ R19 U-03(flow 车道):零术语首页。空库时自动出现,或点顶栏 logo 进来(homeStore)。
+ * 一屏三件事:一句话 + 「新建一集」(唯一 primary)/「继续上次」(当前集有素材才出)+ 「最近的集」卡片。
+ * 模板区撤掉(Wave 2 P-09 做实三条预设句再回);四步条改成动作句,由 `ONBOARDING_STEPS` 承接
+ * 导航条提示条的文案(shell 车道删 PipelineHint)。首页 DOM 不出现首轮词表(`FIRST_ROUND_VOCABULARY`)。
+ * AX:region「首页」/ button「新建一集」「继续上次」(新名;旧名「开始一个新旅程」释放)/ list「最近的集」/ status「新建确认」。
  */
 export function HomeScreen(): JSX.Element {
   const feed = useClipsFeed();
@@ -30,7 +30,7 @@ export function HomeScreen(): JSX.Element {
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [pendingTemplate, setPendingTemplate] = useState<HomeTemplate | null>(null);
+  const [confirmingNew, setConfirmingNew] = useState(false);
   // R15:集卡片「···」菜单与「删除这一集」确认。
   const [menu, setMenu] = useState<EpisodeMenuState | null>(null);
   const [deleting, setDeleting] = useState<EpisodeSummary | null>(null);
@@ -54,7 +54,7 @@ export function HomeScreen(): JSX.Element {
     };
   }, [refresh]);
 
-  const startJourney = () => {
+  const openImport = () => {
     pinHome(false);
     dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" });
   };
@@ -68,19 +68,16 @@ export function HomeScreen(): JSX.Element {
   const current = feed.episode.current;
   const currentHasClips = (current?.clip_count ?? 0) > 0 || feed.clips.length > 0;
 
-  const createFromTemplate = async (template: HomeTemplate) => {
+  // 「新建一集」:当前集还是空的就直接去导入(它就是新的一集);有素材才真的封存 + 开新集。
+  const createFresh = async () => {
     setBusy(true);
-    setPendingTemplate(null);
+    setConfirmingNew(false);
     try {
-      const outcome = await createEpisode(templateEpisodeTitle(template));
-      // 预选模板:记在设置里(镜头带模板面板据此高亮),并把镜头带切到「模板」;素材导入后一点即套。
-      void setSetting(TEMPLATE_PRESELECT_KEY, template.id).catch(() => undefined);
-      dispatchWorkspace({ type: "set-band-mode", mode: "template" });
+      const outcome = await createEpisode(newEpisodeTitle());
       window.dispatchEvent(
         new CustomEvent("tripcut:episode-changed", { detail: { id: outcome.episode.id, title: outcome.episode.title } }),
       );
-      pinHome(false);
-      dispatchWorkspace({ type: "open-drawer", drawer: "import", tab: "source" });
+      openImport();
     } catch (error) {
       setNotice(episodeErrorMessage(error));
     } finally {
@@ -88,15 +85,15 @@ export function HomeScreen(): JSX.Element {
     }
   };
 
-  const pickTemplate = (template: HomeTemplate) => {
+  const startNew = () => {
     if (busy) return;
     setNotice(null);
-    // 当前集有素材:新建集 = 封存当前集 —— 先确认,不让一次点击悄悄封存别人的进行中。
-    if (currentHasClips) {
-      setPendingTemplate(template);
+    if (!currentHasClips) {
+      openImport();
       return;
     }
-    void createFromTemplate(template);
+    // 当前集有素材:新建集 = 封存当前集 —— 先确认,不让一次点击悄悄封存进行中的一集。
+    setConfirmingNew(true);
   };
 
   // R15:删一集。删完后端告诉我们哪一集在进行中;派发 tripcut:episode-changed 让媒体池 /
@@ -149,9 +146,32 @@ export function HomeScreen(): JSX.Element {
           <p className="home-kicker">旅剪工作台</p>
           <h1 className="home-title">把这一趟旅行,剪成一集。</h1>
           <p className="home-lede">选一个装着视频的文件夹就能开始;分析都在本机完成,原片不会被改动。</p>
-          <Button variant="primary" icon="import" className="home-start" aria-label="开始一个新旅程" onClick={startJourney}>
-            开始一个新旅程
-          </Button>
+          <div className="home-actions">
+            <Button variant="primary" icon="import" className="home-start" aria-label="新建一集" disabled={busy} onClick={startNew}>
+              新建一集
+            </Button>
+            {currentHasClips ? (
+              <Button variant="secondary" icon="play" aria-label="继续上次" title={current ? `回到「${current.title}」` : "回到工作区"} onClick={() => pinHome(false)}>
+                继续上次
+              </Button>
+            ) : null}
+          </div>
+          {confirmingNew ? (
+            <p className="home-confirm" role="status" aria-label="新建确认">
+              <span>{`新建一集会先把当前集「${current?.title ?? "当前集"}」封存为只读档案。`}</span>
+              <Button variant="secondary" size="sm" onClick={() => void createFresh()}>
+                确认新建
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmingNew(false)}>
+                取消
+              </Button>
+            </p>
+          ) : null}
+          {notice ? (
+            <p className="home-notice" role="status">
+              {notice}
+            </p>
+          ) : null}
         </div>
 
         {recent.length > 0 ? (
@@ -208,31 +228,6 @@ export function HomeScreen(): JSX.Element {
             ) : null}
           </div>
         ) : null}
-
-        <div className="home-section" role="group" aria-label="从模板开始">
-          <h2 className="home-section-title">从模板开始</h2>
-          <div className="home-templates">
-            {HOME_TEMPLATES.map((template) => (
-              <TemplateCard key={template.id} template={template} disabled={busy} onPick={pickTemplate} />
-            ))}
-          </div>
-          {pendingTemplate ? (
-            <p className="home-confirm" role="status" aria-label="模板确认">
-              <span>{`用「${pendingTemplate.label}」开新集,会先把当前集「${current?.title ?? "当前集"}」封存为只读档案。`}</span>
-              <Button variant="secondary" size="sm" onClick={() => void createFromTemplate(pendingTemplate)}>
-                确认新建
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => setPendingTemplate(null)}>
-                取消
-              </Button>
-            </p>
-          ) : null}
-          {notice ? (
-            <p className="home-notice" role="status">
-              {notice}
-            </p>
-          ) : null}
-        </div>
       </div>
     </section>
   );

@@ -137,7 +137,8 @@ describe("globalHotkeyIntent —— 纯判定", () => {
 });
 
 describe("useGlobalHotkeys —— 装进壳里的行为", () => {
-  it("F6 在四栏之间轮转焦点,焦点真的落进对应 region", () => {
+  it("F6 在四栏之间轮转焦点,焦点真的落进对应 region(R19:检查器要开着 —— 先选中一条)", () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 3 } });
     render(<WorkspaceShell />);
     for (const name of ["预览监视器", "镜头带", "检查器", "媒体池"]) {
       press({ key: "F6", code: "F6" });
@@ -147,13 +148,14 @@ describe("useGlobalHotkeys —— 装进壳里的行为", () => {
   });
 
   it("⇧F6 反向轮转", () => {
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 3 } });
     render(<WorkspaceShell />);
     press({ key: "F6", code: "F6", shiftKey: true });
     expect(document.activeElement?.closest("[role=region]")?.getAttribute("aria-label")).toBe("检查器");
   });
 
-  it("折叠的栏被 F6 跳过", () => {
-    __resetWorkspaceForTests({ inspectorCollapsed: true, focusedPane: "band" });
+  it("折叠的栏被 F6 跳过(R19:检查器收着 = 没选中且没钉住)", () => {
+    __resetWorkspaceForTests({ selection: null, inspectorPinned: false, focusedPane: "band" });
     render(<WorkspaceShell />);
     press({ key: "F6", code: "F6" });
     expect(getWorkspaceSnapshot().focusedPane).toBe("pool");
@@ -165,7 +167,10 @@ describe("useGlobalHotkeys —— 装进壳里的行为", () => {
     expect(getWorkspaceSnapshot().poolCollapsed).toBe(true);
     expect(screen.getByRole("button", { name: "展开媒体池" })).toBeTruthy();
     press({ key: "2", code: "Digit2", metaKey: true });
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(true);
+    // R19 V-04:没选中时 ⌘2 = 钉住找回;再按一次收起(会话态)。
+    expect(getWorkspaceSnapshot().inspectorPinned).toBe(true);
+    press({ key: "2", code: "Digit2", metaKey: true });
+    expect(getWorkspaceSnapshot().inspectorDismissed).toBe(true);
     press({ key: "1", code: "Digit1", metaKey: true });
     expect(getWorkspaceSnapshot().poolCollapsed).toBe(false);
   });

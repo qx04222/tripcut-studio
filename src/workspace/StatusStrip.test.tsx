@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 状态条一挂载就轮询三个后端命令;jsdom 里没有 tauri 的 invoke,不打桩的话三条
@@ -132,6 +132,62 @@ describe("StatusStrip", () => {
     render(<StatusStrip />);
     const main = await screen.findByRole("button", { name: "查看后台任务详情" });
     expect(main.querySelector("svg[data-icon=\"info\"]")).not.toBeNull();
+  });
+
+  it("V-08:真正空闲(没有短语、没有缺失素材)时,状态条内一颗按钮都没有——查看详情/全部暂停都不占位", async () => {
+    apiMocks.getImportProgress.mockResolvedValue({ total: 0, done: 0, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false });
+    apiMocks.listMissingClips.mockResolvedValue([]);
+    apiMocks.listGenerationRequests.mockResolvedValue([]);
+    apiMocks.getJobsPaused.mockResolvedValue(false);
+    render(<StatusStrip />);
+    const strip = await screen.findByRole("status", { name: "后台状态" });
+    await within(strip).findByText("后台空闲");
+    expect(within(strip).queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("V-08:有后台任务时,状态条恢复「查看后台任务详情」与「全部暂停」两颗按钮", async () => {
+    apiMocks.getImportProgress.mockResolvedValue({ total: 500, done: 12, failed: 0, running: 3, waiting_for_permit: 0, paused_for_memory: false });
+    apiMocks.listMissingClips.mockResolvedValue([]);
+    apiMocks.listGenerationRequests.mockResolvedValue([]);
+    apiMocks.getJobsPaused.mockResolvedValue(false);
+    render(<StatusStrip />);
+    const strip = await screen.findByRole("status", { name: "后台状态" });
+    await within(strip).findByText("正在分析 12/500");
+    const buttons = within(strip).queryAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(buttons.map((button) => button.textContent)).toEqual(["查看后台任务详情", "全部暂停"]);
+  });
+
+  it("V-08:必需工具链缺失时,左端多一颗带红点的「视频处理组件缺失」按钮", async () => {
+    apiMocks.getImportProgress.mockResolvedValue({ total: 0, done: 0, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false });
+    apiMocks.listMissingClips.mockResolvedValue([]);
+    apiMocks.listGenerationRequests.mockResolvedValue([]);
+    apiMocks.getJobsPaused.mockResolvedValue(false);
+    apiMocks.getSettingsStatus.mockResolvedValue({
+      ffmpeg: { configured_path: "", resolved_path: "", available: false, version: null, note: null },
+      ffprobe: { configured_path: "", resolved_path: "ffprobe", available: true, version: "6.0", note: null },
+      whisper: {
+        binary: { configured_path: "", resolved_path: "whisper-cli", available: true, version: "1.0", note: null },
+        model_tier: "large-v3-turbo",
+        model_path: "",
+        model_available: true,
+        models_directory: "",
+      },
+      clip_sidecar: { venv_path: "", service_path: "", setup_script: "", available: true, service_available: true, note: "" },
+      cache: { database_bytes: 0, disk_bytes: 0 },
+    });
+    // R19 接线:StatusStrip 不再自己轮询,数据源是壳里的 ToolchainStatusProbe(useToolchainStatus)。
+    const { ToolchainStatusProbe, __resetToolchainStatusForTests } = await import("./ToolchainBanner");
+    __resetToolchainStatusForTests();
+    render(
+      <>
+        <ToolchainStatusProbe />
+        <StatusStrip />
+      </>,
+    );
+    const strip = await screen.findByRole("status", { name: "后台状态" });
+    const toolchain = await within(strip).findByRole("button", { name: "视频处理组件缺失" });
+    expect(toolchain.querySelector(".workspace-status-dot")).not.toBeNull();
   });
 });
 

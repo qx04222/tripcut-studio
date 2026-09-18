@@ -72,9 +72,9 @@ describe("导出结束的 Toast", () => {
       await Promise.resolve();
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
-    // R14 §9 B:剪映不可用时抽屉默认落在「剪映素材包」;本用例测快速导出,先切过去。
+    // R19 U-06/P-04:首屏三卡,点「导出视频文件」直接落在快速导出模式。
     await act(async () => {
-      within(dialog).getByRole("button", { name: "导出片段" }).click();
+      within(dialog).getByRole("button", { name: "导出视频文件" }).click();
       await Promise.resolve();
     });
     await within(dialog).findByText("001_IMG_1.mp4");
@@ -104,9 +104,9 @@ describe("导出结束的 Toast", () => {
       await Promise.resolve();
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
-    // R14 §9 B:剪映不可用时抽屉默认落在「剪映素材包」;本用例测快速导出,先切过去。
+    // R19 U-06/P-04:首屏三卡,点「导出视频文件」直接落在快速导出模式。
     await act(async () => {
-      within(dialog).getByRole("button", { name: "导出片段" }).click();
+      within(dialog).getByRole("button", { name: "导出视频文件" }).click();
       await Promise.resolve();
     });
     await within(dialog).findByText("001_IMG_1.mp4");

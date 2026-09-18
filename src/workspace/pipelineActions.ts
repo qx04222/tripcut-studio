@@ -1,6 +1,6 @@
 import { arrangeSelectedSegments } from "../api";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
-import type { PipelineState, PipelineStep } from "./pipelineModel";
+import { pipelineNextDisabled, type PipelineState, type PipelineStep } from "./pipelineModel";
 import { refreshClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
@@ -49,6 +49,8 @@ export async function arrangeIntoBand(): Promise<{ placed: number; chapters: num
  * ④ 导出 / 再导出一次 → 导出抽屉。
  */
 export function runPipelineNext(state: PipelineState): void {
+  // R19 U-01:一条都还没分析完时按钮本来就是禁用的;键盘 / 程序路径进来也不发一个必然失败的挑选。
+  if (pipelineNextDisabled(state)) return;
   if (state.complete) {
     dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
     return;

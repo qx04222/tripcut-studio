@@ -139,11 +139,15 @@
   transform: scale(1.25);
 }
 
-/* 焦点环画在轨道行上(range 本体是透明的,环在它自己身上看不出边界)。 */
+/* 焦点环画在轨道行上(range 本体是透明的,环在它自己身上看不出边界)。
+   R19 tokens-lite(V-10):styles.css 那条 `:where(...):focus-visible` 通用环带 !important,
+   硬压它只能再加 !important。改成不碰 outline 本身,只改它读的变量——通用环的
+   outline-offset 是 `var(--focus-ring-offset)`,在这个元素上把变量改成负偏移即可,
+   !important 管不到变量的求值。 */
 
 .monitor .monitor-seek-input:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring) !important;
-  outline-offset: calc(-1 * var(--focus-ring-width)) !important;
+  --focus-ring-offset: calc(-1 * var(--focus-ring-width));
+
   border-radius: var(--radius-6);
 }
 
@@ -198,11 +202,13 @@
 /* F6 把焦点送进 [data-pane] 的 landmark(tabIndex=-1)。workspace.css 的通用环
    outline-offset 是 +2px,画在栏盒子外面,被 Panel 的 overflow:hidden 裁光——真机
    上四栏聚焦全都看不见(76-f6-band-focus.png)。这里把环收到栏内(负偏移),用实色
-   强调色。!important 是为了压过 styles.css 里 `:where(...[tabindex]):focus-visible`
-   那条带 !important 的通用规则(它的偏移 +2px 同样会把环推出去)。 */
+   强调色。R19 tokens-lite(V-10):styles.css 那条通用环带 !important,此前这里靠再加
+   !important 硬压;改成只改它读的两个变量(颜色 → 强调色、偏移 → 负),通用环自己画出
+   同样的结果(tokens.test.ts 的 !important 基线降到 1)。 */
 
 .workspace-shell [data-pane]:focus-visible {
-  outline: var(--focus-ring-width) solid var(--accent) !important;
-  outline-offset: calc(-1 * var(--focus-ring-width)) !important;
+  --focus-ring: var(--accent);
+  --focus-ring-offset: calc(-1 * var(--focus-ring-width));
+
   border-radius: 0;
 }

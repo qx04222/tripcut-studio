@@ -149,6 +149,11 @@ describe("Z-07 / Z-08 交付抽屉的原片缺失通知", () => {
       await Promise.resolve();
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
+    // R19 U-06/P-04:首屏三卡,「交给剪映」在版本不可用时自动落在素材包模式。
+    await act(async () => {
+      within(dialog).getByRole("button", { name: "交给剪映" }).click();
+      await Promise.resolve();
+    });
     const notice = await within(dialog).findByRole("alert", { name: "原片缺失" });
     expect(notice.textContent).toContain(`${MISSING_SOURCE_REASON}:IMG_0830_早餐.mov`);
     const primary = within(dialog).getByRole("button", { name: "导出剪映素材包到上次文件夹" }) as HTMLButtonElement;
@@ -171,8 +176,9 @@ describe("Z-07 / Z-08 交付抽屉的原片缺失通知", () => {
       await Promise.resolve();
     });
     const dialog = await screen.findByRole("dialog", { name: "导出" });
+    // R19 U-06/P-04:首屏三卡,「导出视频文件」直接落在快速导出模式。
     await act(async () => {
-      within(dialog).getByRole("button", { name: "导出片段" }).click();
+      within(dialog).getByRole("button", { name: "导出视频文件" }).click();
       await Promise.resolve();
     });
     await within(dialog).findByRole("alert", { name: "原片缺失" });

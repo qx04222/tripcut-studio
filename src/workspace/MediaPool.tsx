@@ -34,6 +34,7 @@ import {
 import { useClipsFeed } from "./useClipsFeed";
 import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
+import { isCompactWidth } from "./shellLayout";
 import { failureText } from "./errorText";
 
 const FILTER_ORDER: readonly SelectionFilter[] = ["all", "favorite", "unrated", "rejected"];
@@ -74,10 +75,10 @@ export function MediaPool(): JSX.Element {
     const measure = () => {
       setViewportHeight(Math.max(1, viewport.clientHeight));
       // 栏宽以实测为准,store 里的值是拖动落定后的值,拖动中途它还没更新。
-      // R18 V-18:列数两档 —— 1440 以下最多两列。此前池宽锁 320,1280 下仍排三列,
-      // 卡只是更挤;窗口窄的时候要的是更大的卡,不是更多的卡。
+      // R18 V-18:列数两档 —— 紧凑档(R19 V-11:<--bp-compact,壳的唯一断点)最多两列。此前池宽锁 320,
+      // 1280 下仍排三列,卡只是更挤;窗口窄的时候要的是更大的卡,不是更多的卡。
       const byWidth = poolColumnCount(viewport.clientWidth || paneWidth);
-      const wide = typeof window === "undefined" || window.innerWidth >= 1440;
+      const wide = typeof window === "undefined" || !isCompactWidth(window.innerWidth);
       setColumns(wide ? byWidth : (Math.min(byWidth, 2) as 2 | 3 | 4));
     };
     measure();

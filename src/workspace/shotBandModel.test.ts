@@ -272,15 +272,15 @@ describe("镜头带数据模型", () => {
 });
 
 describe("镜头带高度与视图(R9 规格 §3.7)", () => {
-  it("镜头带最小高按内容算:故事模式 184,附属带展开 284", () => {
-    expect(bandMinHeight("story")).toBe(184);
-    for (const mode of ["music", "journey", "destination", "template"] as const) expect(bandMinHeight(mode)).toBe(284);
+  it("镜头带最小高按内容算:故事模式 166,附属带展开 266(R19 V-06 瓦片 112 高)", () => {
+    expect(bandMinHeight("story")).toBe(166);
+    for (const mode of ["music", "journey", "destination", "template"] as const) expect(bandMinHeight(mode)).toBe(266);
   });
 
-  it("Panel 的 min 高 = 栏标题条 32 + 内容高:故事 216,附属 316,音乐再加刻度轨 36 = 352", () => {
-    expect(bandPanelMinHeight("story")).toBe(216);
-    expect(bandPanelMinHeight("journey")).toBe(316);
-    expect(bandPanelMinHeight("music")).toBe(352);
+  it("Panel 的 min 高 = 栏标题条 32 + 内容高:故事 198,附属 298,音乐再加刻度轨 36 = 334", () => {
+    expect(bandPanelMinHeight("story")).toBe(198);
+    expect(bandPanelMinHeight("journey")).toBe(298);
+    expect(bandPanelMinHeight("music")).toBe(334);
     expect(BAND_MUSIC_RULER_HEIGHT).toBe(MUSIC_RULER_HEIGHT);
   });
 
@@ -288,18 +288,18 @@ describe("镜头带高度与视图(R9 规格 §3.7)", () => {
     // 故事模式:瓦片下方不留一片壳底色 —— 栏高 = 量到的内容高;Take 条展开时内容更高就跟着高。
     expect(bandPanelHeight("story", { stackHeight: 900, monitorRatio: 0.5, contentHeight: 216 })).toBe(216);
     expect(bandPanelHeight("story", { stackHeight: 900, monitorRatio: 0.5, contentHeight: 308 })).toBe(308);
-    // 还没量到内容(0)时退到 min。
-    expect(bandPanelHeight("story", { stackHeight: 900, monitorRatio: 0.5, contentHeight: 0 })).toBe(216);
-    // 附属模式:按持久化的监视器占比分,剩余给带;不够 316 就抬到 316。
+    // 还没量到内容(0)时退到 min(R19 V-06 瓦片 112 高 → 198)。
+    expect(bandPanelHeight("story", { stackHeight: 900, monitorRatio: 0.5, contentHeight: 0 })).toBe(198);
+    // 附属模式:按持久化的监视器占比分,剩余给带;不够 298(音乐 334)就抬到 min。
     expect(bandPanelHeight("music", { stackHeight: 1000, monitorRatio: 0.6, contentHeight: 216 })).toBe(400);
-    expect(bandPanelHeight("music", { stackHeight: 700, monitorRatio: 0.6, contentHeight: 216 })).toBe(352);
-    expect(bandPanelHeight("journey", { stackHeight: 600, monitorRatio: 0.8, contentHeight: 216 })).toBe(316);
-    expect(bandPanelHeight("template", { stackHeight: 0, monitorRatio: 0.6, contentHeight: 216 })).toBe(316);
+    expect(bandPanelHeight("music", { stackHeight: 700, monitorRatio: 0.6, contentHeight: 216 })).toBe(334);
+    expect(bandPanelHeight("journey", { stackHeight: 600, monitorRatio: 0.8, contentHeight: 216 })).toBe(298);
+    expect(bandPanelHeight("template", { stackHeight: 0, monitorRatio: 0.6, contentHeight: 216 })).toBe(298);
   });
-  it("视口高 = 章节头 28 + 瓦片 130 + 滚动条 10 + 上下 padding 16", () => {
+  it("视口高 = 章节头 28 + 瓦片 112 + 滚动条 10 + 上下 padding 16", () => {
     expect(BAND_CHAPTER_HEAD_HEIGHT).toBe(28);
-    expect(BAND_TILE_HEIGHT).toBe(130);
-    expect(BAND_VIEWPORT_HEIGHT).toBe(184);
+    expect(BAND_TILE_HEIGHT).toBe(112);
+    expect(BAND_VIEWPORT_HEIGHT).toBe(166);
   });
 
   it("每段带本章内的槽位序号(按章重置)与叙事角色词(无叙事时为 null)", () => {

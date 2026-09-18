@@ -21,3 +21,14 @@ createRoot(root).render(
     </ErrorBoundary>
   </StrictMode>,
 );
+
+// R19 E-05(bench 车道):首次 render 提交后的下一帧,报一次 `mark_first_paint`,
+// 与 Rust 侧的 `rust_setup_ms` 拼成启动时间的两段拆分。预览/mock/单测环境没有
+// Tauri host,`invoke` 会 reject——吞掉即可,不影响首屏。
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("mark_first_paint"))
+      .catch(() => {});
+  });
+});

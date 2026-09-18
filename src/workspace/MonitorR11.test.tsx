@@ -190,8 +190,9 @@ describe("R11 §1.2:热力条与建议段", () => {
     expect(heat.querySelectorAll(".monitor-heat-bar").length).toBeLessThanOrEqual(200);
     expect(heat.querySelectorAll(".monitor-heat-suggestion").length).toBe(3);
     expect(heat.querySelectorAll(".monitor-heat-suggestion.active").length).toBe(1);
-    expect(screen.getByText("建议 1/3 · 6.0 s · 清晰·运动适中")).toBeTruthy();
-    expect(screen.getByText("按 Enter 采用这段")).toBeTruthy();
+    // R19 V-05:可见只留「建议 1/3」,整句在 aria-label / tooltip 里;「按 Enter 采用这段」进 tooltip。
+    expect(screen.getByLabelText("建议 1/3 · 6.0 s · 清晰·运动适中").textContent).toBe("建议 1/3");
+    expect(screen.getByTestId("monitor-suggestion").getAttribute("title")).toContain("按 Enter 采用这段");
     // 当前建议已经填成入出点,I / O 可以微调。
     expect(screen.getByRole("button", { name: "入点", pressed: true })).toBeTruthy();
     expect(screen.getByRole("button", { name: "出点", pressed: true })).toBeTruthy();
@@ -202,11 +203,11 @@ describe("R11 §1.2:热力条与建议段", () => {
     region.focus();
     fireEvent.keyDown(region, { key: "n", code: "KeyN" });
     await flush();
-    expect(screen.getByText("建议 2/3 · 5.0 s · 有人声")).toBeTruthy();
+    expect(screen.getByLabelText("建议 2/3 · 5.0 s · 有人声")).toBeTruthy();
     expect(commands()).toContainEqual({ type: "seek_abs", seconds: 40 });
     fireEvent.keyDown(region, { key: "N", code: "KeyN", shiftKey: true });
     await flush();
-    expect(screen.getByText("建议 1/3 · 6.0 s · 清晰·运动适中")).toBeTruthy();
+    expect(screen.getByLabelText("建议 1/3 · 6.0 s · 清晰·运动适中")).toBeTruthy();
     fireEvent.keyDown(region, { key: "Enter", code: "Enter" });
     await flush();
     expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(9, 17, 23);

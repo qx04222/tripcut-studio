@@ -16,11 +16,16 @@ export interface OnboardingStep {
   body: string;
 }
 
+/**
+ * R19 U-03:四步写成动作句(「① 选文件夹 → ② 软件挑 / 你按 F → ③ 拖顺序 → ④ 交给剪映」),
+ * 首页四步卡与首启卡共用;不出现首轮词表里的词(镜头带 / 章节 / 精选段 / 交付 / 模板 / 旅程)。
+ * shell 车道删掉导航条提示条后,提示条那四句由这里承接(主按钮 tooltip 是另一半)。
+ */
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
-  { id: "import", title: "导入", body: "选一个装着视频的文件夹,原片不会被改动。" },
-  { id: "pick", title: "挑选", body: "让软件自动挑选,或看到喜欢的按 F 收藏。" },
-  { id: "arrange", title: "排列", body: "把挑好的片段按章节排进镜头带,顺序可以拖。" },
-  { id: "export", title: "导出", body: "把片段导出到一个文件夹,或整包交付。" },
+  { id: "import", title: "选文件夹", body: "选一个装着视频的文件夹,原片不会被改动、不上传。" },
+  { id: "pick", title: "软件挑 / 你按 F", body: "点右上角让软件挑好,或看到喜欢的按 F。" },
+  { id: "arrange", title: "拖顺序", body: "挑好的片段自动排成一条,拖一拖就能换顺序。" },
+  { id: "export", title: "交给剪映", body: "一键交给剪映,回到熟悉的地方精剪。" },
 ];
 
 export interface OnboardingInput {

@@ -29,16 +29,22 @@ export interface WorkspaceState {
   poolWidth: number;
   inspectorWidth: number;
   monitorRatio: number;
-  /** 用户手动折叠(⌘1/⌘2 或竖条按钮),落 `ui.pane.*_collapsed`。 */
+  /** 用户手动折叠媒体池(⌘1 或竖条按钮),落 `ui.pane.pool_collapsed`。 */
   poolCollapsed: boolean;
-  inspectorCollapsed: boolean;
   /**
-   * 窄窗自动折叠(R10 U-04)。与手动折叠**分开记**且永不落盘:此前自动折叠直接翻
-   * `inspectorCollapsed`,被 persistedPairs 写进设置表——窗口放大后没人把它翻回来,
-   * 真机上 1280 → 1704 检查器一直是竖条。实际显示按 `isPaneCollapsed()`(二者取或)。
+   * 窄窗自动折叠媒体池(R10 U-04)。与手动折叠**分开记**且永不落盘:此前自动折叠直接翻
+   * 手动位,被 persistedPairs 写进设置表——窗口放大后没人把它翻回来。实际显示按
+   * `isPaneCollapsed()`(二者取或)。
    */
   poolAutoCollapsed: boolean;
-  inspectorAutoCollapsed: boolean;
+  /**
+   * R19 shell(V-04):检查器不再是一栏,是监视器栏内的滑出层。可见 = `!inspectorDismissed &&
+   * (inspectorPinned || selection !== null)`(见 `isInspectorOpen`)。
+   * - `inspectorPinned` 是偏好(📌 钉住 → 常驻),落 `ui.inspector.pinned`;
+   * - `inspectorDismissed` 是会话态(Esc / 点空白 / ⌘2 收起),任何一次选中都把它清零,永不落盘。
+   */
+  inspectorPinned: boolean;
+  inspectorDismissed: boolean;
   bandMode: BandMode;
   openDrawer: DrawerKind;
   importTab: "source" | "jobs" | "missing";
@@ -81,8 +87,10 @@ export type WorkspaceAction =
   | { type: "clear-selection" }
   | { type: "set-pane-size"; pane: "pool" | "inspector" | "monitor"; value: number }
   | { type: "toggle-pane"; pane: "pool" | "inspector" }
-  /** 窄窗阈值跨越时由壳派发;只改 auto 位,不碰用户手动位。 */
-  | { type: "set-auto-collapse"; pool?: boolean; inspector?: boolean }
+  /** 窄窗阈值跨越时由壳派发;只改媒体池的 auto 位,不碰用户手动位(检查器 R19 起没有自动折叠)。 */
+  | { type: "set-auto-collapse"; pool?: boolean }
+  /** R19 V-04:📌 钉住 / 取消钉住检查器(落盘的偏好)。 */
+  | { type: "set-inspector-pinned"; pinned: boolean }
   | { type: "set-band-mode"; mode: BandMode }
   | {
       type: "open-drawer";
@@ -126,9 +134,9 @@ export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
   inspectorWidth: Number(UI_SETTING_DEFAULTS["ui.pane.inspector_width"]),
   monitorRatio: Number(UI_SETTING_DEFAULTS["ui.pane.monitor_height"]),
   poolCollapsed: false,
-  inspectorCollapsed: false,
   poolAutoCollapsed: false,
-  inspectorAutoCollapsed: false,
+  inspectorPinned: false,
+  inspectorDismissed: false,
   bandMode: "story",
   openDrawer: null,
   importTab: "source",
@@ -151,11 +159,17 @@ export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
  */
 const HYDRATED_STATES = new WeakSet<WorkspaceState>();
 
-/** 实际显示用的折叠判定:手动折叠或窄窗自动折叠,任一为真就是竖条。 */
+/** R19 V-04:检查器滑出层此刻是否展开(钉住则常驻;否则选中即出、收起即藏)。 */
+export function isInspectorOpen(state: WorkspaceState): boolean {
+  return !state.inspectorDismissed && (state.inspectorPinned || state.selection !== null);
+}
+
+/**
+ * 实际显示用的折叠判定。媒体池:手动折叠或窄窗自动折叠,任一为真就是竖条。
+ * 检查器:R19 起等于「滑出层没展开」——F6 轮栏与「恢复默认布局」仍按这个名字问。
+ */
 export function isPaneCollapsed(state: WorkspaceState, pane: "pool" | "inspector"): boolean {
-  return pane === "pool"
-    ? state.poolCollapsed || state.poolAutoCollapsed
-    : state.inspectorCollapsed || state.inspectorAutoCollapsed;
+  return pane === "pool" ? state.poolCollapsed || state.poolAutoCollapsed : !isInspectorOpen(state);
 }
 
 /** `ui.selection.last_clip`:没写过 / 坏值 / 非正整数一律当没有。 */
@@ -185,22 +199,24 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
   switch (action.type) {
     case "select-clip": {
       const selection: Selection = { kind: "clip", clipId: action.clipId };
+      // R19 V-04:选中即出 —— 任何一次选中都把「收起」清零。
+      const base = { ...state, inspectorDismissed: false };
       if (action.ids) {
-        return { ...state, selection, anchorClipId: action.clipId, multiSelection: action.ids };
+        return { ...base, selection, anchorClipId: action.clipId, multiSelection: action.ids };
       }
       if (action.shift && state.anchorClipId !== null) {
         // ⇧ 连选:锚点到目标的闭区间。锚点不动,监视器跟最后一次点击。
-        return { ...state, selection, multiSelection: rangeBetween(state.anchorClipId, action.clipId) };
+        return { ...base, selection, multiSelection: rangeBetween(state.anchorClipId, action.clipId) };
       }
       if (action.meta) {
         return {
-          ...state,
+          ...base,
           selection,
           anchorClipId: action.clipId,
           multiSelection: toggleMember(state.multiSelection, action.clipId),
         };
       }
-      return { ...state, selection, anchorClipId: action.clipId, multiSelection: [action.clipId] };
+      return { ...base, selection, anchorClipId: action.clipId, multiSelection: [action.clipId] };
     }
     case "select-slot":
       return {
@@ -208,6 +224,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         selection: { kind: "slot", chapterId: action.chapterId, slot: action.slot },
         anchorClipId: null,
         multiSelection: [],
+        inspectorDismissed: false,
       };
     case "clear-selection":
       return { ...state, selection: null, anchorClipId: null, multiSelection: [] };
@@ -222,20 +239,20 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "toggle-pane": {
       // 「切换」按**实际显示**判:竖条状态下(不管是手动还是窄窗自动折的)一律展开,
       // 且把两个位都清掉——用户明确要看,窄窗的自动折叠让位;展开状态下折叠记为手动。
-      // ⌘2 因此在任何状态下都能把检查器找回来(U-04)。
       if (action.pane === "pool") {
         const collapsed = isPaneCollapsed(state, "pool");
         return { ...state, poolCollapsed: !collapsed, poolAutoCollapsed: false };
       }
-      const collapsed = isPaneCollapsed(state, "inspector");
-      return { ...state, inspectorCollapsed: !collapsed, inspectorAutoCollapsed: false };
+      // R19 V-04:⌘2 = 收起 / 找回滑出层。展开着就收起(会话态);收着就找回 —— 没有选中、
+      // 也没钉住时「找回」唯一说得通的意思是钉住它(常驻,空态一句话),记为偏好。
+      if (isInspectorOpen(state)) return { ...state, inspectorDismissed: true };
+      return { ...state, inspectorDismissed: false, inspectorPinned: state.inspectorPinned || state.selection === null };
     }
     case "set-auto-collapse":
-      return {
-        ...state,
-        poolAutoCollapsed: action.pool ?? state.poolAutoCollapsed,
-        inspectorAutoCollapsed: action.inspector ?? state.inspectorAutoCollapsed,
-      };
+      return { ...state, poolAutoCollapsed: action.pool ?? state.poolAutoCollapsed };
+    case "set-inspector-pinned":
+      // 钉住的同时把「收起」清零 —— 用户点 📌 是想看见它,不是想记一个看不见的偏好。
+      return { ...state, inspectorPinned: action.pinned, inspectorDismissed: action.pinned ? false : state.inspectorDismissed };
     case "set-band-mode":
       return { ...state, bandMode: action.mode };
     case "open-drawer":
@@ -305,7 +322,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           MONITOR_RATIO_MAX,
         ),
         poolCollapsed: readUiBool(s, "ui.pane.pool_collapsed"),
-        inspectorCollapsed: readUiBool(s, "ui.pane.inspector_collapsed"),
+        inspectorPinned: readUiBool(s, "ui.inspector.pinned"),
         bandMode: isBandMode(bandMode) ? bandMode : "story",
         inspectorSections: readUiList(s, "ui.inspector.sections_open"),
         filter: readUiSetting(s, "ui.pool.filter") as SelectionFilter,
@@ -340,8 +357,8 @@ export function persistedPairs(
   if (previous.poolCollapsed !== next.poolCollapsed) {
     pairs.push(["ui.pane.pool_collapsed", String(next.poolCollapsed)]);
   }
-  if (previous.inspectorCollapsed !== next.inspectorCollapsed) {
-    pairs.push(["ui.pane.inspector_collapsed", String(next.inspectorCollapsed)]);
+  if (previous.inspectorPinned !== next.inspectorPinned) {
+    pairs.push(["ui.inspector.pinned", String(next.inspectorPinned)]);
   }
   if (previous.bandMode !== next.bandMode) pairs.push(["ui.band.mode", next.bandMode]);
   if (previous.inspectorSections !== next.inspectorSections) {

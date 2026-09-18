@@ -68,10 +68,10 @@ describe("P2-8 / P2-12 播放与导出", () => {
     const panel = await openTab("播放与导出");
     act(() => {
       dispatchWorkspace({ type: "set-pane-size", pane: "pool", value: 400 });
-      dispatchWorkspace({ type: "toggle-pane", pane: "inspector" });
+      dispatchWorkspace({ type: "set-inspector-pinned", pinned: true });
     });
     expect(getWorkspaceSnapshot().poolWidth).toBe(400);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(true);
+    expect(getWorkspaceSnapshot().inspectorPinned).toBe(true);
     apiMocks.setSetting.mockClear();
     const seen: string[] = [];
     window.addEventListener(LAYOUT_RESET_EVENT, () => seen.push("reset"), { once: true });
@@ -83,7 +83,7 @@ describe("P2-8 / P2-12 播放与导出", () => {
     for (const key of PANE_LAYOUT_KEYS) expect(written).toContain(key);
     expect(apiMocks.setSetting).toHaveBeenCalledWith("ui.pane.pool_width", "320");
     expect(getWorkspaceSnapshot().poolWidth).toBe(320);
-    expect(getWorkspaceSnapshot().inspectorCollapsed).toBe(false);
+    expect(getWorkspaceSnapshot().inspectorPinned).toBe(false);
     await settle();
     expect(getToastSnapshot()?.text).toBe("已恢复默认布局");
   });

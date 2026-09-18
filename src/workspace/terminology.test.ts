@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { FIRST_ROUND_VOCABULARY } from "./homeModel";
 import { TERMINOLOGY_EXCEPTIONS } from "./terminology.allowlist";
 
 /**
@@ -64,6 +65,31 @@ describe("工作区可见文案不含内部术语", () => {
         const relative = file.replace(process.cwd() + "/", "");
         if (TERMINOLOGY_EXCEPTIONS.some((exception) => exception.file === relative && exception.line.test(trimmed))) return;
         if (JARGON.test(visible)) hits.push(`${relative}:${index + 1}: ${trimmed.slice(0, 120)}`);
+      });
+    }
+    expect(hits).toEqual([]);
+  });
+});
+
+/**
+ * R19 U-03「首轮词表」:首页是用户第一眼,不许出现 镜头带 / 章节 / 精选段 / 交付 / 模板 / 旅程。
+ * 这里静态扫首页与四步文案的源文件(可见字符串行);真 DOM 的断言在 homeR19.test。
+ */
+describe("首页不含首轮词表(R19 U-03)", () => {
+  const HOME_FILES = ["src/workspace/HomeScreen.tsx", "src/workspace/HomeCards.tsx", "src/workspace/onboarding.ts"];
+  it(`首轮词表 = ${FIRST_ROUND_VOCABULARY.join(" / ")};首页源文件的可见文案一处不含`, () => {
+    const pattern = new RegExp(FIRST_ROUND_VOCABULARY.join("|"));
+    const hits: string[] = [];
+    for (const file of HOME_FILES) {
+      const lines = readFileSync(join(process.cwd(), file), "utf8").split("\n");
+      lines.forEach((line, index) => {
+        const trimmed = line.trim();
+        if (/^(\/\/|\*|\/\*|\{\/\*)/.test(trimmed)) return;
+        const visible = (trimmed.match(/"[^"]*"|`[^`]*`|「[^」]*」|>[^<{]*</g) ?? [])
+          .map((piece) => piece.replace(/\$\{[^}]*\}/g, ""))
+          .filter((piece) => /[\u4e00-\u9fff]/.test(piece))
+          .join(" ");
+        if (pattern.test(visible)) hits.push(`${file}:${index + 1}: ${trimmed.slice(0, 100)}`);
       });
     }
     expect(hits).toEqual([]);

@@ -1,5 +1,5 @@
 import type { SettingsSectionId } from "./settingsSections";
-import { formatKey, type KeymapAction, type KeymapTable } from "./workspace/keymap";
+import { formatKey, isCommonAction, type KeymapAction, type KeymapTable } from "./workspace/keymap";
 
 export interface KeyboardShortcut {
   id: string;
@@ -16,6 +16,12 @@ export function shortcutKeys(shortcut: KeyboardShortcut, table: KeymapTable): re
   if (!shortcut.actions) return shortcut.keys;
   const keys = shortcut.actions.flatMap((action) => (table[action] ?? []).slice(0, 1).map(formatKey));
   return keys.length > 0 ? keys : shortcut.keys;
+}
+
+/** R19 P-12:「常用」视图里的行 —— 挂了常用动作的行,加上没有动作的「星级」(1–5 也是第 ② 步的日常)。 */
+export function isCommonShortcut(shortcut: KeyboardShortcut): boolean {
+  if (shortcut.id === "stars") return true;
+  return (shortcut.actions ?? []).some(isCommonAction);
 }
 
 export interface KeyboardShortcutGroup {

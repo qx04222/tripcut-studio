@@ -40,21 +40,23 @@ describe("workspaceReducer 栏尺寸与折叠", () => {
   });
   it("⌘1/⌘2 只折叠两侧栏,中栏没有折叠态", () => {
     expect(reduce(S0, { type: "toggle-pane", pane: "pool" }).poolCollapsed).toBe(true);
-    expect(reduce(S0, { type: "toggle-pane", pane: "inspector" }).inspectorCollapsed).toBe(true);
+    // R19 V-04:检查器是滑出层 —— 开着(这里 S0 已选中)⌘2 收起,记会话态。
+    expect(reduce({ ...S0, selection: { kind: "clip", clipId: 1 } }, { type: "toggle-pane", pane: "inspector" }).inspectorDismissed).toBe(true);
   });
 });
 
 describe("workspaceReducer 焦点轮转(F6)", () => {
   it("按 媒体池→预览监视器→镜头带→检查器 循环", () => {
     const order = ["pool", "monitor", "band", "inspector", "pool"] as const;
-    let s: WorkspaceState = { ...S0, focusedPane: "pool" };
+    // R19 V-04:检查器只有开着(有选中 / 钉住)才在轮转里。
+    let s: WorkspaceState = { ...S0, focusedPane: "pool", selection: { kind: "clip", clipId: 1 } };
     for (const expected of order.slice(1)) {
       s = reduce(s, { type: "cycle-pane-focus" });
       expect(s.focusedPane).toBe(expected);
     }
   });
   it("栏被折叠时跳过它", () => {
-    const s = reduce({ ...S0, focusedPane: "band", inspectorCollapsed: true },
+    const s = reduce({ ...S0, focusedPane: "band", selection: null, inspectorPinned: false },
       { type: "cycle-pane-focus" });
     expect(s.focusedPane).toBe("pool");
   });

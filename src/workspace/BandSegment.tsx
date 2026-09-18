@@ -5,11 +5,17 @@ import { CSS } from "@dnd-kit/utilities";
 
 import type { GenerationAvailability, StoryGap } from "../api";
 import { GENERATION_STATUS_LABELS } from "../Storyboard";
+import { bandTileNameLabel, bandTileTooltip, slotIndexLabel } from "./BandSegmentLabel";
 import { segmentAriaLabel, slotLabelZh, type BandSegment } from "./shotBandModel";
 import { GapMoreMenu } from "./BandGapMenu";
 import { ShotMenu, ShotMoreButton } from "./BandSegmentMenu";
 import { Badge, Button, Card, CoverImage, Icon, type MenuItem } from "./ui";
 import { openSettings } from "./openSettings";
+
+// slotIndexLabel / bandTileNameLabel / bandTileTooltip(V-06 常显名与 tooltip)在
+// BandSegmentLabel.ts 里(给这个文件腾行数,R13 给镜头带拆文件的同一条理由);
+// re-export 保证外部导入路径不用变。
+export { bandTileNameLabel, bandTileTooltip, slotIndexLabel } from "./BandSegmentLabel";
 
 export { orderedTakes } from "./shotBandModel";
 
@@ -24,11 +30,6 @@ export function bandDurationLabel(ticks: number, tbNum = 1, tbDen = 1_000): stri
   if (tbDen <= 0 || tbNum <= 0) return "0:00";
   const total = Math.max(0, Math.floor((ticks * tbNum) / tbDen));
   return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`;
-}
-
-/** 「槽位 01」—— A 稿瓦片左下那个按章重置的序号。 */
-export function slotIndexLabel(slotIndex: number): string {
-  return `槽位 ${String(slotIndex).padStart(2, "0")}`;
 }
 
 /**
@@ -281,7 +282,10 @@ export function SegmentCard({
     >
       {children ?? (
         <>
-          <span className="band-tile-thumb" aria-hidden="true">
+          {/* V-06:常显只留封面 + 时长 + 一行名——第 n/m 条 / AI 生成 / 槽位 / 角色挪进
+              这颗缩略图的 title(悬停 tooltip)与检查器;badges / meta 这两行仍在 DOM
+              里(检查器与未来接线用),只是不再常驻占视觉(band-r19.css 隐藏)。 */}
+          <span className="band-tile-thumb" aria-hidden="true" title={bandTileTooltip(segment)}>
             <CoverImage src={segment.coverUrl} lazy />
             <span className="band-tile-badges">
               {segment.takeCount > 1 ? (
@@ -298,7 +302,7 @@ export function SegmentCard({
             </Badge>
           </span>
           <span className="band-tile-name" title={segment.fileName ?? ""}>
-            {segment.fileName}
+            {bandTileNameLabel(segment.fileName)}
           </span>
           <span className="band-tile-meta">
             {/* R12 §2:精选段镜块在左下标出它是素材里的哪一截(「片段 0.5–4.5 s」),整条素材仍是「槽位 nn」;130px 里只放得下一行。 */}

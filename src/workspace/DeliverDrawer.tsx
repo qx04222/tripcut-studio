@@ -2,6 +2,16 @@ import { useEffect, useState, type JSX } from "react";
 import { DELIVER_DRAWER_TITLE } from "./copy";
 import { onJianyingAvailabilityChanged } from "./deliver/jianyingHumanCheck";
 import { JIANYING_BUNDLE_ID, getJianyingAvailability, openApp, type JianyingAvailability } from "../api";
+import {
+  DELIVER_CARDS,
+  DELIVER_CARD_HINTS,
+  DELIVER_CARD_LABELS,
+  HANDOFF_DOWNGRADE_LINE,
+  HANDOFF_KIT_TOAST,
+  MORE_WAYS_LABEL,
+  cardToExportMode,
+  type DeliverCard,
+} from "./deliver/deliverCards";
 import { DeliverContents, DeliverPartsDetails } from "./deliver/DeliverContents";
 import { DeliverFooter } from "./deliver/DeliverFooter";
 import { DeliverForm } from "./deliver/DeliverForm";
@@ -126,8 +136,8 @@ function QuickExportBody({ progress, onExtra }: { progress: ExportProgress; onEx
 }
 
 /** R14 §9 B:「剪映素材包」正文——编号清单 + 「导出素材包」;导完广播 export-done 打勾第 ④ 步。 */
-function JianyingKitBody({ progress }: { progress: ExportProgress }): JSX.Element {
-  const kit = useJianyingKit(progress);
+function JianyingKitBody({ progress, autoStart = false }: { progress: ExportProgress; autoStart?: boolean }): JSX.Element {
+  const kit = useJianyingKit(progress, { autoStart });
   const { done } = kit;
   useEffect(() => {
     if (done) window.dispatchEvent(new CustomEvent(EXPORT_DONE_EVENT));
@@ -190,15 +200,69 @@ function ReadOnlyDeliverBody({ title }: { title: string }): JSX.Element {
   );
 }
 
+/**
+ * U-06/P-04(规格 §3 deliver 行、§7 Q-6 已拍板三卡):导出首屏三张大卡——
+ * 「交给剪映」(内部按版本可用性自动选草稿/素材包,不给用户选)、「导出视频文件」、「整包交付」。
+ * 「试验草稿 + 人工确认」(= 既有四模式 chip 选择器,AX 名冻结不变)收进「更多方式 ⌄」。
+ */
+function ExportCardsScreen({
+  availability,
+  onPick,
+  onMore,
+}: {
+  availability: JianyingAvailability;
+  onPick(card: DeliverCard): void;
+  onMore(): void;
+}): JSX.Element {
+  return (
+    <div className="deliver-cards" role="group" aria-label="交付方式">
+      {DELIVER_CARDS.map((card) => (
+        <button
+          key={card}
+          type="button"
+          className="deliver-card"
+          aria-label={DELIVER_CARD_LABELS[card]}
+          onClick={() => onPick(card)}
+        >
+          <span className="deliver-card-title">{DELIVER_CARD_LABELS[card]}</span>
+          <span className="deliver-card-hint">{DELIVER_CARD_HINTS[card]}</span>
+        </button>
+      ))}
+      {!availability.supported ? (
+        <p className="deliver-cards-downgrade" role="status">
+          {HANDOFF_DOWNGRADE_LINE}
+        </p>
+      ) : null}
+      <button type="button" className="deliver-cards-more" aria-label={MORE_WAYS_LABEL} onClick={onMore}>
+        {MORE_WAYS_LABEL} ⌄
+      </button>
+    </div>
+  );
+}
+
 function DeliverDrawerBody(): JSX.Element {
   const progress = useExportProgress();
   const [chosen, setMode] = useState<ExportMode | null>(() => initialExportMode(takePendingExportMode(), hasPendingQuickSelection(), null));
+  // 首屏是三卡;deep-link(镜头带按钮 / 导出所选…)或点过一张卡 / 「更多方式」之后落到既有四模式详情页。
+  const [screen, setScreen] = useState<"cards" | "detail">(() => (chosen !== null ? "detail" : "cards"));
   const [forceContactSheet, setForceContactSheet] = useState(false);
   const [jianying, setJianying] = useState<JianyingAvailability | null>(null);
+  // R19 §6:只有首屏「交给剪映」落到素材包时才一次即出;「更多方式」/ chip / deep-link 进来的照旧等一次点击。
+  const [autoKit, setAutoKit] = useState(false);
   const active = isExportActive(progress.status);
   // 没人指定模式时按可用性定默认;可用性还没回来先按「导出片段」画(chip 一回来就换,通常一帧内)。
   const mode: ExportMode = chosen ?? initialExportMode(null, false, jianying) ?? DEFAULT_EXPORT_MODE;
   const availability = jianying ?? CHECKING_JIANYING;
+
+  const pickCard = (card: DeliverCard): void => {
+    const resolved = cardToExportMode(card, jianying);
+    if (card === "handoff" && resolved === "kit") {
+      showToast(HANDOFF_KIT_TOAST, { tone: "neutral" });
+    }
+    setAutoKit(card === "handoff" && resolved === "kit");
+    setMode(resolved);
+    setScreen("detail");
+  };
 
   useEffect(() => {
     let alive = true;
@@ -226,34 +290,43 @@ function DeliverDrawerBody(): JSX.Element {
   return (
     <div className="deliver-drawer">
       <ExportStepHead />
-      <div className="deliver-mode" role="group" aria-label="导出方式">
-        {MODES.map((candidate) => (
-          <Chip
-            key={candidate}
-            selected={mode === candidate}
-            disabled={active}
-            aria-label={EXPORT_MODE_LABELS[candidate]}
-            onClick={() => setMode(candidate)}
-          >
-            {candidate === "jianying" ? jianyingChipLabel(availability.supported) : EXPORT_MODE_LABELS[candidate]}
-          </Chip>
-        ))}
-      </div>
-      <p className={mode === "jianying" && !availability.supported ? "deliver-mode-hint deliver-mode-hint--warn" : "deliver-mode-hint"} role="status">
-        {hint}
-      </p>
-      {mode === "kit" ? (
-        <JianyingKitBody progress={progress} />
-      ) : mode === "quick" ? (
-        <QuickExportBody
-          progress={progress}
-          onExtra={(kind) => {
-            if (kind === "contact") setForceContactSheet(true);
-            setMode("full");
-          }}
-        />
+      {screen === "cards" ? (
+        <ExportCardsScreen availability={availability} onPick={pickCard} onMore={() => setScreen("detail")} />
       ) : (
-        <FullDeliverBody progress={progress} mode={mode === "jianying" ? "jianying" : "full"} forceContactSheet={forceContactSheet} />
+        <>
+          <div className="deliver-mode" role="group" aria-label="导出方式">
+            {MODES.map((candidate) => (
+              <Chip
+                key={candidate}
+                selected={mode === candidate}
+                disabled={active}
+                aria-label={EXPORT_MODE_LABELS[candidate]}
+                onClick={() => {
+                  setAutoKit(false);
+                  setMode(candidate);
+                }}
+              >
+                {candidate === "jianying" ? jianyingChipLabel(availability.supported) : EXPORT_MODE_LABELS[candidate]}
+              </Chip>
+            ))}
+          </div>
+          <p className={mode === "jianying" && !availability.supported ? "deliver-mode-hint deliver-mode-hint--warn" : "deliver-mode-hint"} role="status">
+            {hint}
+          </p>
+          {mode === "kit" ? (
+            <JianyingKitBody progress={progress} autoStart={autoKit} />
+          ) : mode === "quick" ? (
+            <QuickExportBody
+              progress={progress}
+              onExtra={(kind) => {
+                if (kind === "contact") setForceContactSheet(true);
+                setMode("full");
+              }}
+            />
+          ) : (
+            <FullDeliverBody progress={progress} mode={mode === "jianying" ? "jianying" : "full"} forceContactSheet={forceContactSheet} />
+          )}
+        </>
       )}
     </div>
   );

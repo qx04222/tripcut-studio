@@ -44,8 +44,13 @@ const KIT_DONE_TOAST_MS = 10_000;
  * 交付抽屉「剪映素材包」模式的状态与动作(R14 §9 B)。进度沿用 `useExportProgress` 的轮询
  * (同一个 export 作业,`mode = kit`);文件夹记忆与快速导出同一把钥匙。
  */
-export function useJianyingKit(progress: ExportProgress): JianyingKit {
+/**
+ * R19 §6(deliver U-06/P-04):首屏「交给剪映」那张卡在剪映版本未核对的机器上要**一次点击即出素材包**。
+ * `autoStart` 只在「记过文件夹」时生效——没记过就还是落在详情页等一次「导出素材包…」,不替用户弹面板。
+ */
+export function useJianyingKit(progress: ExportProgress, options: { autoStart?: boolean } = {}): JianyingKit {
   const { status, active, setJobId, refresh } = progress;
+  const autoStart = options.autoStart === true;
   const [lastDir, setLastDir] = useState<string | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [plan, setPlan] = useState<KitExportOutcome | null>(null);
@@ -110,9 +115,14 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
     [refresh, remember, setJobId],
   );
 
+  // J-07:素材包不是剪映原生项目,「打开剪映」光启动 App 用户还是得自己去 Finder 摸文件夹——
+  // 直接把素材包所在目录也带出来(Finder 选中 + 剪映一起打开),两步并一步。
   const openJianying = useCallback(() => {
+    if (startedJobId !== null) {
+      void revealExport(startedJobId).catch(() => undefined);
+    }
     void openApp(JIANYING_BUNDLE_ID).catch((failure) => showToast(failureText("打开剪映", failure, "到剪映首页「本地草稿」旁新建草稿也一样"), { tone: "danger" }));
-  }, []);
+  }, [startedJobId]);
 
   // 完成 toast「已导出 n 个片段 · 打开剪映」(每个 job 只报一次;open_app 只放行剪映的 bundle id)。
   const announcedJob = useRef<number | null>(null);
@@ -162,6 +172,14 @@ export function useJianyingKit(progress: ExportProgress): JianyingKit {
       setBusy(false);
     }
   }, [canExport, lastDir, start]);
+
+  // R19 §6:卡片点进来 + 记过文件夹 + 清单已算好 → 直接导,一次即出;每次挂载只自动一次。
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoStarted.current || !settingsLoaded || lastDir === null || plan === null || !canExport) return;
+    autoStarted.current = true;
+    void exportNow();
+  }, [autoStart, canExport, exportNow, lastDir, plan, settingsLoaded]);
 
   const changeFolder = useCallback(async () => {
     setError(null);

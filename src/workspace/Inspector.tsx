@@ -32,10 +32,11 @@ import {
   visibleDefaultSections,
   type DefaultSectionId,
 } from "./inspectorModel";
-import { Card, Icon, SectionHeader, type IconName } from "./ui";
+import { Button, Card, Icon, SectionHeader, type IconName } from "./ui";
 import { planBandReorder, useBandDrag } from "./useBandDrag";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { useSelection } from "./useSelection";
+import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { INSPECTOR_TITLES } from "./copy";
 import { pushUndo } from "./undoStack";
 
@@ -161,7 +162,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
     setAiDescription(null);
     getAiDescription(clipId)
       .then((result) => {
-        if (mounted.current) setAiDescription(result);
+        if (mounted.current) setAiDescription(result ?? null);
       })
       .catch(() => undefined);
   }, [clipId]);
@@ -363,13 +364,40 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
  */
 export function Inspector(): JSX.Element {
   const { selection, selectedClip } = useSelection();
+  const pinned = useWorkspace((state) => state.inspectorPinned);
   const meta =
     selection === null ? "未选择" : selection.kind === "slot" ? "空槽位" : selectedClip?.file_name ?? "载入中";
   // 栏标题条右侧仍报文件名(冒烟脚本按它对账);头部那一行才有缩略图与上一条 / 下一条。
+  // R19 V-04:标题条右端两颗 —— 📌「钉住检查器」(偏好,常驻)与「收起检查器」(会话态;⌘2 / Esc 同义)。
 
   return (
     <div className="inspector">
-      <PaneHead title="检查器" meta={meta} />
+      <PaneHead
+        title="检查器"
+        meta={meta}
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="inspector-pin"
+              aria-label="钉住检查器"
+              aria-pressed={pinned}
+              title={pinned ? "已钉住:常驻右侧,Esc 不收(再点取消)" : "钉住检查器:常驻右侧,不随 Esc 收起"}
+              onClick={() => dispatchWorkspace({ type: "set-inspector-pinned", pinned: !pinned })}
+            >
+              {pinned ? "已钉住" : "钉住"}
+            </Button>
+            <Button
+              variant="icon"
+              icon="x"
+              aria-label="收起检查器"
+              title="收起检查器 Esc / ⌘2"
+              onClick={() => dispatchWorkspace({ type: "toggle-pane", pane: "inspector" })}
+            />
+          </>
+        }
+      />
       {selection === null ? (
         <EmptyInspectorNote />
       ) : selection.kind === "slot" ? (

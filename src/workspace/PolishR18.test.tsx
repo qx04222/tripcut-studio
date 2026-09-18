@@ -160,11 +160,9 @@ describe("polish-r18.css 的纯样式项", () => {
     expect(declarationsFor(".no-such-selector-r18")).toEqual({});
   });
 
-  it("引导条:「知道了」贴在文案右侧 12px(--space-3),不再被 margin-left:auto 推到屏幕最右", () => {
-    const button = declarationsFor(".workspace-shell .pipeline-hint > .ui-button");
-    expect(button["margin-left"]).toBe("var(--space-3)");
-    expect(button["margin-right"]).toBe("auto");
-    expect(declarationsFor(".workspace-shell .pipeline-hint")["min-height"]).toBe("var(--control-md)");
+  it("引导条:R19 V-02 删了顶部提示行,polish-r18 里它的样式一并清空(不留死 CSS)", () => {
+    expect(declarationsFor(".workspace-shell .pipeline-hint > .ui-button")).toEqual({});
+    expect(declarationsFor(".workspace-shell .pipeline-hint")).toEqual({});
   });
 
   it("监视器:井的舞台四边都降到 --space-3(此前左右 --space-4,各留 ~28px 死沟)", () => {
@@ -252,8 +250,13 @@ describe("V-20 首页", () => {
 
 describe("V-27 状态条分三组 / V-22 折叠竖条", () => {
   it("状态条三组容器都在,更新与素材库各自成组;组间 --space-4", async () => {
+    // V-08:真闲着时「查看后台任务详情」不占位了——给一点后台活让它出现,才能断言它落在哪组。
+    apiMocks.getImportProgress.mockResolvedValue({
+      total: 10, done: 3, failed: 0, running: 1, waiting_for_permit: 0, paused_for_memory: false,
+    });
     const { StatusStrip } = await import("./StatusStrip");
     const { container } = render(<StatusStrip />);
+    await screen.findByRole("button", { name: "查看后台任务详情" });
     for (const kind of ["tasks", "update", "library"]) {
       expect(container.querySelector(`.workspace-status-group--${kind}`), kind).not.toBeNull();
     }
@@ -263,12 +266,12 @@ describe("V-27 状态条分三组 / V-22 折叠竖条", () => {
     expect(declarationsFor(".workspace-shell .workspace-status")["gap"]).toBe("var(--space-4)");
   });
 
-  it("折叠竖条:栏名横排(不是 vertical-rl 的竖排中文),带 tooltip,AX 名仍是「展开检查器」", async () => {
-    const { InspectorCollapsed } = await import("./InspectorCollapsed");
-    render(<InspectorCollapsed label="检查器" onExpand={() => undefined} />);
-    const button = screen.getByRole("button", { name: "展开检查器" });
-    expect(button.getAttribute("title")).toContain("展开检查器");
-    expect(button.querySelector(".workspace-rail-label")?.textContent).toBe("检查器");
+  it("折叠竖条:栏名横排(不是 vertical-rl 的竖排中文),带 tooltip,AX 名仍是「展开<栏名>」(R19:只剩媒体池会折,组件改名 PaneRail)", async () => {
+    const { PaneRail } = await import("./PaneRail");
+    render(<PaneRail label="媒体池" onExpand={() => undefined} />);
+    const button = screen.getByRole("button", { name: "展开媒体池" });
+    expect(button.getAttribute("title")).toContain("展开媒体池");
+    expect(button.querySelector(".workspace-rail-label")?.textContent).toBe("媒体池");
     expect(declarationsFor(".workspace-shell .workspace-rail--r18 .workspace-rail-label")["writing-mode"]).toBe("horizontal-tb");
   });
 });

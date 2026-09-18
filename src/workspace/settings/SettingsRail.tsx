@@ -2,7 +2,8 @@ import type { JSX, KeyboardEvent } from "react";
 
 import type { SettingsSectionId } from "../../settingsSections";
 import { Button, Icon } from "../ui";
-import { SETTINGS_GROUPS, SETTINGS_QUICK_LINKS, type SettingsGroupId } from "./settingsGroups";
+import { useShowAllFeatures } from "../showAllFeatures";
+import { visibleQuickLinks, visibleSettingsGroups, type SettingsGroupId } from "./settingsGroups";
 
 export interface SettingsRailProps {
   value: SettingsGroupId;
@@ -26,15 +27,18 @@ export function railPanelId(id: SettingsGroupId): string {
  * design-system §6 冻结的冒烟锚点,不是 tab,以按钮形式留在左轨,点一下直落对应分区的那一段。
  */
 export function SettingsRail({ value, onChange, onJump }: SettingsRailProps): JSX.Element {
+  // R19 P-05(flow 车道):「显示全部功能」关时左轨只剩四块;当前选中的那块照样在。
+  const showAll = useShowAllFeatures();
+  const groups = visibleSettingsGroups(showAll, value);
   const move = (event: KeyboardEvent<HTMLButtonElement>, from: number) => {
     let to: number;
-    if (event.key === "ArrowDown") to = (from + 1) % SETTINGS_GROUPS.length;
-    else if (event.key === "ArrowUp") to = (from - 1 + SETTINGS_GROUPS.length) % SETTINGS_GROUPS.length;
+    if (event.key === "ArrowDown") to = (from + 1) % groups.length;
+    else if (event.key === "ArrowUp") to = (from - 1 + groups.length) % groups.length;
     else if (event.key === "Home") to = 0;
-    else if (event.key === "End") to = SETTINGS_GROUPS.length - 1;
+    else if (event.key === "End") to = groups.length - 1;
     else return;
     event.preventDefault();
-    const target = SETTINGS_GROUPS[to];
+    const target = groups[to];
     if (!target) return;
     onChange(target.id);
     document.getElementById(railTabId(target.id))?.focus();
@@ -43,7 +47,7 @@ export function SettingsRail({ value, onChange, onJump }: SettingsRailProps): JS
   return (
     <div className="settings-sheet-rail">
       <div role="tablist" aria-label="设置分区" aria-orientation="vertical" className="settings-sheet-rail-tabs">
-        {SETTINGS_GROUPS.map((tab, index) => {
+        {groups.map((tab, index) => {
           const selected = tab.id === value;
           const classes = ["settings-sheet-tab", selected ? "is-selected" : ""].filter(Boolean).join(" ");
           return (
@@ -71,7 +75,7 @@ export function SettingsRail({ value, onChange, onJump }: SettingsRailProps): JS
       </div>
       <div className="settings-sheet-rail-links">
         <span className="settings-sheet-rail-links-title" aria-hidden="true">直达</span>
-        {SETTINGS_QUICK_LINKS.map((link) => (
+        {visibleQuickLinks(showAll).map((link) => (
           <Button key={link.section} variant="ghost" size="sm" className="settings-sheet-rail-link" onClick={() => onJump(link.section)}>
             {link.label}
           </Button>

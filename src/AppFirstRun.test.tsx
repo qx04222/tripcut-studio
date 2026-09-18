@@ -142,19 +142,23 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("R12 §1:新壳没有工具链弹窗,必需组件缺失只出顶栏下横幅(R10 U-23 的「不叠弹窗」由此成立)", () => {
-  it("健康启动 + 必需组件(ffmpeg)缺失:没有 dialog,顶栏下出现横幅「视频处理组件缺失」,「去安装」开设置", async () => {
+describe("R12 §1 → R19 V-02:新壳没有工具链弹窗,必需组件缺失只在状态条左端出红点 + 一句(R10 U-23 的「不叠弹窗」由此成立)", () => {
+  it("健康启动 + 必需组件(ffmpeg)缺失:没有 dialog,状态条左端出现 button「视频处理组件缺失」(红点),点它开设置", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
     vi.mocked(getSettings).mockResolvedValue({});
     const { default: App } = await import("./App");
     render(<App />);
     await screen.findByRole("region", { name: "媒体池" });
-    const banner = await screen.findByRole("region", { name: "视频处理组件缺失" });
+    // R19 接线:红点只渲染一处 —— StatusStrip 左端的一颗按钮(band V-08 形态),数据源是壳里的 ToolchainStatusProbe。
+    const strip = await screen.findByRole("status", { name: "后台状态" });
+    const banner = await within(strip).findByRole("button", { name: "视频处理组件缺失" });
     expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
     expect(banner.getAttribute("aria-modal")).toBeNull();
+    expect(banner.querySelector(".workspace-status-dot")).not.toBeNull();
+    expect(document.querySelector(".toolchain-banner")).toBeNull(); // 顶栏下不再有横幅那一行
     await act(async () => {
-      within(banner).getByRole("button", { name: "去安装" }).click();
+      banner.click();
       await Promise.resolve();
     });
     const { getWorkspaceSnapshot } = await import("./workspace/WorkspaceStore");
@@ -173,10 +177,10 @@ describe("R12 §1:新壳没有工具链弹窗,必需组件缺失只出顶栏下�
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog", { name: "先把本地工具链接好" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "视频处理组件缺失" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "视频处理组件缺失" })).toBeNull();
   });
 
-  it("异常退出 → 恢复页 → 进入工作台:没有弹窗叠上来;横幅照常(它不是模态)", async () => {
+  it("异常退出 → 恢复页 → 进入工作台:没有弹窗叠上来;红点照常(它不是模态)", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue({ ...HEALTHY_REPORT, status: "WARN", abnormal_exit: true });
     vi.mocked(getSettings).mockResolvedValue({});
@@ -188,23 +192,21 @@ describe("R12 §1:新壳没有工具链弹窗,必需组件缺失只出顶栏下�
       await Promise.resolve();
     });
     await screen.findByRole("region", { name: "媒体池" });
-    expect(await screen.findByRole("region", { name: "视频处理组件缺失" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "视频处理组件缺失" })).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("横幅「关闭提示」本次启动收起;first_run_done 不再决定它出不出现(缺就是缺)", async () => {
+  it("红点没有「关闭提示」(缺就是缺,一颗点不占地方);first_run_done 不决定它出不出现", async () => {
     await withMissingFfmpeg();
     vi.mocked(getDoctorReport).mockResolvedValue(HEALTHY_REPORT);
     vi.mocked(getSettings).mockResolvedValue({ "onboarding.first_run_done": "true" });
     const { default: App } = await import("./App");
     render(<App />);
     await screen.findByRole("region", { name: "媒体池" });
-    const banner = await screen.findByRole("region", { name: "视频处理组件缺失" });
-    await act(async () => {
-      within(banner).getByRole("button", { name: "关闭提示" }).click();
-      await Promise.resolve();
-    });
-    expect(screen.queryByRole("region", { name: "视频处理组件缺失" })).toBeNull();
+    const banner = await screen.findByRole("button", { name: "视频处理组件缺失" });
+    expect(screen.queryByRole("button", { name: "关闭提示" })).toBeNull();
+    expect(banner.getAttribute("title")).toContain("安装"); // 按钮本身就是「去安装」入口,没有第二颗按钮
+
     expect(setFirstRunDone).not.toHaveBeenCalled();
   });
 });

@@ -55,8 +55,24 @@ export function hasNextStep(reason: string): boolean {
   return NEXT_STEP_TAIL.test(reason);
 }
 
+/**
+ * R19 U-08:失败文案不说「第 n 步」—— 那是我们的编号,不是剪映的,用户不该先学编号才能读懂错误。
+ * 先按已知句式换成动作词(「在第 2 步手动挑几条」→「去媒体池手动挑几条」),再把剩下的「(在)第 n 步」整个去掉。
+ */
+const STEP_PHRASES: ReadonlyArray<[RegExp, string]> = [
+  [/在第\s*[2②]\s*步手动挑/g, "去媒体池手动挑"],
+  [/回到第\s*[\d①②③④]\s*步/g, "回去"],
+  [/[在到]?第\s*[\d①②③④]\s*步[:：]?\s*/g, ""],
+];
+
+export function stripStepNumbers(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of STEP_PHRASES) out = out.replace(pattern, replacement);
+  return out;
+}
+
 export function failureText(action: string, error: unknown, next = "再试一次"): string {
-  const reason = describeError(error);
+  const reason = stripStepNumbers(describeError(error));
   if (hasNextStep(reason)) return `${action}没成功:${reason}`;
-  return `${action}没成功:${reason}。${next}`;
+  return `${action}没成功:${reason}。${stripStepNumbers(next)}`;
 }

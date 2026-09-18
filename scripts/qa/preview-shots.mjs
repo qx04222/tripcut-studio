@@ -43,8 +43,9 @@ const outFile = (name) => join(outDir, `${name}${dprSuffix}.png`);
 
 const WIDE = { width: 1440, height: 900 };
 const NARROW = { width: 1280, height: 800 };
-// R10 U-10:中栏被压到它的最小 520px。<1040 时媒体池与检查器都折成 44px 竖条,620 − 44 − 44 − 2×6 = 520。
-const MONITOR_NARROW = { width: 620, height: 800 };
+// R10 U-10:中栏被压到它的最小 520px。<1040 时媒体池折成 44px 竖条;R19 起检查器是中栏内的滑出层,
+// 不再占横向空间,570 − 44 − 6 = 520。
+const MONITOR_NARROW = { width: 570, height: 800 };
 const STEP_TIMEOUT_MS = 15_000;
 const KIT_ONLY = process.argv.includes("--kit-only");
 const WITH_KIT = KIT_ONLY || process.argv.includes("--kit");
@@ -97,6 +98,44 @@ async function startVite(port) {
   throw new Error(`vite did not come up within 30s:\n${output}`);
 }
 
+/**
+ * R19 shell · V-01「一屏一颗实心主按钮」:每张截图落盘时数一遍可见的 .ui-button--primary。
+ * 模态(aria-modal 的 dialog / alertdialog)开着时只数最上面那一层 —— 它盖住了壳,壳上那颗不算同屏。
+ * 0.9.1 现状:02-selected 同屏 4 颗(下一步 / 保存片段 / 一键排入 / 导入剪映继续剪)。
+ */
+async function assertSinglePrimary(page, name) {
+  const found = await page.evaluate(() => {
+    const visible = (node) => {
+      if (node.hidden || node.closest("[hidden]") || node.closest("[inert]")) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      const style = getComputedStyle(node);
+      return style.visibility !== "hidden" && style.display !== "none";
+    };
+    const modals = [...document.querySelectorAll('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]')].filter(visible);
+    const scope = modals.length > 0 ? modals[modals.length - 1] : document;
+    const label = (node) => (node.getAttribute("aria-label") || node.textContent || "").trim().slice(0, 24);
+    const byClass = [...scope.querySelectorAll(".ui-button--primary:not([hidden])")].filter(visible).map(label);
+    // 按像素再数一遍:类名不是 primary 但被旧 CSS 填成强调色的按钮(0.9.1 的「生成候选」就是),类名检测看不见。
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    const probe = document.createElement("span");
+    probe.style.color = accent;
+    document.body.append(probe);
+    const accentRgb = getComputedStyle(probe).color;
+    probe.remove();
+    // 只数「按钮形状」的:开关(role=switch)与镜块上的细把手(调整入点 / 出点,宽 < 40)本来就是强调色控件,不是主按钮。
+    const buttonLike = (node) => {
+      const rect = node.getBoundingClientRect();
+      return node.getAttribute("role") !== "switch" && rect.width >= 40 && rect.height >= 20;
+    };
+    const byPixel = [...scope.querySelectorAll("button:not([hidden])")].filter(visible).filter(buttonLike).filter((node) => getComputedStyle(node).backgroundColor === accentRgb).map(label);
+    return { byClass, byPixel };
+  });
+  if (found.byClass.length > 1) failures.push(`V-01 ${name}: 同屏 ${found.byClass.length} 颗实心主按钮: ${found.byClass.join(" | ")}`);
+  if (found.byPixel.length > 1) failures.push(`V-01 ${name}: 按像素数到 ${found.byPixel.length} 颗强调色实心按钮: ${found.byPixel.join(" | ")}`);
+  return Math.max(found.byClass.length, found.byPixel.length);
+}
+
 /** 每一步:找元素(找不到 = 记失败但继续),做动作,等一拍,截图。 */
 async function shot(page, name, { locate, act, settle = 400 } = {}) {
   const file = outFile(name);
@@ -110,7 +149,8 @@ async function shot(page, name, { locate, act, settle = 400 } = {}) {
     }
     await page.waitForTimeout(settle);
     await page.screenshot({ path: file, fullPage: false });
-    log(`PASS ${name} → ${file}`);
+    const primaries = await assertSinglePrimary(page, name);
+    log(`PASS ${name} → ${file} (primary ×${primaries})`);
   } catch (error) {
     failures.push(`${name}: ${String(error).split("\n")[0]}`);
     try {
@@ -124,7 +164,8 @@ async function shot(page, name, { locate, act, settle = 400 } = {}) {
 
 /** 工作区剧本:10 张图 + AX 树 + landmark 硬断言。`--kit-only` 时整段跳过。 */
 async function workspaceScript(page, context, viteUrl) {
-  await page.goto(viteUrl, { waitUntil: "domcontentloaded" });
+  // R19 P-05:01–09 描述的是「显示全部功能」打开后的形态(04 要点检查器的「技术检查」段);默认态(开关关)在 18 / 19b。
+  await page.goto(`${viteUrl}?showall=1`, { waitUntil: "domcontentloaded" });
   // 「媒体池」landmark 出现 = 旗已落地、新壳已挂载。
   await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   // 素材网格第一格出现 = clips feed 已拉到假后端的 60 条。
@@ -143,6 +184,17 @@ async function workspaceScript(page, context, viteUrl) {
   }
 
   await shot(page, "01-workspace");
+  // R19 shell · V-03:镜头带通栏 —— 1440 下 region「镜头带」的 clientWidth ≥ 1380(0.9.1 是 ~740,被池与检查器夹着)。
+  {
+    const bandWidth = await page.getByRole("region", { name: "镜头带" }).evaluate((node) => node.clientWidth);
+    if (bandWidth < 1380) failures.push(`V-03: 镜头带 clientWidth ${bandWidth} < 1380 at 1440`);
+    log(`V-03 band clientWidth at 1440: ${bandWidth}`);
+    // R19 shell · V-02:顶部只有一行 —— 窗顶到媒体池标题条 = 44px(0.9.1 是 76:顶栏 44 + 步骤提示 32)。
+    const chromeTop = (await page.getByRole("region", { name: "媒体池" }).locator(".workspace-pane-chrome").first().boundingBox())?.y ?? -1;
+    if (Math.round(chromeTop) !== 44) failures.push(`V-02: 顶部到媒体池标题条 ${chromeTop}px,应为 44`);
+    if ((await page.getByRole("status", { name: /^第 \d 步提示$/ }).count()) > 0) failures.push("V-02: 「第 n 步提示」status 条还在");
+    log(`V-02 top → pool chrome: ${chromeTop}px`);
+  }
 
   await shot(page, "02-selected", {
     locate: (p) => p.getByRole("gridcell"),
@@ -154,6 +206,9 @@ async function workspaceScript(page, context, viteUrl) {
     settle: 700,
   });
 
+  // R19 V-07:五个附属 tab 收进「附属：{当前} ⌄」触发钮下的浮层,平时不占标题条——
+  // 剧本要先展开它才摸得到 tablist(选中一个 tab 就收起,不留浮层盖住下面的镜头带)。
+  await page.getByRole("button", { name: /^附属：/ }).click();
   await shot(page, "03-band-music", {
     locate: (p) => p.getByRole("tab", { name: "音乐" }),
     act: async (tab, p) => {
@@ -172,6 +227,8 @@ async function workspaceScript(page, context, viteUrl) {
     settle: 500,
   });
 
+  // R19 V-07:视图三芯片同样收进「{当前} ⌄」触发钮的浮层。
+  await page.getByRole("button", { name: "按章节 ⌄" }).click();
   // R9 Task 4:切到「仅缺口」视图(假后端的两处缺口都在第 2 / 3 章,按章节视图里它们在视口外、
   // 被虚拟化折叠),选中第一个空槽位瓦片 —— 看虚线瓦片的选中环、自带的「生成候选」,以及检查器的缺口分支。
   await shot(page, "09-gap-slot", {
@@ -187,6 +244,9 @@ async function workspaceScript(page, context, viteUrl) {
     },
     settle: 600,
   });
+  // 选中「仅缺口」后触发钮变成「仅缺口 ⌄」且浮层已收起(选完就收,不常驻盖住镜头带)——切回
+  // 「按章节」要先重新展开。
+  await page.getByRole("button", { name: "仅缺口 ⌄" }).click();
   await page.getByRole("group", { name: "镜头带视图" }).getByRole("button", { name: "按章节" }).click();
 
   await shot(page, "05-import-drawer", {
@@ -202,12 +262,32 @@ async function workspaceScript(page, context, viteUrl) {
 
   // R11 车道 E → R14 车道 B:抽屉默认落在剪映草稿(假后端剪映可用)/ 剪映素材包(不可用);06 这张仍是
   // 完整交付包的表单,先切 chip(快速模式单独截 17,素材包截 28)。
+  // R19 U-06/P-04(deliver,接线人补):导出首屏恰好三张大卡(规格 §6「交付」行)+ 「更多方式」。先截首屏再进详情。
+  await shot(page, "06a-deliver-cards", {
+    locate: (p) => p.getByRole("button", { name: "第 4 步 导出", exact: true }),
+    act: async (button, p) => {
+      await button.click();
+      const dialog = p.getByRole("dialog").first();
+      await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      const cards = dialog.getByRole("group", { name: "交付方式" }).locator(".deliver-card");
+      await cards.first().waitFor({ timeout: STEP_TIMEOUT_MS });
+      const names = await cards.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+      if (names.join("|") !== "交给剪映|导出视频文件|整包交付") failures.push(`06a-deliver-cards: 首屏卡片应恰好三张 交给剪映|导出视频文件|整包交付,实际 ${names.join("|")}`);
+      if ((await dialog.getByRole("button", { name: "更多方式", exact: true }).count()) !== 1) failures.push("06a-deliver-cards: 首屏缺「更多方式」");
+      if ((await dialog.locator(".deliver-mode").count()) !== 0) failures.push("06a-deliver-cards: 首屏不该直接露出四模式 chip");
+    },
+    settle: 700,
+  });
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
+
   await shot(page, "06-deliver-drawer", {
     locate: (p) => p.getByRole("button", { name: "第 4 步 导出", exact: true }), // R12:顶栏按钮迁为「流水线下一步」,开导出抽屉走导航条
     act: async (button, p) => {
       await button.click();
       await p.getByRole("dialog").first().waitFor({ timeout: STEP_TIMEOUT_MS });
-      await p.getByRole("button", { name: "完整交付包" }).click();
+      // R19 U-06/P-04:首屏是三卡,「整包交付」直接落完整交付包表单。
+      await p.getByRole("button", { name: "整包交付" }).click();
       await p.getByText("本次交付平台").first().waitFor({ timeout: STEP_TIMEOUT_MS });
     },
     settle: 700,
@@ -229,6 +309,23 @@ async function workspaceScript(page, context, viteUrl) {
 
   await page.setViewportSize(NARROW);
   await shot(page, "08-narrow-1280", { settle: 900 });
+  // R19 shell · V-11:壳只有一个断点 --bp-compact: 1366px。1280 是紧凑档(顶栏四步折成胶囊、池两列),
+  // 1366 起是标准档(四步展开、池三列);1512 是 14" 默认、1920 是外接屏,各截一张。
+  {
+    const railButtons = () => page.getByRole("navigation", { name: "流水线" }).getByRole("button", { name: /^第 \d 步 / }).count();
+    const poolCols = () => page.getByRole("grid", { name: "媒体池" }).getAttribute("aria-colcount");
+    if ((await railButtons()) !== 0) failures.push("V-11: 1280 下四步没有折成胶囊");
+    if ((await poolCols()) !== "2") failures.push(`V-11: 1280 下媒体池 ${await poolCols()} 列(应为 2)`);
+    for (const [name, size] of [["08-compact-1366", { width: 1366, height: 768 }], ["08-standard-1512", { width: 1512, height: 945 }], ["08-wide-1920", { width: 1920, height: 1080 }]]) {
+      await page.setViewportSize(size);
+      await shot(page, name, { settle: 700 });
+      if ((await railButtons()) !== 4) failures.push(`V-11: ${name} 下四步没有展开(${await railButtons()} 颗)`);
+      // 标准档不再封顶两列;1920 下池随分栏按比例变宽,可到 4 列。
+      if (Number(await poolCols()) < 3) failures.push(`V-11: ${name} 下媒体池 ${await poolCols()} 列(应 ≥ 3)`);
+    }
+    await page.setViewportSize(NARROW);
+    await page.waitForTimeout(400);
+  }
 
   // AX 树两份:CDP 的完整 AX 节点表(ax.json,Playwright 1.6x 已删掉 page.accessibility)
   // 与 Playwright 的 ariaSnapshot(aria.yml,人眼好读)。都在 1280 窗宽下抓——
@@ -251,17 +348,11 @@ async function workspaceScript(page, context, viteUrl) {
   const aria = await page.locator("body").ariaSnapshot();
   writeFileSync(join(outDir, "aria.yml"), aria);
 
-  // 硬断言:规格 §7 冻结的四个 landmark 与旧壳导航缺席。1280 是最小窗宽,
-  // 检查器在这里按规格 §2 先折成竖条 —— landmark 与「展开检查器」二者必居其一。
-  for (const [role, name] of [["region", "媒体池"], ["region", "预览监视器"], ["status", "后台状态"]]) {
+  // 硬断言:规格 §7 冻结的四个 landmark 与旧壳导航缺席。1280 是最小窗宽。
+  // R19 V-04:检查器是滑出层,region 常在(收起时空着);09 步选了空槽位,这一刻它是展开的。
+  for (const [role, name] of [["region", "媒体池"], ["region", "预览监视器"], ["region", "检查器"], ["status", "后台状态"]]) {
     const count = await page.getByRole(role, { name }).count();
     if (count === 0) failures.push(`landmark missing: ${role} ${name}`);
-  }
-  if (
-    (await page.getByRole("region", { name: "检查器" }).count()) === 0 &&
-    (await page.getByRole("button", { name: "展开检查器" }).count()) === 0
-  ) {
-    failures.push("landmark missing: region 检查器 (and no 展开检查器 rail)");
   }
   if ((await page.getByText("01 导入 INGEST").count()) > 0) failures.push("legacy nav 01 导入 INGEST still in tree");
 
@@ -274,6 +365,9 @@ async function workspaceScript(page, context, viteUrl) {
       const monitor = p.getByRole("region", { name: "预览监视器" });
       await cell.click();
       await monitor.getByRole("button", { name: "入点" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+      // R19 V-04:选中会滑出检查器盖住井右侧;这一步量的是监视器自己的最小宽,先 Esc 收掉它。
+      await p.keyboard.press("Escape");
+      await p.waitForTimeout(300);
       await p.setViewportSize(MONITOR_NARROW);
       await p.waitForTimeout(400);
       await monitor.getByRole("button", { name: "入点" }).click();
@@ -300,28 +394,44 @@ async function workspaceScript(page, context, viteUrl) {
     settle: 600,
   });
   await page.setViewportSize(NARROW);
-  // R10 U-04:走查里的窗宽序列 1512 → 1280 → 1704 → 展开 → 1512。每一步检查器该在就在,
-  // 末了整栏宽 ≥ 280(真机上「整个消失」就是宽塌成 0)。jsdom 量不到宽,这里是真 Chromium。
-  const inspectorWidth = async () => {
-    const box = await page.getByRole("region", { name: "检查器" }).boundingBox().catch(() => null);
-    return box ? box.width : 0;
-  };
-  await page.setViewportSize({ width: 1512, height: 945 });
-  await page.waitForTimeout(400);
-  if ((await inspectorWidth()) < 280) failures.push(`U-04: inspector width < 280 at 1512 (before sequence)`);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.waitForTimeout(400);
-  if ((await page.getByRole("button", { name: "展开检查器" }).count()) === 0) failures.push("U-04: no 展开检查器 rail at 1280");
-  await page.setViewportSize({ width: 1704, height: 1013 });
-  await page.waitForTimeout(400);
-  if ((await inspectorWidth()) < 280) failures.push("U-04: inspector did not auto-expand at 1704");
-  const rail = page.getByRole("button", { name: "展开检查器" });
-  if ((await rail.count()) > 0) await rail.click();
-  await page.setViewportSize({ width: 1512, height: 945 });
-  await shot(page, "13-inspector-roundtrip-1512", { settle: 600 });
-  const finalWidth = await inspectorWidth();
-  if (finalWidth < 280) failures.push(`U-04: inspector width ${finalWidth} < 280 after 1512→1280→1704→展开→1512`);
-  log(`U-04 inspector width after round trip: ${finalWidth}`);
+  // R19 V-04(取代 R10 U-04 的折叠走查):检查器是监视器栏内的滑出层。1280 下:选中 → 300ms 内展开;
+  // Esc → 收起;中栏(.workspace-center)clientWidth 开合前后相等;📌 钉住 → 常驻、Esc 不收;1512 截一张钉住态。
+  {
+    const inspector = page.getByRole("region", { name: "检查器" });
+    const centerWidth = () => page.locator(".workspace-center").evaluate((node) => node.clientWidth);
+    const isOpen = () => inspector.evaluate((node) => node.classList.contains("is-open"));
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(400);
+    await page.getByRole("region", { name: "媒体池" }).getByRole("gridcell").first().click();
+    const t0 = Date.now();
+    await inspector.locator(".inspector").waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("V-04: 选中后检查器没有展开"));
+    const openMs = Date.now() - t0;
+    if (openMs > 300) failures.push(`V-04: 选中后 ${openMs}ms 才展开(要求 ≤300)`);
+    await page.waitForTimeout(300);
+    const widthOpen = await centerWidth();
+    const box = await inspector.boundingBox();
+    const center = await page.locator(".workspace-center").boundingBox();
+    if (!box || !center || Math.abs(box.x + box.width - (center.x + center.width)) > 1) failures.push(`V-04: 滑出层没贴在中栏右缘 (${JSON.stringify(box)} vs ${JSON.stringify(center)})`);
+    if (box && box.width < 280) failures.push(`V-04: 滑出层宽 ${box.width} < 280`);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    if (await isOpen()) failures.push("V-04: Esc 没有收起检查器");
+    const widthClosed = await centerWidth();
+    if (widthOpen !== widthClosed) failures.push(`V-04: 检查器开合改变了中栏宽度 (${widthOpen} → ${widthClosed})`);
+    log(`V-04 center clientWidth open/closed at 1280: ${widthOpen}/${widthClosed}; open in ${openMs}ms`);
+    await page.getByRole("region", { name: "媒体池" }).getByRole("gridcell").nth(1).click();
+    await inspector.locator(".inspector").waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("V-04: 再次选中后检查器没有展开"));
+    await inspector.getByRole("button", { name: "钉住检查器" }).click();
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    if (!(await isOpen())) failures.push("V-04: 钉住后 Esc 仍把检查器收掉了");
+    await page.setViewportSize({ width: 1512, height: 945 });
+    await shot(page, "13-inspector-pinned-1512", { settle: 600 });
+    const pinnedWidth = (await inspector.boundingBox())?.width ?? 0;
+    if (pinnedWidth < 280) failures.push(`V-04: 钉住态检查器宽 ${pinnedWidth} < 280`);
+    log(`V-04 pinned inspector width at 1512: ${pinnedWidth}`);
+    await inspector.getByRole("button", { name: "钉住检查器" }).click(); // 取消钉住,后面的步骤按默认(滑出)走
+  }
 
   // R10 U-21:界面缩放 130% 一张——字号 / 行高 / 控件高 / 栏标题条应整套一起放大。
   await page.setViewportSize(WIDE);
@@ -365,8 +475,18 @@ async function workspaceScript(page, context, viteUrl) {
       if (bars === 0 || bars > 200) failures.push(`16-heat-strip: ${bars} heat bars (expected 1–200)`);
       const active = await monitor.locator(".monitor-heat-suggestion.active").count();
       if (active !== 1) failures.push(`16-heat-strip: ${active} active suggestion blocks (expected 1)`);
-      await monitor.getByText(/^建议 1\/\d · /).waitFor({ timeout: STEP_TIMEOUT_MS });
-      await monitor.getByText("按 Enter 采用这段").waitFor({ timeout: STEP_TIMEOUT_MS });
+      // R19 V-05:可见只留「建议 1/n」,整句与「按 Enter 采用这段」进 tooltip;热力画在 seek 轨道里。
+      await monitor.getByText(/^建议 1\/\d$/).waitFor({ timeout: STEP_TIMEOUT_MS });
+      const suggestionTitle = await monitor.locator(".monitor-suggestion").getAttribute("title");
+      if (!suggestionTitle || !suggestionTitle.includes("按 Enter 采用这段")) failures.push(`16-heat-strip: 建议 tooltip 缺「按 Enter 采用这段」: ${suggestionTitle}`);
+      if ((await monitor.locator(".monitor-seek-track .monitor-heat").count()) !== 1) failures.push("16-heat-strip: 热力条没有画在 seek 轨道里");
+      if ((await monitor.locator(".monitor-heat-row").count()) !== 0) failures.push("16-heat-strip: 假时码热力行还在");
+      if ((await monitor.locator(".monitor-well-chips").count()) !== 0) failures.push("16-heat-strip: 井内 chip 还在");
+      const controlsChildren = await monitor.locator(".monitor-controls").evaluate((node) => node.children.length);
+      if (controlsChildren > 2) failures.push(`16-heat-strip: .monitor-controls 直接子元素 ${controlsChildren} > 2`);
+      const wellHeight = (await monitor.locator(".monitor-well").boundingBox())?.height ?? 0;
+      if (wellHeight < 420) failures.push(`V-05: 1440×900 井高 ${wellHeight} < 420`);
+      log(`V-05 well height at 1440×900: ${wellHeight}`);
       await monitor.getByRole("button", { name: "入点", pressed: true }).waitFor({ timeout: STEP_TIMEOUT_MS });
       const bolts = await p.getByRole("region", { name: "媒体池" }).locator(".pool-card-bolt").count();
       if (bolts === 0) failures.push("16-heat-strip: no 有建议段 bolt badge in the pool");
@@ -390,7 +510,9 @@ async function workspaceScript(page, context, viteUrl) {
       await button.click();
       const dialog = p.getByRole("dialog").first();
       await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
-      // R13 §5:假后端的剪映是白名单版本 → 抽屉默认落在「剪映草稿」;这一步看的是快速导出,先切过去。
+      // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它,
+      // 行为与冻结 AX 名不变(R13 §5:假后端的剪映是白名单版本 → 默认落「剪映草稿」;这一步看快速导出,再切过去)。
+      await dialog.getByRole("button", { name: "更多方式", exact: true }).click();
       await dialog.getByRole("button", { name: "导出片段", exact: true }).click();
       await dialog.getByRole("list", { name: "将导出的文件" }).waitFor({ timeout: STEP_TIMEOUT_MS });
       if ((await dialog.getByText("本次交付平台").count()) > 0) failures.push("R11-E: 快速导出模式里出现了「本次交付平台」");
@@ -408,7 +530,7 @@ async function workspaceScript(page, context, viteUrl) {
 
   // R11 简化专项 → R12 §1 → R13 §3:`?empty=1` 让素材库为空 —— 新用户第一眼看到的是首页(region「首页」,
   // 盖在三栏上),R12 的四步卡并入首页顶部(group「四步上手」,四步、无按钮);唯一的 primary 是
-  // 「开始一个新旅程」;没有任何 dialog 打开;三栏 inert。
+  // 「新建一集」(R19 U-03);没有任何 dialog 打开;三栏 inert。
   await page.setViewportSize(WIDE);
   await page.goto(`${viteUrl}?empty=1`, { waitUntil: "domcontentloaded" });
   await shot(page, "18-onboarding", {
@@ -420,7 +542,9 @@ async function workspaceScript(page, context, viteUrl) {
       if ((await steps.locator("li").count()) !== 4) failures.push("18-onboarding: expected 4 steps in the home pipeline strip");
       const primaries = await home.locator(".ui-button--primary").count();
       if (primaries !== 1) failures.push(`18-onboarding: ${primaries} primary buttons on home (expected 1)`);
-      if ((await home.getByRole("button", { name: "开始一个新旅程", exact: true }).count()) === 0) failures.push("18-onboarding: button missing: 开始一个新旅程");
+      // R19 U-03:大按钮改「新建一集」;首页 DOM 不含首轮词表。
+      if ((await home.getByRole("button", { name: "新建一集", exact: true }).count()) === 0) failures.push("18-onboarding: button missing: 新建一集");
+      if (/镜头带|章节|精选段|交付|模板|旅程/.test(await home.innerText())) failures.push("18-onboarding: 首页出现首轮词表里的词");
       if (!(await p.locator(".workspace-columns").evaluate((node) => node.hasAttribute("inert")))) failures.push("18-onboarding: 三栏没有 inert");
       const text = await p.locator("body").innerText();
       if (/FIRST RUN|remux|VFR|sidecar|L1|L3/.test(text)) failures.push("18-onboarding: 空工作区出现内部术语");
@@ -430,8 +554,8 @@ async function workspaceScript(page, context, viteUrl) {
 
   // R11 简化专项(车道 simplify):设置页收成 3 个分区 + 每区一个「高级…」折叠。硬断言:tablist「设置分区」
   // R13 §2 起:剪映式六个 tab、没有「高级…」折叠(23-settings-keymap 断言六块顺序);冻结锚点「云端补镜」「隐私与诊断」
-  // 以左轨快捷入口常驻。截「播放与导出」分区(导出文件夹在那里)。
-  await page.goto(viteUrl, { waitUntil: "domcontentloaded" });
+  // 以左轨快捷入口常驻。截「播放与导出」分区(导出文件夹在那里)。R19 P-05:六分区是开关打开后的形态(`?showall=1`)。
+  await page.goto(`${viteUrl}?showall=1`, { waitUntil: "domcontentloaded" });
   await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   await shot(page, "19-settings-simplified", {
@@ -448,6 +572,34 @@ async function workspaceScript(page, context, viteUrl) {
       await dialog.getByRole("tab", { name: /^播放与导出/ }).click();
       await dialog.getByText("导出文件夹").first().waitFor({ timeout: STEP_TIMEOUT_MS });
       if ((await dialog.locator("details.settings-sheet-advanced").count()) !== 0) failures.push("19-settings-simplified: 「高级…」 disclosure should be gone (R13 §2)");
+    },
+    settle: 700,
+  });
+  await page.keyboard.press("Escape");
+
+  // R19 P-05(flow 车道):默认态 —— 「显示全部功能」关:设置只剩四块、直达没有「云端补镜」、镜头带附属只剩 故事 / 音乐;
+  // 「关于」里那颗开关默认关。硬断言写在 act 里;打开开关后的形态由 19 / 23 覆盖。
+  await page.goto(viteUrl, { waitUntil: "domcontentloaded" });
+  await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+  await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+  await shot(page, "19b-settings-basic", {
+    locate: (p) => p.getByRole("button", { name: "设置", exact: true }),
+    act: async (button, p) => {
+      // R19 V-07(band):tablist 收在「附属：{当前} ⌄」触发钮下的浮层里,先展开再数,数完 Esc 收起(不让浮层盖住设置弹层)。
+      await p.getByRole("button", { name: /^附属：/ }).click();
+      const bandTabs = await p.getByRole("tablist", { name: "镜头带附属视图" }).getByRole("tab").allInnerTexts();
+      if (bandTabs.join("|") !== "故事|音乐") failures.push(`19b-settings-basic: 默认态附属 tab 应只有 故事|音乐,实际 ${bandTabs.join("|")}`);
+      await p.keyboard.press("Escape");
+      await button.click();
+      const dialog = p.getByRole("dialog").first();
+      await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      const tabs = await dialog.getByRole("tablist", { name: "设置分区" }).getByRole("tab").allInnerTexts();
+      if (tabs.length !== 4) failures.push(`19b-settings-basic: ${tabs.length} tabs in 设置分区 (expected 4): ${tabs.join(" | ")}`);
+      if ((await dialog.getByRole("button", { name: "云端补镜", exact: true }).count()) !== 0) failures.push("19b-settings-basic: 默认态不该有「云端补镜」直达");
+      await dialog.getByRole("tab", { name: /^关于/ }).click();
+      const toggle = dialog.getByRole("switch", { name: "显示全部功能" });
+      await toggle.waitFor({ timeout: STEP_TIMEOUT_MS });
+      if ((await toggle.getAttribute("aria-checked")) !== "false") failures.push("19b-settings-basic: 「显示全部功能」默认应为关");
     },
     settle: 700,
   });
@@ -498,8 +650,8 @@ async function workspaceScript(page, context, viteUrl) {
   if ((await page.getByRole("dialog").count()) > 0) failures.push("21-help-manual: Esc did not close the manual");
   // R12 车道 B(§2 / §3):「一键排入」把假后端里的精选段排进镜头带 → 顶部 Toast「已排入 n 段 · 覆盖 k 章 · 撤销」
   // (role=status,一条),带上出现「片段 a–b s」的段级镜块,选中的镜块常显「往前 / 往后」(X-03 由「上移 / 下移」改名);缺口卡只有一个主动作
-  // + 「···」,空章有「这章够了」。硬断言写在 act 里;镜头带底部不再有 .band-toast。
-  await page.goto(viteUrl, { waitUntil: "domcontentloaded" });
+  // + 「···」,空章有「这章够了」。硬断言写在 act 里;镜头带底部不再有 .band-toast。R19 P-05:23 的六分区要开关打开(`?showall=1`)。
+  await page.goto(`${viteUrl}?showall=1`, { waitUntil: "domcontentloaded" });
   await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   await page.setViewportSize(WIDE);
@@ -507,7 +659,8 @@ async function workspaceScript(page, context, viteUrl) {
     locate: (p) => p.getByRole("region", { name: "镜头带" }).getByRole("button", { name: "一键排入" }),
     act: async (button, p) => {
       const band = p.getByRole("region", { name: "镜头带" });
-      if (!(await button.evaluate((node) => node.classList.contains("ui-button--primary")))) failures.push("22-band-arranged: 「一键排入」不是 primary");
+      // R19 V-01:「一键排入」降为 secondary,同屏唯一的实心主按钮是顶栏「下一步」(每张图由 assertSinglePrimary 数)。
+      if (await button.evaluate((node) => node.classList.contains("ui-button--primary"))) failures.push("22-band-arranged: 「一键排入」仍是 primary(V-01)");
       await button.click();
       const toast = p.getByRole("status").filter({ hasText: "已排入" });
       await toast.first().waitFor({ timeout: STEP_TIMEOUT_MS });
@@ -517,8 +670,10 @@ async function workspaceScript(page, context, viteUrl) {
       const viewport = p.viewportSize();
       if (box && viewport && Math.abs(box.x + box.width / 2 - viewport.width / 2) > 40) failures.push(`22-band-arranged: toast 没有居中(x=${box.x}, w=${box.width})`);
       if ((await band.locator(".band-toast").count()) !== 0) failures.push("22-band-arranged: 镜头带底部仍有旧的 .band-toast 小字");
-      await band.getByText(/^片段 [\d.]+–[\d.]+ s$/).first().waitFor({ timeout: STEP_TIMEOUT_MS });
-      const segmentTile = band.locator(".band-segment").filter({ hasText: "片段 " }).first();
+      // R19 V-06:「片段 a–b s」不再是镜块上常显的文字,挪进了缩略图的 title(tooltip)——
+      // 断言跟着改成读那个属性,不再等一段可见文本。
+      const segmentTile = band.locator('.band-segment:has(.band-tile-thumb[title*="片段 "])').first();
+      await segmentTile.waitFor({ timeout: STEP_TIMEOUT_MS });
       // X-03:点选而不是悬停——选中态(ui-card--selected)要常显,鼠标移开也得在。
       await segmentTile.click();
       await p.mouse.move(4, 4);
@@ -591,9 +746,9 @@ async function workspaceScript(page, context, viteUrl) {
   });
   await page.keyboard.press("Escape");
   await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
-  // R13 车道 B(§3):首页 —— `?empty=1` 之外也能从顶栏 logo 进(有素材时只从这里进)。看「开始一个新旅程」大按钮、
-  // 「最近的集」卡(集名 / 缩略图 / 四步进度)、三个模板卡。硬断言:logo 是 button「首页」且按下;list「最近的集」≥1 张、
-  // 进行中的集排第一且带四步进度;group「从模板开始」恰好三张卡;唯一 primary。
+  // R13 车道 B(§3)→ R19 U-03:首页 —— `?empty=1` 之外也能从顶栏 logo 进(有素材时只从这里进)。看「新建一集」大按钮、
+  // 「继续上次」、「最近的集」卡(集名 / 缩略图 / 四步进度)。硬断言:logo 是 button「首页」且按下;list「最近的集」≥1 张、
+  // 进行中的集排第一且带四步进度;没有模板区;唯一 primary。
   await page.goto(viteUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
   await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
@@ -615,13 +770,12 @@ async function workspaceScript(page, context, viteUrl) {
       const first = await cards.first().innerText();
       if (!first.includes("进行中")) failures.push(`24-home: 第一张集卡不是进行中的集: ${first.replace(/\n/g, " | ")}`);
       if ((await cards.first().locator("[data-step-done]").count()) !== 4) failures.push("24-home: 集卡缺四步进度");
-      const templates = home.getByRole("group", { name: "从模板开始" }).getByRole("button");
-      const names = await templates.allInnerTexts();
-      if (names.length !== 3 || !names.some((n) => n.includes("旅行日记")) || !names.some((n) => n.includes("电影感")) || !names.some((n) => n.includes("快节奏"))) {
-        failures.push(`24-home: 模板卡 ${names.join(" | ")}`);
-      }
+      // R19 U-03:模板区撤掉(Wave 2 P-09 做实再回);有素材时多一颗「继续上次」;首页 DOM 不含首轮词表。
+      if ((await home.getByRole("group", { name: "从模板开始" }).count()) !== 0) failures.push("24-home: 模板区还在");
+      if ((await home.getByRole("button", { name: "继续上次", exact: true }).count()) === 0) failures.push("24-home: button missing: 继续上次");
       const text = await home.innerText();
       if (/tick|VFR|remux|sidecar|L1|L3|hero|Stack/.test(text)) failures.push("24-home: 首页出现内部术语");
+      if (/镜头带|章节|精选段|交付|模板|旅程/.test(text)) failures.push("24-home: 首页出现首轮词表里的词");
     },
     settle: 800,
   });
@@ -691,14 +845,14 @@ async function workspaceScript(page, context, viteUrl) {
       if ((await fold.count()) === 0) failures.push("26-timeline: 轨头缺折叠按钮");
       else if ((await fold.getAttribute("aria-expanded")) !== "true") failures.push("26-timeline: 折叠按钮 aria-expanded 不是 true");
       // 25 步 `?guides=1` 重新载入了假后端,22 步排进带的精选段没了 —— 先再排一次,不然下面找不到「片段」镜块。
-      if ((await band.locator(".band-segment").filter({ hasText: "片段 " }).count()) === 0) {
+      if ((await band.locator(".band-segment").filter({ hasText: /片段 [\d.]+–/ }).count()) === 0) {
         const arrange = p.getByRole("button", { name: "一键排入" }).first();
         if ((await arrange.count()) > 0) {
           await arrange.click();
-          await band.locator(".band-segment").filter({ hasText: "片段 " }).first().waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("26-timeline: 一键排入后仍没有精选段镜块"));
+          await band.locator(".band-segment").filter({ hasText: /片段 [\d.]+–/ }).first().waitFor({ timeout: STEP_TIMEOUT_MS }).catch(() => failures.push("26-timeline: 一键排入后仍没有精选段镜块"));
         } else failures.push("26-timeline: 找不到「一键排入」");
       }
-      const segmentTile = band.locator(".band-segment").filter({ hasText: "片段 " }).first();
+      const segmentTile = band.locator(".band-segment").filter({ hasText: /片段 [\d.]+–/ }).first();
       await segmentTile.click();
       await segmentTile.hover();
       for (const name of ["调整入点", "调整出点"]) {
@@ -744,6 +898,8 @@ async function workspaceScript(page, context, viteUrl) {
       await button.click();
       const dialog = p.getByRole("dialog", { name: "导出" });
       await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它,冻结 AX 名与顺序不变。
+      await dialog.getByRole("button", { name: "更多方式", exact: true }).click();
       const chips = await dialog.getByRole("group", { name: "导出方式" }).getByRole("button").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
       if (chips.join("|") !== "剪映草稿|剪映素材包|导出片段|完整交付包") failures.push(`28-jianying-kit: chip 顺序 ${chips.join("|")}`);
       await dialog.getByRole("button", { name: "剪映素材包", exact: true }).click();

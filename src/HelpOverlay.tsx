@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import {
   HELP_FAQS,
@@ -6,6 +6,7 @@ import {
   PIPELINE_MANUAL,
   SETTINGS_HELP_TOPICS,
   WORKFLOW_STEPS,
+  isCommonShortcut,
   shortcutKeys,
   shortcutsById,
 } from "./helpContent";
@@ -25,6 +26,9 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   // R13 §1:键帽随当前键位预设 / 自定义变化。
   const keymap = useKeymap();
+  // R19 P-12:键位表默认只列「常用」(≤ 15 行),「全部」是原来的整张表。
+  const [showAllKeys, setShowAllKeys] = useState(false);
+  const groups = KEYBOARD_SHORTCUT_GROUPS.map((group) => ({ ...group, shortcuts: showAllKeys ? group.shortcuts : group.shortcuts.filter(isCommonShortcut) })).filter((group) => group.shortcuts.length > 0);
 
   // 帮助层之上还能开命令面板(Cmd+K)。两层的 Esc 监听都挂在 document 上,
   // `stopPropagation()` 管不到同一节点上的兄弟监听,于是一次 Esc 会把两层一起
@@ -175,10 +179,18 @@ export function HelpOverlay({ open, onClose }: HelpOverlayProps) {
               <div>
                 <h3 id="shortcut-help-title">快捷键总表</h3>
                 <p>中文输入法正在组词时，单键操作会自动暂停。</p>
+                <div className="shortcut-scope" role="group" aria-label="键位表范围">
+                  <button type="button" aria-label="常用键位" aria-pressed={!showAllKeys} onClick={() => setShowAllKeys(false)}>
+                    常用
+                  </button>
+                  <button type="button" aria-label="全部键位" aria-pressed={showAllKeys} onClick={() => setShowAllKeys(true)}>
+                    全部
+                  </button>
+                </div>
               </div>
             </div>
             <div className="shortcut-tables">
-              {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
+              {groups.map((group) => (
                 <section className="shortcut-table" aria-label={`${group.label}快捷键`} key={group.id}>
                   <header>
                     <span>{group.eyebrow}</span>

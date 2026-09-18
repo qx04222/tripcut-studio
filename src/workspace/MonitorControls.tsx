@@ -117,45 +117,21 @@ export function MonitorControls({
     ? outPoint - inPoint
     : null;
 
+  // R19 V-05:热力画进 seek 轨道下沿;建议行并进传输条右端「建议 1/3 ‹ ›」,描述与「按 Enter 采用」进 tooltip。
+  const heat =
+    suggestions && suggestions.points.length > 0 && ready ? (
+      <MonitorHeatStrip
+        points={suggestions.points}
+        ranges={suggestions.ranges}
+        activeIndex={suggestions.index}
+        durationSeconds={status.duration}
+        position={status.pos}
+      />
+    ) : null;
+  const suggestionShort = suggestions?.statusLine ? suggestions.statusLine.split(" · ")[0] ?? suggestions.statusLine : null;
+
   return (
     <div className="monitor-controls">
-      <div className="monitor-seek">
-        <span className="monitor-timecode">
-          <span aria-label="当前时间码" title={formatTimecode(status?.pos ?? 0, fps)}>
-            {formatShortTimecode(status?.pos ?? 0)}
-          </span>
-          <span className="monitor-duration" aria-label="素材总时长" title={formatTimecode(status?.duration ?? 0, fps)}>
-            {` / ${formatShortTimecode(status?.duration ?? 0)}`}
-          </span>
-        </span>
-        <MonitorSeekBar status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} />
-      </div>
-      {suggestions && suggestions.points.length > 0 && ready ? (
-        <div className="monitor-heat-row">
-          <span className="monitor-timecode monitor-heat-spacer" aria-hidden="true">
-            {`${formatShortTimecode(status.pos)} / ${formatShortTimecode(status.duration)}`}
-          </span>
-          <MonitorHeatStrip
-            points={suggestions.points}
-            ranges={suggestions.ranges}
-            activeIndex={suggestions.index}
-            durationSeconds={status.duration}
-            position={status.pos}
-          />
-        </div>
-      ) : null}
-      {suggestions && suggestions.statusLine ? (
-        <div className="monitor-suggestion" data-testid="monitor-suggestion">
-          <span className="monitor-suggestion-text" aria-live="polite">{suggestions.statusLine}</span>
-          <Button variant="ghost" size="sm" aria-label="上一条建议" title="上一条建议 ⇧N" disabled={!ready} onClick={() => onStepSuggestion?.(-1)}>
-            ‹
-          </Button>
-          <Button variant="ghost" size="sm" aria-label="下一条建议" title="下一条建议 N" disabled={!ready} onClick={() => onStepSuggestion?.(1)}>
-            ›
-          </Button>
-          <span className="monitor-suggestion-hint">按 Enter 采用这段</span>
-        </div>
-      ) : null}
       <Toolbar ariaLabel="走带与打点" className="ui-toolbar--framed monitor-transport">
         <Button
           variant="icon"
@@ -217,6 +193,20 @@ export function MonitorControls({
           onClick={onToggleMute}
         />
 
+        <span className="monitor-seek">
+          <span className="monitor-timecode">
+            <span aria-label="当前时间码" title={formatTimecode(status?.pos ?? 0, fps)}>
+              {formatShortTimecode(status?.pos ?? 0)}
+            </span>
+          </span>
+          <MonitorSeekBar status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} />
+          <span className="monitor-timecode">
+            <span className="monitor-duration" aria-label="素材总时长" title={formatTimecode(status?.duration ?? 0, fps)}>
+              {formatShortTimecode(status?.duration ?? 0)}
+            </span>
+          </span>
+        </span>
+
         <Toolbar.Divider />
 
         <Button
@@ -247,8 +237,9 @@ export function MonitorControls({
           <ActionKbd action="mark-out" />
           {outPoint !== null ? <span className="monitor-mark-value">{formatShortTimecode(outPoint)}</span> : null}
         </Button>
+        {/* R19 V-01:栏内不再有实心主按钮(唯一一颗是顶栏「下一步」);保存靠位置与键位 S。 */}
         <Button
-          variant="primary"
+          variant="secondary"
           size="sm"
           icon="save"
           aria-label="保存片段"
@@ -257,7 +248,7 @@ export function MonitorControls({
           busy={saving}
           onClick={onSaveSegment}
         >
-          保存片段
+          <span className="monitor-save-label">保存片段</span>
         </Button>
 
         <span className="monitor-marked" aria-live="polite">
@@ -266,7 +257,21 @@ export function MonitorControls({
           }`}
         </span>
 
-        <Toolbar.Spacer />
+        {suggestions && suggestions.statusLine ? (
+          <span
+            className="monitor-suggestion"
+            data-testid="monitor-suggestion"
+            title={`${suggestions.statusLine} · 按 Enter 采用这段 · N / ⇧N 切换`}
+          >
+            <span className="monitor-suggestion-text" aria-live="polite" aria-label={suggestions.statusLine}>{suggestionShort}</span>
+            <Button variant="ghost" size="sm" aria-label="上一条建议" title="上一条建议 ⇧N" disabled={!ready} onClick={() => onStepSuggestion?.(-1)}>
+              ‹
+            </Button>
+            <Button variant="ghost" size="sm" aria-label="下一条建议" title="下一条建议 N · 按 Enter 采用这段" disabled={!ready} onClick={() => onStepSuggestion?.(1)}>
+              ›
+            </Button>
+          </span>
+        ) : null}
 
         {/* R12 §5:点卡片只预览;「连播」开了才播完自动下一条(默认关,与设置页同一个键)。 */}
         {onToggleAutoAdvance ? (

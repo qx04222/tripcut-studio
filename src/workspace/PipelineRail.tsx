@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX } from "react";
 
 import { focusPipelineStep } from "./pipelineActions";
 import { PIPELINE_STEPS, PIPELINE_STEP_MARKS, PIPELINE_STEP_NAMES, pipelineStepCount, type PipelineState, type PipelineStep } from "./pipelineModel";
+import { COMPACT_WIDE_QUERY } from "./shellLayout";
 import { Icon } from "./ui";
 import { useWorkspace } from "./WorkspaceStore";
 
@@ -9,8 +10,8 @@ export interface PipelineRailProps {
   state: PipelineState;
 }
 
-/** R18 V-07:≥1440 才排得下四步的文字。窄屏折叠成一颗胶囊(不是四个没有文字的裸圈)。 */
-const WIDE_QUERY = "(min-width: 1440px)";
+/** R18 V-07:标准档才排得下四步的文字,紧凑档折叠成一颗胶囊(不是四个没有文字的裸圈)。R19 V-11:阈值读壳的唯一断点。 */
+const WIDE_QUERY = COMPACT_WIDE_QUERY;
 
 /** 没有 matchMedia 的环境(单测 / SSR)当作宽屏 —— 展开态是既有行为,冻结的 AX 名都在那一支上。 */
 function useWideTopBar(): boolean {
@@ -34,7 +35,7 @@ function useWideTopBar(): boolean {
  * ③ 排列 0/2 章 → ④ 导出」。当前步高亮(`aria-current="step"`)、完成步打勾、未开始步灰;
  * 每步可点 = 把界面焦点带到那一步。
  *
- * R18 V-07:1440 以下整条折叠成一颗「第 ④ 步 · 导出 ⌄」胶囊,点开是同样四步的菜单。
+ * R18 V-07:紧凑档(<--bp-compact)整条折叠成一颗「第 ④ 步 · 导出 ⌄」胶囊,点开是同样四步的菜单。
  * 此前窄屏是四个没有文字的裸圈:占着 100px 却不给信息(08-narrow-1280.png)。
  *
  * AX:`nav` 名「流水线」,四个 `button` 名固定为「第 n 步 导入/挑选/排列/导出」——

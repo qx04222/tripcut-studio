@@ -11,7 +11,8 @@ import { PerformanceSection } from "./settings/PerformanceSection";
 import { PrivacySection } from "./settings/PrivacySection";
 import { SettingsFormContext } from "./settings/SettingsFormContext";
 import { SettingsRail, railPanelId, railTabId } from "./settings/SettingsRail";
-import { SETTINGS_GROUPS, groupForSection, type SettingsGroupId } from "./settings/settingsGroups";
+import { SETTINGS_GROUPS, groupForSection, visibleSettingsSections, type SettingsGroupId } from "./settings/settingsGroups";
+import { useShowAllFeatures } from "./showAllFeatures";
 import { TimelineSection } from "./settings/TimelineSection";
 import { ToolsSection } from "./settings/ToolsSection";
 import { noticeTone } from "./settings/settingsModel";
@@ -54,6 +55,8 @@ function SettingsSheetBody(): JSX.Element {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const close = () => dispatchWorkspace({ type: "close-drawer" });
   const group = SETTINGS_GROUPS.find((candidate) => candidate.id === active) ?? SETTINGS_GROUPS[0]!;
+  // R19 P-05(flow 车道):「显示全部功能」关时工具块里不画「云端补镜」段;程序直落到它时照样画。
+  const sections = visibleSettingsSections(group, useShowAllFeatures(), focusSection);
   const tone = noticeTone(form.notice);
 
   const changeGroup = useCallback((id: SettingsGroupId) => {
@@ -97,7 +100,7 @@ function SettingsSheetBody(): JSX.Element {
             ref={panelRef}
           >
             <p className="settings-sheet-intro" data-settings-intro={group.id}>{group.intro}</p>
-            {group.sections.map(renderSection)}
+            {sections.map(renderSection)}
           </div>
           <footer className="settings-sheet-footer">
             <p className={`settings-sheet-notice is-${tone}`} role="status" aria-live="polite">

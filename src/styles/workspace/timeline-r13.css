@@ -291,8 +291,10 @@
   box-shadow: var(--ring);
 }
 
-.workspace-shell .shot-band .band-trim-handle:disabled {
-  opacity: 0 !important;
+/* R19 tokens-lite:多写一层 .band-trim 把特异性抬到 (0,5,0),与上面 hover / 选中 / 拖动
+   三条平级、靠声明顺序取胜,不再需要 !important。 */
+.workspace-shell .shot-band .band-trim .band-trim-handle:disabled {
+  opacity: 0;
   pointer-events: none;
 }
 

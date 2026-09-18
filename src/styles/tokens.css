@@ -99,6 +99,12 @@
   --motion-fast: 150ms cubic-bezier(0.2, 0.7, 0.2, 1);
   /* R18 车道 V1:sheet / drawer 进出专用的慢档,不给日常 hover/focus 用。 */
   --motion-slow: 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* R19 tokens-lite(V-10):出场专用。进比出慢——检查器滑出层 / 抽屉 / 菜单 / toast 的收起
+     用它(120ms ease-in),出场不等动画结束就可交互。布局变化(拖分栏 / 折叠 / 换宽度档)
+     一律 0ms,不设令牌。 */
+  --motion-exit: 120ms cubic-bezier(0.4, 0, 1, 1);
+  /* toast 停留时长的默认值(进度细线的 keyframes 时长);JS 可用 --toast-ms 逐条覆盖。 */
+  --motion-toast-life: 4000ms;
 
   /* R18 车道 V1:层级令牌,替代车道文件里裸写的 z-index 数字。 */
   --z-base: 0;
@@ -116,6 +122,11 @@
 
   /* 等宽:时码、文件名、kbd。 */
   --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* R19 shell(V-11):壳的唯一断点。<1366 是「紧凑」档(13" 缩放档常见 1280–1440,取中):顶栏四步折成
+     胶囊、媒体池最多两列;≥1366 是标准档。JS 侧读 shellLayout.ts 的 BP_COMPACT(同值,tokens.test 钉住),
+     因为 matchMedia 吃不到 CSS 变量。 */
+  --bp-compact: 1366px;
 
   /* R13 §4:镜头带播放头。不是语义色(--danger 是「出错」),是剪辑软件里约定俗成的那根红线。 */
   --playhead: #e0312b;

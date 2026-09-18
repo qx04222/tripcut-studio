@@ -8,7 +8,8 @@ import { exportDiagnosticsBundle } from "../../api";
 import { copyDiagnostics } from "../diagnostics";
 import { failureText } from "../errorText";
 import { resetOnboarding } from "../onboardingReset";
-import { Button, SectionHeader, showToast } from "../ui";
+import { setShowAllFeatures, useShowAllFeatures } from "../showAllFeatures";
+import { Button, SectionHeader, Toggle, showToast } from "../ui";
 import { AboutUpdate } from "./AboutUpdate";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
@@ -28,6 +29,7 @@ export function AboutSection(): JSX.Element {
   const [helpOpen, setHelpOpen] = useState(false);
   const closeHelp = useCallback(() => setHelpOpen(false), []);
   const [licensesOpen, setLicensesOpen] = useState(false);
+  const showAll = useShowAllFeatures();
 
   return (
     <>
@@ -44,6 +46,14 @@ export function AboutSection(): JSX.Element {
       </div>
 
       <div className="settings-sheet-group">
+        {/* R19 P-05:「显示全部功能」,默认关。关时只留四步流水线上的常规操作;开关打开原样回来,不删任何东西。 */}
+        <SettingsRow
+          title="显示全部功能"
+          help="默认关:界面只留 导入 → 挑选 → 排列 → 导出 用得到的东西。打开后多出 技术检查、画面评分、声音与调色、旅程与地点卡、快捷键预设、性能、云端补镜。"
+          align="end"
+        >
+          <Toggle label="显示全部功能" checked={showAll} onChange={setShowAllFeatures} />
+        </SettingsRow>
         {/* R13 §3 → R16 P2-11:功能气泡、首页三步卡、四步提示、首启向导一起重置(名副其实)。 */}
         <SettingsRow title="新手引导" help="工作区里那些「知道了」的小气泡、每一步的提示条和首页的上手卡各只出现一次;重置后都会再出现一遍。">
           <Button

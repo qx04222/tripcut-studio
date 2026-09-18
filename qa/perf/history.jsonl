@@ -1,0 +1,9 @@
+{"date":"2026-09-15","round":"r18","metric":"jobspan_ms_21fixtures_w8","value":23070,"unit":"ms","note":"R18 W-1 before(main 13b615f core),median of 5 paired runs — 见 .superpowers/sdd/r18/lane-perf-report.md §1"}
+{"date":"2026-09-15","round":"r18","metric":"jobspan_ms_21fixtures_w8","value":20921,"unit":"ms","note":"R18 W-1 after(cc49bb5),median of 5 paired runs"}
+{"date":"2026-09-15","round":"r18","metric":"rss_peak_mb_21fixtures_w8","value":2152,"unit":"MB","note":"R18 W-1 before, median peak RSS"}
+{"date":"2026-09-15","round":"r18","metric":"rss_peak_mb_21fixtures_w8","value":2243,"unit":"MB","note":"R18 W-1 after, median peak RSS(+4%,噪声内)"}
+{"date":"2026-09-18","round":"r19-bench","metric":"rust_setup_ms_empty_lib","value":208,"unit":"ms","note":"E-03 真机 5 轮中位数(204/207/208/218/229),PASS<400ms;bench/check-startup.mjs --app 旅剪工作台.app(0.9.1,ef5eda1+E-05 打点)"}
+{"date":"2026-09-18","round":"r19-bench","metric":"binary_bytes","value":29360464,"unit":"B","note":"E-11 基线:src-tauri/target/release/tripcut-studio(tauri build --bundles app,ef5eda1+E-05)"}
+{"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_empty_lib","value":118.4,"unit":"MB","note":"E-04 稳态内存·空库,/usr/bin/time -l maximum resident set size,15s idle;bench/check-idle-memory.mjs --scenario empty"}
+{"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_100clip_lib_no_task","value":147.4,"unit":"MB","note":"E-04 稳态内存·100 条库(非规格要求的 1344,用 bench 基线库复用)全部任务已完成后 idle 20s;confirmed via startup census clips=100;bench/check-idle-memory.mjs --scenario large-idle --seed-db bench/runs/baseline-main/bench.db"}
+{"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_playing_4k","value":null,"unit":"MB","note":"E-04 播放 4K 场景本轮未做——需要 AX 驱动点开素材并保持播放,留给下一轮或与 U-12 驱动脚本一起接线"}

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act } from "react";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import postcss from "postcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 import { DELIVER_DRAWER_TITLE, DELIVER_ORIENTATION_LABEL, DIMENSION_FILTER_LABEL, IMPORT_PROGRESS_LABEL, INSPECTOR_TITLES, OPTIONAL_TRANSCRIBE_TITLE, OPTIONAL_VISION_TITLE, ORIENTATION_LABEL, stackCountLabel, stackGroupLabel, takeLabel } from "./copy";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { dispatchWorkspace, __resetWorkspaceForTests } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 /**
  * 冻结串。冒烟脚本(Task 8)按这些名字找元素 —— 改一个字这里就红,
@@ -53,7 +54,14 @@ const BANNED_ON_MAIN_SCREEN = [
 
 const WORKSPACE_CSS = readFileSync(resolve(process.cwd(), "src/styles/workspace.css"), "utf8");
 
-beforeEach(() => __resetWorkspaceForTests());
+beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
+  __resetWorkspaceForTests();
+  // R19 U-05:导入抽屉的「任务 / 缺失素材」分页各自计数 >0 才出 —— 冻结的三个分页名在「导过东西、有缺失」的库里断言。
+  apiMocks.getImportProgress.mockResolvedValue({ total: 12, done: 12, failed: 0, running: 0, waiting_for_permit: 0, paused_for_memory: false } as never);
+  apiMocks.listMissingClips.mockResolvedValue([{ clip_id: 9, file_name: "Z.MOV", volume_uuid: "vol-z", volume_label: null, rel_path: "Z.MOV", missing_since: "" }]);
+});
 afterEach(cleanup);
 
 describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
@@ -67,6 +75,8 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     }
     expect(screen.getByRole("status", { name: FROZEN_STATUS })).toBeTruthy();
 
+    // V-07:五个 tab 收进「附属：{当前} ⌄」触发钮下的浮层,平时不占标题条——先展开才摸得到。
+    fireEvent.click(screen.getByRole("button", { name: /^附属：/ }));
     const list = screen.getByRole("tablist", { name: "镜头带附属视图" });
     expect(within(list).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(FROZEN_TABS);
   });
@@ -79,6 +89,7 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     // tab,导入分页 tablist 也不是它的后代。若这条绿而真机仍数到 8,那 8 就是
     // 探针把整窗 AXRadioButton 数进来了,不是产品缺陷。
     render(<WorkspaceShell />);
+    fireEvent.click(screen.getByRole("button", { name: /^附属：/ }));
     await act(async () => {
       dispatchWorkspace({ type: "open-drawer", drawer: "import" });
       await Promise.resolve();
@@ -88,6 +99,7 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     expect(within(bandList).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(FROZEN_TABS);
     expect(bandList.contains(importList)).toBe(false);
     expect(importList.contains(bandList)).toBe(false);
+    await within(importList).findByRole("tab", { name: "缺失素材" });
     expect(within(importList).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "来源",
       "任务",
@@ -110,7 +122,7 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
       await Promise.resolve();
     });
     const importDialog = await screen.findByRole("dialog", { name: "导入素材" });
-    for (const tab of ["来源", "任务", "缺失素材"]) expect(within(importDialog).getByRole("tab", { name: tab })).toBeTruthy();
+    for (const tab of ["来源", "任务", "缺失素材"]) expect(await within(importDialog).findByRole("tab", { name: tab })).toBeTruthy();
     expect(screen.queryByText("松开即导入")).toBeNull();
     expect(within(importDialog).getByRole("button", { name: "关闭" })).toBeTruthy();
 
@@ -120,6 +132,11 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     });
     const deliver = await screen.findByRole("dialog", { name: DELIVER_DRAWER_TITLE });
     expect(DELIVER_DRAWER_TITLE).toBe("导出");
+    // R19 U-06/P-04:首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它,冻结名不变。
+    await act(async () => {
+      within(deliver).getByRole("button", { name: "更多方式" }).click();
+      await Promise.resolve();
+    });
     // R11 车道 E:抽屉默认「快速导出」(新 AX 名:快速导出 / 完整交付包 / 导出到上次文件夹 / 更改文件夹);
     // 完整交付包那套冻结的名字在切过去之后照旧。
     // Y-08(R13 真机):还没记过文件夹时主按钮叫「导出…」;记过才是「导出到上次文件夹」。
@@ -146,11 +163,14 @@ describe("冻结的 AX 名(冒烟脚本的锚点)", () => {
     expect(within(settings).getByText("云端补镜")).toBeTruthy();
   });
 
-  it("折叠后两条竖条的按钮名也是冻结的", () => {
-    __resetWorkspaceForTests({ poolCollapsed: true, inspectorCollapsed: true });
+  it("折叠后媒体池竖条的按钮名冻结;R19 检查器改滑出层,新控件名「钉住检查器」「收起检查器」", () => {
+    apiMocks.getAiDescription.mockResolvedValue(null); // 选中后检查器会拉 AI 描述;通用替身默认给 [],那里按 null 才不炸
+    __resetWorkspaceForTests({ poolCollapsed: true, selection: { kind: "clip", clipId: 3 } });
     render(<WorkspaceShell />);
     expect(screen.getByRole("button", { name: "展开媒体池" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "展开检查器" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开检查器" })).toBeNull();
+    expect(screen.getByRole("button", { name: "钉住检查器" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起检查器" })).toBeTruthy();
   });
 
   it("主屏不出现任何英文 kicker / eyebrow", () => {

@@ -4,7 +4,9 @@ import { EpisodeSwitcher } from "./EpisodeSwitcher";
 import { pinHome, useHomeOpen } from "./homeStore";
 import { PipelineRail } from "./PipelineRail";
 import { focusPipelineStep, runPipelineNext } from "./pipelineActions";
-import { pipelineGapLabel, pipelineNextLabel } from "./pipelineModel";
+import { pipelineGapLabel, pipelineNextDisabled, pipelineNextLabel } from "./pipelineModel";
+import { PIPELINE_HINTS } from "./pipelineHints";
+import { useAnalysisEta } from "./analysisEta";
 import { ActionKbd } from "./KeymapKbd";
 import { Button, Icon } from "./ui";
 import { usePipeline } from "./usePipeline";
@@ -34,13 +36,18 @@ export function TopBar(): JSX.Element {
   // V-08:更新就绪时那颗按钮降成 ghost(唯一的实心主按钮留给「下一步」),
   // 「还有更新等着」改由齿轮右上角一枚小圆点说 —— 降级不等于藏起来。
   const updatePhase = useUpdateState().phase;
-  const nextLabel = viewingEpisode ? RETURN_TO_EXPORT_LABEL : pipelineNextLabel(pipeline);
+  // R19 U-01(flow 车道):一条都没分析完时主按钮禁用,文案带进度 + 预计时间;有已分析的就「先挑已分析的 x/N 条」。
+  const nextDisabled = !viewingEpisode && pipelineNextDisabled(pipeline);
+  const analysisEta = useAnalysisEta(nextDisabled);
+  const nextLabel = viewingEpisode ? RETURN_TO_EXPORT_LABEL : pipelineNextLabel(pipeline, analysisEta);
   // Z-03:段都排进去了但还有章没镜 → 主按钮已是「导出」,旁边给一颗 ghost「补缺口 n 章」(聚焦镜头带)。
   const gapLabel = viewingEpisode ? null : pipelineGapLabel(pipeline);
   const nextIcon = pipeline.complete || pipeline.step === 4 ? "deliver" : pipeline.step === 1 ? "import" : pipeline.step === 2 ? "star" : "grip";
   // 下一步落在抽屉上(① / ④)时按钮是抽屉的开关,带 haspopup / expanded;②③ 落在栏里,不带。
   const opensDrawer = !viewingEpisode && (pipeline.complete || pipeline.step === 1 || pipeline.step === 4);
   const nextDrawer = pipeline.complete || pipeline.step === 4 ? "deliver" : "import";
+  // R19 V-02:原「第 n 步提示」那一行删了,这句怎么做进按钮 tooltip(首页四步卡另有一份)。
+  const nextTitle = viewingEpisode ? nextLabel : `${nextLabel} —— ${PIPELINE_HINTS[pipeline.step]}`;
 
   return (
     <header className="workspace-topbar">
@@ -88,14 +95,16 @@ export function TopBar(): JSX.Element {
           </Button>
         ) : null}
         <Button
-          variant="primary"
+          // R19 V-01:全应用唯一的实心主按钮。首页盖着三栏时,首页自己的「开始一个新旅程」是那一颗,这里让位。
+          variant={homeOpen ? "secondary" : "primary"}
           icon={nextIcon}
           className="pipeline-next"
           aria-haspopup={opensDrawer ? "dialog" : undefined}
           aria-expanded={opensDrawer ? openDrawer === nextDrawer : undefined}
           aria-label="流水线下一步"
-          title={nextLabel}
+          title={nextTitle}
           data-step={pipeline.step}
+          disabled={nextDisabled}
           onClick={() => (viewingEpisode ? returnToActiveEpisode() : runPipelineNext(pipeline))}
         >
           {nextLabel}

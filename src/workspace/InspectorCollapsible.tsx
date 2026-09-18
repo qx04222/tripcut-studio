@@ -9,6 +9,7 @@ import { AiDescriptionSection } from "./inspectorFields";
 import { InspectorRetryAnalysis } from "./InspectorRetryAnalysis";
 import { CollapsibleSection, DimensionsGrid } from "./InspectorSections";
 import { openSettings } from "./openSettings";
+import { useShowAllFeatures } from "./showAllFeatures";
 import { Icon, type IconName } from "./ui";
 import { INSPECTOR_TITLES } from "./copy";
 
@@ -36,9 +37,13 @@ export interface InspectorCollapsibleSectionsProps {
  * 「待判定 / 未探测 / 暂无数据 / 无」的段收进一个「更多信息」折叠,有内容的段照旧摆在外面 ——
  * 版面只留有东西可看的行。段仍是同一批 `<details>`,开合记忆不受影响。
  */
+/** R19 P-05:「显示全部功能」关时藏 技术检查 / 画面评分(八维)/ 声音与调色(多音轨 + LUT);AI 描述与相似镜头照旧。 */
+export const INSPECTOR_SECTIONS_ADVANCED: ReadonlySet<InspectorSectionId> = new Set(["techcheck", "dimensions", "audio"]);
+
 export function InspectorCollapsibleSections(props: InspectorCollapsibleSectionsProps): JSX.Element {
   const { clip, ctx, clipDimensions, clipsById, aiDescription, llmEnabled, llmBudgetExhausted, aiBusy } = props;
-  const sections: { id: InspectorSectionId; title: string; node: JSX.Element }[] = [
+  const showAll = useShowAllFeatures();
+  const allSections: { id: InspectorSectionId; title: string; node: JSX.Element }[] = [
     {
       id: "techcheck",
       title: "技术检查",
@@ -102,6 +107,8 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
       ),
     },
   ];
+  // R19 P-05(flow 车道,一行):关时按开关过滤;DOM 位置仍固定(见下),开关打开原样回来。
+  const sections = showAll ? allSections : allSections.filter((section) => !INSPECTOR_SECTIONS_ADVANCED.has(section.id));
   const quiet = sections.filter((section) => isQuietSection(section.id, ctx));
   const [moreOpen, setMoreOpen] = useState(false);
   // 五个 `<details>` 的 DOM 位置永远不变(位置一变 React 就会把面板卸了重挂,TechCheckPanel 的

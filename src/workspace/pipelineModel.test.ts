@@ -56,7 +56,8 @@ describe("导航条计数与主按钮文案", () => {
 
   it("主按钮文案随步变化;分析中也不挡路;四步全完成变「再导出一次」", () => {
     expect(pipelineNextLabel(derivePipeline(base))).toBe("下一步:导入素材");
-    expect(pipelineNextLabel(derivePipeline({ ...base, clipCount: 3, analysisPending: 1 }))).toBe("下一步:自动挑选");
+    // R19 U-01:分析中的文案改说「先挑已分析的 x/N 条」(pipelineR19.test 钉住三种形态)。
+    expect(pipelineNextLabel(derivePipeline({ ...base, clipCount: 3, analysisPending: 1 }))).toBe("先挑已分析的 2/3 条");
     expect(pipelineNextLabel(derivePipeline({ ...base, clipCount: 3 }))).toBe("下一步:自动挑选");
     expect(pipelineNextLabel(derivePipeline({ ...base, clipCount: 3, segmentCount: 1 }))).toBe("下一步:排到镜头带");
     expect(pipelineNextLabel(derivePipeline({ ...base, clipCount: 3, segmentCount: 1, chapters: [{ id: 1, shotCount: 1 }] }))).toBe("下一步:导出");

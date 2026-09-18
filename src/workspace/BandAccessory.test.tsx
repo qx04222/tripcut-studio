@@ -62,6 +62,7 @@ import {
   getWorkspaceSnapshot,
   persistedPairs,
 } from "./WorkspaceStore";
+import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 const destinationCard: DestinationCard = {
   id: 5,
@@ -102,6 +103,8 @@ const board: Storyboard = {
 };
 
 beforeEach(() => {
+  // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
+  __setShowAllFeaturesForTests(true);
   __resetClipsFeedForTests();
   __resetWorkspaceForTests();
   for (const mock of Object.values(apiMocks)) mock.mockClear();
@@ -164,12 +167,25 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** V-07:五个附属 tab 收进「附属：{当前} ⌄」触发钮下的浮层,平时不占标题条版面——
+ * 测试要先展开它才摸得到 tablist(选中一个 tab 后面板会自动收起,不留浮层盖住
+ * 下面的镜头带,所以每次点 tab 之前都要重新展开)。 */
+async function openAccessoryPanel(): Promise<void> {
+  const trigger = screen.getByRole("button", { name: /^附属：/ });
+  if (trigger.getAttribute("aria-expanded") === "true") return; // 已经展开就别再点一次把它关掉
+  await act(async () => {
+    fireEvent.click(trigger);
+  });
+}
+
 async function renderBand(): Promise<void> {
   render(<ShotBand />);
+  await openAccessoryPanel();
   await screen.findByRole("tablist", { name: "镜头带附属视图" });
 }
 
 async function clickTab(label: string): Promise<void> {
+  await openAccessoryPanel();
   await act(async () => {
     fireEvent.click(screen.getByRole("tab", { name: label }));
   });
@@ -250,9 +266,9 @@ describe("附属带分段控件", () => {
   });
 
   it("刻度落在镜头带的序号轴上:每个分段一个瓦片节距,整条曲子铺满整条序列", () => {
-    // 节距 = 镜头带瓦片 160 + 间距 8 —— 与 `.band-segment` 的实宽同一个数(R8 视觉审计 §1)。
+    // 节距 = 镜头带瓦片 140 + 间距 8(R19 V-06 由 160 + 8 收小)—— 与 `.band-segment` 的实宽同一个数(R8 视觉审计 §1)。
     const P = RULER_SEGMENT_WIDTH;
-    expect(P).toBe(168);
+    expect(P).toBe(148);
     // 4 个分段 = 4P。0/500/1000 tick(总长 2000)→ 0 / P / 2P。
     expect(rulerMarks([0, 500, 1_000], [0, 1_000], 2_000, 4).beats).toEqual([0, P, 2 * P]);
     expect(rulerMarks([0, 500, 1_000], [0, 1_000], 2_000, 4).sections).toEqual([0, 2 * P]);
@@ -261,8 +277,10 @@ describe("附属带分段控件", () => {
     expect(rulerMarks([500], [], 2_000, 8).beats).toEqual([2 * P]);
   });
 
-  it("BandTabs 单独渲染也给同一份 AX 名(容器可复用)", () => {
+  it("BandTabs 单独渲染也给同一份 AX 名(容器可复用);展开触发钮之后才摸得到 tablist", () => {
     render(<BandTabs />);
+    expect(screen.queryByRole("tablist", { name: "镜头带附属视图" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^附属：/ }));
     expect(screen.getByRole("tablist", { name: "镜头带附属视图" })).toBeTruthy();
   });
 

@@ -2,13 +2,13 @@ import { foldKey } from "./bandGeometry";
 import { BAND_SEGMENT_PITCH, secondsLabel, segmentDurationMs, type BandChapter } from "./shotBandModel";
 
 /**
- * R13 §4:镜头带时间线化的纯数据层。镜头带的横轴是**节距轴**(每个镜块固定 168px,与时长无关),
+ * R13 §4:镜头带时间线化的纯数据层。镜头带的横轴是**节距轴**(每个镜块固定 BAND_SEGMENT_PITCH px,与时长无关),
  * 时间只在块内线性 —— 所以时间 ↔ 像素是一条分段线性映射,刻度、播放头、点击 seek 三处都从
  * 同一张 span 表算,才不会各画各的。
  */
 
-/** 镜块瓦片的实宽(160,节距 168 里余下 8 是间距)。 */
-export const BAND_TILE_WIDTH = 160;
+/** 镜块瓦片的实宽(140,节距 148 里余下 8 是间距;R19 V-06 由 160 收小)。 */
+export const BAND_TILE_WIDTH = BAND_SEGMENT_PITCH - 8;
 /** 时间刻度轨的高度(视口上方,故事模式常驻)。 */
 export const BAND_TIME_RULER_HEIGHT = 22;
 

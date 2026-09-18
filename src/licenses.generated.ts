@@ -18,7 +18,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "base64",
-    "version": "=0.22.1",
+    "version": "=0.23.1",
     "license": "MIT OR Apache-2.0",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -186,7 +186,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "thiserror",
-    "version": "=2.0.17",
+    "version": "=2.0.20",
     "license": "MIT OR Apache-2.0",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -207,7 +207,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "tracing",
-    "version": "=0.1.41",
+    "version": "=0.1.44",
     "license": "MIT",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -319,7 +319,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "@types/node",
-    "version": "24.3.0",
+    "version": "24.13.4",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"
@@ -333,7 +333,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "@types/react-dom",
-    "version": "19.2.5",
+    "version": "19.2.7",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"
@@ -354,7 +354,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "eslint",
-    "version": "10.9.1",
+    "version": "10.10.0",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"
@@ -417,7 +417,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "typescript-eslint",
-    "version": "8.68.0",
+    "version": "8.70.0",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"
@@ -431,7 +431,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "vitest",
-    "version": "4.1.11",
+    "version": "5.0.0",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"

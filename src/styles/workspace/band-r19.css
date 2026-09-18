@@ -1,0 +1,102 @@
+/*
+ * R19 车道 band(V-06 镜块三元素 / V-07 工具条二级化 / V-08 状态条静默化)。
+ * 只在这里写;`@import` 挂在 workspace.css 头部(尾部会被 postcss-import 静默丢掉)。
+ * 选择器都带自己面板的根类;颜色 / 字号 / 圆角一律走 tokens.css 令牌。
+ */
+
+/* ---------- V-08:状态条左端「工具链缺失」红点 ---------- */
+
+.workspace-shell .workspace-status-toolchain.ui-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--danger);
+}
+
+.workspace-shell .workspace-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+}
+
+/* ---------- V-06:镜块常显只留封面 + 时长 + 一行名 ---------- */
+
+/* 第 n/m 条 · AI 生成 · 槽位 / 角色这几件事挪进 title 提示与检查器,常显只留缩略图上的
+   时长角标与下面一行文件名(brainstorm-ui.md §4.5)。DOM 保留(供检查器 / 未来接线取用),
+   只是不再常驻占视觉。 */
+.workspace-shell .shot-band .band-tile-badges,
+.workspace-shell .shot-band .band-tile-meta {
+  display: none;
+}
+
+/* ---------- V-07:镜头带工具条二级化 ---------- */
+
+.workspace-shell .shot-band .band-view-select,
+.workspace-shell .shot-band .band-accessory-select {
+  position: relative;
+  display: inline-flex;
+}
+
+.workspace-shell .shot-band .band-view-select-trigger.ui-button,
+.workspace-shell .shot-band .band-accessory-select-trigger.ui-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+/* 下拉里仍是 role=tab 的 tablist:收在触发钮下方的浮层里,关闭时整块不占版面。 */
+.workspace-shell .shot-band .band-accessory-panel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  min-width: 148px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+.workspace-shell .shot-band .band-accessory-panel[hidden] {
+  display: none;
+}
+
+.workspace-shell .shot-band .band-accessory-panel .band-tabs {
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-shell .shot-band .band-accessory-panel .band-tabs > button {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.workspace-shell .shot-band .band-view-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+}
+
+.workspace-shell .shot-band .band-view-menu[hidden] {
+  display: none;
+}
+
+.workspace-shell .shot-band .band-view-menu-item {
+  justify-content: flex-start;
+  text-align: left;
+}

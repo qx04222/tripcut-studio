@@ -1,0 +1,53 @@
+/*
+ * R19 flow 车道(易用性):首页「新建一集 / 继续上次」两颗并排、新建确认行。
+ * 只写首页根类下的选择器;字号 / 间距 / 圆角一律走 tokens.css 令牌。
+ */
+
+/* U-03:大按钮旁边多一颗「继续上次」(当前集有素材才出),同一行、同一基线。 */
+.home-screen .home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.home-screen .home-actions .ui-button--secondary {
+  height: 44px;
+  padding: 0 var(--space-5);
+  font-size: var(--text-15);
+  border-radius: var(--radius-pill);
+}
+
+/* 「新建一集」的确认行:与旧「模板确认」同一形态,放在 hero 里靠左。 */
+.home-screen .home-hero .home-confirm {
+  margin: var(--space-2) 0 0;
+}
+
+/* P-12:`?` 键位表的「常用 / 全部」切换(help-dialog 根类下),默认常用 ≤ 15 行。 */
+.help-dialog .shortcut-scope {
+  display: inline-flex;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  padding: 2px;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-pill);
+  background: var(--surface-panel);
+}
+
+.help-dialog .shortcut-scope button {
+  min-height: 24px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.help-dialog .shortcut-scope button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+}

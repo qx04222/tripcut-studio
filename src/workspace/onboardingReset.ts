@@ -1,6 +1,6 @@
 import { setFirstRunDone, setSetting } from "../api";
 import { resetGuides } from "./guides";
-import { hintSeenKey } from "./PipelineHint";
+import { hintSeenKey } from "./pipelineHints";
 import { STEPS_SEEN_KEY } from "./onboarding";
 
 /** 「重置新手引导」要一起清掉的布尔键(Rust ONBOARDING_FLAG_KEYS 白名单里的那几个)。 */
