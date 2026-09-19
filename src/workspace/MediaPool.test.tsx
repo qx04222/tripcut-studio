@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
@@ -204,6 +204,25 @@ describe("媒体池 —— AX 与网格结构", () => {
   it("卡片带跨栏回显用的 id,规则与镜头带同一套", async () => {
     await renderPool();
     expect(document.getElementById("pool-clip-1")).toBeTruthy();
+  });
+
+  it("U-04/P-10:有拍摄时间的素材按「日期 › 时段」出一行分组摘要 chip", async () => {
+    apiMocks.listClips.mockResolvedValue([
+      clip(1, { captured_at: "2026-08-12T08:10:00+08:00" }),
+      clip(2, { captured_at: "2026-08-12T08:40:00+08:00" }),
+      clip(3, { captured_at: "2026-08-13T20:00:00+08:00" }),
+    ]);
+    await renderPool();
+    const groups = await screen.findByLabelText("按日期分组");
+    expect(within(groups).getByText("08/12 上午")).toBeTruthy();
+    expect(within(groups).getByText("2")).toBeTruthy();
+    expect(within(groups).getByText("08/13 夜间")).toBeTruthy();
+  });
+
+  it("只有一组(全部同一天同一时段,或全部时间未知)时,分组摘要行不出现", async () => {
+    await renderPool();
+    // beforeEach 里的三条默认夹具 captured_at 都是 null → 只有「时间未知」一组。
+    expect(screen.queryByLabelText("按日期分组")).toBeNull();
   });
 
   it("列数随栏宽在 2–4 之间自适应", () => {

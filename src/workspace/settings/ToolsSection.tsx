@@ -1,9 +1,11 @@
-import { useState, type JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 
-import { enqueueMomentsBackfill, enqueueOcrForEpisode } from "../../api";
+import { CLIP_MODEL_DIR_KEY, enqueueMomentsBackfill, enqueueOcrForEpisode } from "../../api";
 import { SETTINGS_ACTIONS } from "../copy";
 import { failureText } from "../errorText";
+import { loadModels, useModels } from "../modelStore";
 import { Button, SectionHeader, Select, showToast } from "../ui";
+import { ModelCard } from "./ModelCard";
 import { RollbackControl, SettingsRow, StatusPill, ToolReadout } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
 import { ToolchainGuide } from "./ToolchainGuide";
@@ -22,12 +24,32 @@ export const RERUN_WATCHDOG_MS = 2_500;
 /** R18 F7:「清空 = 用内置」这件事此前只能靠用户自己把框选中删干净。AX 名是「恢复内置 <组件名>」。 */
 export const RESTORE_BUILTIN = "恢复内置";
 
+/** R19 P-06:转写档位 → 清单里的模型 id(清单见 Rust core/model_catalog.rs)。 */
+export function whisperModelIdForTier(tier: string): string {
+  return tier === "small" ? "whisper-small" : "whisper-large-v3-turbo";
+}
+export const CLIP_MODEL_ID = "chinese-clip-vit-b-16";
+
 export function ToolsSection(): JSX.Element {
   const form = useSettingsFormContext();
   const { settings, status, componentStatuses, busy, rollbackNotice } = form;
   const toolStatus = (readout: string) =>
     readout === "视频处理组件" ? status?.ffmpeg : readout === "媒体信息组件" ? status?.ffprobe : status?.whisper.binary;
   const component = (id: string) => componentStatuses.find((entry) => entry.id === id);
+  // R19 P-06:模型卡读全局 modelStore(与状态条 / 首启气泡同一份);进设置页时刷一次,
+  // 装完(installed 事件)后 store 自己重读;转写模型装完再 refreshStatus 让 model_available 翻绿。
+  const models = useModels();
+  const whisperCard = models.cards.find((card) => card.id === whisperModelIdForTier(settings["tools.whisper_model_tier"] ?? "large-v3-turbo"));
+  const clipCard = models.cards.find((card) => card.id === CLIP_MODEL_ID);
+  useEffect(() => {
+    void loadModels();
+  }, []);
+  const installedCount = models.cards.filter((card) => card.installed).length;
+  const { refreshStatus } = form;
+  const modelsLoaded = models.loaded;
+  useEffect(() => {
+    if (modelsLoaded) void refreshStatus().catch(() => undefined);
+  }, [installedCount, modelsLoaded, refreshStatus]);
   // R16 P2-5:换了更好的模型之后整集重算 —— 两条排队命令,耗时在文案里说清,结果 toast 说排了几条。
   // A16-04(0.8.0 真机):按下没反应。任何一次按下都要有一条 toast:排了 n 条 / 没有要算的 /
   // 失败白话 / 后端过时不回也说一声;两个按钮只在自己在跑时禁用,不再跟着别的操作的 busy 一起灰掉。
@@ -98,7 +120,7 @@ export function ToolsSection(): JSX.Element {
         })}
         <SettingsRow
           title="转写模型"
-          help="应用不联网下载模型；按下方路径放置已校验的模型文件。"
+          help="把说话内容转成文字。点「安装」后台下载到应用的 models 目录,装完自动启用;缺失不影响导入、挑选与导出。"
           htmlFor="settings-whisper-tier"
           className="settings-sheet-row--stack"
         >
@@ -117,12 +139,10 @@ export function ToolsSection(): JSX.Element {
               </StatusPill>
             </div>
             <code>{status?.whisper.model_path ?? "等待检测"}</code>
-            <small>
-              当前版本不提供在线下载。需要转写时，请自行核验来源与校验码后放入
-              {status?.whisper.models_directory ?? "应用 models 目录"}；缺失不影响核心工作流。
-            </small>
           </div>
-          {/* R10 U-24:模型缺失才展开「去哪下 / 核对什么 / 放哪 / 导入」卡。 */}
+          {/* R19 P-06:当前档位那一张模型卡——「未安装 · 安装」/「下载中 · 取消」/「已安装 · 位置」。 */}
+          {whisperCard ? <ModelCard card={whisperCard} busy={busy} /> : null}
+          {/* R10 U-24 → R19:离线机器的兜底——自己下好的文件走「导入模型文件…」(校验 SHA-256 后落位)。 */}
           {status && !status.whisper.model_available ? (
             <WhisperModelCard component={component("whisper-model")} busy={busy} onImported={form.refreshStatus} />
           ) : null}
@@ -147,9 +167,31 @@ export function ToolsSection(): JSX.Element {
             </div>
             <code>{status?.clip_sidecar.venv_path ?? "等待检测"}</code>
           </div>
-          <Button size="sm" disabled={busy || !status?.clip_sidecar.available} onClick={() => void form.runSelfCheck()}>
-            {status?.clip_sidecar.available ? "运行自检" : "组件尚未提供"}
-          </Button>
+          {/* R19 P-06:画面理解模型一键安装(替代此前的「组件尚未提供」灰按钮);装完自动成为侧车的模型目录。 */}
+          {clipCard ? <ModelCard card={clipCard} busy={busy} /> : null}
+          {/* 模型与运行环境是两件事:模型可以先装好,但 Python 运行环境仍要等签名组件包(不在本轮范围)。 */}
+          {status && !status.clip_sidecar.available ? (
+            <p className="settings-sheet-inline-notice" role="note">
+              画面识别的运行环境还没就位(等带签名的组件包);模型可以先装好,组件到位后自动启用。
+            </p>
+          ) : null}
+          <label className="settings-sheet-subfield" htmlFor="settings-clip-model-dir">
+            <span>模型位置(留空 = 用上面自动安装的目录)</span>
+            <input
+              id="settings-clip-model-dir"
+              className="settings-sheet-input"
+              value={settings[CLIP_MODEL_DIR_KEY] ?? ""}
+              placeholder={status?.clip_sidecar.model_dir ?? "自动安装目录"}
+              spellCheck={false}
+              onChange={(event) => form.setDraft(CLIP_MODEL_DIR_KEY, event.currentTarget.value)}
+              onBlur={(event) => void form.savePath(CLIP_MODEL_DIR_KEY, event.currentTarget.value)}
+            />
+          </label>
+          {status?.clip_sidecar.available ? (
+            <Button size="sm" disabled={busy || !(status.clip_sidecar.model_available ?? true)} onClick={() => void form.runSelfCheck()}>
+              运行自检
+            </Button>
+          ) : null}
         </SettingsRow>
         <SettingsRow title="整集重算" help="换了更好的模型、或觉得之前算得不准时用;会把本集每条素材重新排队,几十条要跑几分钟到十几分钟,后台进行,不影响继续筛片。" className="settings-sheet-row--stack">
           <div className="settings-sheet-actions">

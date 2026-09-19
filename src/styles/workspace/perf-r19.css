@@ -1,0 +1,32 @@
+/*
+ * R19 车道 perf(续)——U-04/P-10「导入即有地图」:媒体池顶部的「日期 › 时段」分组摘要行。
+ * 只能从 workspace.css 头部 @import(放尾部会被 postcss-import 静默丢弃)。
+ * 选择器以 `.workspace-shell .media-pool` 起头,不碰网格本身的 role/AX 名。
+ */
+
+.workspace-shell .media-pool .pool-date-groups {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  list-style: none;
+}
+
+.workspace-shell .media-pool .pool-date-group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-chrome);
+  color: var(--text-secondary);
+  font-size: var(--text-11);
+  white-space: nowrap;
+}
+
+.workspace-shell .media-pool .pool-date-group-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}

@@ -267,8 +267,9 @@ describe("规格 §6 的密度与焦点环", () => {
     expect(WORKSPACE_CSS).toContain("--workspace-topbar-height: 44px");
     expect(WORKSPACE_CSS).toContain("--workspace-status-height: 28px");
     expect(WORKSPACE_CSS).toContain("--workspace-rail-width: 44px");
-    // 13px / 12px 走 styles.css 的 --font-sm / --font-xs,这里只证明壳用的是它们。
-    expect(/\.workspace-shell\s*\{[^}]*font-size:\s*var\(--font-sm\)/.test(WORKSPACE_CSS)).toBe(true);
+    // 13px / 12px 走 tokens.css 的 --text-13 / --text-12(R19 车道 tokens · V-09 前是
+    // styles.css 的 --font-sm / --font-xs,旧梯子在 workspace.css 里已清零)。
+    expect(/\.workspace-shell\s*\{[^}]*font-size:\s*var\(--text-13\)/.test(WORKSPACE_CSS)).toBe(true);
     expect(/\.workspace-shell\s*\{[^}]*line-height:\s*1\.45/.test(WORKSPACE_CSS)).toBe(true);
     // R9:顶栏按钮是套件 Button(kit.css 的 --control-md),旧 `.workspace-topbar-button` 规则已清。
     expect(WORKSPACE_CSS).not.toMatch(/\.workspace-topbar-button/);

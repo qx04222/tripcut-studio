@@ -1,5 +1,6 @@
 import type { JSX } from "react";
 
+import { normalizeThemePref } from "../../appearance";
 import { pickQuickExportFolder } from "../../api";
 import { SETTINGS_ACTIONS } from "../copy";
 import { failureText } from "../errorText";
@@ -13,12 +14,13 @@ import { useSettingsFormContext } from "./SettingsFormContext";
 /** 与 `deliver/useQuickExport.ts` 的 LAST_DIR_KEY 同一个键(那份文件归车道 E,这里不 import 它)。 */
 const EXPORT_DIR_KEY = "ui.export.last_dir";
 
+// R19 车道 tokens · V-09/Q-3:R13 §5 的「剪映风格深色」升格为唯一深色,通用 `dark` 退役——
+// 主题只剩这三档。旧偏好里存的 "jianying-dark" 经 normalizeThemePref 映射回 "dark",不会
+// 出现选不中任何一段的态。
 const THEMES = [
   ["system", "跟随系统"],
   ["light", "浅色"],
   ["dark", "深色"],
-  // R13 §5:近剪映的深灰工作台 + 青绿强调(自己配色,不默认)。
-  ["jianying-dark", "剪映风格深色"],
 ] as const;
 
 const SCALES = [
@@ -46,8 +48,8 @@ export function AppearanceSection(): JSX.Element {
     <>
       <SectionHeader title="播放与导出" description="主题、字号、播放习惯与导出去向 —— 平时会碰的都在这里。" />
       <div className="settings-sheet-group">
-        <SettingsRow title="主题" help="跟随 macOS 外观，或固定明暗主题;「剪映风格深色」是近剪映的深灰工作台。">
-          <Segmented options={THEMES} value={settings["appearance.theme"] ?? "system"} onChange={(value) => void form.save("appearance.theme", value)} />
+        <SettingsRow title="主题" help="跟随 macOS 外观，或固定明暗主题;「深色」是近剪映的深灰工作台 + 青绿强调。">
+          <Segmented options={THEMES} value={normalizeThemePref(settings["appearance.theme"])} onChange={(value) => void form.save("appearance.theme", value)} />
         </SettingsRow>
         <SettingsRow title="界面缩放" help="同步调整筛片、导入、交付与设置页的阅读尺度。">
           <Segmented options={SCALES} value={settings["appearance.ui_scale"] ?? "1.0"} onChange={(value) => void form.save("appearance.ui_scale", value)} />

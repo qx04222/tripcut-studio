@@ -33,6 +33,8 @@ pub const FFMPEG_PATH_KEY: &str = "tools.ffmpeg_path";
 pub const FFPROBE_PATH_KEY: &str = "tools.ffprobe_path";
 pub const WHISPER_PATH_KEY: &str = "tools.whisper_path";
 pub const WHISPER_MODEL_TIER_KEY: &str = "tools.whisper_model_tier";
+/// R19 P-06:画面理解模型目录的设置覆盖(留空 = 用 `models/<id>/` 自动安装目录;环境变量 `TRIPCUT_CLIP_MODEL_DIR` 优先级更高)。
+pub const CLIP_MODEL_DIR_KEY: &str = "tools.clip_model_dir";
 pub const SCENE_THRESHOLD_KEY: &str = "analysis.scene_threshold";
 pub const SIMILARITY_THRESHOLD_KEY: &str = "analysis.similarity_threshold";
 pub const JITTER_THRESHOLD_KEY: &str = "analysis.jitter_threshold";
@@ -164,6 +166,9 @@ pub struct ClipSidecarStatus {
     pub available: bool,
     pub service_available: bool,
     pub note: String,
+    /// R19 P-06:画面理解模型(Chinese-CLIP)就位了吗;`model_dir` 是解析出的目录(环境变量 > 设置 > 自动安装)。
+    pub model_available: bool,
+    pub model_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -408,7 +413,7 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         key if key.starts_with(GUIDE_VIEWED_PREFIX) => {
             guide_viewed_id(key).is_some() && matches!(value, "true" | "false")
         }
-        FFMPEG_PATH_KEY | FFPROBE_PATH_KEY | WHISPER_PATH_KEY => value.len() <= 4_096,
+        FFMPEG_PATH_KEY | FFPROBE_PATH_KEY | WHISPER_PATH_KEY | CLIP_MODEL_DIR_KEY => value.len() <= 4_096,
         WHISPER_MODEL_TIER_KEY => matches!(value, "large-v3-turbo" | "small"),
         SCENE_THRESHOLD_KEY | SIMILARITY_THRESHOLD_KEY => value
             .parse::<f64>()
@@ -763,6 +768,12 @@ pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStat
     let sidecar = crate::packaging::sidecar_paths();
     let sidecar_python_available = sidecar.python.is_file();
     let sidecar_service_available = sidecar.service.is_file();
+    // R19 P-06:设置里的覆盖先灌进进程内那份(侧车 spawn 没有连接),再解析。
+    let clip_override = string_value(connection, CLIP_MODEL_DIR_KEY, "")?;
+    super::model_catalog::set_clip_model_dir_override(
+        (!clip_override.trim().is_empty()).then(|| PathBuf::from(clip_override.trim())),
+    );
+    let clip_model_dir = super::model_catalog::resolve_clip_model_dir().map(|dir| dir.to_string_lossy().into_owned());
 
     Ok(SettingsStatus {
         performance: performance_status(connection)?,
@@ -785,9 +796,13 @@ pub fn status(connection: &Connection, cache_root: &Path) -> Result<SettingsStat
                 "应用资源缺少画面识别组件；请重新安装完整应用。".to_owned()
             } else if !sidecar_python_available {
                 "画面识别组件已就位；正式版不在线安装，等待带签名的本地组件包。".to_owned()
+            } else if clip_model_dir.is_none() {
+                "画面识别组件已就位，还缺画面理解模型；在下方模型卡点「安装」，装完自动启用。".to_owned()
             } else {
                 "自检会在本机启动画面识别组件试跑一次，不会上传素材。".to_owned()
             },
+            model_available: clip_model_dir.is_some(),
+            model_dir: clip_model_dir,
         },
         cache: cache_stats(connection, cache_root)?,
         first_run_done: first_run_done(connection)?,

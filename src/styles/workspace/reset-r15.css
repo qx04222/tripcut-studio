@@ -37,7 +37,7 @@
 .workspace-episode-popover .episode-delete-confirm p,
 .home-screen .episode-delete-confirm p {
   margin: 0;
-  font-size: var(--font-sm);
+  font-size: var(--text-13);
   line-height: 1.45;
   opacity: 0.85;
 }
@@ -91,7 +91,7 @@
 }
 
 .settings-sheet .settings-sheet-reset .settings-reset-field label {
-  font-size: var(--font-sm);
+  font-size: var(--text-13);
   opacity: 0.85;
 }
 

@@ -123,3 +123,6 @@ SHELL_DEFAULTS.bridgeUpdateProgressEvents = () => () => undefined;
 SHELL_DEFAULTS.checkForUpdate = () => ({ available: false, version: "0.0.0", notes: "", pub_date: "" });
 // R17 车道 epmove:移到其他集——默认「一条也没动」;测试按需 mockImplementation 回旧归属。
 SHELL_DEFAULTS.moveClipsToEpisode = () => ({ moved: 0, skipped_missing: 0, from: [] });
+// R19 P-06(models 车道):状态条挂 ModelStatusPhrase 时桥接进度事件,替身要回一个解除函数;清单默认空。
+SHELL_DEFAULTS.bridgeModelProgressEvents = () => () => undefined;
+SHELL_DEFAULTS.listModels = () => [];

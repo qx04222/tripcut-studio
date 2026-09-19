@@ -731,6 +731,84 @@ fn cancel_component_install(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// R19 P-06:模型一键到位(清单见 core/model_catalog.rs,下载见 core/model_download.rs)。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_models(
+    state: tauri::State<'_, RuntimeState>,
+    registry: tauri::State<'_, core::model_registry::DownloadRegistry>,
+) -> std::result::Result<Vec<core::model_registry::ModelCard>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let profile = core::memory_profile::resolve(&connection).map_err(|error| error.to_string())?;
+    let models_dir = core::provisioning::models_dir().map_err(|error| error.to_string())?;
+    Ok(core::model_registry::model_cards(&models_dir, profile, &registry))
+}
+
+/// 装完之后的「启用」:whisper 模型登记为当前档;CLIP 模型就位后把此前因缺模型 blocked 的
+/// `clip_embed` 任务重新排队(R18 0046–0048 的 interest / 帧级向量 / 去重随之生效)。
+fn after_model_installed(db_path: &std::path::Path, cache_root: &std::path::Path, spec: &core::model_catalog::ModelSpec) {
+    let result: core::error::Result<()> = (|| {
+        let mut connection = core::db::open_project(db_path)?;
+        match spec.kind {
+            core::model_catalog::ModelKind::Whisper { tier } => {
+                core::settings::set_setting(&connection, core::settings::WHISPER_MODEL_TIER_KEY, tier)?;
+                tracing::info!(tier, "whisper 模型已下载并登记为当前档");
+            }
+            core::model_catalog::ModelKind::Clip => {
+                if core::memory_profile::sidecars_enabled(&connection) {
+                    let requeued = core::clip_search::enqueue_missing(&mut connection, cache_root)?;
+                    tracing::info!(requeued, "画面理解模型已就位,补排 CLIP 向量任务");
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error, model = spec.id, "模型装完后的启用步骤失败");
+    }
+}
+
+#[tauri::command]
+fn start_model_download(
+    model_id: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RuntimeState>,
+    registry: tauri::State<'_, core::model_registry::DownloadRegistry>,
+) -> std::result::Result<(), String> {
+    if state.read_only {
+        return Err("只读窗口不能安装模型".into());
+    }
+    let spec = core::model_catalog::spec_for_id(&model_id).ok_or_else(|| format!("清单里没有模型 {model_id}"))?;
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let profile = core::memory_profile::resolve(&connection).map_err(|error| error.to_string())?;
+    if !spec.allowed_on(profile) {
+        return Err(format!("{} 需要 16 GB 及以上内存,这台机器不装", spec.title));
+    }
+    let models_dir = core::provisioning::models_dir().map_err(|error| error.to_string())?;
+    let db_path = state.db_path.clone();
+    let cache_root = state.cache_root.clone();
+    registry
+        .start(spec, models_dir, core::model_download::DownloadOptions::default(), move |event| {
+            if let core::model_download::ModelProgress::Installed { .. } = event {
+                after_model_installed(&db_path, &cache_root, spec);
+            }
+            if let Err(error) = app.emit(core::model_download::PROGRESS_EVENT, event) {
+                tracing::warn!(%error, "模型下载进度事件发送失败");
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_model_download(
+    model_id: String,
+    registry: tauri::State<'_, core::model_registry::DownloadRegistry>,
+) {
+    registry.cancel(&model_id);
+}
+
 #[tauri::command]
 fn open_provider_login(provider: String) -> std::result::Result<(), String> {
     if std::env::var_os("TRIPCUT_DISABLE_LLM_PROVIDERS").is_some() {
@@ -999,6 +1077,11 @@ fn set_setting(
     } else {
         core::settings::set_setting(&connection, &key, &value)
             .map_err(|error| error.to_string())?;
+    }
+    if key == core::settings::CLIP_MODEL_DIR_KEY {
+        // R19 P-06:侧车 spawn 时没有数据库连接,覆盖值放一份在进程内。
+        let trimmed = value.trim();
+        core::model_catalog::set_clip_model_dir_override((!trimmed.is_empty()).then(|| PathBuf::from(trimmed)));
     }
     Ok(())
 }
@@ -2083,6 +2166,49 @@ fn auto_select_episode(
         .map_err(|error| error.to_string())
 }
 
+/// R19 P-01 / P-03:带全部参数的自动挑选(一句话挑片 / 预设句)。`weights_json` 是权重偏置
+/// (键限 `WEIGHT_KEYS`),`pick` = chapters(按时间顺序,缺省)/ score(按分数),`prompt` 只做记录。
+#[tauri::command]
+fn auto_select_episode_with(
+    budget_secs: Option<f64>,
+    scope: Option<String>,
+    weights_json: Option<String>,
+    pick: Option<String>,
+    prompt: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::smart_select::AutoSelectOutcome, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    let params = core::smart_select::AutoSelectParams {
+        budget_secs,
+        scope,
+        weights: core::smart_select_runs::parse_weights(weights_json.as_deref()).map_err(|error| error.to_string())?,
+        pick: core::smart_select::AutoSelectPick::parse(pick.as_deref()).map_err(|error| error.to_string())?,
+        prompt,
+        target_secs: None,
+    };
+    core::smart_select::auto_select_episode_with(&mut connection, params).map_err(|error| error.to_string())
+}
+
+/// R19 P-03:结果面板 —— 这一批还活着的段(时长 / 分数 / 理由 / 被去重掉的兄弟)。
+#[tauri::command]
+fn list_auto_select_run(
+    run_id: String,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::smart_select_runs::RunView, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select_runs::list_run(&connection, &run_id).map_err(|error| error.to_string())
+}
+
+/// R19 P-03「换一段」:用同组次优兄弟(或同素材下一条建议段)替掉这一段,返回新段那一行。
+#[tauri::command]
+fn replace_auto_segment(
+    segment_id: i64,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::smart_select_runs::RunRow, String> {
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select_runs::replace_auto_segment(&mut connection, segment_id).map_err(|error| error.to_string())
+}
+
 /// 撤销一批自动挑选:只删该批 `source='auto'` 的段,返回删掉的条数。
 #[tauri::command]
 fn undo_auto_select(
@@ -3079,6 +3205,7 @@ pub fn run() {
         // R19 E-05:见 `ProcessStartedAt`/`mark_first_paint`。
         .manage(ProcessStartedAt(process_started))
         .manage(update_flow::UpdateFlowState::default())
+        .manage(core::model_registry::DownloadRegistry::default())
         .setup(move |app| {
             packaging::configure(app);
             // M-01:菜单建不起来不该拦住启动——没有菜单的应用仍然能用,少一条 warn 反而更糟。
@@ -3251,6 +3378,11 @@ pub fn run() {
             // (实测 workers 4 = 25.08 s、workers 8 = 25.09 s),绑住吞吐的是解码许可。
             // 用户能调的是「后台干活的力度」(省电 / 平衡 / 全速),它缩放的是解码预算。
             let memory_profile = core::memory_profile::resolve(&connection)?;
+            // R19 P-06:启动时把设置里的画面理解模型目录覆盖灌进进程内(侧车 spawn 读不到库)。
+            let clip_override = core::settings::string_value(&connection, core::settings::CLIP_MODEL_DIR_KEY, "")?;
+            core::model_catalog::set_clip_model_dir_override(
+                (!clip_override.trim().is_empty()).then(|| PathBuf::from(clip_override.trim())),
+            );
             let worker_count = memory_profile.max_worker_count();
             let background_effort = core::settings::background_effort(&connection)?;
             let decode_permits = memory_profile.decode_permits_for_effort(&background_effort);
@@ -3701,6 +3833,9 @@ pub fn run() {
             start_component_install,
             get_install_progress,
             cancel_component_install,
+            list_models,
+            start_model_download,
+            cancel_model_download,
             open_provider_login,
             list_episodes,
             get_current_episode,
@@ -3782,6 +3917,9 @@ pub fn run() {
             get_clip_moments,
             suggest_segments,
             auto_select_episode,
+            auto_select_episode_with,
+            list_auto_select_run,
+            replace_auto_segment,
             undo_auto_select,
             arrange_selected_segments,
             undo_arrange,

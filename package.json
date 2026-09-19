@@ -1,7 +1,7 @@
 {
   "name": "tripcut-studio",
   "private": true,
-  "version": "0.10.0",
+  "version": "0.10.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,7 +18,8 @@
     "bench:startup": "node bench/check-startup.mjs",
     "bench:size": "node bench/check-binary-size.mjs",
     "bench:history": "node scripts/qa/perf-history-report.mjs",
-    "qa:first5min": "node scripts/qa/first-five-minutes.mjs"
+    "qa:first5min": "node scripts/qa/first-five-minutes.mjs",
+    "qa:first-five": "node scripts/qa/first-five-minutes.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

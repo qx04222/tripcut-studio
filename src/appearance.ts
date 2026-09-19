@@ -22,6 +22,8 @@ export const DEFAULT_SETTINGS: SettingsMap = {
   "tools.ffprobe_path": "",
   "tools.whisper_path": "",
   "tools.whisper_model_tier": "large-v3-turbo",
+  // R19 P-06(models 车道):画面理解模型目录的覆盖;留空 = 用自动安装目录。
+  "tools.clip_model_dir": "",
   "analysis.scene_threshold": "0.35",
   "analysis.similarity_threshold": "0.25",
   "analysis.jitter_threshold": "0.15",
@@ -52,18 +54,32 @@ const SCALE_DATA: Record<string, string> = {
   "1.3": "130",
 };
 
-/** 设置里可选的固定主题(`html[data-theme]` 的值);R13 §5 加「剪映风格深色」。system = 不写属性。 */
-export const FIXED_THEMES = ["light", "dark", "jianying-dark"] as const;
+/** 设置里可选的固定主题(`html[data-theme]` 的值)。R19 车道 tokens · V-09/Q-3:R13 §5 加的
+ * 「剪映风格深色」升格为唯一深色,通用 `dark` 退役——两套收成一套,`FIXED_THEMES` 只剩两档。
+ * system = 不写属性。 */
+export const FIXED_THEMES = ["light", "dark"] as const;
 export type FixedTheme = (typeof FIXED_THEMES)[number];
+
+/** 旧偏好里存过的主题值到新两档的映射。`"jianying-dark"` 是唯一退役的旧值——它的调色板本身
+ * 升格成了 `"dark"`,映射到 `"dark"` 是让用户睁眼看到自己原来选的那套深色,不是换了一套。 */
+const LEGACY_THEME_ALIASES: Record<string, FixedTheme> = {
+  "jianying-dark": "dark",
+};
+
+export function normalizeThemePref(raw: string | undefined): "system" | FixedTheme {
+  if (!raw || raw === "system") return "system";
+  if ((FIXED_THEMES as readonly string[]).includes(raw)) return raw as FixedTheme;
+  return LEGACY_THEME_ALIASES[raw] ?? "system";
+}
 
 export function appearanceAttributes(settings: SettingsMap): {
   theme: FixedTheme | null;
   uiScale: string;
 } {
-  const theme = settings["appearance.theme"] ?? DEFAULT_SETTINGS["appearance.theme"];
+  const theme = normalizeThemePref(settings["appearance.theme"] ?? DEFAULT_SETTINGS["appearance.theme"]);
   const scale = settings["appearance.ui_scale"] ?? DEFAULT_SETTINGS["appearance.ui_scale"];
   return {
-    theme: (FIXED_THEMES as readonly string[]).includes(theme) ? (theme as FixedTheme) : null,
+    theme: theme === "system" ? null : theme,
     uiScale: SCALE_DATA[scale] ?? "100",
   };
 }

@@ -17,6 +17,19 @@ vi.mock("../api", () => ({
   // R18 W-4:状态条订阅启动补扫事件。
   onStartupBackfill: vi.fn(async () => () => undefined),
   setSetting: vi.fn(async () => undefined),
+  // U-04/P-10(R19 perf 车道续):StatusStrip 现在也订阅 useClipsFeed(算「已导入 N 条 ·
+  // 共 X 分钟」),这份手搭的窄 api 替身要补全它需要的那几条,不然是「找不到导出」的
+  // 硬错误(比 reject 更狠,会当场把树拆掉)。
+  getClipsRevision: vi.fn(async () => 0),
+  getCurrentEpisode: vi.fn(async () => undefined),
+  getStoryboard: vi.fn(async () => ({ chapters: [], candidates: [], items: [] })),
+  getStoryboardOf: vi.fn(async () => ({ chapters: [], candidates: [], items: [] })),
+  listAssetSafety: vi.fn(async () => []),
+  listClipDimensions: vi.fn(async () => []),
+  listClips: vi.fn(async () => []),
+  listShotStacks: vi.fn(async () => []),
+  listStoryGaps: vi.fn(async () => []),
+  listStoryGapsOf: vi.fn(async () => []),
 }));
 
 import { StatusStrip } from "./StatusStrip";

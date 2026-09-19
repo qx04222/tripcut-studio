@@ -1,9 +1,10 @@
 import type { JSX } from "react";
 
-import type { EpisodeSummary, StoryTemplate } from "../api";
+import type { EpisodeSummary } from "../api";
 import { PLATFORM_LABELS } from "../EpisodePanel";
 import { PIPELINE_STEP_NAMES, PIPELINE_STEPS } from "./pipelineModel";
-import type { HomeTemplate, StepDone } from "./homeModel";
+import type { StepDone } from "./homeModel";
+import { SELECT_PRESETS, type SelectPreset } from "./selectPrompt";
 import { Button, Card, CoverImage, Icon } from "./ui";
 
 /** 集卡上的四个小格:①②③④ 各一格,完成的填色。AX 名「第 n 步 已完成 / 未完成」。 */
@@ -72,8 +73,8 @@ export function EpisodeCard({ episode, done, coverUrl, onOpen, onMore }: Episode
   );
 }
 
-/** 三个模板各一枚自己画的小图(不抄剪映资源):日记 = 横线本,电影感 = 遮幅,快节奏 = 速度线。 */
-function TemplateMotif({ id }: { id: StoryTemplate }): JSX.Element {
+/** 三条预设句各一枚自己画的小图(不抄剪映资源):日记 = 横线本,电影感 = 遮幅,快节奏 = 速度线。 */
+function PresetMotif({ id }: { id: SelectPreset["id"] }): JSX.Element {
   if (id === "diary") {
     return (
       <svg viewBox="0 0 64 40" className="home-template-motif" aria-hidden="true">
@@ -108,18 +109,41 @@ function TemplateMotif({ id }: { id: StoryTemplate }): JSX.Element {
   );
 }
 
-export interface TemplateCardProps {
-  template: HomeTemplate;
+export interface PresetCardProps {
+  preset: SelectPreset;
   disabled?: boolean;
-  onPick(template: HomeTemplate): void;
+  onPick(preset: SelectPreset): void;
 }
 
-export function TemplateCard({ template, disabled = false, onPick }: TemplateCardProps): JSX.Element {
+/**
+ * R19 P-09(results 车道):首页的三条预设句卡 —— 每张就是一句 P-01「一句话挑片」,点了直接按那句挑一批。
+ * 零术语:标签 + 动作句,不出现「模板」;库空时禁用(没素材可挑)。AX 名 = 「<标签>:<句子>」。
+ */
+export function PresetCard({ preset, disabled = false, onPick }: PresetCardProps): JSX.Element {
   return (
-    <Card as="button" interactive className={`home-template-card home-template-card--${template.id}`} disabled={disabled} onClick={() => onPick(template)}>
-      <TemplateMotif id={template.id} />
-      <strong className="home-template-title">{template.label}</strong>
-      <span className="home-template-blurb">{template.blurb}</span>
+    <Card
+      as="button"
+      interactive
+      className={`home-template-card home-template-card--${preset.id}`}
+      disabled={disabled}
+      aria-label={`${preset.label}:${preset.sentence}`}
+      title={disabled ? "先导入视频,再让软件按这句挑" : undefined}
+      onClick={() => onPick(preset)}
+    >
+      <PresetMotif id={preset.id} />
+      <strong className="home-template-title">{preset.label}</strong>
+      <span className="home-template-blurb">{preset.sentence}</span>
     </Card>
+  );
+}
+
+/** 首页「让软件先挑一版」区:三张预设句卡并排。 */
+export function PresetCards({ disabled = false, onPick }: { disabled?: boolean; onPick(preset: SelectPreset): void }): JSX.Element {
+  return (
+    <div className="home-templates" role="group" aria-label="让软件先挑一版">
+      {SELECT_PRESETS.map((preset) => (
+        <PresetCard key={preset.id} preset={preset} disabled={disabled} onPick={onPick} />
+      ))}
+    </div>
   );
 }

@@ -1,0 +1,2 @@
+# R19 车道 tokens · V-12/Q-7:深色主题 @2x 全剧本截图基线,入库走 git lfs(不进普通 diff/history 膨胀)。
+qa/preview-baseline/*.png filter=lfs diff=lfs merge=lfs -text

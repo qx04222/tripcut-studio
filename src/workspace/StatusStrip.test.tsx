@@ -39,6 +39,18 @@ describe("summaryPhrases", () => {
     ]);
   });
 
+  it("U-04/P-10:有导入批次信息时,分析短语换成「已导入 N 条 · 共 X 分钟 · 正在分析(约 T)」", () => {
+    const idle = { analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0 };
+    expect(
+      summaryPhrases({ ...idle, analyzed: 12, analyzeTotal: 27, importedCount: 27, importedDurationMs: 620_000 }, "3 分钟"),
+    ).toEqual(["已导入 27 条 · 共 10 分钟 · 正在分析(约 3 分钟)"]);
+    // 分析已经跑完就不再带「正在分析」半句,只剩导入摘要本身。
+    expect(summaryPhrases({ ...idle, analyzed: 27, analyzeTotal: 27, importedCount: 27, importedDurationMs: 620_000 }))
+      .toEqual(["已导入 27 条 · 共 10 分钟"]);
+    // 没有导入批次信息(旧调用方不传)时行为不变,走原来的 analysisPhrase。
+    expect(summaryPhrases({ ...idle, analyzed: 12, analyzeTotal: 27 })).toEqual(["正在分析 12/27"]);
+  });
+
   it("按存在性依次显示中文短语", () => {
     // R12 §3:「正在分析 12/500」,估得出剩余时间时再接「,大约还要 30 秒」。
     expect(summaryPhrases({ analyzed: 12, analyzeTotal: 500, transcribing: 3, generating: 1, missing: 2 }))

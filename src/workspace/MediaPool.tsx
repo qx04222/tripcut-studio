@@ -17,6 +17,7 @@ import { PoolClipContextMenu } from "./ClipMenu";
 import { PaneHead } from "./PaneHead";
 import { PoolCard } from "./PoolCard";
 import { setPoolOrder } from "./poolOrder";
+import { groupClipsByDateAndPeriod } from "./poolGrouping";
 import { INITIAL_POOL_EXTRA_FILTERS, PoolFilters, type PoolExtraFilters } from "./PoolFilters";
 import {
   GRID_OVERSCAN_ROWS,
@@ -93,6 +94,10 @@ export function MediaPool(): JSX.Element {
   }, [paneWidth]);
 
   const clips = useMemo(() => [...feed.clips], [feed.clips]);
+  // U-04/P-10「导入即有地图」:按拍摄时间(EXIF/mtime,分析结果之前就有)分组计数,
+  // 只是一条摘要 chip 行,不进虚拟化网格本身——导入完成的一刻就能看出「这批素材
+  // 大致是哪天、哪个时段拍的」,不用等分析跑完。
+  const dateGroups = useMemo(() => groupClipsByDateAndPeriod(clips), [clips]);
   // 搜索回调要读「此刻」的素材表做文件名匹配,不能把 clips 放进它的依赖里
   // (那会让每次轮询都换一个 runSearch 身份)。
   const clipsRef = useRef(clips);
@@ -370,6 +375,17 @@ export function MediaPool(): JSX.Element {
       onFocus={() => dispatchWorkspace({ type: "focus-pane", pane: "pool" })}
     >
       <PaneHead title="媒体池" meta={feed.loading ? "整理中" : items.length === clips.length ? `${clips.length} 条` : `${items.length} / ${clips.length} 条`} />
+      {dateGroups.length > 1 ? (
+        // 只有一组时(比如库还很小、全在同一天同一时段)chip 行没有信息量,不占位。
+        <ul className="pool-date-groups" aria-label="按日期分组">
+          {dateGroups.map((group) => (
+            <li key={group.key} className="pool-date-group-chip">
+              {group.date === null ? "时间未知" : `${group.date.slice(5).replace("-", "/")} ${group.period}`}
+              <span className="pool-date-group-count">{group.count}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <PoolFilters
         counts={counts}
         dimensionLabelOptions={dimensionLabelOptions}

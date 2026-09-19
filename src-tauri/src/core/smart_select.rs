@@ -7,10 +7,10 @@
 //! - `undo_auto_select`:只删该批 `source='auto'` 的段。
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::{CoreError, Result};
-use super::moments::{load_moments, ticks_to_seconds, Moment, MOMENT_WINDOW_SECS};
+use super::moments::{load_moments, score_moment, ticks_to_seconds, Moment, MomentWeights, MOMENT_WINDOW_SECS};
 
 pub const MAX_SUGGESTIONS: usize = 3;
 /// 平台预算 0(不限)时自动挑选的缺省预算。
@@ -40,6 +40,58 @@ pub struct AutoSelectOutcome {
     pub scope_used: String,
     /// X-01:默认范围「收藏 + 3 星以上」一条候选都没有时自动改按「全部」挑了——前端 toast 要说出来。
     pub fell_back: bool,
+    /// R19 P-03:这一批的 run id(= `batch_id`,`auto_select_runs.run_id`),结果面板按它列「这批还剩什么」。
+    pub run_id: String,
+}
+
+/// R19 P-01 / P-09:挑法 —— `Chapters` 按章节轮转(成片按时间顺序、每章都有份,缺省);
+/// `Score` 不管章节、只按分数从高到低装满预算(「按分数挑」/ 快节奏预设)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSelectPick {
+    #[default]
+    Chapters,
+    Score,
+}
+
+impl AutoSelectPick {
+    pub fn parse(pick: Option<&str>) -> Result<Self> {
+        match pick {
+            None | Some("") | Some("chapters") => Ok(Self::Chapters),
+            Some("score") => Ok(Self::Score),
+            Some(other) => Err(CoreError::Rating(format!("挑法「{other}」不认识;可选:chapters(按时间顺序)、score(按分数)"))),
+        }
+    }
+}
+
+/// R19 P-01:一次自动挑选的全部参数;原样存进 `auto_select_runs.params_json`(加上算出来的 `target_secs`),
+/// 「换一段」按同一份参数找备选。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AutoSelectParams {
+    pub budget_secs: Option<f64>,
+    pub scope: Option<String>,
+    /// 权重偏置(一句话里的「风景 / 运动 / 安静」…):有就按它**临时重打**候选素材的时刻分,不改库里的分。
+    pub weights: Option<MomentWeights>,
+    #[serde(default)]
+    pub pick: AutoSelectPick,
+    /// 用户原句(P-01),只做记录。
+    pub prompt: Option<String>,
+    /// 段目标时长(按平台预算分档算出),存下来给「换一段」复用;调用方不填。
+    #[serde(default)]
+    pub target_secs: Option<f64>,
+}
+
+/// 按权重偏置临时重打一条素材的时刻分(`weights` 为空就是库里的原分)。
+pub(crate) fn moments_with_weights(connection: &Connection, clip_id: i64, weights: Option<&MomentWeights>) -> Result<Vec<Moment>> {
+    let mut moments = load_moments(connection, clip_id)?;
+    if let Some(weights) = weights {
+        // 偏置时六项全算、无声素材的声音项记 0(不像入库打分那样把声音从分母里剔掉)——
+        // 否则「有声 / 人物为主」永远压不住无声素材:它们的分母里根本没有声音这一项。
+        for moment in &mut moments {
+            score_moment(moment, weights, true);
+        }
+    }
+    Ok(moments)
 }
 
 /// 目标时长:按平台时长预算分档——≤15 s 的短平台 4 s,≤60 s 5 s,≤90 s 6 s,更长或不限 8 s。
@@ -192,7 +244,7 @@ impl AutoSelectScope {
         }
     }
 
-    fn sql_predicate(self) -> &'static str {
+    pub(crate) fn sql_predicate(self) -> &'static str {
         const FAVORITE: &str = "COALESCE((SELECT r.value FROM ratings r JOIN segments rs ON rs.id = r.segment_id
                                 WHERE rs.clip_id = c.id AND rs.tombstone = 0 AND r.rating_type = 'binary'
                                 ORDER BY r.id DESC LIMIT 1), 0) = 1";
@@ -228,7 +280,7 @@ struct Candidate {
 
 /// 候选素材:当前集、在线、有时刻分、范围内、**还没有任何存活精选段**(手打或上一批
 /// 自动的都算——不重复挑,也不动用户的段)。按章节起始时间排,未分章的排最后。
-fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs: f64) -> Result<Vec<Candidate>> {
+fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs: f64, weights: Option<&MomentWeights>) -> Result<Vec<Candidate>> {
     let episode_id = active_episode_id(connection)?;
     let sql = format!(
         "SELECT c.id, COALESCE(c.chapter_id, -1), c.tb_num, c.tb_den
@@ -251,7 +303,7 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
     let mut candidates = Vec::new();
     for (clip_id, chapter_key, tb_num, tb_den) in rows {
         let (Some(tb_num), Some(tb_den)) = (tb_num, tb_den) else { continue };
-        let moments = load_moments(connection, clip_id)?;
+        let moments = moments_with_weights(connection, clip_id, weights)?;
         let Some(best) = suggest_from_moments(&moments, target_secs, 1).into_iter().next() else { continue };
         let secs = ticks_to_seconds(best.out_ticks - best.in_ticks, tb_num, tb_den);
         if secs <= 0.0 {
@@ -268,9 +320,21 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
     Ok(candidates)
 }
 
-/// 纯函数:章节轮转挑段。每章各自按分数降序,轮流从每章取一条,装得下就收,
-/// 直到预算用完或候选耗尽。返回选中的候选(按选中顺序)。
-fn rotate_by_chapter(mut candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Candidate> {
+/// R19 P-01「按分数挑」:同一份去重后的候选,不分章节、分数从高到低装满预算。
+fn greedy_by_score(candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Candidate> {
+    let mut chosen = Vec::new();
+    let mut total = 0.0;
+    for candidate in candidates {
+        if total + candidate.secs <= budget_secs + 1e-9 {
+            total += candidate.secs;
+            chosen.push(candidate);
+        }
+    }
+    chosen
+}
+
+/// 分数降序 + 同组去重(R18 B-4):两种挑法共用的前半段。
+fn dedupe_by_score(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
     candidates.sort_by(|a, b| {
         b.suggestion
             .score
@@ -280,13 +344,17 @@ fn rotate_by_chapter(mut candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Ca
     // R18 B-4 视觉去重:同一机位连拍的几条(`similar_groups` 已经把它们判成一组)
     // 以前会各出一段,成片里连着三个几乎一样的画面。按分数降序扫,**每组只留最高分那一条**。
     // 只在这里剔,不动 `similar_groups` 本身 —— 分组是别处算的,这里只是消费者。
-    {
-        let mut seen_groups = std::collections::BTreeSet::new();
-        candidates.retain(|candidate| match candidate.similar_group {
-            Some(group) => seen_groups.insert(group),
-            None => true,
-        });
-    }
+    let mut seen_groups = std::collections::BTreeSet::new();
+    candidates.retain(|candidate| match candidate.similar_group {
+        Some(group) => seen_groups.insert(group),
+        None => true,
+    });
+    candidates
+}
+
+/// 纯函数:章节轮转挑段。每章各自按分数降序,轮流从每章取一条,装得下就收,
+/// 直到预算用完或候选耗尽。返回选中的候选(按选中顺序)。
+fn rotate_by_chapter(candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Candidate> {
     let mut chapters: Vec<(i64, Vec<Candidate>)> = Vec::new();
     for candidate in candidates {
         match chapters.iter_mut().find(|(key, _)| *key == candidate.chapter_key) {
@@ -347,30 +415,52 @@ pub fn auto_select_episode(
     budget_secs: Option<f64>,
     scope: Option<&str>,
 ) -> Result<AutoSelectOutcome> {
-    let scope = AutoSelectScope::parse(scope)?;
+    auto_select_episode_with(
+        connection,
+        AutoSelectParams { budget_secs, scope: scope.map(str::to_owned), ..AutoSelectParams::default() },
+    )
+}
+
+/// R19 P-01 / P-03:带全部参数的自动挑选。挑完写一行 `auto_select_runs`(run_id = batch_id),
+/// 每段挂 `auto_select_run_id`,结果面板按它列出来;权重偏置只影响这一次的候选排序,不改库。
+pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSelectParams) -> Result<AutoSelectOutcome> {
+    let scope = AutoSelectScope::parse(params.scope.as_deref())?;
     let platform_budget = platform_budget_secs(connection)?;
-    let budget = match budget_secs {
+    let budget = match params.budget_secs {
         Some(value) if value.is_finite() && value > 0.0 => value,
         Some(_) => return Err(CoreError::Rating("时长预算要是正数秒".to_owned())),
         None if platform_budget > 0 => platform_budget as f64,
         None => DEFAULT_BUDGET_SECS,
     };
     let target = target_secs_for_budget(platform_budget);
-    let mut candidates = load_candidates(connection, scope, target)?;
+    params.target_secs = Some(target);
+    let weights = params.weights;
+    let mut candidates = load_candidates(connection, scope, target, weights.as_ref())?;
     // X-01:新手默认范围在全新库(0 收藏、0 打星)里是空的——自动改按「全部」挑,不让流水线停在第 ② 步。
     let mut scope_used = scope;
     let mut fell_back = false;
     if candidates.is_empty() && scope == AutoSelectScope::FavoritesOrRated3 {
-        candidates = load_candidates(connection, AutoSelectScope::All, target)?;
+        candidates = load_candidates(connection, AutoSelectScope::All, target, weights.as_ref())?;
         scope_used = AutoSelectScope::All;
         fell_back = !candidates.is_empty();
     }
     if candidates.is_empty() {
         return Err(CoreError::Rating(empty_scope_reason(connection, scope_used)?));
     }
-    let chosen = rotate_by_chapter(candidates, budget);
+    let deduped = dedupe_by_score(candidates);
+    let chosen = match params.pick {
+        AutoSelectPick::Chapters => rotate_by_chapter(deduped, budget),
+        AutoSelectPick::Score => greedy_by_score(deduped, budget),
+    };
     let batch_id = format!("auto-{}", uuid::Uuid::new_v4().simple());
+    let params_json = serde_json::to_string(&AutoSelectParams { scope: Some(scope_used.as_str().to_owned()), ..params })
+        .map_err(|error| CoreError::Rating(format!("无法保存挑选参数:{error}")))?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO auto_select_runs(run_id, episode_id, params_json, created_at)
+         VALUES (?1, (SELECT id FROM episodes WHERE status = 'active'), ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        params![batch_id, params_json],
+    )?;
     let mut created = Vec::with_capacity(chosen.len());
     let mut total_secs = 0.0;
     let mut chapters = Vec::new();
@@ -381,8 +471,8 @@ pub fn auto_select_episode(
         let reasons = serde_json::to_string(&candidate.suggestion.reasons)
             .map_err(|error| CoreError::Rating(format!("无法保存挑选理由:{error}")))?;
         transaction.execute(
-            "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind, tombstone, source, batch_id, reason_json)
-             VALUES (?1, ?2, ?3, 'select', 0, 'auto', ?4, ?5)",
+            "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind, tombstone, source, batch_id, reason_json, auto_select_run_id)
+             VALUES (?1, ?2, ?3, 'select', 0, 'auto', ?4, ?5, ?4)",
             params![
                 candidate.clip_id,
                 candidate.suggestion.in_ticks,
@@ -418,6 +508,7 @@ pub fn auto_select_episode(
         created,
         total_secs,
         chapters_covered: chapters.len(),
+        run_id: batch_id.clone(),
         batch_id,
         placed,
         arrange_batch_id,
@@ -441,7 +532,7 @@ pub fn undo_auto_select(connection: &mut Connection, batch_id: &str) -> Result<u
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::{db, test_support::TestDirectory};
 
@@ -518,14 +609,14 @@ mod tests {
         assert_eq!(target_secs_for_budget(0), 8.0);
     }
 
-    fn library() -> (TestDirectory, Connection) {
+    pub(crate) fn library() -> (TestDirectory, Connection) {
         let directory = TestDirectory::new();
         let connection = db::open_project(&directory.db_path()).unwrap();
         connection.execute("INSERT INTO volumes(uuid) VALUES ('v')", []).unwrap();
         (directory, connection)
     }
 
-    fn add_chapter(connection: &Connection, title: &str, start_at: &str) -> i64 {
+    pub(crate) fn add_chapter(connection: &Connection, title: &str, start_at: &str) -> i64 {
         connection
             .execute(
                 "INSERT INTO chapters(title, start_at, end_at, episode_id)
@@ -537,7 +628,7 @@ mod tests {
     }
 
     /// 20 s 素材,时刻分全 `score`,可选收藏/星级。
-    fn add_clip(connection: &mut Connection, chapter_id: i64, score: f64, favorite: bool, stars: i64) -> i64 {
+    pub(crate) fn add_clip(connection: &mut Connection, chapter_id: i64, score: f64, favorite: bool, stars: i64) -> i64 {
         connection
             .execute(
                 "INSERT INTO clips(volume_uuid, rel_path, duration_ticks, tb_num, tb_den, imported_at, quick_hash, episode_id, chapter_id, captured_at)

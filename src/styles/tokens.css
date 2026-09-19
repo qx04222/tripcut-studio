@@ -24,6 +24,15 @@
   --text-40: 40px;
   --lh-40: 48px;
 
+  /* R19 车道 tokens · V-09:旧 --font-* 五级(styles.css:6-11)收编进这套令牌,数值原样保留
+     (不做视觉改动,只改引用名)——xs/sm/base 已有对应档位,补 16(旧 lg)与 19(旧 xl)两级,
+     display 换成同值 clamp 令牌。 */
+  --text-16: 16px;
+  --lh-16: 21px;
+  --text-19: 19px;
+  --lh-19: 25px;
+  --text-display: clamp(2.125rem, 5vw, 3.875rem);
+
   /* 间距六档。只允许这六档;不许写 padding: 10px。 */
   --space-1: 4px;
   --space-2: 8px;
@@ -132,71 +141,26 @@
   --playhead: #e0312b;
 }
 
-/* 深色:只改浅色时写死了字面量的那几个。不做走查,只保证不刺眼、不反色。 */
+/* 深色:只改浅色时写死了字面量的那几个。R19 车道 tokens · V-09/Q-3:R13 §5「剪映风格深色」
+   升格为唯一深色,通用 dark 的这层退役——数值原样照抄自退役前挂在 jianying 那一档的令牌,
+   不是新配的色;调色板那层(bg/accent/text…)的对应改动在 styles.css。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --surface-card: var(--bg-elevated);
-    --surface-raised: var(--bg-elevated);
-    --surface-chrome: color-mix(in srgb, var(--bg) 60%, var(--bg-elevated));
-    --surface-chrome-2: var(--bg);
-    --well-bg: var(--media-well);
+    --surface-card: #1b1d20;
+    --surface-raised: #202329;
+    --surface-chrome: #0e0f11;
+    --surface-chrome-2: #0a0b0d;
+    --well-bg: #0a0b0d;
     --shadow-card: 0 0 0 1px var(--border);
-    --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
-    --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
-    --playhead: #ff5f56;
+    --shadow-raised: 0 0 0 1px var(--border-strong), 0 14px 36px rgb(0 0 0 / 60%);
+    --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 70%), inset 0 0 0 1px rgb(255 255 255 / 5%);
+    --playhead: #ff4d4a;
     /* V-25:浅色 --ring 内圈借 --surface-panel(半透明),深色下会透出底色 4%——换成不透明的 --bg-solid。 */
     --ring: 0 0 0 2px var(--bg-solid), 0 0 0 4px var(--focus-ring);
   }
 }
 
 html[data-theme="dark"] {
-  --surface-card: var(--bg-elevated);
-  --surface-raised: var(--bg-elevated);
-  --surface-chrome: color-mix(in srgb, var(--bg) 60%, var(--bg-elevated));
-  --surface-chrome-2: var(--bg);
-  --well-bg: var(--media-well);
-  --shadow-card: 0 0 0 1px var(--border);
-  --shadow-raised: 0 0 0 1px var(--border-strong), 0 12px 32px rgb(0 0 0 / 55%);
-  --shadow-inset-well: inset 0 2px 8px rgb(0 0 0 / 65%), inset 0 0 0 1px rgb(255 255 255 / 6%);
-  --playhead: #ff5f56;
-  /* V-25:同上。 */
-  --ring: 0 0 0 2px var(--bg-solid), 0 0 0 4px var(--focus-ring);
-}
-
-/* R13 §5「剪映风格深色」(设置 → 外观第四档,不默认)。自己配的一套:近黑的冷炭灰分四级、青绿强调、
-   红播放头 —— 只借剪映的「深灰工作台 + 一种亮色强调」心智,不抄它的资源与色值。
-   既有深色只改 tokens 这层,这一档连 styles.css 顶部的调色板一起换,所以令牌比上面两块多。 */
-html[data-theme="jianying-dark"] {
-  /* 调色板(styles.css :root 那一层) */
-  --bg: #121316;
-  --bg-elevated: rgb(27 29 32 / 97%);
-  --bg-solid: #121316;
-  --border: #2a2d32;
-  --border-strong: #3a3e45;
-  --text-primary: #e9ebee;
-  --text-secondary: #9aa0a8;
-  --text-muted: #aab0b8;
-  --text-faint: #5f656d;
-  --accent: #2fd6c4;
-  --accent-contrast: #0b1413;
-  --accent-tint: rgb(47 214 196 / 11%);
-  --accent-glow: rgb(47 214 196 / 45%);
-  --sheen: rgb(255 255 255 / 2.5%);
-  --sheen-line: rgb(255 255 255 / 2%);
-  --frame: #4c525a;
-  --index-ghost: #23262b;
-  --warning: #f2b544;
-  --warning-tint: rgb(242 181 68 / 12%);
-  --danger: #ff6b66;
-  --danger-tint: rgb(255 107 102 / 11%);
-  --media-well: #0a0b0d;
-  --skeleton-highlight: rgb(255 255 255 / 8%);
-  --waveform-midline: rgb(233 235 238 / 14%);
-  --media-overlay: rgb(6 7 9 / 78%);
-  --media-ink: #f4f6f8;
-  --card-shadow: rgb(0 0 0 / 52%);
-  --focus-ring: rgb(47 214 196 / 50%);
-  /* tokens 这一层 */
   --surface-card: #1b1d20;
   --surface-raised: #202329;
   --surface-chrome: #0e0f11;

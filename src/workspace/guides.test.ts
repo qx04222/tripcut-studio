@@ -36,7 +36,8 @@ beforeEach(() => {
 /** 规格 §3:七个 guide、各只弹一次、同一时刻最多一个;键 `guide.<id>.viewed`。 */
 describe("guides 纯函数表", () => {
   it("首批七个 guide,键名 guide.<id>.viewed,每个都有一段话与锚点", () => {
-    expect(GUIDE_IDS).toEqual(["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"]);
+    // R19 P-06(models 车道)追加 "models":首启「装画面理解,搜索和挑选会更准」。
+    expect(GUIDE_IDS).toEqual(["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]);
     for (const id of GUIDE_IDS) {
       expect(guideKey(id)).toBe(`guide.${id}.viewed`);
       expect(GUIDES[id].text.length).toBeGreaterThan(8);
@@ -61,6 +62,9 @@ describe("guides 纯函数表", () => {
     expect(nextGuide({ ...inWorkspace, gapVisible: true }, viewed, none, none)).toBe("gap");
     expect(nextGuide({ ...inWorkspace, exportDrawerOpen: true }, viewed, none, none)).toBe("export");
     expect(nextGuide({ ...inWorkspace, playbackEnded: true }, viewed, none, none)).toBe("autoplay");
+    // R19 P-06:模型清单里有「推荐且未装」的 → models;信号由 modelStore 报,不由 GuideHost 折。
+    expect(nextGuide({ ...inWorkspace, modelInstallSuggested: true }, viewed, none, none)).toBe("models");
+    expect(nextGuide({ ...EMPTY_GUIDE_SIGNALS, modelInstallSuggested: true }, viewed, none, none)).toBeNull();
     // 导出抽屉打开时工作区被盖住,但抽屉本身是锚点 —— 不要求 inWorkspace。
     expect(nextGuide({ ...EMPTY_GUIDE_SIGNALS, exportDrawerOpen: true }, viewed, none, none)).toBe("export");
   });
@@ -187,5 +191,23 @@ describe("guides store", () => {
     reportGuideSignals({ inWorkspace: true, playbackEnded: true });
     expect(getGuideSnapshot().active).toBe("autoplay");
     expect(getGuideSnapshot().seen).toBe(2);
+  });
+
+  it("R19 P-06:models 气泡有「安装」这一个入口(tryEvent = tripcut:install-models),文案不带术语、锚在状态条", () => {
+    expect(GUIDES.models.tryLabel).toBe("安装");
+    expect(GUIDES.models.tryEvent).toBe("tripcut:install-models");
+    expect(GUIDES.models.text).toContain("画面理解");
+    expect(GUIDES.models.text).not.toMatch(/CLIP|whisper|模型目录/i);
+    expect(GUIDES.models.anchor).toContain("workspace-status");
+  });
+});
+
+describe("R19 Wave 2 接线:假后端默认把每一只气泡都标成「已看过」", () => {
+  it("devMock/fixture.ts 的预置列表覆盖 GUIDE_IDS 全部 —— 漏一只,截图剧本每一步都会被它挡住(models 合并后 32-update 那步就是这样红的)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../devMock/fixture.ts", import.meta.url), "utf8");
+    const line = source.split("\n").find((candidate) => candidate.includes("state.settings[`guide.${id}.viewed`] = \"true\""));
+    expect(line).toBeDefined();
+    for (const id of GUIDE_IDS) expect(line, `guide ${id} 不在假后端的「已看过」预置里`).toContain(`"${id}"`);
   });
 });

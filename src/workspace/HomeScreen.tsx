@@ -5,10 +5,11 @@ import { episodeErrorMessage } from "../EpisodePanel";
 import { EPISODES_UPDATED_EVENT } from "./copy";
 import { EpisodeDeleteConfirm, episodeDeleteConsequence } from "./EpisodeDeleteConfirm";
 import { EpisodeMenu, EpisodeRenameInline, type EpisodeMenuState } from "./EpisodeMenu";
-import { EpisodeCard } from "./HomeCards";
+import { EpisodeCard, PresetCards } from "./HomeCards";
 import { episodeProgress, newEpisodeTitle, recentEpisodes } from "./homeModel";
 import { pinHome } from "./homeStore";
 import { ONBOARDING_STEPS } from "./onboarding";
+import { SELECT_PROMPT_EVENT } from "./selectPrompt";
 import { Button, Icon } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 import { usePipeline } from "./usePipeline";
@@ -172,6 +173,18 @@ export function HomeScreen(): JSX.Element {
               {notice}
             </p>
           ) : null}
+        </div>
+
+        {/* R19 P-09(results 车道,这一块):三条预设句卡 —— 点了回到工作区、按那句挑一批(结果面板会说为什么)。 */}
+        <div className="home-section">
+          <h2 className="home-section-title">让软件先挑一版</h2>
+          <PresetCards
+            disabled={!currentHasClips}
+            onPick={(preset) => {
+              pinHome(false);
+              window.dispatchEvent(new CustomEvent(SELECT_PROMPT_EVENT, { detail: { sentence: preset.sentence } }));
+            }}
+          />
         </div>
 
         {recent.length > 0 ? (

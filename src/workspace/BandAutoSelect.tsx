@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useId, useRef, useState, type JSX } from "react";
 
 import {
-  autoSelectEpisode,
+  autoSelectEpisodeWith,
   getCurrentEpisode,
   getMomentsProgress,
   listPlatformPresets,
+  undoAutoSelect,
   type AutoSelectOutcome,
+  type AutoSelectParamsInput,
   type AutoSelectScope,
   type ClipListItem,
 } from "../api";
 import { PLATFORM_LABELS } from "../EpisodePanel";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
+import { PromptInput } from "./results/PromptInput";
+import { ResultsLayer, ResultsPanel } from "./results/ResultsPanel";
+import { parseSelectPromptSmart, SELECT_PRESETS, SELECT_PROMPT_EVENT, toAutoSelectParams } from "./selectPrompt";
+import { pushUndo, runUndoById } from "./undoStack";
 import { refreshClipsFeed, useClipsFeed } from "./useClipsFeed";
 import { Button, Chip } from "./ui";
 import { failureText } from "./errorText";
@@ -49,6 +55,8 @@ export type AutoSelectResult = AutoSelectOutcome & {
   first_run?: boolean;
   budget_secs?: number;
   platform_label?: string;
+  /** R19 P-03:这一批在全局撤销栈(⌘Z)里的那一条;toast 的「撤销」与面板的「全部撤销」都走它,撤过一次不再撤第二次。 */
+  undo_id?: number;
 };
 
 /** R19 U-09:第一次(库里无收藏、无星、还没挑过)不该让用户做决定 —— 直接跑。 */
@@ -72,8 +80,13 @@ export function pendingAnalysisCount(clips: readonly Pick<ClipListItem, "analysi
 
 /** toast 文案:「已挑选 n 段 · 共 m s · 覆盖 k 章」;后端降级到「全部」时先说明为什么;分析没跑完时补一句剩余数。 */
 export function autoSelectToast(outcome: AutoSelectResult): string {
-  // U-09:首次零决定时时长写明来源「共 45 s(本集平台:抖音)」—— 用户从没被问过平台,这里说清 30/45 秒从哪来。
-  const secs = outcome.first_run && outcome.budget_secs ? `共 ${outcome.budget_secs} s(本集平台:${outcome.platform_label ?? "通用"})` : `共 ${Math.round(outcome.total_secs)} s`;
+  // U-09:首次零决定时补一句平台来源「共 44.6 s(本集平台:抖音,目标约 45 s)」——
+  // F-R19-07:实际时长(`total_secs`,与结果面板/镜头带同一个字段)才是真数,预算(`budget_secs`)只是目标,
+  // 之前把预算当成实际报给用户,首挑与后续面板对不上。
+  const secs =
+    outcome.first_run && outcome.budget_secs
+      ? `共 ${outcome.total_secs.toFixed(1)} s(本集平台:${outcome.platform_label ?? "通用"},目标约 ${outcome.budget_secs} s)`
+      : `共 ${Math.round(outcome.total_secs)} s`;
   const tail = `${secs}${outcome.first_run ? "" : " "}· 覆盖 ${outcome.chapters_covered} 章`;
   const left = outcome.pending_left && outcome.pending_left > 0 ? ` · 还有 ${outcome.pending_left} 条在分析,分析完可再挑一次` : "";
   if (outcome.fell_back) return `你还没收藏或打星,已按全部素材挑了 ${outcome.created.length} 段 · ${tail}${left}`;
@@ -133,13 +146,27 @@ export function BandAutoSelect({
   const rootRef = useRef<HTMLDivElement | null>(null);
   // U-09:本会话已经零决定跑过一次 —— 之后再按主按钮就出面板(第二次才有「改一改」的需求)。
   const ranOnceRef = useRef(false);
+  // P-03:挑完打开结果面板(按 run id 列这一批);「全部撤销」= 撤销栈里这一批那一条。
+  const [runId, setRunId] = useState<string | null>(null);
+  const undoIdRef = useRef<number | null>(null);
 
   const run = useCallback(
-    async (chosen: AutoSelectScope, seconds: number | undefined, first: { budget: number; platform: string } | null) => {
+    async (chosen: AutoSelectScope, seconds: number | undefined, first: { budget: number; platform: string } | null, extra: AutoSelectParamsInput = {}) => {
       setBusy(true);
       try {
-        const outcome = await autoSelectEpisode({ scope: chosen, budgetSecs: seconds });
+        const outcome = await autoSelectEpisodeWith({ ...extra, scope: chosen, budgetSecs: seconds });
         setOpen(false);
+        // P-03:整批进 ⌘Z 栈 —— 面板「全部撤销」、toast「撤销」、⌘Z 三条路同一个闭包,只跑一次。
+        const undoId = pushUndo({
+          label: `自动挑选 ${outcome.created.length} 段`,
+          undo: async () => {
+            await undoAutoSelect(outcome.batch_id);
+            setRunId((current) => (current === (outcome.run_id ?? outcome.batch_id) ? null : current));
+            await refreshClipsFeed(true);
+          },
+        });
+        undoIdRef.current = undoId;
+        setRunId(outcome.run_id ?? null);
         // Y-03:全新库(0 收藏 0 打星)按「全部」挑时,后端的 fell_back 永远走不到 —— 前端已经预选了「全部」。
         // 「为什么按全部」由前端按同一份库状态说清,toast 文案与后端降级一致。
         const uncurated = chosen === "all" && defaultScopeFor(clips) === "all";
@@ -150,6 +177,7 @@ export function BandAutoSelect({
           fell_back: uncurated ? true : outcome.fell_back,
           pending_left: pendingLeft,
           ...(first ? { first_run: true, budget_secs: first.budget, platform_label: first.platform } : {}),
+          undo_id: undoId,
         });
         await refreshClipsFeed(true);
       } catch (error) {
@@ -205,8 +233,46 @@ export function BandAutoSelect({
     return run(scope, Number.isFinite(seconds) && seconds > 0 ? seconds : undefined, null);
   }, [budget, scope, run]);
 
+  // P-01:一句话 → 本地规则(LLM 可用时增强)→ 参数 → 同一条 run();范围没说就按库状态推导的那个。
+  const runSentence = useCallback(
+    async (sentence: string) => {
+      const { parsed } = await parseSelectPromptSmart(sentence);
+      const params = toAutoSelectParams(parsed, sentence, chosenScope ?? defaultScopeFor(clips));
+      setRunId(null);
+      await run(params.scope ?? "all", params.budgetSecs, null, { weights: params.weights, pick: params.pick, prompt: params.prompt });
+    },
+    [chosenScope, clips, run],
+  );
+
+  useEffect(() => {
+    // 首页预设卡 / 其它入口广播一句话:直接跑,不弹面板。
+    const onPrompt = (event: Event) => {
+      if (disabled) return;
+      const sentence = (event as CustomEvent<{ sentence?: string } | undefined>).detail?.sentence;
+      if (typeof sentence === "string" && sentence.trim().length > 0) void runSentence(sentence);
+    };
+    window.addEventListener(SELECT_PROMPT_EVENT, onPrompt);
+    return () => window.removeEventListener(SELECT_PROMPT_EVENT, onPrompt);
+  }, [disabled, runSentence]);
+
+  const closeResults = useCallback(() => setRunId(null), []);
+  const undoAll = useCallback(async () => {
+    const id = undoIdRef.current;
+    if (id === null) return false;
+    undoIdRef.current = null;
+    return runUndoById(id);
+  }, []);
+  // 滑出层挂到镜头带栏上(与检查器滑出层同一套机制);单测里没有栏就原地渲染。
+  const [bandRegion, setBandRegion] = useState<Element | null>(null);
+  useEffect(() => {
+    setBandRegion(rootRef.current?.closest('[data-pane="band"]') ?? null);
+  }, []);
+
   return (
     <div className="band-autoselect" ref={rootRef}>
+      <ResultsLayer open={runId !== null} container={bandRegion}>
+        {runId !== null ? <ResultsPanel runId={runId} onClose={closeResults} onUndoAll={undoAll} onPrompt={(sentence) => void runSentence(sentence)} busy={busy} /> : null}
+      </ResultsLayer>
       <Button
         // R18 V-15:镜头带工具条同一组里此前两种按钮样式(这颗描边 + 「一键排入」实心)。
         // 第 ③ 步的主动作只有「一键排入」一个,这颗降为 ghost。
@@ -221,6 +287,16 @@ export function BandAutoSelect({
       </Button>
       {open ? (
         <div className="band-autoselect-panel" role="group" aria-label="自动挑选精选段">
+          {/* P-01:一句话挑片放在面板最上面 —— 会说话就不用碰下面的 chips 和数字。 */}
+          <PromptInput busy={busy} onSubmit={(sentence) => void runSentence(sentence)} />
+          {/* P-09:三条预设句(旅行日记 / 电影感 / 快节奏)= 三句现成的 P-01。 */}
+          <div className="band-autoselect-presets" role="group" aria-label="现成的三句">
+            {SELECT_PRESETS.map((preset) => (
+              <Chip key={preset.id} title={preset.sentence} disabled={busy} onClick={() => void runSentence(preset.sentence)}>
+                {preset.label}
+              </Chip>
+            ))}
+          </div>
           <div className="band-autoselect-scope" role="group" aria-label="挑选范围">
             {AUTO_SELECT_SCOPES.map((item) => (
               <Chip key={item.scope} selected={scope === item.scope} onClick={() => setScope(item.scope)}>
@@ -242,7 +318,8 @@ export function BandAutoSelect({
             />
             秒(按发布平台预填)
           </label>
-          <Button variant="primary" size="sm" busy={busy} disabled={busy} onClick={() => void runFromPanel()}>
+          {/* F-R19-11:弹层开着时顶栏「下一步」仍是整屏唯一的实心主按钮(V-01),这颗降 secondary。 */}
+          <Button variant="secondary" size="sm" busy={busy} disabled={busy} onClick={() => void runFromPanel()}>
             开始挑选
           </Button>
         </div>

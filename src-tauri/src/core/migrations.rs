@@ -1435,6 +1435,24 @@ CREATE INDEX clip_frame_embeddings_model_idx
   ON clip_frame_embeddings(model, dimensions);
 "#;
 
+/// R19 Wave 2 results 车道(P-03):自动挑选「这一批」可寻址 —— 一次 `auto_select_episode` = 一行
+/// `auto_select_runs`(run_id 就是那批段的 `batch_id`,参数原样存 JSON:预算 / 范围 / 权重偏置 /
+/// 挑法 / 原句),段上多一列 `auto_select_run_id` 指回去。「不要这一段」把 `batch_id` 摘掉但
+/// 保留 run_id,结果面板才能按 run 列出「这批还剩什么」;整批撤销仍按 `batch_id` 走。
+pub const MIGRATION_0049: &str = r#"
+CREATE TABLE auto_select_runs (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    params_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+ALTER TABLE segments ADD COLUMN auto_select_run_id TEXT REFERENCES auto_select_runs(run_id) ON DELETE SET NULL;
+
+CREATE INDEX segments_auto_select_run_idx ON segments(auto_select_run_id) WHERE auto_select_run_id IS NOT NULL;
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1584,9 +1602,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 46, sql: MIGRATION_0046 },
     Migration { version: 47, sql: MIGRATION_0047 },
     Migration { version: 48, sql: MIGRATION_0048 },
+    Migration { version: 49, sql: MIGRATION_0049 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 48;
+pub const LATEST_SCHEMA_VERSION: i64 = 49;
 
 #[cfg(test)]
 mod tests {
@@ -1859,9 +1878,31 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_48() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 48);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 48);
+    fn schema_version_is_49() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 49);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 49);
+    }
+
+    /// R19 results 车道 P-03:0049 建 `auto_select_runs` 并给 `segments` 加 `auto_select_run_id`。
+    /// 对 0.10.0(48)红:表不存在、列不存在。
+    #[test]
+    fn migration_0049_adds_auto_select_runs_and_the_segment_run_column() {
+        let directory = TestDirectory::new();
+        let connection = db::open_project(&directory.db_path()).unwrap();
+        let table: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'auto_select_runs'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(table, 1, "0049 必须建 auto_select_runs");
+        for column in ["run_id", "episode_id", "params_json", "created_at"] {
+            let found: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_table_info('auto_select_runs') WHERE name = ?1", [column], |row| row.get(0))
+                .unwrap();
+            assert_eq!(found, 1, "auto_select_runs 缺列 {column}");
+        }
+        let segment_column: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('segments') WHERE name = 'auto_select_run_id'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(segment_column, 1, "0049 必须给 segments 加 auto_select_run_id");
     }
 
     /// R18 车道 aiscore:0046 的两列与 0047/0048 的帧表。

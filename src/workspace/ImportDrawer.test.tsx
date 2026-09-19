@@ -188,7 +188,12 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
   });
 
   it("来源分页:工具链缺失时出警告卡,「去设置」打开设置 sheet 而不改 hash", async () => {
+    // 替身要按真实 `SettingsStatus` 的形状给全:设置 sheet 的「工具与模型」分区读 `whisper.binary` /
+    // `clip_sidecar.*`(R19 P-06 起进设置页就刷一次模型清单并重渲染),只给两个字段会在渲染里抛未处理异常
+    // (vitest 断言全绿但 exit 1 —— 门禁 vitest 因此红)。
+    const full = (await apiMocks.getSettingsStatus.getMockImplementation()?.()) as Record<string, unknown> | undefined;
     apiMocks.getSettingsStatus.mockResolvedValue({
+      ...(full ?? {}),
       ffmpeg: { available: false }, ffprobe: { available: true },
     } as never);
     render(<WorkspaceShell />);
@@ -325,7 +330,10 @@ describe("导入抽屉:原生内容(R9 Task 5)", () => {
     });
     expect(apiMocks.importPaths).toHaveBeenCalledWith(["/a/1.mp4"]);
     expect(screen.queryByText("松开即导入")).toBeNull();
-    expect(await within(dialog).findByText("已发现 1 个视频，新增 1 项")).toBeTruthy();
+    // U-04/P-10「导入即有地图」:批次真落地(enqueued>0)后抽屉自动收起——
+    // 断言迁移:不再去(已经关掉的)抽屉里找「已发现…新增…」这句话,它现在只在
+    // 状态条的「已导入 N 条 · 共 X 分钟」里(StatusStrip.test.tsx 覆盖那条)。
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "导入素材" })).toBeNull());
   });
 
   it("抽屉里不渲染素材清单(素材在媒体池)", async () => {

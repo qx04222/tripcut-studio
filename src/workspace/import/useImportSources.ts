@@ -10,6 +10,7 @@ import {
   type WatchedFolder,
 } from "../../api";
 import { importNotice, useGlobalDrop } from "../useGlobalDrop";
+import { dispatchWorkspace } from "../WorkspaceStore";
 
 export interface ImportSources {
   watched: readonly WatchedFolder[];
@@ -93,6 +94,10 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
       // 添加成功当场把关注文件夹列出来(后端在 start_import 里登记了它)——走查 U-07:
       // 此前要重启才看得到,来源分页一直写着「还没有关注的文件夹」。
       await refreshWatched();
+      // U-04/P-10「导入即有地图」:批次真的有新素材入库时,抽屉自动收起,让媒体池的
+      // 分组占位卡立刻可见——不需要用户自己按关闭。enqueued=0(全部重复/跳过)时
+      // 没有新地图可看,留着抽屉让用户看清「没有新素材」的原因。
+      if (started.enqueued > 0) dispatchWorkspace({ type: "close-drawer" });
       onImportedRef.current?.();
     } catch (importError) {
       setError(String(importError));
@@ -118,7 +123,12 @@ export function useImportSources(options: { onImported?: () => void } = {}): Imp
     },
     onNotice: setNotice,
     onError: setError,
-    onImported: () => onImportedRef.current?.(),
+    onImported: () => {
+      // 拖放导入同一条纪律:批次落地就收抽屉(`useGlobalDrop` 只在真有可导入文件时才会
+      // 走到这里,不用像上面 chooseFolder 那样再判 enqueued)。
+      dispatchWorkspace({ type: "close-drawer" });
+      onImportedRef.current?.();
+    },
   });
 
   const rescan = useCallback(async () => {

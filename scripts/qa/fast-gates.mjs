@@ -79,6 +79,10 @@ const commands = [
   { id: "npm-audit", command: "npm", args: ["audit", "--audit-level=high"] },
   // R19 E-02(bench 车道):100 条固定夹具跑一次导入基准 + 对基线报告(不拦截,Q-13 头两周只报告)。
   { id: "perf-bench-100", command: "node", args: ["bench/gate.mjs"] },
+  // R19 车道 tokens · V-12:深色主题 @2x 全剧本截图与入库基线的像素差异,与 bench 同策略——
+  // 默认不带 --enforce,超阈值只打印不拦截 fast-gates;preview-shots 本身跑不出来(基础设施
+  // 问题,不是像素判定)才会让这条真的红。
+  { id: "preview-diff-dark", command: "node", args: ["scripts/qa/preview-diff.mjs"] },
 ];
 
 const results = commands.map((entry) => {

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{CoreError, Result};
 use super::jobs::{self, Job};
+use super::machine;
 
 pub const DEFAULT_MODEL_TIER: &str = "large-v3-turbo";
 // S5: small 约 29x 实时、峰值约 1GB，作为 8/16GB 老款机器的低配档；质量低于默认档。
@@ -484,13 +485,17 @@ fn extract_audio(source: &Path, output: &Path, ffmpeg: &OsStr, track: i64) -> Re
     validate_nonempty_file(output, "Whisper 输入音频")
 }
 
-fn transcribe_audio(
-    whisper: &OsStr,
-    model: &Path,
-    audio: &Path,
-    output_base: &Path,
-) -> Result<()> {
-    let args = [
+/// R19 perf E-01:whisper-cli 默认单线程，大核越多的机器收益越大。
+/// 上限 8——whisper.cpp 线程数超过实际大核数后收益递减甚至倒退，
+/// 8 是社区基准里的常见饱和点，避免把 16 大核机器的开销也压给 whisper。
+const WHISPER_MAX_THREADS: usize = 8;
+
+fn whisper_thread_count() -> usize {
+    machine::current().perf_cores.clamp(1, WHISPER_MAX_THREADS)
+}
+
+fn transcribe_audio_args(model: &Path, audio: &Path, output_base: &Path, threads: usize) -> Vec<OsString> {
+    vec![
         OsString::from("-m"),
         model.as_os_str().to_owned(),
         OsString::from("-f"),
@@ -499,11 +504,24 @@ fn transcribe_audio(
         // 同时保留 S4 英文 walking tour 的原语言文本。
         OsString::from("-l"),
         OsString::from("auto"),
+        // E-01:线程数取 min(P 核数, 8)，来自 machine::current()；
+        // 解析不到核数时 machine 模块保守回落到 4。
+        OsString::from("-t"),
+        OsString::from(threads.to_string()),
         OsString::from("-oj"),
         OsString::from("-osrt"),
         OsString::from("-of"),
         output_base.as_os_str().to_owned(),
-    ];
+    ]
+}
+
+fn transcribe_audio(
+    whisper: &OsStr,
+    model: &Path,
+    audio: &Path,
+    output_base: &Path,
+) -> Result<()> {
+    let args = transcribe_audio_args(model, audio, output_base, whisper_thread_count());
     let result = execute_with_timeout(whisper, &args, TRANSCRIBE_TIMEOUT).map_err(|error| {
         CoreError::Transcription(format!("无法运行 whisper-cli：{error}"))
     })?;
@@ -918,6 +936,25 @@ mod tests {
         let args = extract_audio_args(source, output, 0);
         let map_index = args.iter().position(|arg| arg == "-map").unwrap();
         assert_eq!(args[map_index + 1], OsString::from("0:a:0"));
+    }
+
+    #[test]
+    fn transcribe_audio_args_include_thread_flag_from_machine_perf_cores() {
+        let model = Path::new("/tmp/model.bin");
+        let audio = Path::new("/tmp/whisper-input.wav");
+        let output_base = Path::new("/tmp/transcript");
+        let args = transcribe_audio_args(model, audio, output_base, 6);
+        let t_index = args.iter().position(|arg| arg == "-t").expect("-t 参数缺失");
+        assert_eq!(args[t_index + 1], OsString::from("6"));
+    }
+
+    #[test]
+    fn whisper_thread_count_stays_within_one_to_eight() {
+        // machine::current() 的核数经 OnceLock 进程级缓存，测试里改
+        // TRIPCUT_MACHINE_PERF_CORES 不保证生效；这里只锁 clamp 的上下界，
+        // 真实机器上的线程数由 E-01 的手测数字佐证。
+        let threads = super::whisper_thread_count();
+        assert!((1..=WHISPER_MAX_THREADS).contains(&threads), "threads={threads}");
     }
 
     #[test]

@@ -9,7 +9,7 @@ import type { PipelineStep } from "./pipelineModel";
  * 只弹一次(键 `guide.<id>.viewed`,Rust 白名单按前缀 `guide.` 放行);同一时刻最多一个。
  * 触发条件是下面这张纯函数表 —— 谁先满足谁先出,按 `GUIDE_ORDER` 定序。
  */
-export const GUIDE_IDS = ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"] as const;
+export const GUIDE_IDS = ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"] as const;
 export type GuideId = (typeof GUIDE_IDS)[number];
 
 export function guideKey(id: GuideId): string {
@@ -34,6 +34,9 @@ export interface GuideSignals {
   playbackEnded: boolean;
   /** R18 F1:后台真的在分析素材 —— 完成通知即将发出,也是要系统通知权限的时机。 */
   backgroundRunning: boolean;
+  /** R19 P-06(models 车道):清单里有这一档推荐、允许装、还没装也没在下的模型(由 modelStore 报)。
+   *  可选:追加的信号不逼着既有的字面量对象都补一项。 */
+  modelInstallSuggested?: boolean;
 }
 
 export const EMPTY_GUIDE_SIGNALS: GuideSignals = {
@@ -117,6 +120,17 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     anchor: '[data-guide="autoplay"], .monitor-auto-advance',
     side: "top",
     when: (s) => s.inWorkspace && s.playbackEnded,
+  },
+  // R19 P-06(models 车道):首启按内存档提一句装模型。≥ 16 GB 推画面理解 + 转写默认档,≤ 8 GB 只推
+  // 转写低内存档——「推荐哪几个」由后端清单按档位算好(ModelCard.recommended),这里只管出不出;
+  // 「安装」= 与设置页模型卡同一个入口(modelStore.installRecommendedModels),后台下载,进度在状态条。
+  models: {
+    text: "装上「画面理解」和转写模型,搜索和挑选会更准。点「安装」后台下载,不影响你继续用;装完自动启用。",
+    anchor: '[data-guide="models"], .workspace-status',
+    tryLabel: "安装",
+    tryEvent: "tripcut:install-models",
+    side: "top",
+    when: (s) => s.inWorkspace && s.modelInstallSuggested === true,
   },
 };
 

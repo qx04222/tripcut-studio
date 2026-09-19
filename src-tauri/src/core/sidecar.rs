@@ -186,8 +186,8 @@ impl SidecarClient {
     }
 
     fn start(&mut self) -> Result<()> {
-        let (python, service) = resolve_launch()?;
-        let mut process = spawn_process(&python, &service)?;
+        let (python, service, model_dir) = resolve_launch()?;
+        let mut process = spawn_process(&python, &service, &model_dir)?;
         let id = self.take_id();
         match call_process(&mut process, id, "ping", json!({}), PING_TIMEOUT) {
             Ok(_) => {
@@ -338,7 +338,7 @@ fn with_client<T>(operation: impl FnOnce(&mut SidecarClient) -> Result<T>) -> Re
     operation(&mut client)
 }
 
-fn resolve_launch() -> Result<(PathBuf, PathBuf)> {
+fn resolve_launch() -> Result<(PathBuf, PathBuf, PathBuf)> {
     let paths = crate::packaging::sidecar_paths();
     let service = paths.service;
     let python = paths.python;
@@ -348,14 +348,26 @@ fn resolve_launch() -> Result<(PathBuf, PathBuf)> {
                 .to_owned(),
         ));
     }
-    Ok((python, service))
+    // R19 P-06:没有模型就别起 Python(冷启动几十秒到几分钟,起来也只会报
+    // `TRIPCUT_CLIP_MODEL_DIR must point to ...`)。模型目录的解析(环境变量 > 设置 > 自动
+    // 安装目录)在 model_catalog;装完模型后 lib.rs 会补排 clip_embed,下一次 spawn 就带上它。
+    let model_dir = match super::model_catalog::resolve_clip_provider_state() {
+        super::model_catalog::ProviderState::Ready { dir, .. } => PathBuf::from(dir),
+        super::model_catalog::ProviderState::Blocked { reason } => {
+            return Err(CoreError::Sidecar(format!(
+                "{reason}；到「设置 › 工具与模型」点「安装」即可,装完自动启用"
+            )));
+        }
+    };
+    Ok((python, service, model_dir))
 }
 
-fn spawn_process(python: &Path, service: &Path) -> Result<RunningSidecar> {
+fn spawn_process(python: &Path, service: &Path, model_dir: &Path) -> Result<RunningSidecar> {
     let mut child = Command::new(python)
         .arg("-u")
         .arg(service)
         .env("PYTHONUNBUFFERED", "1")
+        .env("TRIPCUT_CLIP_MODEL_DIR", model_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

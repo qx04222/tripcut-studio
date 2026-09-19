@@ -1,0 +1,207 @@
+/*
+ * R19 results 车道(P-03 结果面板 / P-01 一句话挑片 / P-09 预设句)。
+ * 结果面板 = 镜头带栏内的滑出层,与 Wave 1 检查器滑出层同一套机制(absolute 盖栏右侧、
+ * translateX 进出、--motion-slow 进 / --motion-exit 出、收起时不接指针)。
+ * 只写自己面板根类(.results-layer / .results-panel / .band-autoselect-*)下的选择器;
+ * 字号 / 间距 / 圆角 / 阴影 / 动效 / 层级一律走 tokens.css 令牌。
+ */
+
+/* 滑出层的定位锚点:镜头带栏(band 车道的根节点,这里只给它一个 relative,不改布局)。 */
+.shot-band:has(> .results-layer) {
+  position: relative;
+}
+
+.results-layer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: var(--z-overlay);
+  width: min(560px, 60%);
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-raised);
+  transform: translateX(calc(100% + var(--space-2)));
+  transition: transform var(--motion-exit);
+  pointer-events: none;
+}
+
+.results-layer.is-open {
+  transform: none;
+  transition: transform var(--motion-slow);
+  pointer-events: auto;
+}
+
+.results-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.results-panel .results-head {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--surface-panel);
+}
+
+.results-panel .results-head-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.results-panel .results-title {
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+}
+
+.results-panel .results-summary {
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.results-panel .results-head-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.results-panel .results-list {
+  margin: 0;
+  padding: var(--space-1) 0;
+  list-style: none;
+}
+
+.results-panel .results-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: var(--space-2) var(--space-3);
+  align-items: start;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-hair);
+}
+
+.results-panel .results-row-thumb {
+  display: block;
+  width: 72px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-4);
+  background: var(--well-bg);
+}
+
+.results-panel .results-row-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.results-panel .results-row-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.results-panel .results-row-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.results-panel .results-row-name {
+  font-size: var(--text-13);
+  line-height: var(--lh-13);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.results-panel .results-row-meta,
+.results-panel .results-row-reason,
+.results-panel .results-siblings {
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  color: var(--text-secondary);
+}
+
+.results-panel .results-row-reason {
+  color: var(--text-primary);
+}
+
+.results-panel .results-siblings summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.results-panel .results-siblings-list {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+}
+
+.results-panel .results-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.results-panel .results-empty {
+  margin: 0;
+  padding: var(--space-4) var(--space-3);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  color: var(--text-muted);
+}
+
+/* P-01:一句话挑片的输入行(自动挑选面板顶部 + 结果面板顶部共用)。 */
+.band-autoselect-prompt {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.band-autoselect-prompt input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  font-size: var(--text-12);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  color: var(--text-primary);
+}
+
+.band-autoselect-prompt input:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--ring);
+}
+
+/* P-09:三条预设句的 chip 行。 */
+.band-autoselect-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.results-panel .band-autoselect-prompt {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-hair);
+}

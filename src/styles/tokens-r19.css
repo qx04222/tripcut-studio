@@ -1,0 +1,23 @@
+/* R19 车道 tokens · Q-4:浅色主题下,监视器井 / 镜头带轨道 / 状态条按 NLE 惯例走深底——
+   这三块是「素材本体被看见 / 走带位置」的场地,不是普通面板,浅色壳里也保持深色,曝光与
+   选中判断不会被浅色反衬带偏。池(媒体池)与检查器不在这份名单里,仍走浅色令牌。
+
+   只在浅色下重定义这几个自定义属性;深色主题(prefers-color-scheme 媒体块 / html[data-theme="dark"])
+   的对应选择器特异性更高,天然不受这份覆盖影响,规则本身不用分深浅色写两遍。
+
+   数值原样借用已升格为唯一 dark 的调色板(见 tokens.css / styles.css 的 html[data-theme="dark"]),
+   不是新配的色——保证浅色下的深底与深色主题下同一批区域视觉一致,只做一次校色。
+
+   镜头带 / 状态条这两处不直接改 --surface-panel 全局值(那会连累设置页、检查器等其它
+   读同一个令牌的浅色面板),而是把覆盖限定在这两个选择器自己身上;自定义属性按继承解析,
+   band.css / chrome.css 里 `background: var(--surface-panel)` 的规则不用改一个字,子树里
+   读到的就是这份深色。镜头块 / 段卡自己有独立的 --surface-raised / --surface-card,不受影响。 */
+:root {
+  --well-bg: #1b1d20;
+}
+
+.workspace-shell .shot-band .band-viewport,
+.workspace-shell .workspace-status {
+  --surface-panel: #1b1d20;
+  --border-hair: #2a2d32;
+}

@@ -14,6 +14,7 @@ import { failureText } from "./errorText";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
 import type { BandChapter } from "./shotBandModel";
 import { showToast } from "./ui/Toast";
+import { runUndoById } from "./undoStack";
 import { refreshClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
@@ -129,22 +130,31 @@ export function useBandArrange(): {
 
   // R11 §1.2 / R12 §3:自动挑选的结果走全局 Toast,「撤销」撤这一批(段没了,带上的镜块级联消失)。
   const onAutoSelected = useCallback((outcome: AutoSelectResult) => {
+    // R19 Wave 2 接线:带 `run_id` 时结果面板(P-03)同时打开、里面有「全部撤销」+ ⌘Z ——
+    // toast 不再重复一颗「撤销」(首次零决定的用户只看一处入口);没有 run_id 的旧路径照旧带。
+    const undoAction =
+      outcome.run_id !== undefined
+        ? undefined
+        : {
+            label: "撤销",
+            onClick: () => {
+              // R19 P-03(results 车道,两行):这批已经在 ⌘Z 栈里(`undo_id`)就走同一条,撤过一次不再撤第二次;
+              // 没有 undo_id(旧路径)照旧直接撤。
+              const undone = outcome.undo_id !== undefined ? runUndoById(outcome.undo_id).then((ran) => (ran ? undefined : Promise.reject(new Error("这批已经撤销过了")))) : undoAutoSelect(outcome.batch_id);
+              undone
+                .then(() => {
+                  showToast("已撤销这批挑选");
+                  return refreshClipsFeed(true);
+                })
+                .catch((error) => showToast(failureText("撤销", error), { tone: "danger" }));
+            },
+          };
     showToast(autoSelectPlacedToast(outcome), {
       tone: "success",
       durationMs: UNDO_TOAST_MS,
       // R19 U-09(flow 车道,一行):首次零决定跑完,给「改范围 / 改时长」入口(次要动作,排在「撤销」之后)。
       actions: autoSelectToastActions(outcome),
-      action: {
-        label: "撤销",
-        onClick: () => {
-          undoAutoSelect(outcome.batch_id)
-            .then(() => {
-              showToast("已撤销这批挑选");
-              return refreshClipsFeed(true);
-            })
-            .catch((error) => showToast(failureText("撤销", error), { tone: "danger" }));
-        },
-      },
+      action: undoAction,
     });
   }, []);
   return { skipped, onSkipChapter, arranging, onArrange, onBackToSelect, onAutoSelected };

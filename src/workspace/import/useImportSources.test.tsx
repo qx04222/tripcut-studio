@@ -20,6 +20,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 
 import { useImportSources } from "./useImportSources";
+import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "../WorkspaceStore";
 
 afterEach(cleanup);
 
@@ -27,6 +28,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   webview.dropHandler = null;
   apiMock.listWatchedFolders.mockResolvedValue([]);
+  __resetWorkspaceForTests({ openDrawer: "import" });
 });
 
 describe("useImportSources(迁自 ImportPageRuntime.test 的拖放与关注文件夹)", () => {
@@ -50,6 +52,8 @@ describe("useImportSources(迁自 ImportPageRuntime.test 的拖放与关注文�
     expect(result.current.dragActive).toBe(false);
     expect(result.current.notice).toBe("已发现 2 个视频，新增 2 项");
     expect(onImported).toHaveBeenCalled();
+    // U-04/P-10:拖放批次落地 → 抽屉自动收起,媒体池的分组占位卡立刻可见。
+    expect(getWorkspaceSnapshot().openDrawer).toBeNull();
     act(() => webview.dropHandler!({ payload: { type: "enter" } }));
     await act(async () => { webview.dropHandler!({ payload: { type: "drop", paths: [] } }); });
     expect(apiMock.importPaths).toHaveBeenCalledTimes(1);
@@ -75,6 +79,22 @@ describe("useImportSources(迁自 ImportPageRuntime.test 的拖放与关注文�
     unmount();
     expect(webview.dropHandler).toBeNull();
     expect(webview.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("U-04/P-10:选文件夹导入且真有新素材时,抽屉自动收起", async () => {
+    apiMock.pickImportFolder.mockResolvedValue("/trip");
+    apiMock.startImport.mockResolvedValue({ folder: "/trip", total: 5, enqueued: 5, skipped: 0 });
+    const { result } = renderHook(() => useImportSources());
+    await act(async () => { await result.current.chooseFolder(); });
+    expect(getWorkspaceSnapshot().openDrawer).toBeNull();
+  });
+
+  it("U-04/P-10:选文件夹导入但全部重复(enqueued=0)时,抽屉不收——留着让用户看清原因", async () => {
+    apiMock.pickImportFolder.mockResolvedValue("/trip");
+    apiMock.startImport.mockResolvedValue({ folder: "/trip", total: 5, enqueued: 0, skipped: 5 });
+    const { result } = renderHook(() => useImportSources());
+    await act(async () => { await result.current.chooseFolder(); });
+    expect(getWorkspaceSnapshot().openDrawer).toBe("import");
   });
 
   it("立即扫描:NAS 断线时说清「未扫描」而不是「没有新素材」", async () => {

@@ -7,3 +7,18 @@
 {"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_empty_lib","value":118.4,"unit":"MB","note":"E-04 稳态内存·空库,/usr/bin/time -l maximum resident set size,15s idle;bench/check-idle-memory.mjs --scenario empty"}
 {"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_100clip_lib_no_task","value":147.4,"unit":"MB","note":"E-04 稳态内存·100 条库(非规格要求的 1344,用 bench 基线库复用)全部任务已完成后 idle 20s;confirmed via startup census clips=100;bench/check-idle-memory.mjs --scenario large-idle --seed-db bench/runs/baseline-main/bench.db"}
 {"date":"2026-09-18","round":"r19-bench","metric":"idle_rss_mb_playing_4k","value":null,"unit":"MB","note":"E-04 播放 4K 场景本轮未做——需要 AX 驱动点开素材并保持播放,留给下一轮或与 U-12 驱动脚本一起接线"}
+{"date":"2026-09-18","round":"r19-perf","metric":"whisper_transcribe_seconds_t4_median","value":4.055,"unit":"s","note":"E-01 whisper-cli large-v3-turbo·60.6s say(Tingting)生成的中文口播·-t 4·3次取中位数·本机4P/6E核"}
+{"date":"2026-09-18","round":"r19-perf","metric":"whisper_transcribe_seconds_t8_median","value":3.916,"unit":"s","note":"E-01 同素材同模型·-t 8(超过本机P核数,借E核)·3次取中位数;相对-t4提升约3.4%,<15%门槛,保留min(P核,8)=本机4"}
+{"date":"2026-09-18","round":"r19-perf","metric":"band_scroll_scriptduration_ms_32seg","value":222,"unit":"ms","note":"E-07 镜头带 32 段 vs 300 段量测:20 次横向 wheel 滚动的 ScriptDuration 增量,两轮均值(233,211)/2=222;perf-idle-render.mjs --band-segments 32"}
+{"date":"2026-09-18","round":"r19-perf","metric":"band_scroll_scriptduration_ms_300seg","value":211,"unit":"ms","note":"E-07 同场景 300 段:两轮均值(215,207)/2=211——比 32 段还低,差距在噪声内,不构成虚拟化理由;perf-idle-render.mjs --band-segments 300"}
+{"date":"2026-09-18","round":"r19-perf","metric":"band_scroll_layoutcount_32seg","value":24.5,"unit":"count","note":"E-07 32 段两轮 LayoutCount 增量均值(25,24)/2"}
+{"date":"2026-09-18","round":"r19-perf","metric":"band_scroll_layoutcount_300seg","value":24.5,"unit":"count","note":"E-07 300 段两轮 LayoutCount 增量均值(25,24)——与 32 段完全一致,滚动开销与段数无关(虚拟窗口外的 DOM 未参与滚动重排)"}
+{"date":"2026-09-18","round":"r19-perf","metric":"a18_01_first_paint_ms_round1","value":792,"unit":"ms","note":"E-06 取证:27条素材×4类任务=108条pending job 夹具,真机v0.10.0-preview .app 第1轮,无并行车道"}
+{"date":"2026-09-18","round":"r19-perf","metric":"a18_01_first_paint_ms_round5","value":41388,"unit":"ms","note":"E-06 取证第5轮:同夹具同二进制,first_paint 从 792ms 跳到 41.4s(约64倍),主进程CPU约8.6%不是0%;round2/3/4 在20-30s观察窗内未等到,不排除同量级"}
+{"date":"2026-09-18","round":"r19-perf","metric":"a18_01_first_paint_ms_round6","value":649,"unit":"ms","note":"E-06 取证第6轮:恢复快速,六轮里3快1慢2超观察窗——间歇性,方向与R18原始7分钟报告一致但量级更小"}
+{"date":"2026-09-18","round":"r19-perf","metric":"a18_01_rust_setup_ms_median","value":268,"unit":"ms","note":"E-06 六轮 rust_setup_ms 中位数(203-414区间)——Rust侧本身不是瓶颈,排除头号猜测(全局锁长时间持有)"}
+{"date":"2026-09-18","round":"r19-perf","metric":"e10_8gb_all_cover_ms_after","value":297894,"unit":"ms","note":"E-10 8GB注入(--budget-gb 8→low_spec档,decode_permits=2)本分支(E-01+E-07+P-10)100条基准;jobs done=827/827同0.10.0；此次运行时机早于E-06真机取证(无并行负载)"}
+{"date":"2026-09-18","round":"r19-perf","metric":"e10_8gb_all_cover_ms_before","value":507090,"unit":"ms","note":"E-10 8GB注入 0.10.0基线(main 35b4ae3,E-01前)同100条基准;总耗时比after慢约70%——但运行窗口与本会话E-06真机取证(多次起停.app+lldb attach)重叠，怀疑是并行负载污染而非代码回归，见per-stage对比"}
+{"date":"2026-09-18","round":"r19-perf","metric":"e10_8gb_analyze_l1_p50_ms_before_after","value":3093,"unit":"ms","note":"E-10 逐项对比锚点:analyze_l1 p50 before=3093 after=3262(+5.5%,噪声内)；11个stage的p50/p95全部在±20%内，无单向系统性变化——按stage口径判定PASS(不更慢)，聚合总耗时与rss_peak的差异记为并行负载污染，不采信"}
+{"ts":"2026-09-18T21:16:26.214Z","tool":"first-five-minutes","clicks":5,"newWords":7,"seconds":null,"reachedCount":2,"exportedCount":0,"roundsTotal":3}
+{"ts":"2026-09-18T21:25:26.971Z","tool":"first-five-minutes","clicks":5,"newWords":7,"seconds":125.673,"reachedCount":3,"exportedCount":1,"roundsTotal":3}

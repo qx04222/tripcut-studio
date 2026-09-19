@@ -3,8 +3,19 @@ import { resolve } from "node:path";
 import postcss from "postcss";
 import { describe, expect, it } from "vitest";
 
+import { appearanceAttributes, FIXED_THEMES, normalizeThemePref } from "../appearance";
+
+// R19 车道 tokens · Q-4:浅色下监视器井 / 镜头带 / 状态条深底,只经这份新令牌文件覆盖。
+const TOKENS_R19 = readFileSync(resolve(process.cwd(), "src/styles/tokens-r19.css"), "utf8");
+
 const TOKENS = readFileSync(resolve(process.cwd(), "src/styles/tokens.css"), "utf8");
 const WORKSPACE = readFileSync(resolve(process.cwd(), "src/styles/workspace.css"), "utf8");
+// R19 车道 tokens · V-09:旧字号梯子(styles.css:6-11 定义的 --font-xs/sm/base/lg/xl/display)
+// 要在这三个文件里清零,styles.css 本身留作只降不升的基线(它自己还定义着这批变量,给
+// 剩下没碰的 ~270 处用)。
+const PLAYER_OVERLAY = readFileSync(resolve(process.cwd(), "src/PlayerOverlay.css"), "utf8");
+const STYLES = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+const OLD_FONT_VAR = /var\(--font-(xs|sm|base|lg|xl|display)\b[^)]*\)/g;
 // kit.css 只是 @import 桶,一个组件一个文件在 src/styles/kit/ 下;门禁扫全部。
 const KIT_DIR = resolve(process.cwd(), "src/styles/kit");
 const KIT = [readFileSync(resolve(process.cwd(), "src/styles/kit.css"), "utf8")]
@@ -54,7 +65,7 @@ describe("tokens.css", () => {
       "--motion-slow",
     ];
     for (const k of NEW_TOKENS) expect(names.has(k), k).toBe(true);
-    // 三套主题(浅色 :root、prefers-color-scheme 深色、data-theme=dark、jianying-dark)都不
+    // 两套主题(浅色 :root、深色——prefers-color-scheme 与 data-theme=dark 是同一套值)都不
     // 重新定义这批令牌——只声明一次,靠层叠继承覆盖所有主题,不存在“某套主题漏了新令牌”。
     const root = postcss.parse(TOKENS);
     const themedOverrides = new Set<string>();
@@ -102,33 +113,28 @@ describe("tokens.css", () => {
       }
     }
   });
-  it("R13 §5「剪映风格深色」:自己的一整套深色值(底 / 面板 / 文字 / 强调 / 播放头),挂在 html[data-theme=\"jianying-dark\"] 上", () => {
+  it("R19 车道 tokens · Q-3:「剪映风格深色」升格为唯一深色——tokens.css 里不再有单独的 html[data-theme=\"jianying-dark\"] 选择器,它的令牌值(井底/阴影/播放头)原样并进两套通用深色块", () => {
+    expect(TOKENS).not.toMatch(/data-theme="jianying-dark"/);
     const root = postcss.parse(TOKENS);
-    const blocks: Set<string>[] = [];
+    const darkBlocks: Record<string, string>[] = [];
     root.walkRules((rule) => {
-      if (!rule.selector.includes('data-theme="jianying-dark"')) return;
-      const set = new Set<string>();
-      rule.walkDecls((d) => {
-        set.add(d.prop);
-      });
-      blocks.push(set);
+      if (!/data-theme="dark"|:not\(\[data-theme="light"\]\)/.test(rule.selector)) return;
+      const values: Record<string, string> = {};
+      rule.walkDecls((d) => { values[d.prop] = d.value; });
+      darkBlocks.push(values);
     });
-    expect(blocks.length).toBe(1);
-    const set = blocks[0]!;
-    for (const k of [
-      "--bg", "--bg-elevated", "--bg-solid", "--border", "--border-strong", "--text-primary", "--text-secondary", "--text-muted", "--text-faint",
-      "--accent", "--accent-contrast", "--accent-tint", "--accent-glow", "--focus-ring", "--warning", "--danger", "--media-well", "--media-overlay",
-      "--surface-card", "--surface-raised", "--surface-chrome", "--surface-chrome-2", "--well-bg", "--shadow-card", "--shadow-raised", "--shadow-inset-well", "--playhead",
-    ]) {
-      expect(set.has(k), k).toBe(true);
+    expect(darkBlocks.length).toBe(2);
+    for (const values of darkBlocks) {
+      expect(values["--surface-card"]).toBe("#1b1d20");
+      expect(values["--well-bg"]).toBe("#0a0b0d");
+      expect(values["--playhead"]).toBe("#ff4d4a");
     }
   });
-  it("V-25:深色下 --ring 内圈改用不透明的 --bg-solid(浅色 --surface-panel 半透明会透出底色 4%,三套深色主题都要盖住)", () => {
+  it("V-25:深色下 --ring 内圈改用不透明的 --bg-solid(浅色 --surface-panel 半透明会透出底色 4%,两套深色主题都要盖住)", () => {
     const root = postcss.parse(TOKENS);
     const darkRingSelectors = [
       ':root:not([data-theme="light"])',
       'html[data-theme="dark"]',
-      'html[data-theme="jianying-dark"]',
     ];
     const found: Record<string, string> = {};
     root.walkRules((rule) => {
@@ -140,6 +146,33 @@ describe("tokens.css", () => {
       expect(found[sel]).toContain("var(--bg-solid)");
       expect(found[sel]).not.toContain("var(--surface-panel)");
     }
+  });
+});
+
+describe("R19 车道 tokens · Q-3:主题收两套(jianying-dark 升格为唯一 dark)", () => {
+  it("normalizeThemePref:三选项原样返回,旧 jianying-dark 映射到 dark,未知值落回 system", () => {
+    expect(normalizeThemePref("system")).toBe("system");
+    expect(normalizeThemePref("light")).toBe("light");
+    expect(normalizeThemePref("dark")).toBe("dark");
+    expect(normalizeThemePref("jianying-dark")).toBe("dark");
+    expect(normalizeThemePref(undefined)).toBe("system");
+    expect(normalizeThemePref("some-future-value")).toBe("system");
+  });
+  it("FIXED_THEMES 只剩 light/dark,appearanceAttributes 对旧 jianying-dark 偏好解出 dark", () => {
+    expect(FIXED_THEMES).toEqual(["light", "dark"]);
+    expect(appearanceAttributes({ "appearance.theme": "jianying-dark" }).theme).toBe("dark");
+    expect(appearanceAttributes({ "appearance.theme": "dark" }).theme).toBe("dark");
+    expect(appearanceAttributes({ "appearance.theme": "system" }).theme).toBeNull();
+  });
+  it("styles.css 里 --accent 等调色板令牌:深色 = jianying 的青绿(浅色仍是原来的橄榄绿强调只在 :root 定义,深色块整段换成青绿系)", () => {
+    const root = postcss.parse(STYLES);
+    let sawDarkAccent = false;
+    root.walkRules((rule) => {
+      if (!/data-theme="dark"|:not\(\[data-theme="light"\]\)/.test(rule.selector)) return;
+      rule.walkDecls("--accent", (d) => { if (d.value.trim() === "#2fd6c4") sawDarkAccent = true; });
+    });
+    expect(sawDarkAccent).toBe(true);
+    expect(STYLES).not.toMatch(/data-theme="jianying-dark"/);
   });
 });
 
@@ -324,5 +357,105 @@ describe("R19 tokens-lite · V-10 动效令牌", () => {
       if (rule.selector === ":root") return;
       rule.walkDecls("--motion-exit", () => { throw new Error(`${rule.selector} 不应重定义 --motion-exit`); });
     });
+  });
+});
+
+describe("R19 车道 tokens · V-09:旧字号梯子退役", () => {
+  it("tokens.css 补了 --text-16/--text-19/--text-display,承接旧 --font-lg/--font-xl/--font-display 的原值(数值不变,只改名)", () => {
+    const names = declared(TOKENS);
+    for (const k of ["--text-16", "--lh-16", "--text-19", "--lh-19", "--text-display"]) {
+      expect(names.has(k), k).toBe(true);
+    }
+    const values: Record<string, string> = {};
+    postcss.parse(TOKENS).walkDecls(/^--(text-16|text-19|text-display)$/, (d) => { values[d.prop] = d.value; });
+    expect(values["--text-16"]).toBe("16px");
+    expect(values["--text-19"]).toBe("19px");
+    expect(values["--text-display"]).toBe("clamp(2.125rem, 5vw, 3.875rem)");
+  });
+  it("workspace.css / PlayerOverlay.css / 车道文件(reset-r15.css、native-r18.css)里旧 --font-* 命中数为 0", () => {
+    expect((WORKSPACE.match(OLD_FONT_VAR) ?? []).length).toBe(0);
+    expect((PLAYER_OVERLAY.match(OLD_FONT_VAR) ?? []).length).toBe(0);
+    for (const f of ["reset-r15.css", "native-r18.css"]) {
+      const css = readLane(f);
+      expect((css.match(OLD_FONT_VAR) ?? []).length, f).toBe(0);
+    }
+  });
+  it("styles.css 只降不升基线:本轮把首页/抽屉相关 ~63 处换成 --text-*,旧梯子命中数不得超过当前基线", () => {
+    const hits = (STYLES.match(OLD_FONT_VAR) ?? []).length;
+    // 基线由本轮实测钉死;下一轮清得更多时把这个数字往下改,不允许涨回去。
+    expect(hits).toBeLessThanOrEqual(292);
+  });
+  it("门禁自身会响:塞一个 var(--font-xs) 进去就能被正则逮到", () => {
+    expect(("font-size: var(--font-xs);".match(OLD_FONT_VAR) ?? []).length).toBe(1);
+  });
+});
+
+describe("R19 车道 tokens · Q-4:浅色下监视器井/镜头带/状态条深底", () => {
+  const root = postcss.parse(TOKENS_R19);
+  it("workspace.css 头部 @import 了 tokens-r19.css(house 规则:@import 不在头部会被 postcss 静默丢)", () => {
+    const workspaceHead = WORKSPACE.split("\n").slice(0, 40).join("\n");
+    expect(workspaceHead).toContain('@import "./tokens-r19.css";');
+  });
+  it("--well-bg 在浅色 :root 下改成深底(不是旧的 --media-well 浅米灰)", () => {
+    let value = "";
+    root.walkRules(":root", (rule) => { rule.walkDecls("--well-bg", (d) => { value = d.value; }); });
+    expect(value).toBe("#1b1d20");
+  });
+  it("镜头带轨道与状态条的 --surface-panel 被限定在各自选择器上覆盖成深底,不是全局改 :root(不连累池/检查器/设置页等其它读 --surface-panel 的浅色面板)", () => {
+    const scoped: Record<string, string> = {};
+    root.walkRules((rule) => {
+      if (rule.selector === ":root") return;
+      rule.walkDecls("--surface-panel", (d) => { scoped[rule.selector] = d.value; });
+    });
+    expect(scoped[".workspace-shell .shot-band .band-viewport,\n.workspace-shell .workspace-status"]).toBe("#1b1d20");
+    // :root 本身(池/检查器/设置页都读它)不在这份文件里被重定义。
+    let rootOverridesSurfacePanel = false;
+    root.walkRules(":root", (rule) => { rule.walkDecls("--surface-panel", () => { rootOverridesSurfacePanel = true; }); });
+    expect(rootOverridesSurfacePanel).toBe(false);
+  });
+  it("门禁自身会响:tokens-r19.css 缺 --well-bg 覆盖就该失败(正向证明上面两条真的在读这份文件而不是巧合过了)", () => {
+    const empty = postcss.parse("/* empty */");
+    let found = false;
+    empty.walkRules(":root", (rule) => { rule.walkDecls("--well-bg", () => { found = true; }); });
+    expect(found).toBe(false);
+  });
+});
+
+describe("R19 车道 tokens · Q-4:WCAG 对比度(playhead / 选中环在新深底上的实测数字)", () => {
+  // 与 tokens-r19.css 的深底、tokens.css 的 --playhead / --accent-glow 数值手动对齐——
+  // 改了任何一头这条测试都要跟着重算,不是复制一份魔法数字。
+  function hexToRgb(hex: string): [number, number, number] {
+    const n = parseInt(hex.replace("#", ""), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function relLum([r, g, b]: [number, number, number]): number {
+    const f = (c: number) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const [rr, gg, bb] = [f(r), f(g), f(b)];
+    return 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
+  }
+  function contrast(hex1: string, hex2: string): number {
+    const [l1, l2] = [relLum(hexToRgb(hex1)), relLum(hexToRgb(hex2))].sort((a, b) => b - a);
+    return (l1 + 0.05) / (l2 + 0.05);
+  }
+  it("浅色下 --playhead(#e0312b)在新深底(#1b1d20)上的对比度 ≥ 3:1(WCAG 1.4.11 非文字对比),且不比旧浅底(#e8e6dc)差", () => {
+    const onNewDark = contrast("#e0312b", "#1b1d20");
+    const onOldLight = contrast("#e0312b", "#e8e6dc");
+    expect(onNewDark).toBeGreaterThanOrEqual(3);
+    expect(onNewDark).toBeGreaterThanOrEqual(onOldLight - 0.05);
+  });
+  it("选中环 --accent-glow(浅色强调色 30% 透明度)叠在新深底上的对比度是已知弱项(< 3:1),但不比退役前的浅底更差——记录数字,不是本车道修的范围", () => {
+    const composite = (fgHex: string, alpha: number, bgHex: string): [number, number, number] => {
+      const [fr, fg, fb] = hexToRgb(fgHex);
+      const [br, bg, bb] = hexToRgb(bgHex);
+      return [fr * alpha + br * (1 - alpha), fg * alpha + bg * (1 - alpha), fb * alpha + bb * (1 - alpha)];
+    };
+    const contrastRgb = (rgb: [number, number, number], hex2: string) => {
+      const [l1, l2] = [relLum(rgb), relLum(hexToRgb(hex2))].sort((a, b) => b - a);
+      return (l1 + 0.05) / (l2 + 0.05);
+    };
+    const onNewDark = contrastRgb(composite("#6d8f00", 0.3, "#1b1d20"), "#1b1d20");
+    const onOldLight = contrastRgb(composite("#6d8f00", 0.3, "#e8e6dc"), "#e8e6dc");
+    expect(onNewDark).toBeLessThan(3);
+    expect(onNewDark).toBeGreaterThan(onOldLight - 0.3);
   });
 });

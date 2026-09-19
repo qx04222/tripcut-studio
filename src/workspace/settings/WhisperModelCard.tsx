@@ -20,8 +20,9 @@ async function copyText(value: string): Promise<void> {
 }
 
 /**
- * R10 U-24:Whisper 模型缺失态——应用不联网下载模型,这里把「去哪下 / 核对什么 / 放哪」三件事
- * 摆出来,并给一条不用手动拷文件的路:「导入模型文件…」(系统面板选文件 → 后端校验 SHA-256 后原子落位)。
+ * R10 U-24 → R19 P-06:Whisper 模型缺失态的**离线兜底**。主路径已经是上方模型卡的「安装」
+ * (后台下载 + 校验 + 自动启用);这张卡留给没法联网 / 想自己下的人:「去哪下 / 核对什么 / 放哪」
+ * 三件事摆出来,再给一条不用手动拷文件的路:「导入模型文件…」(系统面板选文件 → 后端校验 SHA-256 后原子落位)。
  */
 export function WhisperModelCard({ component, busy, onImported }: WhisperModelCardProps): JSX.Element {
   const [importing, setImporting] = useState(false);
@@ -62,6 +63,7 @@ export function WhisperModelCard({ component, busy, onImported }: WhisperModelCa
 
   return (
     <div className="settings-sheet-readout settings-whisper-model" role="group" aria-label="转写模型文件">
+      <small>没法联网、或想自己下载?下面是官方地址与校验码;下好后用「导入模型文件…」。</small>
       <dl className="settings-whisper-model-facts">
         <div>
           <dt>官方下载地址</dt>

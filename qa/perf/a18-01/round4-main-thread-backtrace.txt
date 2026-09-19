@@ -1,0 +1,314 @@
+(lldb) process attach --pid 26596
+Process 26596 stopped
+* thread #1, name = 'main', queue = 'com.apple.main-thread', stop reason = signal SIGSTOP
+       frame #0: 0x0000000181530c20 libsystem_kernel.dylib`mach_msg2_trap + 8
+libsystem_kernel.dylib`mach_msg2_trap:
+->  0x181530c20 <+8>: ret    
+
+libsystem_kernel.dylib`macx_swapon:
+    0x181530c24 <+0>: mov    x16, #-0x30               ; =-48 
+    0x181530c28 <+4>: svc    #0x80
+    0x181530c2c <+8>: ret    
+Target 0: (tripcut-studio) stopped.
+Executable binary set to "/private/tmp/claude-501/-Users-xin-Desktop-Torquemax-codex-split-prep/0b1eb8a1-56bc-4f37-9f8f-c0573756a979/scratchpad/a18-01/旅剪工作台.app/Contents/MacOS/tripcut-studio".
+Architecture set to: arm64-apple-macosx-.
+(lldb) thread backtrace all
+* thread #1, name = 'main', queue = 'com.apple.main-thread', stop reason = signal SIGSTOP
+   * frame #0: 0x0000000181530c20 libsystem_kernel.dylib`mach_msg2_trap + 8
+     frame #1: 0x00000001815438e0 libsystem_kernel.dylib`mach_msg2_internal + 76
+     frame #2: 0x0000000181539a28 libsystem_kernel.dylib`mach_msg_overwrite + 480
+     frame #3: 0x0000000181530fac libsystem_kernel.dylib`mach_msg + 24
+     frame #4: 0x0000000181636aec CoreFoundation`__CFRunLoopServiceMachPort + 160
+     frame #5: 0x0000000181635334 CoreFoundation`__CFRunLoopRun + 1172
+     frame #6: 0x000000018170f82c CoreFoundation`_CFRunLoopRunSpecificWithOptions + 536
+     frame #7: 0x000000018ea68590 HIToolbox`RunCurrentEventLoopInMode + 320
+     frame #8: 0x000000018ea6b91c HIToolbox`ReceiveNextEventCommon + 492
+     frame #9: 0x000000018ebee380 HIToolbox`_BlockUntilNextEventMatchingListInMode + 48
+     frame #10: 0x0000000185f2f29c AppKit`_DPSBlockUntilNextEventMatchingListInMode + 292
+     frame #11: 0x0000000185bec4fc AppKit`_DPSNextEvent + 580
+     frame #12: 0x0000000186464748 AppKit`-[NSApplication(NSEventRouting) _nextEventMatchingEventMask:untilDate:inMode:dequeue:] + 780
+     frame #13: 0x000000018646426c AppKit`-[NSApplication(NSEventRouting) nextEventMatchingMask:untilDate:inMode:dequeue:] + 292
+     frame #14: 0x0000000185bdf90c AppKit`-[NSApplication run] + 396
+     frame #15: 0x0000000102838438 tripcut-studio`___lldb_unnamed_symbol_1003b01f8 + 576
+     frame #16: 0x0000000102c68d3c tripcut-studio`tripcut_studio_lib::run + 10944
+     frame #17: 0x00000001028063e0 tripcut-studio`___lldb_unnamed_symbol_10037e3d4 + 12
+     frame #18: 0x00000001028063f8 tripcut-studio`___lldb_unnamed_symbol_10037e3e8 + 16
+     frame #19: 0x000000010270f170 tripcut-studio`std::rt::lang_start_internal + 952
+     frame #20: 0x0000000102806458 tripcut-studio`main + 52
+     frame #21: 0x000000018119fe80 dyld`start + 6688
+  thread #2, name = 'graceful-signals'
+       frame #0: 0x000000018153c878 libsystem_kernel.dylib`__sigwait + 8
+       frame #1: 0x00000001815764c0 libsystem_pthread.dylib`sigwait + 40
+       frame #2: 0x00000001028e01fc tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<tripcut_studio_lib::core::shutdown::watch<tripcut_studio_lib::run::{closure#0}>::{closure#0}, ()> + 100
+       frame #3: 0x0000000102c595b0 tripcut-studio`___lldb_unnamed_symbol_1007d156c + 68
+       frame #4: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #5: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #3, name = 'com.apple.NSEventThread'
+       frame #0: 0x0000000181530c20 libsystem_kernel.dylib`mach_msg2_trap + 8
+       frame #1: 0x00000001815438e0 libsystem_kernel.dylib`mach_msg2_internal + 76
+       frame #2: 0x0000000181539a28 libsystem_kernel.dylib`mach_msg_overwrite + 480
+       frame #3: 0x0000000181530fac libsystem_kernel.dylib`mach_msg + 24
+       frame #4: 0x0000000181636aec CoreFoundation`__CFRunLoopServiceMachPort + 160
+       frame #5: 0x0000000181635334 CoreFoundation`__CFRunLoopRun + 1172
+       frame #6: 0x000000018170f82c CoreFoundation`_CFRunLoopRunSpecificWithOptions + 536
+       frame #7: 0x0000000185d10844 AppKit`_NSEventThread + 184
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #4, name = 'JavaScriptCore libpas scavenger'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001a554cc94 JavaScriptCore`scavenger_thread_main + 1088
+       frame #3: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #5
+       frame #0: 0x00000001815329ec libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #6
+       frame #0: 0x00000001815329ec libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #7
+       frame #0: 0x00000001815329ec libsystem_kernel.dylib`__workq_kernreturn + 8
+  thread #8, name = 'WebCore: Scrolling'
+       frame #0: 0x0000000181530c20 libsystem_kernel.dylib`mach_msg2_trap + 8
+       frame #1: 0x00000001815438e0 libsystem_kernel.dylib`mach_msg2_internal + 76
+       frame #2: 0x0000000181539a28 libsystem_kernel.dylib`mach_msg_overwrite + 480
+       frame #3: 0x0000000181530fac libsystem_kernel.dylib`mach_msg + 24
+       frame #4: 0x0000000181636aec CoreFoundation`__CFRunLoopServiceMachPort + 160
+       frame #5: 0x0000000181635334 CoreFoundation`__CFRunLoopRun + 1172
+       frame #6: 0x000000018170f82c CoreFoundation`_CFRunLoopRunSpecificWithOptions + 536
+       frame #7: 0x00000001816ad4c4 CoreFoundation`CFRunLoopRun + 64
+       frame #8: 0x00000001a6103d40 JavaScriptCore`WTF::Detail::CallableWrapper<WTF::RunLoop::create(WTF::ASCIILiteral, WTF::ThreadType, WTF::ThreadQOS)::$_0, void>::call() + 136
+       frame #9: 0x00000001a56712f8 JavaScriptCore`WTF::Thread::entryPoint(WTF::Thread::NewThreadContext*) + 152
+       frame #10: 0x00000001a5671464 JavaScriptCore`WTF::wtfThreadEntryPoint(void*) + 16
+       frame #11: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #9, name = 'tracing-appender'
+       frame #0: 0x0000000181530b9c libsystem_kernel.dylib`semaphore_wait_trap + 8
+       frame #1: 0x00000001813b649c libdispatch.dylib`_dispatch_sema4_wait + 28
+       frame #2: 0x00000001813b6b28 libdispatch.dylib`_dispatch_semaphore_wait_slow + 132
+       frame #3: 0x0000000102713128 tripcut-studio`std::thread::functions::park + 96
+       frame #4: 0x0000000102c2a654 tripcut-studio`___lldb_unnamed_symbol_1007a2554 + 256
+       frame #5: 0x0000000102c0da88 tripcut-studio`___lldb_unnamed_symbol_100784da8 + 3296
+       frame #6: 0x00000001028e4e38 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tracing_appender::worker::Worker<tracing_appender::rolling::RollingFileAppender>>::worker_thread::{closure#0}, ()> + 12
+       frame #7: 0x0000000102c5b018 tripcut-studio`___lldb_unnamed_symbol_1007d2f54 + 196
+       frame #8: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #9: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #10
+       frame #0: 0x0000000181534308 libsystem_kernel.dylib`__semwait_signal + 8
+       frame #1: 0x000000018140b054 libsystem_c.dylib`nanosleep + 220
+       frame #2: 0x00000001028e2bf8 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<tripcut_studio_lib::run::{closure#2}::{closure#0}, ()> + 124
+       frame #3: 0x0000000102c5a6b8 tripcut-studio`___lldb_unnamed_symbol_1007d2660 + 88
+       frame #4: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #5: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #11, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #12, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #13, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #14, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #15, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #16, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #17, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #18, name = 'tokio-rt-worker'
+       frame #0: 0x0000000181536fcc libsystem_kernel.dylib`kevent + 8
+       frame #1: 0x00000001027d6dcc tripcut-studio`___lldb_unnamed_symbol_10034ebfc + 464
+       frame #2: 0x00000001027d2ba4 tripcut-studio`___lldb_unnamed_symbol_10034a988 + 540
+       frame #3: 0x00000001027dd10c tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 292
+       frame #4: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #5: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #6: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #7: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #8: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #9: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #19, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #20, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761d0 libsystem_pthread.dylib`_pthread_cond_wait + 980
+       frame #2: 0x00000001027dd1b8 tripcut-studio`___lldb_unnamed_symbol_100354fe8 + 464
+       frame #3: 0x00000001027e1184 tripcut-studio`tokio::runtime::scheduler::multi_thread::worker::run + 4184
+       frame #4: 0x00000001027d1798 tripcut-studio`___lldb_unnamed_symbol_1003496c4 + 212
+       frame #5: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #6: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #21, name = 'tokio-rt-worker'
+       frame #0: 0x000000010307dc20 tripcut-studio`___lldb_unnamed_symbol_100bf5b78 + 168
+       frame #1: 0x00000001030cc384 tripcut-studio`___lldb_unnamed_symbol_100c44198 + 492
+       frame #2: 0x00000001030be448 tripcut-studio`___lldb_unnamed_symbol_100c361b0 + 664
+       frame #3: 0x000000010306edf0 tripcut-studio`sqlite3_exec + 1492
+       frame #4: 0x00000001030bded8 tripcut-studio`___lldb_unnamed_symbol_100c35458 + 2688
+       frame #5: 0x00000001030d0e44 tripcut-studio`___lldb_unnamed_symbol_100c48dd8 + 108
+       frame #6: 0x00000001030de940 tripcut-studio`___lldb_unnamed_symbol_100c549c4 + 8060
+       frame #7: 0x000000010307defc tripcut-studio`___lldb_unnamed_symbol_100bf5b78 + 900
+       frame #8: 0x00000001030cc4b0 tripcut-studio`___lldb_unnamed_symbol_100c44198 + 792
+       frame #9: 0x000000010307bbc4 tripcut-studio`___lldb_unnamed_symbol_100bf3ae0 + 228
+       frame #10: 0x0000000102c99538 tripcut-studio`___lldb_unnamed_symbol_1008114c8 + 112
+       frame #11: 0x0000000102d7c394 tripcut-studio`tripcut_studio_lib::core::db::open_project + 1668
+       frame #12: 0x0000000102966478 tripcut-studio`___lldb_unnamed_symbol_1004de318 + 352
+       frame #13: 0x00000001027d0a18 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 496
+       frame #14: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #15: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #16: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #22, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #23, name = 'dock-progress'
+       frame #0: 0x0000000181534308 libsystem_kernel.dylib`__semwait_signal + 8
+       frame #1: 0x000000018140b054 libsystem_c.dylib`nanosleep + 220
+       frame #2: 0x00000001028dd678 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<tripcut_studio_lib::dock::spawn_watcher<tauri_runtime_wry::Wry<tauri::EventLoopMessage>>::{closure#0}, ()> + 140
+       frame #3: 0x0000000102c58c70 tripcut-studio`___lldb_unnamed_symbol_1007d0bdc + 148
+       frame #4: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #5: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #24, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #25, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #26, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #27, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #28, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #29, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #30
+       frame #0: 0x0000000181530b9c libsystem_kernel.dylib`semaphore_wait_trap + 8
+       frame #1: 0x00000001813b649c libdispatch.dylib`_dispatch_sema4_wait + 28
+       frame #2: 0x00000001813b6b28 libdispatch.dylib`_dispatch_semaphore_wait_slow + 132
+       frame #3: 0x0000000102c1821c tripcut-studio`___lldb_unnamed_symbol_100790090 + 396
+       frame #4: 0x0000000102ca4650 tripcut-studio`___lldb_unnamed_symbol_10081c498 + 440
+       frame #5: 0x00000001028e3a58 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<tripcut_studio_lib::run::{closure#2}::{closure#9}, ()> + 120
+       frame #6: 0x0000000102c5a874 tripcut-studio`___lldb_unnamed_symbol_1007d2810 + 100
+       frame #7: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #8: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #31, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #32
+       frame #0: 0x0000000181570cd8 libsystem_pthread.dylib`start_wqthread
+  thread #33, name = 'Log work queue'
+       frame #0: 0x0000000181530b9c libsystem_kernel.dylib`semaphore_wait_trap + 8
+       frame #1: 0x00000001afdab434 WebKit`WTF::Detail::CallableWrapper<IPC::StreamConnectionWorkQueue::startProcessingThread()::$_0, void>::call() + 48
+       frame #2: 0x00000001a56712f8 JavaScriptCore`WTF::Thread::entryPoint(WTF::Thread::NewThreadContext*) + 152
+       frame #3: 0x00000001a5671464 JavaScriptCore`WTF::wtfThreadEntryPoint(void*) + 16
+       frame #4: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+  thread #34, name = 'tokio-rt-worker'
+       frame #0: 0x000000018153450c libsystem_kernel.dylib`__psynch_cvwait + 8
+       frame #1: 0x00000001815761fc libsystem_pthread.dylib`_pthread_cond_wait + 1024
+       frame #2: 0x00000001026fcf74 tripcut-studio`<std::sys::sync::condvar::pthread::Condvar>::wait_timeout + 176
+       frame #3: 0x00000001027d0964 tripcut-studio`std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> + 316
+       frame #4: 0x00000001027d1e90 tripcut-studio`___lldb_unnamed_symbol_100349e48 + 72
+       frame #5: 0x00000001027187ec tripcut-studio`___lldb_unnamed_symbol_10029066c + 384
+       frame #6: 0x0000000181575d00 libsystem_pthread.dylib`_pthread_start + 136
+(lldb) quit

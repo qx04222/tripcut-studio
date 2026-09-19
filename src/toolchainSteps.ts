@@ -47,7 +47,8 @@ export function onboardingSteps(status: SettingsStatus): GuideStep[] {
     steps.push({
       id: "whisper-model",
       title: OPTIONAL_TRANSCRIBE_TITLE,
-      description: `把说话内容转成文字要用到转写模型;正式版不会联网下载。需要时请把已核验的模型文件放到：${status.whisper.model_path}；不装不影响导入、挑选、播放与导出。`,
+      // R19 P-06(models 车道):模型现在可以在 设置 › 工具与模型 一键后台下载(校验 SHA-256 后落到 model_path)。
+      description: `把说话内容转成文字要用到转写模型;在「设置 › 工具与模型」的模型卡点「安装」即可后台下载(落到 ${status.whisper.model_path});不装不影响导入、挑选、播放与导出。`,
     });
   }
 

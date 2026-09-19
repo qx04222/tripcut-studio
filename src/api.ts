@@ -107,6 +107,9 @@ export interface SettingsStatus {
     available: boolean;
     service_available: boolean;
     note: string;
+    /** R19 P-06:画面理解模型就位了吗 / 解析出的目录;旧后端没有这两项。 */
+    model_available?: boolean;
+    model_dir?: string | null;
   };
   cache: {
     database_bytes: number;
@@ -1848,6 +1851,8 @@ export interface AutoSelectOutcome {
   scope_used?: AutoSelectScope;
   /** X-01:默认范围「收藏 + 3 星以上」一条候选都没有、后端自动改按「全部」挑了 —— toast 要说出来。 */
   fell_back?: boolean;
+  /** R19 P-03:这一批的 run id(= batch_id);结果面板按它列「这批还剩什么」。旧后端没有这个字段。 */
+  run_id?: string;
 }
 
 /** 状态条「补齐时刻分 n/m」:当前集已分析素材里有/没有时刻分的数量与任务状态。 */
@@ -2415,4 +2420,148 @@ export function inspectPaths(paths: string[]): Promise<PathCondition[]> {
 /** 「现在下载」。回来时可能还在下,判定要重新 `inspectPaths` 一次。 */
 export function downloadCloudFile(path: string): Promise<void> {
   return invoke<void>("download_cloud_file", { path });
+}
+
+// ---------------------------------------------------------------------------
+// R19 Wave 2 results 车道(P-01 一句话挑片 / P-03 结果面板 / P-09 预设句)。只追加。
+// ---------------------------------------------------------------------------
+
+/** 挑法:`chapters` 按章节轮转(成片按时间顺序,缺省);`score` 不分章节、只按分数装满预算。 */
+export type AutoSelectPick = "chapters" | "score";
+
+/** `moments.rs` 的 `WEIGHT_KEYS`;权重偏置的键只能是这六个(后端 `MomentWeights::parse` 再验一次)。 */
+export const WEIGHT_KEYS = ["sharp", "motion", "exposure", "sound", "no_cut", "interest"] as const;
+export type WeightKey = (typeof WEIGHT_KEYS)[number];
+export type MomentWeights = Record<WeightKey, number>;
+
+export interface AutoSelectParamsInput {
+  budgetSecs?: number;
+  scope?: AutoSelectScope;
+  /** 权重偏置;不传 = 库里的原分。 */
+  weights?: MomentWeights | null;
+  pick?: AutoSelectPick;
+  /** 用户原句(P-01),只做记录。 */
+  prompt?: string;
+}
+
+/** 带全部参数的自动挑选(一句话挑片 / 预设句);挑完写一行 `auto_select_runs`,outcome 带 `run_id`。 */
+export function autoSelectEpisodeWith(options: AutoSelectParamsInput = {}): Promise<AutoSelectOutcome> {
+  return invoke<AutoSelectOutcome>("auto_select_episode_with", {
+    budgetSecs: options.budgetSecs ?? null,
+    scope: options.scope ?? null,
+    weightsJson: options.weights ? JSON.stringify(options.weights) : null,
+    pick: options.pick ?? null,
+    prompt: options.prompt ?? null,
+  });
+}
+
+/** 被同组去重掉的兄弟素材(这一批没选它)。 */
+export interface AutoSelectRunSibling {
+  clip_id: number;
+  score: number;
+}
+
+/** 结果面板的一行:一段自动段 + 为什么 + 兄弟。 */
+export interface AutoSelectRunRow {
+  segment_id: number;
+  clip_id: number;
+  in_ticks: number;
+  out_ticks: number;
+  tb_num: number;
+  tb_den: number;
+  secs: number;
+  score: number;
+  reasons: string[];
+  siblings: AutoSelectRunSibling[];
+}
+
+export interface AutoSelectRunParams {
+  budget_secs: number | null;
+  scope: string | null;
+  weights: MomentWeights | null;
+  pick: AutoSelectPick;
+  prompt: string | null;
+  target_secs: number | null;
+}
+
+export interface AutoSelectRunView {
+  run_id: string;
+  params: AutoSelectRunParams;
+  rows: AutoSelectRunRow[];
+}
+
+/** 这一批还活着的段(「不要这一段」软删掉的不列;「换一段」换进来的列)。 */
+export function listAutoSelectRun(runId: string): Promise<AutoSelectRunView> {
+  return invoke<AutoSelectRunView>("list_auto_select_run", { runId });
+}
+
+/** 「换一段」:同组次优兄弟(或同素材下一条建议段)替掉这一段,返回新段那一行。 */
+export function replaceAutoSegment(segmentId: number): Promise<AutoSelectRunRow> {
+  return invoke<AutoSelectRunRow>("replace_auto_segment", { segmentId });
+}
+
+// ---------------------------------------------------------------------------
+// R19 P-06(models 车道):模型一键到位。清单在 Rust `core/model_catalog.rs`,下载在
+// `core/model_download.rs`;这里只是三条命令 + 一个进度事件桥。
+// ---------------------------------------------------------------------------
+
+export type ModelPhase = "idle" | "downloading" | "installed" | "cancelled" | "error";
+
+export interface ModelCard {
+  id: string;
+  title: string;
+  /** 一句白话:装了它能干什么。 */
+  purpose: string;
+  size_bytes: number;
+  installed: boolean;
+  /** 已安装时的落地目录(画面理解)或文件(转写);未安装为 null。 */
+  location: string | null;
+  /** 这一档机器允不允许装;不允许时 `blocked_reason` 说原因。 */
+  allowed: boolean;
+  blocked_reason: string | null;
+  /** 首启该不该推荐它(≥ 16 GB 推画面理解 + 转写默认档;≤ 8 GB 只推转写低内存档)。 */
+  recommended: boolean;
+  phase: ModelPhase;
+  downloaded: number;
+  total: number;
+  error: string | null;
+  /** 清单核对日期(审计线索)。 */
+  fetched_on: string;
+}
+
+export function listModels(): Promise<ModelCard[]> {
+  return invoke<ModelCard[]>("list_models");
+}
+
+/** 后台下载;立即返回,进度走 `tripcut:model-download-progress`。同一模型下载中再点会 reject。 */
+export function startModelDownload(modelId: string): Promise<void> {
+  return invoke<void>("start_model_download", { modelId });
+}
+
+export function cancelModelDownload(modelId: string): Promise<void> {
+  return invoke<void>("cancel_model_download", { modelId });
+}
+
+/** 画面理解模型目录的设置覆盖(留空 = 用自动安装目录;环境变量 `TRIPCUT_CLIP_MODEL_DIR` 优先)。 */
+export const CLIP_MODEL_DIR_KEY = "tools.clip_model_dir";
+
+export const MODEL_PROGRESS_EVENT = "tripcut:model-download-progress";
+
+export type ModelProgressEvent =
+  | { phase: "downloading"; model_id: string; file: string; downloaded: number; total: number }
+  | { phase: "verifying"; model_id: string; file: string }
+  | { phase: "installed"; model_id: string; dir: string }
+  | { phase: "cancelled"; model_id: string }
+  | { phase: "error"; model_id: string; message: string };
+
+/** 与 `bridgeUpdateProgressEvents` 同一套约定:Tauri 事件 → 同名 window CustomEvent;非 Tauri 环境 no-op。 */
+export async function bridgeModelProgressEvents(): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<ModelProgressEvent>(MODEL_PROGRESS_EVENT, (event) => {
+      window.dispatchEvent(new CustomEvent<ModelProgressEvent>(MODEL_PROGRESS_EVENT, { detail: event.payload }));
+    });
+  } catch {
+    return () => undefined;
+  }
 }

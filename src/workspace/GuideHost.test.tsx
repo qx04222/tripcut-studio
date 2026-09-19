@@ -129,8 +129,8 @@ describe("GuideHost", () => {
     await act(async () => dispatchWorkspace({ type: "close-drawer" }));
     const dialog = await screen.findByRole("dialog", { name: "新手引导" });
     expect(dialog.textContent).toContain("往前 / 往后");
-    // 固定表里镜块是第 4 只;这位用户看过 3 只 → 显示 4/8;换成只看过 1 只就该是 2/8。
-    expect(dialog.textContent).toContain("4/8");
+    // 固定表里镜块是第 4 只;这位用户看过 3 只 → 显示 4/9;换成只看过 1 只就该是 2/9(R19 P-06 追加 models 后共 9 只)。
+    expect(dialog.textContent).toContain("4/9");
   });
 
   it("Y-05:只看过 1 只时,第二只无论是表里第几个都显示 2/8", async () => {
@@ -139,7 +139,7 @@ describe("GuideHost", () => {
     feedMock.state = feed({ clips: [{ id: 1 }], clipsById: new Map(), storyboard: { items: [{ key: "segment:1", item_kind: "segment" }], chapters: [] } });
     render(<GuideHost />);
     const dialog = await screen.findByRole("dialog", { name: "新手引导" });
-    expect(dialog.textContent).toContain("2/8");
-    expect(dialog.textContent).not.toContain("4/8");
+    expect(dialog.textContent).toContain("2/9");
+    expect(dialog.textContent).not.toContain("4/9");
   });
 });

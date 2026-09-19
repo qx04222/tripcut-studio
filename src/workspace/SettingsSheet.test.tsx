@@ -169,15 +169,16 @@ describe("设置 sheet", () => {
     expect(within(project).getByRole("heading", { level: 3, name: "设备时钟校正" })).toBeTruthy();
   });
 
-  it("播放与导出分区:主题四段(R13 加剪映风格深色)、缩放四段、导出文件夹", async () => {
+  it("播放与导出分区:主题三段(R19 车道 tokens · Q-3:剪映风格深色升格为唯一深色,通用 dark 退役)、缩放四段、导出文件夹", async () => {
     // 壳里不止 sheet 一处读 getSettings(监视器的三步引导也读一次),Once 会被抢走 —— 用常驻值,末尾还原。
     apiMocks.getSettings.mockResolvedValue({ "ui.export.last_dir": "/Volumes/T7/导出" });
     const dialog = await openLoaded();
     await goTab(dialog, "播放与导出");
     expect(within(dialog).getByRole("heading", { level: 3, name: "播放与导出" })).toBeTruthy();
-    for (const label of ["跟随系统", "浅色", "深色", "剪映风格深色", "90%", "100%", "115%", "130%"]) {
+    for (const label of ["跟随系统", "浅色", "深色", "90%", "100%", "115%", "130%"]) {
       expect(within(dialog).getByRole("button", { name: label })).toBeTruthy();
     }
+    expect(within(dialog).queryByRole("button", { name: "剪映风格深色" })).toBeNull();
     expect(within(dialog).getByRole("button", { name: "跟随系统" }).getAttribute("aria-pressed")).toBe("true");
     expect(within(dialog).getByText("导出文件夹")).toBeTruthy();
     expect(within(dialog).getByText(/\/Volumes\/T7\/导出/)).toBeTruthy();
@@ -193,6 +194,15 @@ describe("设置 sheet", () => {
       await Promise.resolve();
     });
     await waitFor(() => expect(apiMocks.setSetting).toHaveBeenCalledWith("appearance.theme", "dark"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("R19 车道 tokens · Q-3:旧偏好存的 jianying-dark 自动映射——分段选中「深色」,html[data-theme] 也是 dark(不是失踪的旧值)", async () => {
+    apiMocks.getSettings.mockResolvedValue({ "appearance.theme": "jianying-dark" });
+    const dialog = await openLoaded();
+    await goTab(dialog, "播放与导出");
+    expect(within(dialog).getByRole("button", { name: "深色" }).getAttribute("aria-pressed")).toBe("true");
     expect(document.documentElement.dataset.theme).toBe("dark");
     delete document.documentElement.dataset.theme;
   });

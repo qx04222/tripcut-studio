@@ -22,7 +22,7 @@
 
 .exit-confirm p {
   margin: 0;
-  font-size: var(--font-sm);
+  font-size: var(--text-13);
   line-height: 1.45;
   opacity: 0.85;
 }

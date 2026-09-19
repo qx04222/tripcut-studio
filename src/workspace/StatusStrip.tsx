@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
 import {
   IMPORT_PROBE_DONE_EVENT,
   bridgeImportProbeEvents,
@@ -11,9 +11,12 @@ import {
   type ImportProgress,
 } from "../api";
 import { UpdateStatusChip } from "./update/UpdateStatusChip";
+import { ModelStatusPhrase } from "./ModelStatusPhrase";
 import { StatusPause } from "./StatusPause";
 import { useComposingIndicator } from "./useRatingHotkeys";
 import { useToolchainStatus } from "./ToolchainBanner";
+import { useClipsFeed } from "./useClipsFeed";
+import { clipDurationSeconds } from "./useBandTrim";
 import { Button, Icon } from "./ui";
 import { dispatchWorkspace } from "./WorkspaceStore";
 
@@ -41,6 +44,13 @@ export interface BackgroundSummary {
   startupBackfill?: boolean;
   /** R16 §3⑤:后台不认领重活的原因;`user` 由 StatusPause 的「后台已暂停」负责,这里不再重复。可选。 */
   pausedReason?: ImportProgress["paused_reason"];
+  /**
+   * U-04/P-10「导入即有地图」:当前库已入库的素材数 / 总时长(毫秒)。两个都传时,
+   * 分析短语换成「已导入 N 条 · 共 X 分钟 · 正在分析(约 T)」——比单说「正在分析 12/27」
+   * 多告诉用户「这批素材有多少内容」。旧调用方不传时行为完全不变(走 analysisPhrase)。
+   */
+  importedCount?: number;
+  importedDurationMs?: number;
 }
 
 const EMPTY_SUMMARY: BackgroundSummary = {
@@ -107,6 +117,20 @@ export function analysisPhrase(analyzed: number, total: number, eta: string | nu
   return eta ? `正在分析 ${analyzed}/${total},大约还要 ${eta}` : `正在分析 ${analyzed}/${total}`;
 }
 
+/** 620_000 ms → 「10 分钟」(向下取整到分钟,不到 1 分钟按 1 分钟报,不然新导入的一小批显示「共 0 分钟」很怪)。 */
+function formatImportedMinutes(ms: number): string {
+  return `${Math.max(1, Math.floor(ms / 60_000))} 分钟`;
+}
+
+/**
+ * U-04/P-10「导入即有地图」:「已导入 27 条 · 共 10 分钟」/ 分析还没跑完时多接一句
+ * 「· 正在分析(约 3 分钟)」。`analysing` 传 null 表示分析已经完成或本来就没有分析总量。
+ */
+export function importMapPhrase(count: number, durationMs: number, analysing: string | null): string {
+  const base = `已导入 ${count} 条 · 共 ${formatImportedMinutes(durationMs)}`;
+  return analysing ? `${base} · 正在分析(约 ${analysing})` : base;
+}
+
 /**
  * Z-01 / Z-04:把后端的登记进度与素材分析进度合成状态条用的 (analyzed, total, failed)。
  * - 分母 = 登记到的文件数(与素材数 + 失败 + 重复取大,生成物等没走登记的素材也算进来);
@@ -124,14 +148,24 @@ export function analysisProgressFrom(progress: ImportProgress): { analyzed: numb
   return { analyzed, total, failed };
 }
 
-const isAnalysisPhrase = (phrase: string): boolean => phrase.startsWith("正在分析 ") || phrase.startsWith("分析完成 ");
+const isAnalysisPhrase = (phrase: string): boolean =>
+  phrase.startsWith("正在分析 ") || phrase.startsWith("分析完成 ") || phrase.startsWith("已导入 ");
 
 /** 纯函数:按存在性依次生成中文短语,全 0 时返回 ["后台空闲"]。`eta` 是估好的剩余时间文案(估不出传 null)。 */
 export function summaryPhrases(summary: BackgroundSummary, eta: string | null = null): string[] {
   const phrases: string[] = [];
   // R18 W-4:启动补扫挪到开窗之后,这段时间要说人话——不说「补扫」这种内部词。
   if (summary.startupBackfill) phrases.push("正在整理素材库");
-  if (summary.analyzeTotal > 0) phrases.push(analysisPhrase(summary.analyzed, summary.analyzeTotal, eta, summary.analyzeFailed ?? 0));
+  if (typeof summary.importedCount === "number" && typeof summary.importedDurationMs === "number") {
+    // U-04/P-10:有导入批次信息时,「已导入 N 条 · 共 X 分钟」取代单说「正在分析 n/m」——
+    // 分析还没跑完才带「· 正在分析(约 T)」半句,跑完了就只剩导入摘要本身。
+    const analysing = summary.analyzeTotal > 0 && summary.analyzed < summary.analyzeTotal ? eta : null;
+    if (summary.analyzeTotal > 0 || summary.importedCount > 0) {
+      phrases.push(importMapPhrase(summary.importedCount, summary.importedDurationMs, analysing));
+    }
+  } else if (summary.analyzeTotal > 0) {
+    phrases.push(analysisPhrase(summary.analyzed, summary.analyzeTotal, eta, summary.analyzeFailed ?? 0));
+  }
   // 音乐分析只在还有轨排队 / 进行中时报数;全部落终态就不占位(失败的在音乐面板里看)。
   if ((summary.musicActive ?? 0) > 0) phrases.push(`音乐分析 ${summary.musicDone ?? 0}/${summary.musicTotal ?? 0}`);
   // R15-perf:预览小文件排在分析之后单独报数;全部生成完就不占位。
@@ -340,7 +374,16 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
   // R19 接线:红点的数据源是壳里 ToolchainStatusProbe 发布的那一份(useToolchainStatus),
   // 状态条不再自己轮询 getSettingsStatus;红点只在这里渲染一处。
   const toolchainMissing = useToolchainStatus().missing;
-  const visible = summaryPhrases(summary, eta).filter((phrase) => showAnalysis || !isAnalysisPhrase(phrase));
+  // U-04/P-10:导入即有地图——「已导入 N 条 · 共 X 分钟」用的是 useClipsFeed 这份
+  // 全应用唯一的素材订阅(媒体池/镜头带已经在用,这里不多一次网络拉取)。
+  const feed = useClipsFeed();
+  const importedDurationMs = useMemo(
+    () => feed.clips.reduce((total, clip) => total + (clipDurationSeconds(clip) ?? 0) * 1_000, 0),
+    [feed.clips],
+  );
+  const summaryWithImportMap: BackgroundSummary =
+    feed.clips.length > 0 ? { ...summary, importedCount: feed.clips.length, importedDurationMs } : summary;
+  const visible = summaryPhrases(summaryWithImportMap, eta).filter((phrase) => showAnalysis || !isAnalysisPhrase(phrase));
   // 「分析完成」收起后别留一条空的状态条。
   const phrases = visible.length > 0 ? visible : ["后台空闲"];
   // V-08:真空闲(只剩兜底句「后台空闲」、没有缺失素材)时,「查看详情/全部暂停」都不占位。
@@ -425,6 +468,8 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
       <span className="workspace-status-group workspace-status-group--update">
         {/* R17 车道 B:「正在下载更新 42%」/「更新已下载 · 重启完成更新」。 */}
         <UpdateStatusChip />
+        {/* R19 P-06(models 车道):「正在下载画面理解模型 42%」;只在下载中出现,也是模型 store 的宿主。 */}
+        <ModelStatusPhrase />
       </span>
       <span className="workspace-status-group workspace-status-group--library">
         {/* 规格 §3.2 的「中文输入法组合中」提示条槽位;真值由 useRatingHotkeys 灌入。 */}

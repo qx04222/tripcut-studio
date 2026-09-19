@@ -66,6 +66,11 @@ TRIPCUT_BUILD_STAMP=github-preview-r1 \
 `TRIPCUT_UPDATER_KEY`（默认 `~/.tauri/tripcut-updater.key`）+ 钥匙串口令对更新包做 minisign
 签名，因此没有更新私钥的人照样能打出可安装的 QA/Preview DMG，只是拿不到更新产物。
 
+**`TRIPCUT_UPDATER_SIGN=1` 必须显式传，否则不生成 `.sig`/`latest.json`。** 更新产物分支只在
+`TRIPCUT_UPDATER_SIGN=1` 时执行（见 `scripts/package-dmg.sh` 第 503 行起）；preview 打包若漏传这个
+变量，DMG 照常打出但没有更新清单——本轮发布就漏过一次。发 preview 前确认命令行带了
+`TRIPCUT_UPDATER_SIGN=1`，并核对产物目录下确实出现了 `latest.json` 与 `*.tar.gz.sig`。
+
 默认产物目录：
 
 ```text

@@ -1,0 +1,103 @@
+/*
+ * R19 车道 models(P-06 模型一键到位,规格 §4 perf 行,业主拍板 §7 Q-10 ③):
+ * 设置 › 工具与模型 里的模型卡(`.settings-model-card`)与状态条的下载一句(`.models-r19-status`)。
+ * 颜色 / 圆角 / 间距 / 字号全部走 tokens.css,不新增字面量。
+ */
+
+.settings-sheet .settings-model-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+}
+
+.settings-sheet .settings-model-card[data-model-state="installed"] {
+  border-color: var(--accent);
+}
+
+.settings-sheet .settings-model-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-sheet .settings-model-card-head strong {
+  font-size: var(--text-13);
+  color: var(--text-primary);
+}
+
+.settings-sheet .settings-model-card-purpose {
+  margin: 0;
+  font-size: var(--text-12);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.settings-sheet .settings-model-card-progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-2);
+  background: var(--border-hair);
+}
+
+.settings-sheet .settings-model-card-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--progress, 0%);
+  background: var(--accent);
+}
+
+.settings-sheet .settings-model-card-location {
+  font-size: var(--text-12);
+  word-break: break-all;
+  color: var(--text-secondary);
+}
+
+.settings-sheet .settings-model-card-blocked {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: var(--text-12);
+  color: var(--text-secondary);
+}
+
+.settings-sheet .settings-model-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-sheet .settings-model-card-actions small {
+  font-size: var(--text-12);
+  color: var(--text-muted);
+}
+
+/* 状态条:与 R17 更新短语同一套排法(图标 + 进度底色 + 一句)。 */
+.workspace-shell .workspace-status-phrase.models-r19-status {
+  height: 22px;
+  padding: 0 var(--space-1);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* 画面识别组件行里的「模型位置」小字段:标签 + 输入框竖排。 */
+.settings-sheet .settings-sheet-subfield {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.settings-sheet .settings-sheet-subfield > span {
+  font-size: var(--text-12);
+  color: var(--text-secondary);
+}

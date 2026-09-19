@@ -23,6 +23,7 @@ import type {
   ClipMotion,
   ClipRating,
   ComponentStatus,
+  ModelCard,
   DestinationCard,
   DeviceClockSetting,
   DoctorReport,
@@ -871,6 +872,8 @@ const SETTINGS_STATUS: SettingsStatus = {
     available: true,
     service_available: true,
     note: "Chinese-CLIP 本地服务已就绪",
+    model_available: false,
+    model_dir: null,
   },
   cache: { database_bytes: 48_000_000, disk_bytes: 1_250_000_000 },
 };
@@ -900,6 +903,13 @@ const STORY_TEMPLATES: StoryTemplateInfo[] = [
   { id: "fastcut", name_zh: "快剪", blurb_zh: "卡点密集,适合抖音" },
   { id: "ambient", name_zh: "氛围", blurb_zh: "以空镜与环境声为主" },
   { id: "diary", name_zh: "日记", blurb_zh: "按时间顺序,口播为主" },
+];
+
+/** R19 P-06:设置 › 工具与模型 的三张模型卡(mock 里画面理解未装,点「安装」停在 42%)。 */
+const MODEL_CARDS: ModelCard[] = [
+  { id: "chinese-clip-vit-b-16", title: "画面理解模型", purpose: "看懂画面里有什么:按画面搜索、挑选时的「有意思」分、相似素材去重都靠它。", size_bytes: 753_290_873, installed: false, location: null, allowed: true, blocked_reason: null, recommended: true, phase: "idle", downloaded: 0, total: 753_290_873, error: null, fetched_on: "2026-09-18" },
+  { id: "whisper-large-v3-turbo", title: "转写模型(默认质量)", purpose: "把说话内容转成文字,搜索和字幕都用它;16 GB 及以上机器用这一档。", size_bytes: 1_624_555_275, installed: true, location: "~/Library/Application Support/tripcut/models/ggml-large-v3-turbo.bin", allowed: true, blocked_reason: null, recommended: false, phase: "installed", downloaded: 0, total: 1_624_555_275, error: null, fetched_on: "2026-09-18" },
+  { id: "whisper-small", title: "转写模型(低内存)", purpose: "转写的省内存档:8 GB 机器用这一档,质量略低但不卡。", size_bytes: 487_601_967, installed: false, location: null, allowed: true, blocked_reason: null, recommended: false, phase: "idle", downloaded: 0, total: 487_601_967, error: null, fetched_on: "2026-09-18" },
 ];
 
 const COMPONENTS: ComponentStatus[] = [
@@ -960,15 +970,37 @@ const JIANYING: JianyingAvailability = { installed_version: "11.4.0", supported:
 // 状态装配
 // ---------------------------------------------------------------------------
 
+// E-07(R19 perf 车道):镜头带量测夹具——仅在 VITE_MOCK_BAND_SEGMENTS 设了值时生效,
+// 默认路径(未设该环境变量)完全不变。用于 `scripts/qa/perf-idle-render.mjs --band-segments N`
+// 造一条 N 段的镜头带,不新增/不修改任何既有素材数据,只是把已有 60 条素材循环引用成 N 段选段。
+function bandSegmentScale(): number {
+  const raw = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_MOCK_BAND_SEGMENTS;
+  const n = Number(raw ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+export function buildScaledSegments(count: number, clipCount: number): SelectSegment[] {
+  const segments: SelectSegment[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const clipId = (i % clipCount) + 1;
+    segments.push({ id: 901 + i, clip_id: clipId, in_ticks: 2000, out_ticks: 9000, tb_num: TB_NUM, tb_den: TB_DEN });
+  }
+  return segments;
+}
+
 function createState(): MockState {
   const clips = buildClips();
+  const bandScale = bandSegmentScale();
   return {
     revision: 1,
     settings: { ...DEFAULT_SETTINGS },
     clips,
     gaps: buildGaps(),
     stacks: buildStacks(),
-    segments: [{ id: 901, clip_id: 6, in_ticks: 2000, out_ticks: 9000, tb_num: TB_NUM, tb_den: TB_DEN }],
+    segments:
+      bandScale > 0
+        ? buildScaledSegments(bandScale, clips.length)
+        : [{ id: 901, clip_id: 6, in_ticks: 2000, out_ticks: 9000, tb_num: TB_NUM, tb_den: TB_DEN }],
     player: { phase: "closed", clip_id: null, pos: 0, duration: 0, paused: true, frame: null, error: null, seek_samples: 0, seek_p50_ms: null, seek_p95_ms: null, last_seek_ms: null },
     destinationCards: buildDestinationCards(),
     narrativeRevision: { id: 77, episode_id: EPISODE_ID, kind: "suggested", created_at: "2026-09-10T22:14:00+08:00", pending_undo_count: 0 },
@@ -1502,6 +1534,24 @@ const HANDLERS: Record<string, Handler> = {
   cancel_component_install: noop,
   open_provider_login: noop,
 
+  // --- R19 P-06 模型一键到位(models 车道):画面理解未装、转写默认档已装、低内存档允许但不推荐 ---
+  list_models: () => MODEL_CARDS,
+  start_model_download: ({ modelId }) => {
+    const card = MODEL_CARDS.find((item) => item.id === str(modelId, "modelId"));
+    if (!card) throw new Error(`清单里没有模型 ${String(modelId)}`);
+    if (card.phase === "downloading") throw new Error(`${card.title} 正在下载中`);
+    card.phase = "downloading";
+    card.downloaded = Math.round(card.total * 0.42);
+    card.error = null;
+  },
+  cancel_model_download: ({ modelId }) => {
+    const card = MODEL_CARDS.find((item) => item.id === str(modelId, "modelId"));
+    if (card && card.phase === "downloading") {
+      card.phase = "cancelled";
+      card.downloaded = 0;
+    }
+  },
+
   // --- 库 ---
   list_libraries: () => state.libraries,
   create_library: ({ name }) => {
@@ -1994,7 +2044,8 @@ HANDLERS.skip_chapter = ({ chapterId, skipped }) => {
 // 功能气泡默认「都看过」—— 否则截图剧本每一步都会被一只气泡挡住;`?guides=1` 让七个按真实顺序出。
 // ---------------------------------------------------------------------------
 if (typeof location !== "undefined" && !new URLSearchParams(location.search).has("guides")) {
-  for (const id of ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay"]) state.settings[`guide.${id}.viewed`] = "true";
+  // R19 P-06 合并接线:models 也要在这里,不然它锚在状态条的气泡会挡住 32-update 的 toast 按钮。
+  for (const id of ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]) state.settings[`guide.${id}.viewed`] = "true";
 }
 // R13 车道 C:「打开剪映」(open_app 白名单只放行剪映 bundle id)与拖边裁剪的顺序表重写。只追加不改上面的表。
 HANDLERS.open_app = ({ bundleId }) => {
@@ -2387,4 +2438,100 @@ HANDLERS.download_cloud_file = () => undefined;
 // ---------------------------------------------------------------------------
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("showall")) {
   state.settings["ui.show_all_features"] = "true";
+}
+
+// ---------------------------------------------------------------------------
+// R19 Wave 2 results 车道(P-01 / P-03 / P-09):带参数的自动挑选、结果面板、换一段。只追加不改上面的表。
+// `auto_select_episode_with` 复用上面的 `auto_select_episode`(范围 / 预算同一套),权重偏置在假后端里
+// 不重打分,只把参数记进 run;`pick = score` 在假后端里等价于按章节(分数都是合成的)。
+// ---------------------------------------------------------------------------
+import type { AutoSelectRunParams, AutoSelectRunRow, AutoSelectRunView } from "../api";
+
+const autoSelectRuns = new Map<string, AutoSelectRunParams>();
+
+function runRowFor(segment: SelectSegment): AutoSelectRunRow {
+  const clip = clipById(segment.clip_id);
+  const secs = (segment.out_ticks - segment.in_ticks) / TB_DEN;
+  const best = suggestionsFor(segment.clip_id, Math.max(2, secs))[0];
+  // 假后端的「相似组」:同一章里紧挨着的下一条素材当作被去重掉的兄弟(截图要看得见「可展开」)。
+  const chapterMates = state.clips.filter((candidate) => candidate.id !== null && candidate.id !== clip.id && chapterOfClip(candidate) === chapterOfClip(clip) && candidate.select_count === 0);
+  const siblings = chapterMates.slice(0, segment.id % 3).map((mate, index) => ({ clip_id: mate.id as number, score: Math.max(0.05, (best?.score ?? 0.6) - 0.08 * (index + 1)) }));
+  return {
+    segment_id: segment.id,
+    clip_id: segment.clip_id,
+    in_ticks: segment.in_ticks,
+    out_ticks: segment.out_ticks,
+    tb_num: TB_NUM,
+    tb_den: TB_DEN,
+    secs,
+    score: best?.score ?? 0.6,
+    reasons: best?.reasons.length ? best.reasons : ["清晰", "曝光正常"],
+    siblings,
+  };
+}
+
+// 旧入口挑完也要有 run_id(真后端两条入口都带),结果面板才会在首次零决定(U-09)之后出现。
+const plainAutoSelect = HANDLERS.auto_select_episode;
+HANDLERS.auto_select_episode = (args) => {
+  const outcome = plainAutoSelect(args) as AutoSelectOutcome;
+  autoSelectRuns.set(outcome.batch_id, {
+    budget_secs: typeof args.budgetSecs === "number" ? args.budgetSecs : null,
+    scope: outcome.scope_used ?? null,
+    weights: null,
+    pick: "chapters",
+    prompt: null,
+    target_secs: 5,
+  });
+  return { ...outcome, run_id: outcome.batch_id };
+};
+HANDLERS.auto_select_episode_with = ({ budgetSecs, scope, weightsJson, pick, prompt }) => {
+  const outcome = HANDLERS.auto_select_episode({ budgetSecs, scope }) as AutoSelectOutcome;
+  autoSelectRuns.set(outcome.batch_id, {
+    budget_secs: typeof budgetSecs === "number" ? budgetSecs : null,
+    scope: outcome.scope_used ?? null,
+    weights: typeof weightsJson === "string" ? (JSON.parse(weightsJson) as AutoSelectRunParams["weights"]) : null,
+    pick: pick === "score" ? "score" : "chapters",
+    prompt: typeof prompt === "string" ? prompt : null,
+    target_secs: 5,
+  });
+  return outcome;
+};
+HANDLERS.list_auto_select_run = ({ runId }): AutoSelectRunView => {
+  const id = str(runId, "runId");
+  const params = autoSelectRuns.get(id);
+  if (!params) throw new Error("这一批挑选已经不存在了");
+  const ids = autoBatches.get(id) ?? [];
+  const rows = state.segments.filter((segment) => ids.includes(segment.id)).map(runRowFor);
+  return { run_id: id, params, rows };
+};
+HANDLERS.replace_auto_segment = ({ segmentId }): AutoSelectRunRow => {
+  const id = num(segmentId, "segmentId");
+  const segment = state.segments.find((candidate) => candidate.id === id);
+  const runId = [...autoBatches.entries()].find(([, ids]) => ids.includes(id))?.[0];
+  if (!segment || !runId) throw new Error("这一段不是自动挑的,或已经不在了");
+  const row = runRowFor(segment);
+  const sibling = row.siblings[0];
+  if (!sibling) throw new Error("这一段没有可换的备选:同组没有其它素材,这条素材也只有这一段拿得出手");
+  const best = suggestionsFor(sibling.clip_id, 5)[0] ?? { in_ticks: 0, out_ticks: 5000, score: 0.6, reasons: ["清晰"] };
+  const replacement: SelectSegment = { id: 900 + state.segments.length + 1, clip_id: sibling.clip_id, in_ticks: best.in_ticks, out_ticks: best.out_ticks, tb_num: TB_NUM, tb_den: TB_DEN };
+  storyboard.items = storyboard.items.filter((item) => item.segment_id !== id);
+  state.segments = state.segments.filter((candidate) => candidate.id !== id).concat(replacement);
+  clipById(segment.clip_id).select_count = Math.max(0, clipById(segment.clip_id).select_count - 1);
+  clipById(sibling.clip_id).select_count += 1;
+  autoBatches.set(runId, (autoBatches.get(runId) ?? []).filter((candidate) => candidate !== id).concat(replacement.id));
+  bump(state);
+  handleMockCommand("arrange_selected_segments", { mode: "append" });
+  return runRowFor(replacement);
+};
+(MOCK_COMMANDS as string[]).push("auto_select_episode_with", "list_auto_select_run", "replace_auto_segment");
+
+// ---------------------------------------------------------------------------
+// R19 车道 tokens · V-12:`?theme=light|dark` 让 preview-shots.mjs 的 `--theme` 从假后端启动
+// 那一刻起就把 appearance.theme 预置好(不是截完图再点设置切),整套剧本从第一张截图开始就在
+// 目标主题下。只认 "light"/"dark" 两档(Q-3 收编后 FIXED_THEMES 已不含 jianying-dark);
+// 只追加不改上面的表。
+// ---------------------------------------------------------------------------
+if (typeof location !== "undefined") {
+  const themeParam = new URLSearchParams(location.search).get("theme");
+  if (themeParam === "light" || themeParam === "dark") state.settings["appearance.theme"] = themeParam;
 }

@@ -2,7 +2,7 @@
 // R10 车道 E 对导入抽屉的回归(U-07 / U-08),从 ImportDrawer.test.tsx 分出来守 400 行;
 // api 替身与拖放桩与那份一致。
 import { act } from "react";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = await vi.hoisted(async () => {
@@ -66,7 +66,9 @@ describe("R10 U-07:来源分页按钮三态与路径中间省略", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(within(dialog).getByRole("button", { name: "选择文件夹" })).toBeTruthy();
+    // U-04/P-10「导入即有地图」:断言迁移——批次真落地(enqueued>0)后抽屉自动收起,
+    // 不会再回到「选择文件夹」这颗按钮的三态循环(抽屉都不在了)。
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "导入素材" })).toBeNull());
   });
 
   it("关注文件夹与「最近添加」的路径拆成头 / 尾两段(中间省略),AX 名仍是整条路径", async () => {

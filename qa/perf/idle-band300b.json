@@ -1,0 +1,40 @@
+{
+  "label": "band300b",
+  "seconds": 8,
+  "polls_expected": 4,
+  "delta": {
+    "LayoutCount": 0,
+    "RecalcStyleCount": 0,
+    "ScriptDuration_ms": 2,
+    "TaskDuration_ms": 4,
+    "JSHeapUsedSize_delta_kb": 1253
+  },
+  "trace_events": {
+    "Commit": 1,
+    "Layout": 0,
+    "UpdateLayoutTree": 0,
+    "FunctionCall": 14,
+    "Paint": 0
+  },
+  "scenario": "idle",
+  "band_segments": 300,
+  "scroll": {
+    "label": "band300b",
+    "scenario": "scroll",
+    "wheel_events": 20,
+    "delta": {
+      "LayoutCount": 24,
+      "RecalcStyleCount": 167,
+      "ScriptDuration_ms": 207,
+      "TaskDuration_ms": 283,
+      "JSHeapUsedSize_delta_kb": 1394
+    },
+    "trace_events": {
+      "Commit": 137,
+      "Layout": 23,
+      "UpdateLayoutTree": 162,
+      "FunctionCall": 1002,
+      "Paint": 285
+    }
+  }
+}

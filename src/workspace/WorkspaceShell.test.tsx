@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act } from "react";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 
 // 三个模态懒加载的探针:模块顶层代码只有在 dynamic import() 真正触发时才跑,
@@ -575,6 +575,26 @@ describe("R11 简化专项 #4:每屏一个主动作", () => {
     expect(document.querySelectorAll(".ui-button--primary:not([hidden])").length, list()).toBeLessThanOrEqual(1);
     act(() => dispatchWorkspace({ type: "clear-selection" }));
     expect(document.querySelectorAll(".ui-button--primary:not([hidden])").length, list()).toBeLessThanOrEqual(1);
+  });
+
+  it("F-R19-11:「自动挑选精选段」弹层开着时整屏仍只有顶栏「下一步」一颗实心主按钮(弹层里的「开始挑选」是 secondary)", async () => {
+    apiMocks.getAiDescription.mockResolvedValue(null);
+    apiMocks.getClipsRevision.mockResolvedValue("rev-primary-3" as never);
+    apiMocks.listClips.mockResolvedValue([shellClip(3)]);
+    __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 3 }, anchorClipId: 3, multiSelection: [3] });
+    render(<WorkspaceShell />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const band = screen.getByRole("region", { name: "镜头带" });
+    fireEvent.click(within(band).getByRole("button", { name: "自动挑选精选段" }));
+    const panel = within(band).getByRole("group", { name: "自动挑选精选段" });
+    const start = within(panel).getByRole("button", { name: "开始挑选" });
+    expect(start.className).not.toContain("ui-button--primary");
+    const all = document.querySelectorAll(".ui-button--primary:not([hidden])");
+    expect(all.length, [...all].map((n) => n.getAttribute("aria-label") ?? n.textContent).join(" | ")).toBe(1);
+    expect(all[0]!.getAttribute("aria-label")).toBe("流水线下一步");
   });
 });
 
