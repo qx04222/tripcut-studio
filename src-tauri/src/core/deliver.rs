@@ -3061,12 +3061,16 @@ fn pts_boundary_warning(
     expected_duration: f64,
     frame_seconds: f64,
 ) -> Option<String> {
+    // 与 `validate_output_pts_bounds` 同一把尺:首帧容「1 帧 + 封装偏移」(AAC 编码器延迟被
+    // `make_zero` 整体前推,60 fps 下 0.023 s 已经超过 1 帧),段长(尾 − 首)仍只容 1 帧——
+    // 偏移是整体平移,段长错了才是真裁错。
     let first_delta = bounds.first_seconds.abs();
-    let end_delta = (bounds.end_seconds - expected_duration).abs();
+    let end_delta = ((bounds.end_seconds - bounds.first_seconds) - expected_duration).abs();
     let tolerance = frame_seconds.max(0.000_001);
-    if first_delta > tolerance + f64::EPSILON || end_delta > tolerance + f64::EPSILON {
+    let first_tolerance = tolerance + MUX_SHIFT_ALLOWANCE_SECONDS;
+    if first_delta > first_tolerance + f64::EPSILON || end_delta > tolerance + f64::EPSILON {
         Some(format!(
-            "⚠ 黄标：PTS 边界偏差超过 1 帧（首帧 {first_delta:.6}s，尾帧 {end_delta:.6}s，1 帧 {tolerance:.6}s）"
+            "⚠ 黄标：PTS 边界偏差超过 1 帧（首帧 {first_delta:.6}s，段长差 {end_delta:.6}s，1 帧 {tolerance:.6}s）"
         ))
     } else {
         None
@@ -5833,6 +5837,47 @@ mod tests {
 
         assert!(warning.contains("黄标"));
         assert!(warning.contains("超过 1 帧"));
+    }
+
+    /// 2026-09-19 frozen-video 取证副产物:60 fps 精选段带 AAC 音轨时,`make_zero` 把编码器
+    /// 延迟(1024 采样 ≈ 0.023 s)整体前推,输出首帧 pts 就是 0.023 s;这是封装平移不是裁错帧
+    /// (`validate_output_pts_bounds` 早已这样看),黄标却按「1 帧 = 0.0167 s」硬判,真机 6 段里
+    /// 5 段全被打了黄标,业主看到就以为导出坏了。首帧容「1 帧 + 封装偏移」,段长(尾 − 首)仍只容 1 帧。
+    #[test]
+    fn mux_shift_on_first_frame_at_60fps_is_not_a_yellow_warning() {
+        let bounds = PtsBounds {
+            first_seconds: 0.023,
+            end_seconds: 5.023 + 0.005,
+        };
+        assert!(pts_boundary_warning(bounds, 5.0, 1.0 / 59.94).is_none());
+    }
+
+    #[test]
+    fn span_off_by_more_than_one_frame_is_still_a_yellow_warning_even_with_mux_shift() {
+        let warning = pts_boundary_warning(
+            PtsBounds {
+                first_seconds: 0.023,
+                end_seconds: 5.023 + 0.05,
+            },
+            5.0,
+            1.0 / 59.94,
+        )
+        .unwrap();
+        assert!(warning.contains("黄标"), "{warning}");
+    }
+
+    #[test]
+    fn first_frame_beyond_mux_shift_allowance_is_still_a_yellow_warning() {
+        let warning = pts_boundary_warning(
+            PtsBounds {
+                first_seconds: 0.09,
+                end_seconds: 5.09,
+            },
+            5.0,
+            1.0 / 59.94,
+        )
+        .unwrap();
+        assert!(warning.contains("黄标"), "{warning}");
     }
 
     #[test]

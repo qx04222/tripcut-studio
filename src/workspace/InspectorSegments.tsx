@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
 import { listSelectSegments, playerCommand, type SelectSegment } from "../api";
+import { PLAYER_STATUS_REFRESH_EVENT } from "../PlayerOverlay";
 import { ExportSelectedButton } from "./deliver/QuickExportEntry";
 import { deleteSegmentWithUndo } from "./segmentDeletion";
 import { Button, Icon } from "./ui";
@@ -77,12 +78,16 @@ export function SelectSegmentsSection({
       try {
         await playerCommand({ type: "seek_abs", seconds: inSeconds }, clipId);
         await playerCommand({ type: "play" }, clipId);
+        // 监视器暂停时停表,不广播它就不知道已经在放(时间码 / 播放键停在旧值,气泡也不让位)。
+        window.dispatchEvent(new Event(PLAYER_STATUS_REFRESH_EVENT));
         setNotice(null);
       } catch (error) {
         setNotice(failureText("复播", error));
       }
     },
-    [],
+    // 2026-09-19 frozen-video:以前是 `[]`,闭包里的 clipId 永远是首次挂载那条;R17 起后端按素材
+    // 归属拒命令(「命令属于已换掉的素材」),换过素材后「复播」就整个哑掉。
+    [clipId],
   );
 
   const remove = useCallback(

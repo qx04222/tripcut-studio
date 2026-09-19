@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("./api", () => apiMocks);
 
 import {
+  PLAYER_STATUS_REFRESH_EVENT,
   PlayerOverlay,
   STATUS_INTERVAL_MS,
   VIEWPORT_DEBOUNCE_MS,
@@ -320,6 +321,24 @@ describe("PlayerOverlay 嵌入模式", () => {
     apiMocks.playerStatus.mockClear();
     await settle(STATUS_INTERVAL_MS * 5);
     expect(apiMocks.playerStatus).not.toHaveBeenCalled();
+  });
+
+  it("2026-09-19 frozen-video:检查器「复播精选段」绕过监视器直发 seek+play,停表中的监视器收到状态刷新广播后补读一次、表重新走起来", async () => {
+    stubPaneRect({ left: 320, top: 96, width: 700, height: 400 });
+    await mount({ variant: "embedded" });
+    apiMocks.playerStatus.mockClear();
+    await settle(STATUS_INTERVAL_MS * 3);
+    expect(apiMocks.playerStatus).not.toHaveBeenCalled();
+    // 后端已经在放(别处发的 play),监视器不知道。
+    apiMocks.playerStatus.mockResolvedValue({ ...readyStatus, paused: false, pos: 12 });
+    await act(async () => {
+      window.dispatchEvent(new Event(PLAYER_STATUS_REFRESH_EVENT));
+      await Promise.resolve();
+    });
+    expect(apiMocks.playerStatus).toHaveBeenCalled();
+    const afterBroadcast = apiMocks.playerStatus.mock.calls.length;
+    await settle(STATUS_INTERVAL_MS * 3);
+    expect(apiMocks.playerStatus.mock.calls.length).toBeGreaterThan(afterBroadcast);
   });
 
   it("嵌入模式 ⌘⏎ 请求全屏沉浸,Esc 不退出(退出由监视器接管)", async () => {

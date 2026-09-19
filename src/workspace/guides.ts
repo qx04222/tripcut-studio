@@ -37,6 +37,9 @@ export interface GuideSignals {
   /** R19 P-06(models 车道):清单里有这一档推荐、允许装、还没装也没在下的模型(由 modelStore 报)。
    *  可选:追加的信号不逼着既有的字面量对象都补一项。 */
   modelInstallSuggested?: boolean;
+  /** 2026-09-19 frozen-video:播放器正在放(ready 且未暂停)。气泡压到画面又躲不开时据此让位,
+   *  不再为了一只气泡把原生画面藏掉。可选,同上。 */
+  playing?: boolean;
 }
 
 export const EMPTY_GUIDE_SIGNALS: GuideSignals = {
@@ -301,8 +304,10 @@ export function reportGuideSignals(patch: Partial<GuideSignals>): void {
 
 /** 播放器状态一到末尾就锁存「播完过」;换素材后回到开头也不丢。 */
 export function notePlayerStatus(status: PlayerStatus | null): void {
-  if (signals.playbackEnded || !isAtEnd(status)) return;
-  reportGuideSignals({ playbackEnded: true });
+  const playing = status !== null && status.phase === "ready" && !status.paused;
+  const patch: Partial<GuideSignals> = { playing };
+  if (!signals.playbackEnded && isAtEnd(status)) patch.playbackEnded = true;
+  reportGuideSignals(patch);
 }
 
 /** 「知道了」:本会话不再出,并把 `guide.<id>.viewed` 写成 true。 */

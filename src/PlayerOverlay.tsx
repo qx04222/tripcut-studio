@@ -33,6 +33,12 @@ function isStaleClipCommand(reason: unknown): boolean {
 }
 
 export const STATUS_INTERVAL_MS = 80;
+/**
+ * 2026-09-19 frozen-video:别处(检查器「复播精选段」)绕过监视器直接给播放器发了 seek / play,
+ * 停表中的监视器(暂停时不轮询)不会知道后端已经在放——时间码、播放键、`signals.playing`
+ * 全停在旧值。发完命令广播这一条,监视器补读一次状态,表就重新走起来。
+ */
+export const PLAYER_STATUS_REFRESH_EVENT = "tripcut:player-status-refresh";
 
 /**
  * V-04:mpv 的 seek 是异步的 —— 命令返回那一刻 `time-pos` 多半还是旧值,暂停时又不轮询,
@@ -380,6 +386,12 @@ export function PlayerOverlay({
       await reportFailure(reason);
     }
   }, [reportFailure]);
+
+  useEffect(() => {
+    const onRefresh = () => void refreshStatus();
+    window.addEventListener(PLAYER_STATUS_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(PLAYER_STATUS_REFRESH_EVENT, onRefresh);
+  }, [refreshStatus]);
 
   // seek 之后等它落地(V-04):只把落地(或超时)那次状态交出去,中间的旧位置不上屏。
   // 代际号:新的一批命令、换素材、卸载都让还在等的旧循环退出,别对着已经不在的实例敲。

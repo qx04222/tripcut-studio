@@ -18,7 +18,7 @@ export function GuideHost(): JSX.Element | null {
   const pinned = useHomePinned();
   const selection = useWorkspace((state) => state.selection);
   const openDrawer = useWorkspace((state) => state.openDrawer);
-  const { active, seen } = useGuides();
+  const { active, seen, signals } = useGuides();
 
   useEffect(() => {
     void hydrateGuides();
@@ -67,6 +67,8 @@ export function GuideHost(): JSX.Element | null {
       onTry={spec.tryEvent ? onTry : undefined}
       onDismiss={onDismiss}
       onAnchorMissing={onAnchorMissing}
+      // 2026-09-19 frozen-video:播放中、气泡又压到画面躲不开时,气泡让位而不是藏画面。
+      yieldWhilePlaying={signals.playing === true}
       // Y-05:编号按看到的顺序数,不是固定表里的序号(真机上看到 1 → 3 → 4 → 2 像漏看了)。
       counter={`${Math.min(seen + 1, GUIDE_ORDER.length)}/${GUIDE_ORDER.length}`}
     />

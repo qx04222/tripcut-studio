@@ -155,6 +155,18 @@ describe("guides store", () => {
     expect(getGuideSnapshot().active).toBe("autoplay");
   });
 
+  it("2026-09-19 frozen-video:播放器在放 / 停下由 notePlayerStatus 报成 signals.playing(气泡压到画面时据此让位)", async () => {
+    await hydrateGuides();
+    notePlayerStatus({ phase: "ready", duration: 10, pos: 3, paused: false } as never);
+    expect(getGuideSnapshot().signals.playing).toBe(true);
+    notePlayerStatus({ phase: "ready", duration: 10, pos: 3, paused: true } as never);
+    expect(getGuideSnapshot().signals.playing).toBe(false);
+    notePlayerStatus({ phase: "loading", duration: 0, pos: 0, paused: false } as never);
+    expect(getGuideSnapshot().signals.playing).toBe(false);
+    notePlayerStatus(null);
+    expect(getGuideSnapshot().signals.playing).toBe(false);
+  });
+
   it("Y-04:镜块引导的文案跟按钮走 —— 「往前 / 往后」,不再是「上移 / 下移」", () => {
     expect(GUIDES.shot.text).toContain("往前 / 往后");
     expect(GUIDES.shot.text).not.toMatch(/上移|下移/);
