@@ -99,7 +99,7 @@ ttf-parser = "=0.25.1"
 # 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
 # url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
 url = "=2.5.8"
-uuid = { version = "=1.26.0", features = ["v4"] }
+uuid = { version = "=1.26.1", features = ["v4"] }
 walkdir = "=2.5.0"
 tauri-plugin-notification = "=2.4.0"
 # R18 H-16:通知上的「在 Finder 中显示」。tauri-plugin-notification 的桌面
