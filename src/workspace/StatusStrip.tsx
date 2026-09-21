@@ -161,7 +161,9 @@ export function summaryPhrases(summary: BackgroundSummary, eta: string | null = 
     // 分析还没跑完才带「· 正在分析(约 T)」半句,跑完了就只剩导入摘要本身。
     const analysing = summary.analyzeTotal > 0 && summary.analyzed < summary.analyzeTotal ? eta : null;
     if (summary.analyzeTotal > 0 || summary.importedCount > 0) {
-      phrases.push(importMapPhrase(summary.importedCount, summary.importedDurationMs, analysing));
+      const unknownEta = eta === null && summary.analyzed < summary.analyzeTotal;
+      const progress = unknownEta ? ` · 正在分析 ${summary.analyzed}/${summary.analyzeTotal}` : "";
+      phrases.push(importMapPhrase(summary.importedCount, summary.importedDurationMs, analysing) + progress);
     }
   } else if (summary.analyzeTotal > 0) {
     phrases.push(analysisPhrase(summary.analyzed, summary.analyzeTotal, eta, summary.analyzeFailed ?? 0));

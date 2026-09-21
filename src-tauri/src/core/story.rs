@@ -161,7 +161,9 @@ pub fn enqueue_if_import_complete(connection: &mut Connection) -> Result<Option<
     let (clip_count, latest_import): (i64, String) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(MAX(imported_at), '')
          FROM clips
-         WHERE missing_since IS NULL AND (episode_id = ?1 OR episode_id IS NULL)",
+         WHERE missing_since IS NULL
+           AND kind = 'video'
+           AND (episode_id = ?1 OR episode_id IS NULL)",
         [episode_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -235,6 +237,7 @@ fn chapterize_episode(
     transaction.execute(
         "UPDATE clips SET chapter_id = NULL
          WHERE (episode_id = ?1 OR episode_id IS NULL)
+           AND kind = 'video'
            AND chapter_id IN (
                SELECT id FROM chapters WHERE manual = 0 AND episode_id = ?1
            )",
@@ -386,6 +389,7 @@ fn load_clip_moments(connection: &Connection, episode_id: i64) -> Result<Vec<Cli
          FROM clips c
          LEFT JOIN chapters chapter ON chapter.id = c.chapter_id
          WHERE c.missing_since IS NULL
+           AND c.kind = 'video'
            AND (c.episode_id = ?1 OR c.episode_id IS NULL)
            AND c.captured_at IS NOT NULL
            AND strftime('%s', c.captured_at) IS NOT NULL
@@ -474,9 +478,23 @@ pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> R
         "SELECT chapter.id, chapter.title, chapter.start_at, chapter.end_at,
                 (SELECT COUNT(*) FROM clips WHERE chapter_id = chapter.id
                  AND (episode_id = ?1 OR episode_id IS NULL)
-                 AND missing_since IS NULL)
+                 AND missing_since IS NULL
+                 AND kind = 'video')
          FROM chapters chapter
          WHERE chapter.tombstone = 0 AND chapter.episode_id = ?1
+           AND (
+               EXISTS (
+                   SELECT 1 FROM clips c
+                   WHERE c.chapter_id = chapter.id
+                     AND c.kind = 'video'
+                     AND c.missing_since IS NULL
+                     AND (c.episode_id = ?1 OR c.episode_id IS NULL)
+               ) OR (
+                   chapter.manual = 1 AND NOT EXISTS (
+                       SELECT 1 FROM clips any_clip WHERE any_clip.chapter_id = chapter.id
+                   )
+               )
+           )
          ORDER BY chapter.start_at, chapter.id",
     )?;
     let chapter_rows = chapter_statement.query_map([episode_id], |row| {
@@ -508,6 +526,7 @@ pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> R
              FROM clips c
              JOIN live_selects selected ON selected.clip_id = c.id
              WHERE c.missing_since IS NULL
+               AND c.kind = 'video'
                AND (c.episode_id = ?1 OR c.episode_id IS NULL)
              UNION ALL
              SELECT c.id, NULL, 'whole', 0, COALESCE(c.duration_ticks, 0),
@@ -518,6 +537,7 @@ pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> R
                     c.chapter_id
              FROM clips c
              WHERE c.missing_since IS NULL
+               AND c.kind = 'video'
                AND (c.episode_id = ?1 OR c.episode_id IS NULL)
                AND NOT EXISTS (
                    SELECT 1 FROM live_selects selected WHERE selected.clip_id = c.id
@@ -845,7 +865,8 @@ fn ensure_selected(
                 SELECT 1 FROM segments
                 JOIN clips c ON c.id = segments.clip_id
                 WHERE segments.id = ?1 AND segments.clip_id = ?2
-                  AND kind = 'select' AND tombstone = 0
+                  AND segments.kind = 'select' AND segments.tombstone = 0
+                  AND c.kind = 'video'
                   AND (c.episode_id = ?3 OR c.episode_id IS NULL)
              )",
             params![item.segment_id, item.clip_id, episode_id],
@@ -857,6 +878,7 @@ fn ensure_selected(
                 "SELECT EXISTS(
                     SELECT 1 FROM clips c
                     WHERE c.id = ?1 AND c.missing_since IS NULL
+                      AND c.kind = 'video'
                       AND (c.episode_id = ?2 OR c.episode_id IS NULL)
                       AND NOT EXISTS (
                           SELECT 1 FROM segments selected
@@ -887,6 +909,9 @@ pub(crate) fn upsert_story_order(
     episode_id: i64,
     position: i64,
 ) -> Result<()> {
+    if !is_video_clip_in_episode(connection, item.clip_id, episode_id)? {
+        return Err(CoreError::Story(format!("视频镜头带拒绝非视频素材 {}", item.clip_id)));
+    }
     let existing = if item.item_kind == "whole" {
         connection
             .query_row(
@@ -928,6 +953,23 @@ pub(crate) fn upsert_story_order(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn is_video_clip_in_episode(
+    connection: &Connection,
+    clip_id: i64,
+    episode_id: i64,
+) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM clips
+             WHERE id = ?1 AND kind = 'video'
+               AND missing_since IS NULL
+               AND (episode_id = ?2 OR episode_id IS NULL)
+         )",
+        params![clip_id, episode_id],
+        |row| row.get::<_, i64>(0),
+    )? == 1)
 }
 
 fn active_chapter_bounds(
@@ -973,7 +1015,20 @@ fn record_snapshot(
 pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Result<StorySnapshot> {
     let mut chapter_statement = connection.prepare(
         "SELECT id, title, start_at, end_at, manual, tombstone
-         FROM chapters WHERE episode_id = ?1 ORDER BY id",
+         FROM chapters chapter
+         WHERE episode_id = ?1
+           AND (
+               EXISTS (
+                   SELECT 1 FROM clips c
+                   WHERE c.chapter_id = chapter.id AND c.kind = 'video'
+                     AND (c.episode_id = ?1 OR c.episode_id IS NULL)
+               ) OR (
+                   chapter.manual = 1 AND NOT EXISTS (
+                       SELECT 1 FROM clips any_clip WHERE any_clip.chapter_id = chapter.id
+                   )
+               )
+           )
+         ORDER BY id",
     )?;
     let chapters = chapter_statement
         .query_map([episode_id], |row| {
@@ -989,7 +1044,9 @@ pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Resu
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut clip_statement = connection.prepare(
         "SELECT id, chapter_id FROM clips
-         WHERE episode_id = ?1 OR episode_id IS NULL ORDER BY id",
+         WHERE kind = 'video'
+           AND (episode_id = ?1 OR episode_id IS NULL)
+         ORDER BY id",
     )?;
     let clip_chapters = clip_statement
         .query_map([episode_id], |row| {
@@ -1000,9 +1057,14 @@ pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Resu
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut order_statement = connection.prepare(
-        "SELECT item_kind, clip_id, segment_id, position
-         FROM story_order
-         WHERE episode_id = ?1 AND tombstone = 0 ORDER BY position, id",
+        "SELECT story.item_kind, story.clip_id, story.segment_id, story.position
+         FROM story_order story
+         JOIN clips c ON c.id = story.clip_id
+         WHERE story.episode_id = ?1 AND story.tombstone = 0
+           AND c.kind = 'video'
+           AND c.missing_since IS NULL
+           AND (c.episode_id = ?1 OR c.episode_id IS NULL)
+         ORDER BY story.position, story.id",
     )?;
     let order = order_statement
         .query_map([episode_id], |row| {
@@ -1029,10 +1091,32 @@ fn restore_snapshot(
     snapshot: &StorySnapshot,
 ) -> Result<usize> {
     connection.execute(
-        "UPDATE chapters SET tombstone = 1 WHERE episode_id = ?1",
+        "UPDATE chapters SET tombstone = 1
+         WHERE episode_id = ?1
+           AND EXISTS (
+               SELECT 1 FROM clips c
+               WHERE c.chapter_id = chapters.id AND c.kind = 'video'
+                 AND (c.episode_id = ?1 OR c.episode_id IS NULL)
+           )",
         [episode_id],
     )?;
+    let mut snapshot_video_chapters = HashSet::new();
+    for assignment in &snapshot.clip_chapters {
+        if let Some(chapter_id) = assignment.chapter_id {
+            if is_video_clip_in_episode(connection, assignment.clip_id, episode_id)? {
+                snapshot_video_chapters.insert(chapter_id);
+            }
+        }
+    }
     for chapter in &snapshot.chapters {
+        let empty_manual = chapter.manual == 1 && connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM clips WHERE chapter_id = ?1)",
+            [chapter.id],
+            |row| row.get::<_, i64>(0),
+        )? == 1;
+        if !snapshot_video_chapters.contains(&chapter.id) && !empty_manual {
+            continue;
+        }
         connection.execute(
             "UPDATE chapters
              SET title = ?2, start_at = ?3, end_at = ?4,
@@ -1051,14 +1135,16 @@ fn restore_snapshot(
     }
     connection.execute(
         "UPDATE clips SET chapter_id = NULL
-         WHERE episode_id = ?1 OR episode_id IS NULL",
+         WHERE kind = 'video'
+           AND (episode_id = ?1 OR episode_id IS NULL)",
         [episode_id],
     )?;
     for assignment in &snapshot.clip_chapters {
         if let Some(chapter_id) = assignment.chapter_id {
             connection.execute(
                 "UPDATE clips SET chapter_id = ?2
-                 WHERE id = ?1 AND (episode_id = ?3 OR episode_id IS NULL)",
+                 WHERE id = ?1 AND kind = 'video'
+                   AND (episode_id = ?3 OR episode_id IS NULL)",
                 params![assignment.clip_id, chapter_id, episode_id],
             )?;
         }
@@ -1073,10 +1159,16 @@ fn restore_snapshot(
         // R17 epmove:快照里的素材如今属于别的集(被「移到其他集」挪走了)—— 不回排、也不报错:
         // `story_order_whole_unique_idx` 按 clip 全局唯一,硬插会撞索引把整次撤销打死;镜头带是按集的,
         // 别的集的素材本来也不该出现在这一集的带上。跳过数带回给前端提示。
-        let owner: Option<Option<i64>> = connection
-            .query_row("SELECT episode_id FROM clips WHERE id = ?1", [item.clip_id], |row| row.get(0))
+        let clip_state: Option<(Option<i64>, String, Option<String>)> = connection
+            .query_row("SELECT episode_id, kind, missing_since FROM clips WHERE id = ?1", [item.clip_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .optional()?;
-        if matches!(owner, Some(Some(other)) if other != episode_id) {
+        let Some((owner, kind, missing_since)) = clip_state else {
+            continue;
+        };
+        if kind != "video" || missing_since.is_some() {
+            continue;
+        }
+        if matches!(owner, Some(other) if other != episode_id) {
             skipped_moved += 1;
             continue;
         }
@@ -1123,6 +1215,7 @@ pub(crate) fn ordered_band_items(connection: &Connection) -> Result<Vec<BandItem
          WHERE story.tombstone = 0
            AND story.episode_id = ?1
            AND c.missing_since IS NULL
+           AND c.kind = 'video'
          ORDER BY chapter.id IS NULL, chapter.start_at, chapter.id,
                   story.position, story.id",
     )?;
@@ -1202,6 +1295,100 @@ mod tests {
                 .unwrap();
         }
         clip_id
+    }
+
+    fn insert_legacy_whole_order(connection: &Connection, episode_id: i64, clip_id: i64, position: i64) {
+        connection
+            .execute(
+                "INSERT INTO story_order(item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id)
+                 VALUES ('whole', ?1, NULL, ?2, 0, '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z', ?3)",
+                params![clip_id, position, episode_id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn photo_probe_does_not_block_video_chapterize_scheduling() {
+        let (_directory, mut connection) = setup();
+        insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z", None, false);
+        connection.execute(
+            "INSERT INTO jobs(kind, payload, payload_hash, status, attempt, created_at, updated_at)
+             VALUES ('photo_probe', '{}', 'photo-active', 'pending', 0, '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z')",
+            [],
+        ).unwrap();
+        assert!(enqueue_if_import_complete(&mut connection).unwrap().is_some());
+    }
+
+    #[test]
+    fn photo_import_does_not_change_video_chapterize_payload_hash() {
+        let (_directory, mut connection) = setup();
+        insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z", None, false);
+        assert!(enqueue_if_import_complete(&mut connection).unwrap().is_some());
+        connection.execute("UPDATE jobs SET status = 'done' WHERE kind = 'chapterize'", []).unwrap();
+        let photo = insert_clip(&connection, "photo.jpg", "2026-09-01T20:00:00Z", None, false);
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        assert_eq!(enqueue_if_import_complete(&mut connection).unwrap(), None);
+    }
+
+    #[test]
+    fn chapterize_moments_boundaries_and_board_ignore_distant_photo() {
+        let (_directory, mut connection) = setup();
+        let first = insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, false);
+        let second = insert_clip(&connection, "b.mov", "2026-08-31T10:10:00Z", None, false);
+        let photo = insert_clip(&connection, "photo.jpg", "2026-09-01T20:00:00Z", None, false);
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+
+        assert_eq!(load_clip_moments(&connection, episode).unwrap().iter().map(|moment| moment.id).collect::<Vec<_>>(), vec![first, second]);
+        chapterize(&mut connection).unwrap();
+        let video_chapters: Vec<Option<i64>> = [first, second].into_iter().map(|id| connection.query_row("SELECT chapter_id FROM clips WHERE id = ?1", [id], |row| row.get(0)).unwrap()).collect();
+        assert_eq!(video_chapters[0], video_chapters[1]);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM chapters WHERE tombstone = 0", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+
+        connection.execute(
+            "INSERT INTO chapters(title, start_at, end_at, manual, tombstone, episode_id)
+             VALUES ('历史照片章', '2026-09-01T20:00:00Z', '2026-09-01T20:00:00Z', 0, 0, ?1)",
+            [episode],
+        ).unwrap();
+        let photo_chapter = connection.last_insert_rowid();
+        connection.execute("UPDATE clips SET chapter_id = ?2 WHERE id = ?1", params![photo, photo_chapter]).unwrap();
+        let board = get_storyboard(&connection).unwrap();
+        assert_eq!(board.chapters.len(), 1);
+        assert_eq!(board.chapters[0].clip_count, 2);
+    }
+
+    #[test]
+    fn story_snapshot_capture_and_restore_never_revive_photo_state() {
+        let (_directory, mut connection) = setup();
+        let video = insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z", None, true);
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:01:00Z", None, true);
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        chapterize(&mut connection).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+        let video_chapter: i64 = connection.query_row("SELECT chapter_id FROM clips WHERE id = ?1", [video], |row| row.get(0)).unwrap();
+        connection.execute(
+            "INSERT INTO chapters(title, start_at, end_at, manual, tombstone, episode_id)
+             VALUES ('照片章', '2026-08-31T10:01:00Z', '2026-08-31T10:01:00Z', 1, 0, ?1)",
+            [episode],
+        ).unwrap();
+        let photo_chapter = connection.last_insert_rowid();
+        connection.execute("UPDATE clips SET chapter_id = ?2 WHERE id = ?1", params![photo, photo_chapter]).unwrap();
+        insert_legacy_whole_order(&connection, episode, video, 0);
+        insert_legacy_whole_order(&connection, episode, photo, 1);
+
+        let captured = capture_snapshot(&connection, episode).unwrap();
+        assert_eq!(captured.chapters.len(), 1);
+        assert_eq!(captured.clip_chapters.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![video]);
+        assert_eq!(captured.order.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![video]);
+
+        let mut historical = captured;
+        historical.clip_chapters.push(ClipChapterSnapshot { clip_id: photo, chapter_id: Some(video_chapter) });
+        historical.order.push(StoryOrderSnapshot { item_kind: "whole".to_owned(), clip_id: photo, segment_id: None, position: 1 });
+        restore_snapshot(&connection, episode, &historical).unwrap();
+        assert_eq!(connection.query_row("SELECT chapter_id FROM clips WHERE id = ?1", [photo], |row| row.get::<_, i64>(0)).unwrap(), photo_chapter);
+        assert_eq!(connection.query_row("SELECT tombstone FROM chapters WHERE id = ?1", [photo_chapter], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let live: Vec<i64> = connection.prepare("SELECT clip_id FROM story_order WHERE tombstone = 0 ORDER BY position").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(live, vec![video]);
     }
 
     #[test]
@@ -1317,6 +1504,95 @@ mod tests {
             .query_row("SELECT id FROM chapters WHERE tombstone = 0", [], |row| row.get(0))
             .unwrap();
         assert_eq!(first_id, second_id);
+    }
+
+    /// R21 W1 真机 P0:0050 给 `clips` 加了 `kind` 之后,`ensure_selected` 的段分支 `segments JOIN clips`
+    /// 里裸写的 `kind = 'select'` 变成 ambiguous column —— 镜头带上只要有一个精选段,任何 `set_story_order`
+    /// (拖排 / 「加入当前章节」/ 撤销)都报错。段路径此前没有测试盖到。
+    #[test]
+    fn r21_story_order_with_select_segment_survives_clips_kind_column() {
+        let (_directory, mut connection) = setup();
+        let clip = insert_clip(&connection, "a.mov", "2026-08-31T10:00:00Z", None, false);
+        connection
+            .execute(
+                "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind) VALUES (?1, 1000, 5000, 'select')",
+                [clip],
+            )
+            .unwrap();
+        let segment_id = connection.last_insert_rowid();
+        set_story_order(
+            &mut connection,
+            &[StoryOrderRef { item_kind: "segment".to_owned(), clip_id: clip, segment_id: Some(segment_id) }],
+        )
+        .unwrap();
+        let storyboard = get_storyboard(&connection).unwrap();
+        assert_eq!((storyboard.items[0].clip_id, storyboard.items[0].segment_id), (clip, Some(segment_id)));
+    }
+
+    #[test]
+    fn r21_story_order_rejects_photo_whole_and_select_segment() {
+        let (_directory, mut connection) = setup();
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:00:00Z", None, true);
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+
+        let whole_error = set_story_order(
+            &mut connection,
+            &[StoryOrderRef { item_kind: "whole".to_owned(), clip_id: photo, segment_id: None }],
+        )
+        .unwrap_err();
+        assert!(whole_error.to_string().contains("已失效"));
+        let episode = active_episode_id(&connection).unwrap();
+        assert!(upsert_story_order(
+            &connection,
+            &StoryOrderRef { item_kind: "whole".to_owned(), clip_id: photo, segment_id: None },
+            episode,
+            0,
+        ).is_err());
+
+        connection
+            .execute(
+                "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind) VALUES (?1, 1000, 5000, 'select')",
+                [photo],
+            )
+            .unwrap();
+        let segment_id = connection.last_insert_rowid();
+        let segment_error = set_story_order(
+            &mut connection,
+            &[StoryOrderRef { item_kind: "segment".to_owned(), clip_id: photo, segment_id: Some(segment_id) }],
+        )
+        .unwrap_err();
+        assert!(segment_error.to_string().contains("已失效"));
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM story_order WHERE tombstone = 0", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn r21_storyboard_hides_historical_photo_rows_and_next_video_write_cleans_them() {
+        let (_directory, mut connection) = setup();
+        let video = insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z", None, true);
+        let video_candidate = insert_clip(&connection, "candidate.mov", "2026-08-31T10:01:00Z", None, true);
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:02:00Z", None, true);
+        let photo_candidate = insert_clip(&connection, "candidate.jpg", "2026-08-31T10:03:00Z", None, true);
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id IN (?1, ?2)", params![photo, photo_candidate]).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+        let whole = |clip_id| StoryOrderRef { item_kind: "whole".to_owned(), clip_id, segment_id: None };
+        insert_legacy_whole_order(&connection, episode, photo, 0);
+        upsert_story_order(&connection, &whole(video), episode, 1).unwrap();
+
+        let board = get_storyboard(&connection).unwrap();
+        assert_eq!(board.items.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![video]);
+        assert_eq!(board.candidates.iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![video_candidate]);
+        assert_eq!(ordered_band_items(&connection).unwrap().iter().map(|item| item.clip_id).collect::<Vec<_>>(), vec![video]);
+
+        set_story_order(&mut connection, &[whole(video)]).unwrap();
+        let live: Vec<i64> = connection
+            .prepare("SELECT clip_id FROM story_order WHERE episode_id = ?1 AND tombstone = 0 ORDER BY position")
+            .unwrap()
+            .query_map([episode], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(live, vec![video]);
     }
 
     #[test]

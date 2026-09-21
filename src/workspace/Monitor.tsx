@@ -1,3 +1,4 @@
+import { PhotoMonitor } from "./PhotoMonitor";
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 
 import { PlayerOverlay, type EmbeddedPlayerControls } from "../PlayerOverlay";
@@ -42,6 +43,7 @@ export function __setEmbeddedPlaybackForTests(value: boolean): void {
 export function Monitor(): JSX.Element {
   const selection = useWorkspace((state) => state.selection);
   const immersive = useWorkspace((state) => state.immersive);
+  const workspaceMode = useWorkspace((state) => state.workspaceMode);
   const feed = useClipsFeed();
 
   const [clips, setClips] = useState<readonly ClipListItem[]>([]);
@@ -89,13 +91,15 @@ export function Monitor(): JSX.Element {
   }, [selectedSlot]);
 
   const clip = useMemo(
-    () => (selectedClipId === null ? null : clips.find((item) => item.id === selectedClipId) ?? null),
-    [clips, selectedClipId],
+    () => (selectedClipId === null ? null : clips.find((item) => (
+      item.id === selectedClipId && (item.kind === workspaceMode || (workspaceMode === "video" && item.kind === undefined))
+    )) ?? null),
+    [clips, selectedClipId, workspaceMode],
   );
 
   // 井同时装进舞台的宽和高,舞台一变就重提交区域矩形(R9 D5)。舞台只在嵌入
   // 播放分支里存在,所以 effect 只跟着「这条分支是否在渲染」重跑。
-  const stageRef = useStageFit(MONITOR_EMBEDDED_PLAYBACK && !immersive && clip !== null && selectedSlot === null);
+  const stageRef = useStageFit(MONITOR_EMBEDDED_PLAYBACK && !immersive && clip !== null && clip.kind !== "photo" && selectedSlot === null);
 
   // 换素材就把上一条的打点丢掉 —— 让 I/O 跨素材存活会把 A 的入点配上 B 的出点。
   useEffect(() => {
@@ -124,8 +128,9 @@ export function Monitor(): JSX.Element {
   );
 
   const send = useCallback(async (commands: Parameters<EmbeddedPlayerControls["send"]>[0]) => {
+    if (clip?.kind === "photo") return;
     await controlsRef.current?.send(commands);
-  }, []);
+  }, [clip?.kind]);
 
   const onPlayPause = useCallback(() => {
     if (status?.paused === false) {
@@ -138,12 +143,12 @@ export function Monitor(): JSX.Element {
   }, [send, status]);
 
   // R11 §1.2:时刻分 + 建议段;§3:变速 / 逐帧 / 循环 / 自动下一条 / 静音记忆 / 从最高分开播。
-  const suggestions = useClipSuggestions(clip, status?.phase === "ready" ? status.duration : 0);
+  const suggestions = useClipSuggestions(clip?.kind === "photo" ? null : clip, status?.phase === "ready" ? status.duration : 0);
   // 所有 seek 走走带的 seekTo:它记着「最后要去的位置」,暂停态下 seek 未落地时打点 / 逐帧
   // 才不会拿旧读数算(V-04)。
   const transport = useMonitorTransport({
-    clip,
-    status,
+    clip: clip?.kind === "photo" ? null : clip,
+    status: clip?.kind === "photo" ? null : status,
     send,
     inPoint,
     outPoint,
@@ -246,6 +251,7 @@ export function Monitor(): JSX.Element {
 
   // 单键全走 useMonitorHotkeys(R10 建):J/K/L 变速在 transport 里,Enter 采纳 = 保存当前入出点。
   useMonitorHotkeys(rootRef, {
+    disabled: clip?.kind === "photo",
     onMark: markAt,
     onNudge,
     onShuttle: transport.shuttle,
@@ -256,6 +262,8 @@ export function Monitor(): JSX.Element {
     onToggleLoop: transport.toggleLoop,
     onSave: () => void onSaveSegment(),
   });
+
+  if (clip?.kind === "photo") return <PhotoMonitor key={clip.id} clip={clip} clips={clips} rootRef={rootRef} />;
 
   if (immersive && clip) {
     // 沉浸态是同一条素材的另一种呈现;退出后 selection 不变,嵌入态接着播它。

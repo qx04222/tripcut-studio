@@ -203,6 +203,7 @@ fn probe_metadata_for_path(connection: &Connection, path: &Path) -> Result<super
 /// 落地它全部音频流与拍摄参数标签。用于导入之后新增音轨解析逻辑时的历史素材回填,
 /// 或是用户手动触发的“重新探测音轨”。
 pub fn probe_and_store(connection: &mut Connection, clip_id: i64) -> Result<Vec<ClipAudioTrack>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(Vec::new()); }
     let path = super::media_source::verified_clip_path(connection, clip_id)?;
     let metadata = probe_metadata_for_path(connection, &path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

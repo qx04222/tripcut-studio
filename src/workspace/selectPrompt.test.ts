@@ -143,3 +143,14 @@ describe("R19 P-09:三条预设句 = 三组不同参数", () => {
     for (const preset of SELECT_PRESETS) expect(`${preset.label}${preset.sentence}`).not.toMatch(/镜头带|章节|精选段|交付|模板|旅程/);
   });
 });
+
+describe("R21 PH09 照片参数", () => {
+  it.each(["挑 20 张照片", "照片 20 张"])("%s", (sentence) => {
+    const parsed = parseSelectPrompt(sentence);
+    expect(parsed).toMatchObject({ mediaKind: "photo", photoCount: 20, budgetSecs: null });
+    expect(toAutoSelectParams(parsed, sentence, "all")).toMatchObject({ mediaKind: "photo", photoCount: 20 });
+  });
+  it.each([["只要照片", "photo"], ["只要视频", "video"]])("%s", (sentence, mediaKind) => {
+    expect(parseSelectPrompt(sentence)).toMatchObject({ mediaKind, photoCount: null });
+  });
+});

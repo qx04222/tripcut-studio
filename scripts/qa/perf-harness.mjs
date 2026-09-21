@@ -50,6 +50,10 @@ const red = (id, detail) => checks.push({ id, pass: false, detail });
 const green = (id, detail) => checks.push({ id, pass: true, detail });
 if (result.jobs.failed > 0 || result.jobs.blocked > 0) red("jobs.clean", JSON.stringify(result.jobs)); else green("jobs.clean", JSON.stringify(result.jobs));
 if (result.first_screen_cover_ms == null || result.first_screen_cover_ms > 30_000) red("first-screen<=30s", String(result.first_screen_cover_ms)); else green("first-screen<=30s", String(result.first_screen_cover_ms));
+if ((result.photo_clips ?? result.photo_fixtures ?? 0) > 0) {
+  if (result.all_photo_cover_ms == null || result.all_photo_cover_ms > 4_000) red("photo-covers<=4s", String(result.all_photo_cover_ms)); else green("photo-covers<=4s", String(result.all_photo_cover_ms));
+  if (result.all_preview_ms == null) red("photo-previews-recorded", "null"); else green("photo-previews-recorded", String(result.all_preview_ms));
+}
 if (result.swapouts_delta > 0) red("swapouts=0", String(result.swapouts_delta)); else green("swapouts=0", "0");
 if (existsSync(baselinePath) && !writeBaseline) {
   const base = JSON.parse(readFileSync(baselinePath, "utf8"));

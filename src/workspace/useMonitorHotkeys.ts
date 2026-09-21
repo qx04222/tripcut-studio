@@ -26,6 +26,7 @@ export type MonitorHotkeyIntent =
   | { kind: "save" };
 
 export interface MonitorHotkeyHandlers {
+  disabled?: boolean;
   onMark(edge: "in" | "out"): void;
   onNudge(seconds: -5 | -1 | 1 | 5): void;
   onShuttle(key: "j" | "k" | "l"): void;
@@ -109,7 +110,7 @@ export function useMonitorHotkeys(rootRef: RefObject<HTMLElement | null>, handle
       if (getWorkspaceSnapshot().focusedPane !== "monitor") dispatchWorkspace({ type: "focus-pane", pane: "monitor" });
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || handlersRef.current.disabled) return;
       const scope = paneScope(rootRef.current);
       if (!scope || !isPaneShortcutTarget(event.target, scope)) return;
       if (getWorkspaceSnapshot().focusedPane !== "monitor") return;

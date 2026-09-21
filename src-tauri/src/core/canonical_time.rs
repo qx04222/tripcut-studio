@@ -462,7 +462,7 @@ pub fn set_device_offset(
 pub fn enqueue_align_if_ready(connection: &mut Connection) -> Result<Option<i64>> {
     let active_dependencies: i64 = connection.query_row(
         "SELECT COUNT(*) FROM jobs
-         WHERE kind IN ('import_probe', 'metadata_backfill')
+         WHERE kind IN ('import_probe', 'photo_probe', 'metadata_backfill')
            AND status IN ('pending', 'running')",
         [],
         |row| row.get(0),

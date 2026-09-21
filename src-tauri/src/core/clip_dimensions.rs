@@ -148,6 +148,7 @@ pub fn enqueue_for_clip(
     clip_id: i64,
     cache_root: &Path,
 ) -> Result<Option<i64>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(None); }
     let config = prototype_config()?;
     let candidate = connection
         .query_row(
@@ -234,6 +235,7 @@ pub fn enqueue_for_clip(
 }
 
 pub fn run_classify_dims(connection: &mut Connection, job: &Job) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload: ClassifyDimensionsPayload = serde_json::from_str(&job.payload).map_err(|error| {
         CoreError::ClipDimensions(format!("八维分类任务数据无效：{error}"))
     })?;

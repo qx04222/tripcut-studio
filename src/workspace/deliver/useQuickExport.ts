@@ -96,7 +96,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     return () => {
       alive = false;
     };
-  }, [active, lastDir, selection, settingsLoaded, status.selected_count]);
+  }, [active, lastDir, selection, settingsLoaded, status.selected_count, status.selected_photo_count]);
 
   const remember = useCallback((dir: string) => {
     setLastDir(dir);
@@ -146,7 +146,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
 
   // Z-07:清单里有原片不在原位的素材就不放行(后端也会拒绝;这里先把按钮关掉并给出路)。
   const hasMissing = (plan?.missing?.length ?? 0) > 0;
-  const canExport = !busy && !active && status.selected_count > 0 && planError === null && !hasMissing;
+  const canExport = !busy && !active && status.selected_count > 0 && plan !== null && planError === null && !hasMissing;
 
   const exportNow = useCallback(async () => {
     if (!canExport) return;

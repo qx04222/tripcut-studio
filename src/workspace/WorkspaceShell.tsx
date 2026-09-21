@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState, type JSX } fr
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { Inspector } from "./Inspector";
 import { Monitor } from "./Monitor";
+import { DuelHost } from "./duel/DuelHost";
 import { MediaPool } from "./MediaPool";
 import { ShotBand } from "./ShotBand";
 import { bandMinHeight, bandPanelHeight, bandPanelMinHeight } from "./shotBandModel";
@@ -23,6 +24,7 @@ import { autoCollapseTransition, useRestoreSelection } from "./shellLayout";
 import { useShellWindowEvents } from "./useShellWindowEvents";
 import { returnToActiveEpisode } from "../historyView";
 import { Button } from "./ui";
+import { PhotoWorkspace } from "./PhotoWorkspace";
 import {
   POOL_WIDTH_MAX,
   POOL_WIDTH_MIN,
@@ -71,6 +73,7 @@ export function WorkspaceShell(): JSX.Element {
   const bandMode = useWorkspace((state) => state.bandMode);
   const openDrawer = useWorkspace((state) => state.openDrawer);
   const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
+  const workspaceMode = useWorkspace((state) => state.workspaceMode);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const bandPanelRef = usePanelRef();
   const [helpOpen, setHelpOpen] = useState(false);
@@ -81,7 +84,7 @@ export function WorkspaceShell(): JSX.Element {
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
-    for (const node of shell.querySelectorAll<HTMLElement>(".workspace-columns, .workspace-status-row")) node.toggleAttribute("inert", homeOpen);
+    for (const node of shell.querySelectorAll<HTMLElement>(".workspace-columns, .photo-workspace, .workspace-status-row")) node.toggleAttribute("inert", homeOpen);
   }, [homeOpen]);
 
   // 拖动期间只改 CSS 变量,不 setState —— 三栏不重渲染(规格 §10);
@@ -142,7 +145,7 @@ export function WorkspaceShell(): JSX.Element {
     });
     observer.observe(fit);
     return () => observer.disconnect();
-  }, [bandMode, fitBand]);
+  }, [bandMode, fitBand, workspaceMode]);
 
   useEffect(() => {
     // 窄窗自动折叠(只剩媒体池)只碰 store 的 auto 位(set-auto-collapse),不碰用户手动位,
@@ -204,6 +207,7 @@ export function WorkspaceShell(): JSX.Element {
         R19 V-03(方案 B「Cut 页式两层」):外层竖向 Group = 上层(媒体池 | 监视器 | 检查器)/ 镜头带通栏;
         带不再被两侧栏夹着,1440 下带宽从 ~740 涨到 ~1400。上层的高就是原来的「监视器占比」。
       */}
+      {workspaceMode === "photo" ? <PhotoWorkspace /> : (
       <Group key={layoutEpoch} orientation="vertical" className="workspace-columns" onLayoutChanged={commitSizes}>
         <Panel
           id="upper"
@@ -296,7 +300,8 @@ export function WorkspaceShell(): JSX.Element {
             // 滑出层盖住井右侧时画面缩小而不是被遮住:给监视器让出层宽(CSS 里封顶 60%,布局变化按动效总则 0ms)。
             className={inspectorOpen && !inspectorPinned ? "workspace-pane is-shifted" : "workspace-pane"}
           >
-            <Monitor />
+            {/* R21 PH-05:擂台激活时替换监视器子树(单 mpv 拥有者),不碰 Monitor 内部。 */}
+            <DuelHost><Monitor /></DuelHost>
           </div>
           {/*
             R19 V-04:检查器不再是 Panel,是监视器栏内 `position:absolute; right:0` 的滑出层
@@ -334,6 +339,7 @@ export function WorkspaceShell(): JSX.Element {
           </div>
         </Panel>
       </Group>
+      )}
       {/* 状态条一行。工具链红点由 StatusStrip 自己在左端渲染(数据源是上面 ToolchainStatusProbe 发布的 useToolchainStatus)。 */}
       <div className="workspace-status-row">
         <StatusStrip />

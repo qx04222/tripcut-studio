@@ -15,6 +15,7 @@ import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 
 const CLIP = {
+  kind: "video",
   id: 1,
   path: "/v/a.mp4",
   file_name: "a.mp4",

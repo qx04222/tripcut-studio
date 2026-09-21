@@ -1,3 +1,5 @@
+import { poolCapturedAt } from "./poolOrder";
+import { photoSizeLabel } from "./photoModel";
 import type { JSX } from "react";
 
 import type { ClipListItem } from "../api";
@@ -24,8 +26,8 @@ export function InspectorHeader({
   total: number;
   onStep: (direction: -1 | 1) => void;
 }): JSX.Element {
-  const date = takeDateLabel(clip);
-  const duration = clip.duration_ticks === null ? null : bandDurationLabel(clip.duration_ticks, clip.tb_num ?? 1, clip.tb_den ?? 1_000);
+  const date = clip.kind === "photo" ? poolCapturedAt(clip)?.slice(0, 10) ?? null : takeDateLabel(clip);
+  const duration = clip.kind === "photo" ? photoSizeLabel(clip) : clip.duration_ticks === null ? null : bandDurationLabel(clip.duration_ticks, clip.tb_num ?? 1, clip.tb_den ?? 1_000);
   const subtitle = [date, duration].filter((part): part is string => part !== null).join(" · ");
   // R16 §1:头部「···」与媒体池右键同一张菜单;这条在多选里时作用于整组。
   const multiSelection = useWorkspace((state) => state.multiSelection);
@@ -44,7 +46,7 @@ export function InspectorHeader({
       <span className="inspector-head-nav">
         <Button variant="icon" icon="prev" aria-label="上一条" disabled={index <= 0} onClick={() => onStep(-1)} />
         <Button variant="icon" icon="next" aria-label="下一条" disabled={index < 0 || index >= total - 1} onClick={() => onStep(1)} />
-        {clip.id !== null ? <ClipMoreButton clipId={clip.id} multiSelection={multiSelection} /> : null}
+        {clip.id !== null ? <ClipMoreButton clipId={clip.id} multiSelection={multiSelection} context={{ canAddToBand: clip.kind === "video" }} /> : null}
       </span>
     </div>
     {/* R16 P1-7:原片不在原位时,头部下面一行「找到它…」(与缺失页同入口)。 */}

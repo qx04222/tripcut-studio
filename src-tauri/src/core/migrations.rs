@@ -1453,6 +1453,70 @@ ALTER TABLE segments ADD COLUMN auto_select_run_id TEXT REFERENCES auto_select_r
 CREATE INDEX segments_auto_select_run_idx ON segments(auto_select_run_id) WHERE auto_select_run_id IS NOT NULL;
 "#;
 
+/// R21 PH-01: photographs share clip identity, never video duration.
+pub const MIGRATION_0050: &str = r#"
+ALTER TABLE clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'video' CHECK(kind IN ('video','photo'));
+CREATE INDEX clips_episode_kind_idx ON clips(episode_id,kind,id);
+CREATE TABLE photo_meta (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    width INTEGER, height INTEGER,
+    orientation INTEGER NOT NULL DEFAULT 1 CHECK(orientation BETWEEN 1 AND 8),
+    taken_at TEXT, gps_lat REAL, gps_lon REAL, camera TEXT, lens TEXT,
+    hold_ms INTEGER NOT NULL DEFAULT 3000 CHECK(hold_ms > 0),
+    color_space TEXT, has_alpha INTEGER NOT NULL DEFAULT 0 CHECK(has_alpha IN (0,1)),
+    error TEXT
+);
+"#;
+
+/// R21 PH-04: pairing is descriptive; source files are always read-only.
+pub const MIGRATION_0051: &str = r#"
+ALTER TABLE photo_meta ADD COLUMN companions_ambiguous INTEGER NOT NULL DEFAULT 0 CHECK(companions_ambiguous IN (0,1));
+CREATE TABLE clip_companions (
+    id INTEGER PRIMARY KEY,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('raw','xmp','live_mov','jpg')),
+    size INTEGER NOT NULL CHECK(size >= 0),
+    mtime INTEGER,
+    UNIQUE(clip_id,path)
+);
+CREATE INDEX clip_companions_clip_idx ON clip_companions(clip_id);
+"#;
+
+/// R21 W1 验收 P1:`photo_meta.taken_at` 改存 UTC(与视频 `captured_at` 同口径),本地钟原文另存。
+/// 照片线尚未发布(0050 起都在 R21 内),没有需要回填的旧行;不在迁移里猜时区。
+pub const MIGRATION_0052: &str = r#"
+ALTER TABLE photo_meta ADD COLUMN taken_at_local TEXT;
+"#;
+
+/// R21 W2 PH-05(合并时由 0052 重编号为 0053,0052 已被 W1 验收的 taken_at_local 占用): decisions and the exact pre-finish state survive restarts.
+pub const MIGRATION_0053: &str = r#"
+CREATE TABLE duel_sessions (
+    id INTEGER PRIMARY KEY,
+    episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('photo','video','mixed')),
+    source TEXT NOT NULL CHECK(source IN ('similar_group','shot_stack','manual','results')),
+    member_ids_json TEXT NOT NULL CHECK(json_valid(member_ids_json)),
+    request_json TEXT NOT NULL CHECK(json_valid(request_json)),
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    winner_clip_or_segment_id TEXT,
+    snapshot_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(snapshot_json)),
+    undone INTEGER NOT NULL DEFAULT 0 CHECK(undone IN (0,1))
+);
+CREATE TABLE duel_verdicts (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES duel_sessions(id) ON DELETE CASCADE,
+    left_id TEXT NOT NULL,
+    right_id TEXT NOT NULL,
+    winner_id TEXT,
+    decided_at TEXT NOT NULL,
+    undone INTEGER NOT NULL DEFAULT 0 CHECK(undone IN (0,1))
+);
+CREATE INDEX duel_verdicts_session_idx ON duel_verdicts(session_id,id);
+CREATE INDEX duel_sessions_episode_idx ON duel_sessions(episode_id,finished_at,id);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1603,14 +1667,37 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 47, sql: MIGRATION_0047 },
     Migration { version: 48, sql: MIGRATION_0048 },
     Migration { version: 49, sql: MIGRATION_0049 },
+    Migration { version: 50, sql: MIGRATION_0050 },
+    Migration { version: 51, sql: MIGRATION_0051 },
+    Migration { version: 52, sql: MIGRATION_0052 },
+    Migration { version: 53, sql: MIGRATION_0053 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 49;
+pub const LATEST_SCHEMA_VERSION: i64 = 53;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{db, test_support::TestDirectory};
+
+    #[test]
+    fn r21_migration_preserves_video_ratings_and_order() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version <= 49) { c.execute_batch(m.sql).unwrap(); }
+        c.execute_batch("INSERT INTO clips(id,rel_path) VALUES(901,'old.mov');
+            INSERT INTO segments(id,clip_id,in_ticks,out_ticks,kind) VALUES(901,901,0,1000,'select');
+            INSERT INTO ratings(segment_id,rating_type,value,rated_at) VALUES(901,'star',4,'2026-01-01');
+            INSERT INTO story_order(item_kind,clip_id,position,created_at,updated_at) VALUES('whole',901,7,'2026-01-01','2026-01-01');").unwrap();
+        let before: String = c.query_row("SELECT sql FROM sqlite_master WHERE name='story_order'", [], |r|r.get(0)).unwrap();
+        for m in MIGRATIONS.iter().filter(|m| m.version > 49) { c.execute_batch(m.sql).unwrap(); }
+        let kind: String = c.query_row("SELECT kind FROM clips WHERE id=901", [], |r|r.get(0)).unwrap();
+        assert_eq!(kind, "video");
+        assert_eq!(c.query_row("SELECT position FROM story_order WHERE clip_id=901", [], |r|r.get::<_,i64>(0)).unwrap(),7);
+        assert_eq!(c.query_row("SELECT value FROM ratings WHERE segment_id=901", [], |r|r.get::<_,i64>(0)).unwrap(), 4);
+        assert_eq!(before,c.query_row("SELECT sql FROM sqlite_master WHERE name='story_order'", [], |r|r.get::<_,String>(0)).unwrap());
+        assert_eq!(c.query_row("SELECT count(*) FROM photo_meta", [], |r|r.get::<_,i64>(0)).unwrap(),0);
+    }
 
     #[test]
     fn migrations_are_sequential_and_reach_the_latest_version() {
@@ -1878,9 +1965,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_49() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 49);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 49);
+    fn schema_version_is_53() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 53);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 53);
     }
 
     /// R19 results 车道 P-03:0049 建 `auto_select_runs` 并给 `segments` 加 `auto_select_run_id`。

@@ -148,8 +148,9 @@ export function goToMediaPool(): void {
  */
 export async function settleTemplateOutcome(kind: "job" | "revision", notice: string): Promise<{ text: string; empty: boolean }> {
   if (kind === "job") return { text: notice, empty: false };
-  const board = getClipsFeedSnapshot().storyboard ?? null;
-  const refs = narrativeStoryOrder(board);
+  const feed = getClipsFeedSnapshot();
+  const board = feed.storyboard ?? null;
+  const refs = narrativeStoryOrder(board, feed.clips);
   if (refs.length === 0) return { text: TEMPLATE_EMPTY_NOTICE, empty: true };
   if (!storyOrderMatches(board?.items ?? [], refs)) {
     await setStoryOrder(refs);

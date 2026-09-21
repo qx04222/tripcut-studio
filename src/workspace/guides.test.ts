@@ -33,11 +33,11 @@ beforeEach(() => {
   apiMocks.setSetting.mockReset().mockResolvedValue(undefined);
 });
 
-/** 规格 §3:七个 guide、各只弹一次、同一时刻最多一个;键 `guide.<id>.viewed`。 */
+/** 功能 guide 各只弹一次、同一时刻最多一个；键 `guide.<id>.viewed`。 */
 describe("guides 纯函数表", () => {
-  it("首批七个 guide,键名 guide.<id>.viewed,每个都有一段话与锚点", () => {
+  it("十个 guide 的键名都是 guide.<id>.viewed，每个都有一段话与锚点", () => {
     // R19 P-06(models 车道)追加 "models":首启「装画面理解,搜索和挑选会更准」。
-    expect(GUIDE_IDS).toEqual(["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]);
+    expect(GUIDE_IDS).toEqual(["nav", "photo", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]);
     for (const id of GUIDE_IDS) {
       expect(guideKey(id)).toBe(`guide.${id}.viewed`);
       expect(GUIDES[id].text.length).toBeGreaterThan(8);
@@ -51,6 +51,16 @@ describe("guides 纯函数表", () => {
     expect(nextGuide(inWorkspace, null, new Set(), new Set())).toBeNull();
     expect(nextGuide(inWorkspace, new Set(), new Set(), new Set())).toBe("nav");
     expect(nextGuide(EMPTY_GUIDE_SIGNALS, new Set(), new Set(), new Set())).toBeNull();
+  });
+
+  it("R21:照片工作台气泡只在照片模式首次触发，文案与入口固定", () => {
+    const viewed = new Set<string>([guideKey("nav")]);
+    const none = new Set<GuideId>();
+    expect(nextGuide({ ...inWorkspace, photoWorkspace: false }, viewed, none, none)).not.toBe("photo");
+    expect(nextGuide({ ...inWorkspace, photoWorkspace: true }, viewed, none, none)).toBe("photo");
+    expect(nextGuide({ ...inWorkspace, photoWorkspace: true }, new Set([...viewed, guideKey("photo")]), none, none)).not.toBe("photo");
+    expect(GUIDES.photo.text).toBe("这里挑照片，那边挑视频。");
+    expect(GUIDES.photo.anchor).toContain("photo-workspace");
   });
 
   it("触发条件表:每个 guide 对应一个信号", () => {

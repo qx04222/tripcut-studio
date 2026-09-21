@@ -1,4 +1,4 @@
-import { memo, type JSX } from "react";
+import { memo, useState, type JSX } from "react";
 
 import { AnalysisBadges, analysisBadgeKinds } from "../AnalysisPanel";
 import type { ClipListItem } from "../api";
@@ -6,6 +6,7 @@ import { clipAriaLabel, fileNameLines, poolDateLabel, poolDurationLabel, poolRat
 import { Badge, Card, CoverImage, Icon } from "./ui";
 import { usePoolScrub } from "./usePoolScrub";
 import { stackCountLabel } from "./copy";
+import { companionRoleLabel } from "./photoModel";
 
 /**
  * 媒体池的一张卡(规格 §3.5,视觉按 A 稿「编辑台密度」)。从 `MediaPool.tsx` 拆出来只为
@@ -79,6 +80,7 @@ function PoolCardInner({
   isAnchor,
   inMultiSelection,
   onSelect,
+  standaloneGridCell = true,
 }: {
   clip: ClipListItem;
   columnIndex: number;
@@ -96,7 +98,11 @@ function PoolCardInner({
   isAnchor: boolean;
   inMultiSelection: boolean;
   onSelect: (modifiers: { shift?: boolean; meta?: boolean }) => void;
+  /** 独立媒体池卡自己是 gridcell；照片工作台把卡与擂台操作包进同一个外层 gridcell。 */
+  standaloneGridCell?: boolean;
 }): JSX.Element {
+  const [companionsOpen, setCompanionsOpen] = useState(false);
+  const hasCompanions = (clip.companions?.length ?? 0) > 0;
   const [nameHead, nameTail] = fileNameLines(clip.file_name);
   // R11 §3:悬停刮擦(帧条来自已有缓存;没有就静态封面)。
   const scrub = usePoolScrub(clip);
@@ -114,14 +120,19 @@ function PoolCardInner({
       selected={selected}
       // 回显 id 由 useSelection.echoElementId 统一生成 —— 镜头带按同一套规则找它。
       id={`pool-clip-${clip.id}`}
-      role="gridcell"
-      aria-colindex={columnIndex}
+      role={standaloneGridCell ? "gridcell" : undefined}
+      aria-colindex={standaloneGridCell ? columnIndex : undefined}
       // roving tabindex:整张网格对 Tab 只有一个落点 —— 锚点卡片(没有锚点时是容器)。
       tabIndex={isAnchor ? 0 : -1}
-      className={`pool-card${selected ? " selected" : ""}${inMultiSelection ? " multi" : ""}`}
-      aria-selected={selected}
-      aria-expanded={stackCount !== undefined && onToggleStack ? stackExpanded === true : undefined}
+      className={`pool-card${clip.kind === "photo" ? " photo-r21-card" : ""}${selected ? " selected" : ""}${inMultiSelection ? " multi" : ""}`}
+      aria-selected={standaloneGridCell ? selected : undefined}
+      aria-expanded={hasCompanions ? companionsOpen : stackCount !== undefined && onToggleStack ? stackExpanded === true : undefined}
       aria-label={clipAriaLabel(clip)}
+      onKeyDown={(event) => {
+        if (hasCompanions && event.altKey && event.key === "Enter") {
+          event.preventDefault(); event.stopPropagation(); setCompanionsOpen(open => !open);
+        }
+      }}
       onMouseEnter={scrub.onMouseEnter}
       onMouseMove={scrub.onMouseMove}
       onMouseLeave={scrub.onMouseLeave}
@@ -129,6 +140,10 @@ function PoolCardInner({
         // 角标「n 条候选」是卡片(一个 <button>)里的一块,不能再嵌一个按钮 ——
         // 点在角标上就当作「展开/收起」,不改选中(U-02)。
         const target = event.target as HTMLElement | null;
+        if (hasCompanions && target?.closest?.(".photo-r21-raw")) {
+          setCompanionsOpen(open => !open);
+          return;
+        }
         if (onToggleStack && target?.closest?.(".pool-card-stack")) {
           onToggleStack();
           return;
@@ -143,6 +158,14 @@ function PoolCardInner({
       }}
     >
       <span className="pool-card-image">
+        {clip.kind === "photo" ? <span className="photo-r21-badge" role="img" aria-label="照片">照片</span> : null}
+        {hasCompanions ? <span className="photo-r21-raw" title="展开伴随文件 · ⌥Enter">{clip.companions?.some(file => file.role.toLowerCase() === "raw") ? "RAW" : "伴随"}</span> : null}
+        {companionsOpen ? <span className="photo-r21-companions" role="list" aria-label="伴随文件">
+          {clip.companions?.map(file => <span role="listitem" key={file.path}>
+            <span className="photo-r21-companion-name">{file.path.split(/[\\/]/).pop()}</span>
+            <span className="photo-r21-companion-role">{companionRoleLabel(file.role)}</span>
+          </span>)}
+        </span> : null}
         {/* 没封面 = 分析还没跑到;封面文件坏了(分析失败)= 中性胶片占位,不留坏图(R9 D4)。 */}
         <CoverImage
           src={clip.cover_url}

@@ -262,13 +262,16 @@ fn main() {
     let mut samples: Vec<u64> = Vec::new();
     let mut first_screen_ms: Option<u64> = None;
     let mut all_cover_ms: Option<u64> = None;
+    let mut all_photo_cover_observed_ms: Option<u64> = None;
+    let mut all_preview_ms: Option<u64> = None;
     // R18:原来只数 `.mp4`,`.mov` 为主的夹具上 `fixtures` 恒为 0、`first_screen_cover_ms`
     // 恒为 null(阈值写死 24 也大于夹具条数)——两个字段静默失效。现在递归数所有
     // 常见视频后缀,首屏阈值取「一屏 12 张与夹具总数的较小者」。
-    fn count_media(directory: &std::path::Path) -> i64 {
-        const MEDIA_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "avi", "mkv", "mts"];
+    fn count_media(directory: &std::path::Path) -> (i64,i64) {
+        const MEDIA_EXTENSIONS: [&str; 14] = ["mp4", "mov", "m4v", "avi", "mkv", "mts", "jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff"];
+        const PHOTO_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff"];
         let Ok(entries) = std::fs::read_dir(directory) else {
-            return 0;
+            return (0,0);
         };
         entries
             .filter_map(|entry| entry.ok())
@@ -277,17 +280,15 @@ fn main() {
                 if path.is_dir() {
                     return count_media(&path);
                 }
-                let matches = path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        MEDIA_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(extension))
-                    });
-                i64::from(matches)
+                let extension=path.extension().and_then(|value|value.to_str()).unwrap_or("");
+                (
+                    i64::from(MEDIA_EXTENSIONS.iter().any(|known|known.eq_ignore_ascii_case(extension))),
+                    i64::from(PHOTO_EXTENSIONS.iter().any(|known|known.eq_ignore_ascii_case(extension))),
+                )
             })
-            .sum()
+            .fold((0,0),|(media,photos),(next_media,next_photos)|(media+next_media,photos+next_photos))
     }
-    let fixtures = count_media(&folder);
+    let (fixtures,photo_fixtures) = count_media(&folder);
     let first_screen_target = fixtures.clamp(1, 12);
     // R18:采样循环原来**每 500 ms 新开一次 `open_project`**。8 个 worker 正在狂写同一个
     // 库时,这一次打开要等写锁(busy_timeout 5 s),于是 `total_ms` 被量化成 5 s 的整数倍
@@ -303,6 +304,18 @@ fn main() {
         }
         if all_cover_ms.is_none() && covers >= fixtures {
             all_cover_ms = Some(started.elapsed().as_millis() as u64);
+        }
+        let photo_covers:i64=c.query_row("SELECT COUNT(*) FROM cache_artifacts a JOIN clips c ON c.id=a.clip_id WHERE a.kind='cover' AND c.kind='photo'",[],|r|r.get(0)).unwrap();
+        // 照片工作台的 cover/preview 门禁只等待照片登记完成；混合导入里的视频
+        // import_probe 属于独立视频工作台，不能把已完成的 100 张照片继续记成未完成。
+        let registrations_busy:i64=c.query_row("SELECT COUNT(*) FROM jobs WHERE kind='photo_probe' AND status IN ('pending','running')",[],|r|r.get(0)).unwrap();
+        let photos:i64=c.query_row("SELECT COUNT(*) FROM clips WHERE kind='photo'",[],|r|r.get(0)).unwrap();
+        if all_photo_cover_observed_ms.is_none() && registrations_busy==0 && photos>0 && photo_covers>=photos {
+            all_photo_cover_observed_ms=Some(started.elapsed().as_millis() as u64);
+        }
+        let previews:i64=c.query_row("SELECT COUNT(*) FROM jobs WHERE kind='photo_preview' AND status='done'",[],|r|r.get(0)).unwrap();
+        if all_preview_ms.is_none() && registrations_busy==0 && photos>0 && previews>=photos {
+            all_preview_ms=Some(started.elapsed().as_millis() as u64);
         }
         let active: i64 = c.query_row("SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')", [], |r| r.get(0)).unwrap();
         if active == 0 && started.elapsed() > Duration::from_secs(5) {
@@ -336,10 +349,18 @@ fn main() {
         )
         .unwrap()
     };
+    let photo_clips:i64=c.query_row("SELECT COUNT(*) FROM clips WHERE kind='photo'",[],|row|row.get(0)).unwrap();
     samples.sort_unstable();
     let mut by_kind: HashMap<String, Vec<u64>> = HashMap::new();
     let mut timeline: Vec<(String, u64, u64)> = timings.lock().unwrap().clone();
     timeline.sort_by_key(|(_, start, _)| *start);
+    // R21 照片导入已在 photo_probe 内用同一个 ImageIO source 原子发布 cover；
+    // 任务结束时间就是最后一张 cover 的真实完成时间。轮询值另存 observed，避免
+    // SQLite 锁等待和 500 ms 采样粒度污染 ≤4 s 的解码判据。
+    let all_photo_cover_ms=timeline.iter()
+        .filter(|(kind,_,_)|kind=="photo_probe")
+        .map(|(_,start,duration)|start.saturating_add(*duration))
+        .max();
     for (k, _, ms) in timeline.iter() {
         by_kind.entry(k.clone()).or_default().push(*ms);
     }
@@ -356,12 +377,15 @@ fn main() {
         .collect();
     let result = json!({
         "schema_version": 1, "started_at": started_at, "finished_at": chrono_now(),
-        "workers": workers, "fixtures": fixtures,
+        "workers": workers, "fixtures": fixtures, "photo_fixtures": photo_fixtures, "photo_clips": photo_clips,
         "profile": profile.as_str(), "effort": effort, "decode_permits": permits,
         "chip": machine.chip.as_str(), "media_engines": machine.media_engines(),
         "rss_bytes": {"peak": samples.last().copied().unwrap_or(0), "p95": percentile(&samples, 0.95)},
         "swapouts_delta": swapouts().saturating_sub(swap_before),
         "first_screen_cover_ms": first_screen_ms, "all_cover_ms": all_cover_ms,
+        "all_photo_cover_ms": all_photo_cover_ms,
+        "all_photo_cover_observed_ms": all_photo_cover_observed_ms,
+        "all_preview_ms": all_preview_ms,
         "total_ms": started.elapsed().as_millis() as u64,
         "stages": stages,
         "timeline": timeline,

@@ -18,7 +18,7 @@
   width: min(560px, 60%);
   overflow: auto;
   border-left: 1px solid var(--border);
-  background: var(--surface-panel);
+  background: var(--bg-solid);
   box-shadow: var(--shadow-raised);
   transform: translateX(calc(100% + var(--space-2)));
   transition: transform var(--motion-exit);
@@ -47,7 +47,7 @@
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-hair);
-  background: var(--surface-panel);
+  background: var(--bg-solid);
 }
 
 .results-panel .results-head-copy {

@@ -69,7 +69,7 @@ fn pause_overlapping_folders(connection: &Connection, sources: &[String]) -> Res
     Ok(())
 }
 pub fn dismiss_notices(connection: &Connection) -> Result<usize> {
-    Ok(connection.execute("UPDATE jobs SET import_dismissed=1 WHERE kind='import_probe' AND status IN ('done','failed','blocked') AND (result_path IS NOT NULL OR status!='done') AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?)
+    Ok(connection.execute("UPDATE jobs SET import_dismissed=1 WHERE kind IN ('import_probe','photo_probe') AND status IN ('done','failed','blocked') AND (result_path IS NOT NULL OR status!='done') AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -117,7 +117,7 @@ pub(crate) fn clip_paths(connection: &Connection, ids_json: &str) -> Result<Vec<
 /// 只有 worker 数那么几条。此前每个任务一次事务,2 000 个 pending 就是 2 000 次提交。
 pub(crate) fn cancel_related_jobs(connection: &mut Connection, ids_json: &str, paths_json: &str, episode: Option<i64>) -> Result<()> {
     let active_episode = episode;
-    let predicate = "clip_id IN (SELECT value FROM json_each(?1)) OR (kind='import_probe' AND json_valid(payload) AND json_extract(payload,'$.path') IN (SELECT value FROM json_each(?2))) OR (?3 IS NOT NULL AND json_valid(payload) AND json_extract(payload,'$.episode_id')=?3)";
+    let predicate = "clip_id IN (SELECT value FROM json_each(?1)) OR (kind IN ('import_probe','photo_probe') AND json_valid(payload) AND json_extract(payload,'$.path') IN (SELECT value FROM json_each(?2))) OR (?3 IS NOT NULL AND json_valid(payload) AND json_extract(payload,'$.episode_id')=?3)";
     connection.execute(&format!("UPDATE jobs SET status='failed', cancel_requested=1, blocked_summary='用户已取消', owner_id=NULL, lease_expires_at=NULL, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status='pending' AND ({predicate})"), params![ids_json, paths_json, active_episode])?;
     let running = {
         let mut statement = connection.prepare(&format!("SELECT id FROM jobs WHERE status='running' AND cancel_requested=0 AND ({predicate})"))?;
@@ -167,9 +167,9 @@ pub fn remove_records(connection: &mut Connection, request: &RemovalRequest) -> 
     // Retain history but free dedupe keys. Old attempts stay fenced by status;
     // retained job ids also keep SQLite from recycling ids under late callbacks.
     transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id,blocked_summary='素材已从库中移除' WHERE clip_id IN (SELECT value FROM json_each(?1))", [&json])?;
-    transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id,blocked_summary='素材已从库中移除' WHERE kind='import_probe' AND json_valid(payload) AND json_extract(payload,'$.path') IN (SELECT value FROM json_each(?1))", [&paths])?;
+    transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id,blocked_summary='素材已从库中移除' WHERE kind IN ('import_probe','photo_probe') AND json_valid(payload) AND json_extract(payload,'$.path') IN (SELECT value FROM json_each(?1))", [&paths])?;
     if request.all {
-        transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id WHERE kind='import_probe' AND json_valid(payload) AND json_extract(payload,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?;
+        transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id WHERE kind IN ('import_probe','photo_probe') AND json_valid(payload) AND json_extract(payload,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?;
         transaction.execute("UPDATE import_batches SET status='removed' WHERE episode_id=(SELECT id FROM episodes WHERE status='active')", [])?;
     } else if let Some(id) = request.batch_id {
         transaction.execute("UPDATE import_batches SET status='removed' WHERE id=?1", [id])?;
@@ -178,12 +178,13 @@ pub fn remove_records(connection: &mut Connection, request: &RemovalRequest) -> 
     // Duplicate aliases may point at the removed content through another path.
     // Recheck them on the next explicit scan instead of keeping a stale done key.
     if !ids.is_empty() {
-        transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id WHERE kind='import_probe' AND status='done' AND result_path IS NOT NULL AND json_valid(payload) AND json_extract(payload,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?;
+        transaction.execute("UPDATE jobs SET status='failed',cancel_requested=1,import_dismissed=1,payload_hash=payload_hash||':removed:'||id WHERE kind IN ('import_probe','photo_probe') AND status='done' AND result_path IS NOT NULL AND json_valid(payload) AND json_extract(payload,'$.episode_id')=(SELECT id FROM episodes WHERE status='active')", [])?;
     }
     // Keep clip identifiers monotonic even after clearing the highest row. IDs
     // are used in cache paths and historical JSON, so they must not be recycled.
     let maximum: i64 = transaction.query_row("SELECT coalesce(max(id),0) FROM clips", [], |r| r.get(0))?;
     transaction.execute("INSERT INTO settings(key,value,updated_at) VALUES ('removed_clip_high_water',?1,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(key) DO UPDATE SET value=max(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER))", [maximum.to_string()])?;
+    super::similar::remove_primary_events_for_clips(&transaction, &ids)?;
     transaction.execute("DELETE FROM clips WHERE id IN (SELECT value FROM json_each(?1))", [&json])?;
     super::cache_gc::enqueue_clip_dirs(&transaction, &ids)?;
     transaction.commit()?;
@@ -195,7 +196,7 @@ pub fn remove_records(connection: &mut Connection, request: &RemovalRequest) -> 
 pub struct RetryAnalysisOutcome { pub clip_id: i64, pub reset: usize, pub enqueued: usize }
 
 /// R16 P2-4:这条素材上会被「重新分析」触及的任务种类——画质 / 运镜 / 时刻分 / 封面等派生物。
-const RETRY_ANALYSIS_KINDS_SQL: &str = "('analyze_l1','analyze_motion','moments','thumbnail','strip','waveform','proxy')";
+const RETRY_ANALYSIS_KINDS_SQL: &str = "('analyze_l1','analyze_motion','moments','thumbnail','photo_preview','strip','waveform','proxy')";
 
 /// R16 P2-4:单条重跑分析。先把这条素材上失败 / 受阻的任务行**原地复位成 pending**(清失败标记;
 /// `artifacts::enqueue_for_clip` 见到任何同哈希旧行都不再入队,所以失败的封面任务只能复位不能新建),

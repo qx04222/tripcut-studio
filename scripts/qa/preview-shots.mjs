@@ -16,6 +16,8 @@ import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
+import { photoScenario } from "./photo-scenario.mjs";
+import { duelScenario } from "./duel-scenario.mjs";
 import { makeMockCovers } from "./make-mock-covers.mjs";
 
 const require = createRequire(import.meta.url);
@@ -992,7 +994,7 @@ async function workspaceScript(page, context, viteUrl) {
       const poolMenu = p.getByRole("menu", { name: "素材操作" });
       await poolMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
       const poolItems = await poolMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
-      if (poolItems.join("|") !== "收藏|拒绝|清除评级|加入镜头带|移到其他集|导出所选|在 Finder 中显示|移除素材") failures.push(`29-entity-menus: 媒体池菜单 ${poolItems.join("|")}`);
+      if (poolItems.join("|") !== "收藏|拒绝|清除评级|加入镜头带|移到其他集|导出所选|在 Finder 中显示|移除素材|擂台") failures.push(`29-entity-menus: 媒体池菜单 ${poolItems.join("|")}`);
       await p.keyboard.press("Escape");
       await poolMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
 
@@ -1017,7 +1019,7 @@ async function workspaceScript(page, context, viteUrl) {
         const shotMenu = p.getByRole("menu", { name: "镜块操作" });
         await shotMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
         const items = await shotMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
-        if (items.join("|") !== "往前|往后|从镜头带移出|删除精选段|导出这一段") failures.push(`29-entity-menus: 镜块菜单 ${items.join("|")}`);
+        if (items.join("|") !== "往前|往后|从镜头带移出|删除精选段|导出这一段|擂台") failures.push(`29-entity-menus: 镜块菜单 ${items.join("|")}`);
         await p.keyboard.press("Escape");
         await shotMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
       }
@@ -1189,12 +1191,18 @@ async function workspaceScript(page, context, viteUrl) {
         await rowsOf(p).first().waitFor({ timeout: STEP_TIMEOUT_MS });
         const count = await rowsOf(p).count();
         if (count < 1) failures.push("35-results-panel: 结果面板一行都没有");
-        const reasons = await rowsOf(p).locator(".results-row-reason").allInnerTexts();
+        // R20-1 起一行可能有两个 .results-row-reason(理由 + 「可修:…」),按行取第一个数。
+        const reasons = await rowsOf(p).locator(".results-row-head + .results-row-reason").allInnerTexts();
         if (reasons.length !== count || reasons.some((text) => text.trim().length === 0)) failures.push(`35-results-panel: 有行没有理由: ${reasons.join("|")}`);
         const text = await results.innerText();
         if (/tick|VFR|remux|sidecar|L1|L3|hero|Stack|sharp|motion|no_cut|interest/.test(text)) failures.push("35-results-panel: 结果面板出现内部术语 / 内部键");
         if ((await results.locator("details summary").count()) === 0) failures.push("35-results-panel: 假后端里没有一行带「相似的没选」折叠");
-        await results.locator("details").first().locator("summary").click();
+        // R20-1:面板顶部多了「被去重/未选」折叠(details.results-siblings),每行的「还有 N 条相似的没选」是列表里的 details;
+        // 两种各展开一个,截图同时看得见「未选:…」与兄弟列表;每行「可修:…」是行内文本,不用点。
+        await results.locator("details.results-siblings summary").first().click().catch(() => failures.push("35-results-panel: 缺「被去重/未选」折叠"));
+        await results.locator(".results-list details").first().locator("summary").click();
+        if (!/可修:/.test(await results.innerText())) failures.push("35-results-panel: 没有一行带「可修:…」");
+        if (!/未选:/.test(await results.innerText())) failures.push("35-results-panel: 「被去重/未选」没有条目");
       },
       settle: 600,
     });
@@ -1254,7 +1262,8 @@ async function main() {
     for (const pass of DPR_PASSES) {
       dprSuffix = pass.suffix;
       log(`--- pass deviceScaleFactor=${pass.scale}${pass.suffix ? ` (文件名后缀 ${pass.suffix})` : ""} ---`);
-      const context = await browser.newContext({ viewport: WIDE, deviceScaleFactor: pass.scale, locale: "zh-CN" });
+      // 分组 chip / 章名按浏览器时区算,假后端夹具是 +08:00 的钟面:钉在东八区,基线才不随拍图机器的时区漂。
+      const context = await browser.newContext({ viewport: WIDE, deviceScaleFactor: pass.scale, locale: "zh-CN", timezoneId: "Asia/Shanghai" });
       const page = await context.newPage();
       page.on("console", (message) => {
         if (message.type() === "error" || message.type() === "warning") {
@@ -1264,7 +1273,11 @@ async function main() {
       page.on("pageerror", (error) => pageErrors.push(String(error)));
       page.setDefaultTimeout(STEP_TIMEOUT_MS);
 
-      if (!KIT_ONLY) await workspaceScript(page, context, vite.url);
+      if (!KIT_ONLY) {
+        if (!process.argv.includes("--photo-only")) await workspaceScript(page, context, vite.url);
+        await photoScenario(context, vite.url, shot, failures, withTheme);
+        await duelScenario(context, vite.url, shot, failures, withTheme);
+      }
 
       if (WITH_KIT) {
         await page.setViewportSize(WIDE);

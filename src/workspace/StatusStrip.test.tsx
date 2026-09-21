@@ -28,6 +28,10 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("summaryPhrases", () => {
+  it("R20: ETA 未知仍显示分析计数", () => {
+    expect(summaryPhrases({ analyzed: 12, analyzeTotal: 27, transcribing: 0, generating: 0, missing: 0, importedCount: 27, importedDurationMs: 620_000 }))
+      .toEqual(["已导入 27 条 · 共 10 分钟 · 正在分析 12/27"]);
+  });
   // R18 W-4:启动补扫挪到开窗之后,补扫期间状态条要说人话(不出现「补扫」这种内部词)。
   it("启动补扫期间排在最前,补扫结束后消失", () => {
     const idle = { analyzed: 0, analyzeTotal: 0, transcribing: 0, generating: 0, missing: 0 };

@@ -13,6 +13,7 @@ import { usePipeline } from "./usePipeline";
 import { UpdateTopChip } from "./update/UpdateTopChip";
 import { useUpdateState } from "./update/updateStore";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
+import { WorkspaceTabs } from "./WorkspaceTabs";
 
 /**
  * 顶栏(高 44px,规格 §3.1)。左起品牌记号 + 字标 + 「导入素材」,居中「切换集」胶囊 +
@@ -81,6 +82,7 @@ export function TopBar(): JSX.Element {
 
       <div className="workspace-topbar-center">
         <EpisodeSwitcher />
+        <WorkspaceTabs />
         <PipelineRail state={pipeline} />
       </div>
 

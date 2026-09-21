@@ -13,7 +13,10 @@ vi.mock("../api", () => apiMock);
 
 import { JIANYING_BUNDLE_ID, type EpisodeSummary, type ExportCanvas, type ExportStatus, type PlatformPreset } from "../api";
 import { WorkspaceShell } from "./WorkspaceShell";
+import { __resetPhotoOrderPersistenceForTests, savePhotoOrder } from "./photoOrderSettings";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
+
+const LAZY_UI_TIMEOUT_MS = 5_000;
 
 const episode: EpisodeSummary = {
   id: 5,
@@ -68,6 +71,7 @@ beforeEach(() => {
   // 只清调用记录,实现保留:上一条用例点过「生成交付包」后 startExport 的调用不能漏到下一条。
   vi.clearAllMocks();
   __resetWorkspaceForTests();
+  __resetPhotoOrderPersistenceForTests();
   apiMock.getCurrentEpisode.mockResolvedValue(episode);
   apiMock.listPlatformPresets.mockResolvedValue(platformPresets);
   apiMock.getJianyingAvailability.mockResolvedValue({
@@ -91,14 +95,14 @@ async function openDeliverDrawer(): Promise<void> {
   });
   // R19 U-06/P-04:抽屉首屏是三卡,既有四模式 chip 选择器搬进「更多方式 ⌄」——先展开它,
   // 行为与冻结 AX 名都不变(见 DeliverDrawerMoreWays.test.tsx)。
-  const more = await screen.findByRole("button", { name: "更多方式" });
+  const more = await screen.findByRole("button", { name: "更多方式" }, { timeout: LAZY_UI_TIMEOUT_MS });
   await act(async () => {
     more.click();
     await Promise.resolve();
   });
   // R11 车道 E:抽屉默认是「快速导出」;本文件测的是完整交付包那套表单,先切过去
   // (快速模式的用例在 DeliverDrawerQuick.test.tsx)。
-  const fullChip = await screen.findByRole("button", { name: "完整交付包" });
+  const fullChip = await screen.findByRole("button", { name: "完整交付包" }, { timeout: LAZY_UI_TIMEOUT_MS });
   await act(async () => {
     fullChip.click();
     await Promise.resolve();
@@ -210,11 +214,75 @@ describe("交付抽屉原生内容(R9 Task 6b)", () => {
     const button = within(dialog).getByRole("button", { name: "开始生成" });
     expect(button.className).toContain("ui-button--primary");
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    apiMock.getCurrentEpisode.mockClear();
     await act(async () => {
       button.click();
       await Promise.resolve();
     });
     await waitFor(() => expect(apiMock.startExport).toHaveBeenCalled());
+    expect(apiMock.getCurrentEpisode).not.toHaveBeenCalled();
+  });
+
+  it("完整交付同集等待照片顺序成功后启动，并在启动前复核一次集 ID", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_photo_count: 1 });
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    const dialog = await openDialog();
+    apiMock.getCurrentEpisode.mockClear();
+    let finishSave: () => void = () => undefined;
+    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
+      ? new Promise<void>((resolve) => { finishSave = resolve; })
+      : Promise.resolve());
+    const pendingSave = savePhotoOrder("ui.photo.order.5", [4, 3, 2, 1]);
+    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[4,3,2,1]"));
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
+    await act(async () => { button.click(); await Promise.resolve(); });
+    expect(apiMock.startExport).not.toHaveBeenCalled();
+
+    await act(async () => { finishSave(); await pendingSave; });
+    await waitFor(() => expect(apiMock.startExport).toHaveBeenCalled());
+    expect(apiMock.getCurrentEpisode).toHaveBeenCalledTimes(2);
+  });
+
+  it("完整交付包含照片时等待精选顺序保存，保存失败就显示错误且不启动旧顺序交付", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_photo_count: 1 });
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    let rejectSave: (failure: Error) => void = () => undefined;
+    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
+      ? new Promise<void>((_resolve, reject) => { rejectSave = reject; })
+      : Promise.resolve());
+    const pendingSave = savePhotoOrder("ui.photo.order.5", [4, 3, 2, 1]);
+    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[4,3,2,1]"));
+    const dialog = await openDialog();
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
+    await act(async () => { button.click(); await Promise.resolve(); });
+    expect(apiMock.startExport).not.toHaveBeenCalled();
+
+    await act(async () => { rejectSave(new Error("disk full")); await pendingSave.catch(() => undefined); });
+    expect(await within(dialog).findByText(/照片顺序未保存/)).toBeTruthy();
+    expect(apiMock.startExport).not.toHaveBeenCalled();
+  });
+
+  it("完整交付等待 A 集照片顺序期间切到 B 集，明确中止且绝不启动后端", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_photo_count: 1 });
+    apiMock.pickExportFolder.mockResolvedValue("/Volumes/DELIVERY");
+    const dialog = await openDialog();
+    let currentEpisode = episode;
+    apiMock.getCurrentEpisode.mockImplementation(async () => currentEpisode);
+    apiMock.getCurrentEpisode.mockClear();
+    let finishSave: () => void = () => undefined;
+    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
+      ? new Promise<void>((resolve) => { finishSave = resolve; })
+      : Promise.resolve());
+    const pendingSave = savePhotoOrder("ui.photo.order.5", [4, 3, 2, 1]);
+    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[4,3,2,1]"));
+    const button = within(dialog).getByRole("button", { name: "开始生成" });
+    await act(async () => { button.click(); await Promise.resolve(); });
+    await waitFor(() => expect(apiMock.getCurrentEpisode).toHaveBeenCalledTimes(1));
+    currentEpisode = { ...episode, id: 6, title: "EP06" };
+    await act(async () => { finishSave(); await pendingSave; });
+
+    expect(await within(dialog).findByText(/等待照片顺序保存时已切换集/)).toBeTruthy();
+    expect(apiMock.startExport).not.toHaveBeenCalled();
   });
 
   it("剪映草稿开关打开时,主按钮走 generateJianyingDraft(不先 startExport)", async () => {

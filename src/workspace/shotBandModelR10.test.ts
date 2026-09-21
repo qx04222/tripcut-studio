@@ -65,6 +65,7 @@ function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
     motion: null,
     motion_status: null,
     motion_error: null,
+    kind: "video",
     binary_rating: null,
     star_rating: null,
     select_count: 0,
@@ -89,7 +90,7 @@ function board(overrides: Partial<Storyboard> = {}): Storyboard {
 
 describe("U-17:0 镜的章算一处缺口", () => {
   it("空章 gapCount = 1、clipCount = 0、isEmpty;「仅缺口」视图把它留下来", () => {
-    const chapters = buildBandChapters(board(), [], [], new Map());
+    const chapters = buildBandChapters(board(), [], [], new Map([[1, clip(1)]]));
     const [first, second] = chapters;
     expect(first!.clipCount).toBe(1);
     expect(first!.gapCount).toBe(0);
@@ -120,7 +121,7 @@ describe("U-03:模板候选池 = 收藏 ∪ ≥3 星(拒绝的不算)", () => {
 
   it("bandPickerCandidates 去掉已经在带上的、未就绪的", () => {
     const picks = bandPickerCandidates(
-      [clip(1, { binary_rating: 1 }), clip(2, { star_rating: 4 }), clip(3, { star_rating: 4, status: "duplicate" }), clip(4)],
+      [clip(1, { binary_rating: 1 }), clip(2, { star_rating: 4 }), clip(3, { star_rating: 4, status: "duplicate" }), clip(4), clip(5, { kind: "photo", star_rating: 5 }), clip(6, { kind: undefined, star_rating: 5 })],
       board({ items: [item(1, 1, 0)] }),
     );
     expect(picks.map((entry) => entry.id)).toEqual([2]);
@@ -152,18 +153,18 @@ describe("U-03:模板 beats → story_order 引用", () => {
         chapters: [narrativeChapter(2, 1, [[3, null, 0]]), narrativeChapter(1, 0, [[2, 7, 1], [1, null, 0], [1, null, 2]])],
       } as unknown as Storyboard["narrative"],
     });
-    expect(narrativeStoryOrder(withNarrative)).toEqual([
+    const clips = [clip(1), clip(2, { kind: "photo" }), clip(3, { kind: undefined })];
+    expect(narrativeStoryOrder(withNarrative, clips)).toEqual([
       { item_kind: "whole", clip_id: 1, segment_id: null },
-      { item_kind: "segment", clip_id: 2, segment_id: 7 },
-      { item_kind: "whole", clip_id: 3, segment_id: null },
     ]);
-    expect(narrativeStoryOrder(board())).toEqual([]);
-    expect(narrativeStoryOrder(null)).toEqual([]);
+    expect(narrativeStoryOrder(board(), clips)).toEqual([]);
+    expect(narrativeStoryOrder(null, clips)).toEqual([]);
   });
 
   it("storyOrderMatches:顺序一致才为真,免得白写一次 story_order", () => {
     const refs = narrativeStoryOrder(
       board({ narrative: { chapters: [narrativeChapter(1, 0, [[1, null, 0], [2, null, 1]])] } as unknown as Storyboard["narrative"] }),
+      [clip(1), clip(2)],
     );
     expect(storyOrderMatches([item(2, 1, 1), item(1, 1, 0)], refs)).toBe(true);
     expect(storyOrderMatches([item(1, 1, 0)], refs)).toBe(false);
@@ -227,7 +228,7 @@ describe("R-02:镜头带时长按素材的 time base 换算,不把 ticks 当毫�
       narration_job_status: null,
       current_template: null,
     };
-    const chapters = buildBandChapters(board, [], [], new Map());
+    const chapters = buildBandChapters(board, [], [], new Map([[1, clip(1)], [2, clip(2)]]));
     const [first, second] = chapters[0]!.segments;
     expect([first!.tbNum, first!.tbDen]).toEqual([1, 19_200]);
     expect(bandDurationLabel(first!.durationTicks, first!.tbNum, first!.tbDen)).toBe("0:23");

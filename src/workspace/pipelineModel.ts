@@ -109,25 +109,28 @@ export function pipelineInputFrom(
   episode: EpisodeSummary | null,
   skippedChapterIds?: ReadonlySet<number>,
 ): PipelineInput {
+  const videos = clips.filter((clip) => clip.kind === "video");
+  const videoIds = new Set(videos.map((clip) => clip.id).filter((id): id is number => id !== null));
   let analysisPending = 0;
   let segmentCount = 0;
-  for (const clip of clips) {
+  for (const clip of videos) {
     if (clip.analysis_status === "pending" || clip.analysis_status === "running") analysisPending += 1;
     segmentCount += clip.select_count ?? 0;
   }
   const shotsByChapter = new Map<number, number>();
   for (const item of storyboard?.items ?? []) {
+    if (!videoIds.has(item.clip_id)) continue;
     if (item.chapter_id === null) continue;
     shotsByChapter.set(item.chapter_id, (shotsByChapter.get(item.chapter_id) ?? 0) + 1);
   }
   return {
-    clipCount: clips.length,
+    clipCount: videos.length,
     analysisPending,
     segmentCount,
     chapters: (storyboard?.chapters ?? []).map((chapter) => ({ id: chapter.id, shotCount: shotsByChapter.get(chapter.id) ?? 0 })),
     skippedChapterIds,
     exportCount: episode?.export_count ?? 0,
-    unplacedCount: storyboard?.candidates?.length ?? 0,
+    unplacedCount: storyboard?.candidates?.filter((item) => videoIds.has(item.clip_id)).length ?? 0,
   };
 }
 

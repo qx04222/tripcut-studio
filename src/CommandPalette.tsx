@@ -7,14 +7,17 @@ import { useFocusTrap } from "./useFocusTrap";
 import { KIND_LABEL } from "./kindLabels";
 import { useSearchAugment } from "./useSearchAugment";
 import { isTopModal, popModal, pushModal } from "./workspace/modalStack";
+import { requestDuel } from "./workspace/duel/duelBus";
+import type { WorkspaceMode } from "./workspace/WorkspaceStore";
 
 interface CommandPaletteProps {
   onNavigate: (path: string) => void;
   onSelectClip: (clipId: number) => void;
+  workspaceMode?: WorkspaceMode;
 }
 
 /** P6-U1 全局命令面板(cmdk):Cmd+K——跳页、全量搜索(文件/转写/描述/标签/画面文字)、素材直达。 */
-export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps) {
+export function CommandPalette({ onNavigate, onSelectClip, workspaceMode = "video" }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const [clips, setClips] = useState<ClipListItem[]>([]);
   const [query, setQuery] = useState("");
@@ -196,6 +199,7 @@ export function CommandPalette({ onNavigate, onSelectClip }: CommandPaletteProps
             <Command.Item onSelect={() => go("open-deliver")}>打开导出</Command.Item>
             <Command.Item onSelect={() => go("open-settings")}>打开设置</Command.Item>
             <Command.Item onSelect={() => go("open-help")}>打开帮助</Command.Item>
+            <Command.Item onSelect={() => { setOpen(false); requestDuel({ workspaceMode }); }}>擂台</Command.Item>
           </Command.Group>
           <Command.Group heading="附属带">
             <Command.Item onSelect={() => go("band-story")}>切到故事附属带</Command.Item>

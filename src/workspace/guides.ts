@@ -9,7 +9,7 @@ import type { PipelineStep } from "./pipelineModel";
  * 只弹一次(键 `guide.<id>.viewed`,Rust 白名单按前缀 `guide.` 放行);同一时刻最多一个。
  * 触发条件是下面这张纯函数表 —— 谁先满足谁先出,按 `GUIDE_ORDER` 定序。
  */
-export const GUIDE_IDS = ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"] as const;
+export const GUIDE_IDS = ["nav", "photo", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"] as const;
 export type GuideId = (typeof GUIDE_IDS)[number];
 
 export function guideKey(id: GuideId): string {
@@ -20,6 +20,8 @@ export function guideKey(id: GuideId): string {
 export interface GuideSignals {
   /** 首页没盖住、素材已读回 —— 用户真的在看工作区。 */
   inWorkspace: boolean;
+  /** R21:当前是独立照片工作台；照片入口气泡绝不在视频工作台出现。 */
+  photoWorkspace?: boolean;
   /** 当前选中的素材带「有建议段」。 */
   selectedClipHasSuggestions: boolean;
   pipelineStep: PipelineStep | 0;
@@ -75,6 +77,12 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     anchor: '[data-guide="nav"], nav.pipeline-rail',
     side: "bottom",
     when: (s) => s.inWorkspace,
+  },
+  photo: {
+    text: "这里挑照片，那边挑视频。",
+    anchor: '[data-guide="photo-workspace"], .photo-workspace',
+    side: "bottom",
+    when: (s) => s.inWorkspace && s.photoWorkspace === true,
   },
   // R18 车道 settings F1:通知权限的前置说明。macOS 只在第一次 `show()` 时弹权限框,
   // 那一刻用户如果没读过任何说明,本能就会点「不允许」,之后所有通知永久失效且软件不会再问。

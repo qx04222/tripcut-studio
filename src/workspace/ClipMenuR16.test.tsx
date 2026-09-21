@@ -11,19 +11,19 @@ vi.mock("../api", () => apiMock);
 
 import type { ClipListItem, EpisodeSummary, Storyboard } from "../api";
 import { ClipMoreButton, PoolClipContextMenu } from "./ClipMenu";
-import { clipMenuItems, rateClips } from "./clipMenuModel";
+import { addClipsToBand, clipMenuItems, rateClips } from "./clipMenuModel";
 import { __resetClipRemovalForTests } from "./clipRemoval";
 import { ClipRemovalHost } from "./ClipRemovalHost";
 import { CLIP_MENU, REMOVAL_CONFIRM_BUTTON, REMOVAL_CONFIRM_LABEL } from "./copy";
 import { MediaPool } from "./MediaPool";
 import { __resetToastsForTests, getToastSnapshot } from "./ui/toastStore";
 import { __resetUndoForTests, runUndo } from "./undoStack";
-import { __resetClipsFeedForTests, getClipsFeedSnapshot } from "./useClipsFeed";
+import { __resetClipsFeedForTests, getClipsFeedSnapshot, refreshClipsFeed } from "./useClipsFeed";
 import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "./WorkspaceStore";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
-    id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`, file_name: `clip-${id}.mov`,
+    kind: "video", id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`, file_name: `clip-${id}.mov`,
     byte_size: 1, quick_hash: null, full_hash: null, tb_num: 1, tb_den: 1000, duration_ticks: 12_000, fps_num: 25, fps_den: 1,
     is_vfr: false, codec: "h264", width: 1920, height: 1080, captured_at: null, status: "ready", error: null, analysis: null,
     analysis_status: null, analysis_error: null, motion: null, motion_status: null, motion_error: null,
@@ -69,6 +69,24 @@ describe("R16 §1 / P1-1:素材卡菜单", () => {
     expect(multi.map((item) => item.label)).toEqual(["收藏(3 条)", "拒绝(3 条)", "清除评级(3 条)", "加入镜头带(3 条)", "移到其他集(3 条)…", "导出所选(3 条)…", "在 Finder 中显示", "移除素材(3 条)…"]);
     const readOnly = clipMenuItems(1, { readOnly: true });
     expect(readOnly.filter((item) => item.disabled).map((item) => item.id)).toEqual(["favorite", "reject", "clear", "addToBand", "moveToEpisode", "remove"]);
+    expect(clipMenuItems(1, { canAddToBand: false }).map((item) => item.id)).not.toContain("addToBand");
+  });
+
+  it("底层加入镜头带动作严格跳过照片且不先收藏", async () => {
+    apiMock.listClips.mockResolvedValue([clip(10, { kind: "photo", file_name: "photo.jpg", path: "/Volumes/CARD/photo.jpg" })]);
+    await refreshClipsFeed(true);
+    const storyboardCalls = apiMock.getStoryboard.mock.calls.length;
+    await expect(addClipsToBand([10])).resolves.toEqual({ added: 0, skipped: 1 });
+    expect(apiMock.rateClip).not.toHaveBeenCalled();
+    expect(apiMock.getStoryboard).toHaveBeenCalledTimes(storyboardCalls);
+    expect(apiMock.setStoryOrder).not.toHaveBeenCalled();
+  });
+
+  it("检查器照片菜单透传禁用加入镜头带", async () => {
+    render(<ClipMoreButton clipId={10} multiSelection={[]} context={{ canAddToBand: false }} />);
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    const menu = await screen.findByRole("menu", { name: "素材操作" });
+    expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.getAttribute("aria-label"))).not.toContain("加入镜头带");
   });
 
   it("媒体池右键:菜单「素材操作」列全八项;「移除素材…」→ 预览 → 确认卡列后果数字 → 确认后调命令、本地拿掉、清选择、toast", async () => {
@@ -86,7 +104,7 @@ describe("R16 §1 / P1-1:素材卡菜单", () => {
     fireEvent.contextMenu(screen.getByRole("gridcell", { name: /clip-3/ }), { clientX: 10, clientY: 10 });
     const menu = await screen.findByRole("menu", { name: "素材操作" });
     expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.textContent)).toEqual([
-      "收藏(2 条)", "拒绝(2 条)", "清除评级(2 条)", "加入镜头带(2 条)", "移到其他集(2 条)…", "导出所选(2 条)…", "在 Finder 中显示", "移除素材(2 条)…",
+      "收藏(2 条)", "拒绝(2 条)", "清除评级(2 条)", "加入镜头带(2 条)", "移到其他集(2 条)…", "导出所选(2 条)…", "在 Finder 中显示", "移除素材(2 条)…", "擂台",
     ]);
     fireEvent.click(screen.getByRole("menuitem", { name: "移除素材" }));
     const dialog = await screen.findByRole("alertdialog", { name: REMOVAL_CONFIRM_LABEL });
@@ -129,7 +147,7 @@ describe("R16 §1 / P1-1:素材卡菜单", () => {
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     const menu = await screen.findByRole("menu", { name: "素材操作" });
     expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.getAttribute("aria-label"))).toEqual(
-      clipMenuItems(1).map((item) => item.ariaLabel),
+      [...clipMenuItems(1).map((item) => item.ariaLabel), "擂台"],
     );
     fireEvent.click(screen.getByRole("menuitem", { name: "导出所选" }));
     await tick();

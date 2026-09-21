@@ -3,7 +3,7 @@
 // 与 e2e 用的那份)与 api.ts 的形状一致,新库 + 一批夹具从头走到尾。
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { AutoSelectOutcome, AutoSelectRunRow, AutoSelectRunView, ClipListItem, SelectSegment } from "../api";
+import type { AutoSelectOutcome, AutoSelectRunRow, AutoSelectRunView, ClipListItem, DuelSession, SelectSegment } from "../api";
 import { __resetMockForTests, handleMockCommand } from "./fixture";
 
 function segments(): SelectSegment[] {
@@ -37,6 +37,66 @@ describe("devMock:自动挑选 → 结果面板全流程(R19 P-01 / P-03)", () =
     }
   });
 
+  it("R21: onlyPhotos/photoCount 只挑照片，同批 siblings/unselected 同类型且不进视频故事板", () => {
+    const beforeBoard = handleMockCommand("get_storyboard", {}) as { items: { clip_id: number }[] };
+    const seed = handleMockCommand("auto_select_episode_with", {
+      scope: "all", onlyPhotos: true, photoCount: 1, prompt: "挑 1 张照片",
+    }) as AutoSelectOutcome;
+    handleMockCommand("undo_auto_select", { batchId: seed.batch_id });
+    const loaded = handleMockCommand("list_clips", {}) as ClipListItem[];
+    const rejected = loaded.find((clip) => clip.kind === "photo")!;
+    handleMockCommand("rate_clip", { clipId: rejected.id, ratingType: "binary", value: -1 });
+    const outcome = handleMockCommand("auto_select_episode_with", {
+      scope: "all",
+      onlyPhotos: true,
+      photoCount: 3,
+      prompt: "挑 3 张照片",
+    }) as AutoSelectOutcome;
+    expect(outcome.created).toHaveLength(3);
+    expect(outcome.placed).toBe(0);
+    const view = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+    const clips = handleMockCommand("list_clips", {}) as ClipListItem[];
+    const kind = (clipId: number) => clips.find((clip) => clip.id === clipId)?.kind;
+    expect(view.params.only_photos).toBe(true);
+    expect(view.params.photo_count).toBe(3);
+    expect(view.rows.every((row) => kind(row.clip_id) === "photo" && row.siblings.every((item) => kind(item.clip_id) === "photo"))).toBe(true);
+    expect(view.unselected?.every((item) => kind(item.clip_id) === "photo")).toBe(true);
+    expect(view.rows.some((row) => row.clip_id === rejected.id)).toBe(false);
+    expect(view.rows.flatMap((row) => row.siblings).some((item) => item.clip_id === rejected.id)).toBe(false);
+    expect(view.unselected?.some((item) => item.clip_id === rejected.id)).toBe(false);
+    const selectedPhoto = view.rows[0]!;
+    handleMockCommand("rate_clip", { clipId: selectedPhoto.clip_id, ratingType: "binary", value: -1 });
+    expect((handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView).rows.some((row) => row.clip_id === selectedPhoto.clip_id)).toBe(false);
+    handleMockCommand("rate_clip", { clipId: selectedPhoto.clip_id, ratingType: "binary", value: 0 });
+    expect((handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView).rows.some((row) => row.clip_id === selectedPhoto.clip_id)).toBe(true);
+    expect((handleMockCommand("get_storyboard", {}) as typeof beforeBoard).items).toEqual(beforeBoard.items);
+  });
+
+  it("R21:照片结果行擂台换成B后同一run仍唯一显示B，整组撤销恢复A", () => {
+    const outcome = handleMockCommand("auto_select_episode_with", {
+      scope: "all",
+      onlyPhotos: true,
+      photoCount: 1,
+      prompt: "挑 1 张照片",
+    }) as AutoSelectOutcome;
+    const before = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+    expect(before.rows).toHaveLength(1);
+    const a = before.rows[0]!;
+    const b = a.siblings[0]!;
+    expect(b).toBeTruthy();
+    let session = handleMockCommand("start_duel", { members: [
+      { clip_id: a.clip_id, segment_id: null, result_segment_id: a.segment_id },
+      { clip_id: b.clip_id, segment_id: null },
+    ], source: "results" }) as DuelSession;
+    session = handleMockCommand("duel_action", { sessionId: session.id, action: "decide", winner: `photo:${b.clip_id}` }) as DuelSession;
+    handleMockCommand("duel_action", { sessionId: session.id, action: "finish" });
+    const replaced = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+    expect(replaced.rows.map((row) => [row.segment_id, row.clip_id])).toEqual([[a.segment_id, b.clip_id]]);
+    handleMockCommand("duel_action", { sessionId: session.id, action: "undo_session" });
+    const restored = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+    expect(restored.rows.map((row) => [row.segment_id, row.clip_id])).toEqual([[a.segment_id, a.clip_id]]);
+  });
+
   it("不要这一段 → 行消失、segments −1;换一段 → 行数不变、段换了素材;全部撤销 → 本批回 0", () => {
     const outcome = handleMockCommand("auto_select_episode", { budgetSecs: 60, scope: "all" }) as AutoSelectOutcome;
     const total = outcome.created.length;
@@ -64,4 +124,29 @@ describe("devMock:自动挑选 → 结果面板全流程(R19 P-01 / P-03)", () =
     expect((handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView).rows).toHaveLength(0);
     expect(segments().length).toBe(before - total);
   });
+});
+
+it("R20: 换一段还原快照、顺序与批次,全部撤销后旧撤销不能复活", () => {
+  __resetMockForTests();
+  const outcome = handleMockCommand("auto_select_episode", { budgetSecs: 60, scope: "all" }) as AutoSelectOutcome;
+  const view = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+  const old = view.rows.find((r) => r.siblings.length > 0)!;
+  const before = handleMockCommand("get_storyboard", {}) as { items: { segment_id: number; position: number }[] };
+  const position = before.items.find((r) => r.segment_id === old.segment_id)?.position;
+  const next = handleMockCommand("replace_auto_segment", { segmentId: old.segment_id }) as AutoSelectRunRow & { replaced: { segment_id: number; position: number } };
+  expect(next.replaced.segment_id).toBe(old.segment_id);
+  expect(next.replaced.position).toBe(position);
+  const replacedBoard = handleMockCommand("get_storyboard", {}) as { items: { segment_id: number; key: string; file_name: string }[] };
+  const replacementItem = replacedBoard.items.find((item) => item.segment_id === next.segment_id)!;
+  expect(replacementItem.key).toBe(`segment:${next.segment_id}`);
+  const clips = handleMockCommand("list_clips", {}) as ClipListItem[];
+  expect(replacementItem.file_name).toBe(clips.find((clip) => clip.id === next.clip_id)!.file_name);
+  expect(handleMockCommand("undo_replace_auto_segment", { runId: outcome.run_id, replacedSegmentId: old.segment_id })).toBe(true);
+  const restored = handleMockCommand("list_auto_select_run", { runId: outcome.run_id }) as AutoSelectRunView;
+  expect(restored.rows.map((r) => r.segment_id)).toEqual(view.rows.map((r) => r.segment_id));
+  const after = handleMockCommand("get_storyboard", {}) as typeof before;
+  expect(after.items.find((r) => r.segment_id === old.segment_id)?.position).toBe(position);
+  handleMockCommand("replace_auto_segment", { segmentId: old.segment_id });
+  expect(handleMockCommand("undo_auto_select", { batchId: outcome.batch_id })).toBe(view.rows.length);
+  expect(handleMockCommand("undo_replace_auto_segment", { runId: outcome.run_id, replacedSegmentId: old.segment_id })).toBe(false);
 });

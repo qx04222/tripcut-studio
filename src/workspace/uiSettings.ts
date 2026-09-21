@@ -7,6 +7,7 @@ import { setSetting, type SettingsMap } from "../api";
  */
 export const UI_SETTING_DEFAULTS = {
   "ui.workspace_v2": "true", // Task 6d:旧四页壳全部有了新家,旗默认打开;设置 → 外观 → 「切回旧界面」写回 "false"
+  "ui.workspace.mode": "video",
   "ui.pane.pool_width": "320",
   "ui.pane.inspector_width": "340",
   "ui.pane.monitor_height": "0.55",

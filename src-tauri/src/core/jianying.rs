@@ -464,6 +464,7 @@ fn generate_with_availability(
         .query_row("SELECT title FROM episodes WHERE id = ?1", [episode_id], |row| row.get(0))
         .unwrap_or_default();
     let mut clips = deliver::selected_clips(&transaction)?;
+    clips.retain(|clip| clip.media_kind != "photo");
     // R3 Task 3:草稿画布来自集的目标平台预设,不再取首条素材的原始尺寸——
     // `both` 朝向在这里折成 `landscape`(横竖同时制作,草稿按横版画布)。
     // 原生草稿没有交付层的 override 入口,永远读集自己的 target_platform。
@@ -1606,6 +1607,43 @@ mod tests {
             source.canonicalize().unwrap()
         );
         assert_eq!(draft_inputs(&connection, &clips).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn photo_only_selection_reports_the_ordinary_no_video_error() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('photo-volume')", []).unwrap();
+        connection.execute(
+            "INSERT INTO clips(
+                volume_uuid,rel_path,byte_size,quick_hash,kind,duration_ticks,episode_id
+             ) VALUES(
+                'photo-volume','still.jpg',10,'photo-hash','photo',0,
+                (SELECT id FROM episodes WHERE status='active')
+             )",
+            [],
+        ).unwrap();
+        let clip_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO segments(clip_id,in_ticks,out_ticks,kind,tombstone)
+             VALUES(?1,0,0,'whole',0)",
+            [clip_id],
+        ).unwrap();
+        let segment_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO ratings(segment_id,rating_type,value,rated_at)
+             VALUES(?1,'binary',1,'2026-09-19T23:59:59Z')",
+            [segment_id],
+        ).unwrap();
+        let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
+        let error = generate_with_availability(
+            &mut connection,
+            &status,
+            directory.path(),
+            false,
+        ).unwrap_err().to_string();
+        assert!(error.contains("当前没有精选段或收藏素材"), "{error}");
+        assert!(!error.contains("photo_not_supported"), "{error}");
     }
 
     /// R14 C-1:草稿名用集名,不再固定「旅剪项目」。

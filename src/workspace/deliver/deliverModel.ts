@@ -142,6 +142,8 @@ export function wholeFavoritesNote(status: ExportStatus): string | null {
 
 /** 交付项汇总一行(规格 §4.2 第 2 条):「4 项 · 3 段精选片段 · 1 条收藏的整条视频 · 预计 3:05」。 */
 export function summaryLine(status: ExportStatus): string {
+  const photos = status.selected_photo_count ?? 0;
+  if (photos > 0) return `${status.selected_count - photos} 段 · ${photos} 张 · 预计 ${formatDuration(status.total_duration_seconds)}`;
   const note = wholeFavoritesNote(status);
   const whole = `${status.selected_whole_count} 条收藏的整条视频${note ? `（${note}）` : ""}`;
   return `${status.selected_count} 项 · ${status.selected_segment_count} 段精选片段 · ${whole} · 预计 ${formatDuration(status.total_duration_seconds)}`;

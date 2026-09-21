@@ -122,6 +122,7 @@ function clip(id: number, fileName: string): ClipListItem {
     motion: null,
     motion_status: null,
     motion_error: null,
+    kind: "video",
     binary_rating: null,
     star_rating: null,
     select_count: 0,

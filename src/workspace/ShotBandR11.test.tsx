@@ -94,6 +94,7 @@ const clip: ClipListItem = {
   motion: null,
   motion_status: null,
   motion_error: null,
+  kind: "video",
   binary_rating: 1,
   star_rating: null,
   select_count: 0,
@@ -168,7 +169,7 @@ describe("R11 §1.2:镜头带工具条「自动挑选精选段」", () => {
       fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
       await Promise.resolve();
     });
-    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "favorites_or_rated3", budgetSecs: 45 });
+    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "favorites_or_rated3", budgetSecs: 45, mediaKind: "video", photoCount: null });
     const toast = await screen.findByRole("status");
     expect(toast.textContent).toContain("已挑选 5 段 · 共 31 s · 覆盖 3 章");
     // R12 §2:挑完默认已排进镜头带,toast 里说出来;旧后端没有 placed 时提示去点「一键排入」。
@@ -195,7 +196,7 @@ describe("R11 §1.2:镜头带工具条「自动挑选精选段」", () => {
       fireEvent.click(within(panel).getByRole("button", { name: "开始挑选" }));
       await Promise.resolve();
     });
-    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "all", budgetSecs: 60 });
+    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "all", budgetSecs: 60, mediaKind: "video", photoCount: null });
     const toast = await screen.findByRole("status");
     // R11 简化专项 #5:「动作没成功:原因。下一步」。
     expect(toast.textContent).toContain("自动挑选没成功:没有时刻分。先让画面分析跑完,再试一次");

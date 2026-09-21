@@ -36,6 +36,8 @@ export const CLIP_MENU_ORDER: readonly ClipMenuId[] = ["favorite", "reject", "cl
 export interface ClipMenuOptions {
   readOnly?: boolean;
   canReveal?: boolean;
+  /** 照片检查器不提供视频镜头带动作；底层动作仍会再次校验素材类型。 */
+  canAddToBand?: boolean;
   /** R17 epmove:库里一共几集。恰好一集时「移到其他集…」禁用并说明先去首页新建一集;不传 / 读不到(0)按「有别的集」处理。 */
   episodeCount?: number;
 }
@@ -44,6 +46,7 @@ export function clipMenuItems(count: number, options: ClipMenuOptions = {}): Men
   const items: MenuItem[] = [];
   for (const id of CLIP_MENU_ORDER) {
     if (id === "reveal" && options.canReveal === false) continue;
+    if (id === "addToBand" && options.canAddToBand === false) continue;
     const label = CLIP_MENU[id];
     const mutating = id !== "export" && id !== "reveal";
     const alone = id === "moveToEpisode" && options.episodeCount === 1;
@@ -132,7 +135,12 @@ export async function addClipsToBand(clipIds: readonly number[]): Promise<{ adde
   let added = 0;
   let skipped = 0;
   for (const clipId of clipIds) {
-    if (needsFavoriteBeforeInsert(getClipsFeedSnapshot().clipsById.get(clipId))) {
+    const clip = getClipsFeedSnapshot().clipsById.get(clipId);
+    if (clip?.kind !== "video") {
+      skipped += 1;
+      continue;
+    }
+    if (needsFavoriteBeforeInsert(clip)) {
       await rateClip(clipId, "binary", 1);
       patchClipInFeed(clipId, { binary_rating: 1 });
     }
@@ -154,6 +162,7 @@ export async function addClipsToBand(clipIds: readonly number[]): Promise<{ adde
 
 export interface ClipMenuContext {
   readOnly?: boolean;
+  canAddToBand?: boolean;
   /** 传 false 才不出「在 Finder 中显示」(默认出)。 */
   canReveal?: boolean;
   /** 「在 Finder 中显示」的实现;默认 `reveal_clip`(测试可换)。 */

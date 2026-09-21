@@ -7,6 +7,19 @@ import {
 } from "./WorkspaceStore";
 
 describe("workspaceReducer 选择模型", () => {
+  it("R21:工作台模式默认视频，切照片时清选择并落 ui.workspace.mode", () => {
+    const base = { ...S0, selection: { kind: "clip" as const, clipId: 7 }, multiSelection: [7], anchorClipId: 7 };
+    const next = reduce(base, { type: "set-workspace-mode", mode: "photo" });
+    expect(next.workspaceMode).toBe("photo");
+    expect(next.selection).toBeNull();
+    expect(next.multiSelection).toEqual([]);
+    expect(persistedPairs(base, next)).toContainEqual(["ui.workspace.mode", "photo"]);
+  });
+
+  it("R21:从设置水合照片工作台，坏值退回视频工作台", () => {
+    expect(reduce(S0, { type: "hydrate", settings: { "ui.workspace.mode": "photo" } }).workspaceMode).toBe("photo");
+    expect(reduce(S0, { type: "hydrate", settings: { "ui.workspace.mode": "mixed" } }).workspaceMode).toBe("video");
+  });
   it("选素材记锚点,单选清空多选", () => {
     const s = reduce(S0, { type: "select-clip", clipId: 7 });
     expect(s.selection).toEqual({ kind: "clip", clipId: 7 });
@@ -46,6 +59,17 @@ describe("workspaceReducer 栏尺寸与折叠", () => {
 });
 
 describe("workspaceReducer 焦点轮转(F6)", () => {
+  it("照片工作台只在网格→静态检视→精选带间轮转，跳过不存在的检查器", () => {
+    let s: WorkspaceState = { ...S0, workspaceMode: "photo", focusedPane: "pool", selection: { kind: "clip", clipId: 2 } };
+    for (const expected of ["monitor", "band", "pool"] as const) {
+      s = reduce(s, { type: "cycle-pane-focus" });
+      expect(s.focusedPane).toBe(expected);
+    }
+  });
+  it("视频池已手动/自动折叠也不影响照片网格，照片模式 F6 仍能回到 pool", () => {
+    const state: WorkspaceState = { ...S0, workspaceMode: "photo", focusedPane: "band", poolCollapsed: true, poolAutoCollapsed: true };
+    expect(reduce(state, { type: "cycle-pane-focus" }).focusedPane).toBe("pool");
+  });
   it("按 媒体池→预览监视器→镜头带→检查器 循环", () => {
     const order = ["pool", "monitor", "band", "inspector", "pool"] as const;
     // R19 V-04:检查器只有开着(有选中 / 钉住)才在轮转里。

@@ -1,3 +1,5 @@
+import { photoDimensions, photoSizeLabel } from "./photoModel";
+import { poolCapturedAt } from "./poolOrder";
 import { analysisBadgeKinds, type AnalysisBadgeKind } from "../AnalysisPanel";
 import type { ClipDimension, ClipDimensionKey, ClipListItem, ShotStack } from "../api";
 
@@ -117,7 +119,11 @@ export function filterClipsByDimension(
 // G4：rotation 与 width/height 都是 ffprobe 探测出的解码前（旋转前）尺寸——
 // 90/270 会把 landscape 的解码尺寸转成竖屏画面，反之亦然。用 XOR：
 // 已经是竖屏尺寸 且 旋转不是 90/270 → 仍是竖屏；反之同理。
-export function isPortraitClip(clip: Pick<ClipListItem, "rotation" | "width" | "height">): boolean {
+export function isPortraitClip(clip: Pick<ClipListItem, "rotation" | "width" | "height" | "kind" | "photo">): boolean {
+  if (clip.kind === "photo") {
+    const size = photoDimensions(clip);
+    return size !== null && size.height > size.width;
+  }
   const rotatesQuarterTurn = clip.rotation === 90 || clip.rotation === 270;
   const tallerThanWide = (clip.height ?? 0) > (clip.width ?? 0);
   return rotatesQuarterTurn !== tallerThanWide;
@@ -198,7 +204,9 @@ export function matchClipsByFileName(clips: readonly ClipListItem[], query: stri
 
 /** 媒体池卡片上的时长 —— 补零到 mm:ss,规格 §7 的 AX 名靠它对齐。 */
 export function poolDurationLabel(clip: ClipListItem): string {
+  if (clip.kind === "photo") return photoSizeLabel(clip);
   if (
+    ![clip.duration_ticks, clip.tb_num, clip.tb_den].every(Number.isFinite) ||
     clip.duration_ticks === null ||
     clip.tb_num === null ||
     clip.tb_den === null ||
@@ -243,7 +251,7 @@ export function fileNameLines(name: string, maxLine = 18): [string, string | nul
 
 /** 拍摄日期:`captured_at` 的 ISO 日期段 → `08-12`;没有就不显示。 */
 export function poolDateLabel(clip: ClipListItem): string | null {
-  const match = clip.captured_at?.match(/^\d{4}-(\d{2})-(\d{2})/);
+  const match = poolCapturedAt(clip)?.match(/^\d{4}-(\d{2})-(\d{2})/);
   return match ? `${match[1]}-${match[2]}` : null;
 }
 

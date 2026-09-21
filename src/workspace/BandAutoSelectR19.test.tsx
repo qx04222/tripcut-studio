@@ -24,7 +24,7 @@ import { RESULTS_LIST_NAME, RESULTS_PANEL_NAME } from "./results/ResultsPanel";
 import { SELECT_PROMPT_EVENT } from "./selectPrompt";
 import { __resetUndoForTests, canUndo, runUndo } from "./undoStack";
 
-const uncurated = { id: 1, binary_rating: null, star_rating: null, select_count: 0, analysis_status: "done" };
+const uncurated = { id: 1, kind: "video", binary_rating: null, star_rating: null, select_count: 0, analysis_status: "done" };
 const OUTCOME: AutoSelectResult = { created: [1, 2, 3], total_secs: 44.6, chapters_covered: 2, batch_id: "auto-7", run_id: "auto-7", placed: 3, arrange_batch_id: "arr-7", scope_used: "all", fell_back: false };
 const RUN_ROW = { clip_id: 1, in_ticks: 0, out_ticks: 5000, tb_num: 1, tb_den: 1000, secs: 5, score: 0.8, reasons: ["清晰"], siblings: [] };
 const RUN_VIEW = { run_id: "auto-7", params: { budget_secs: 45, scope: "all", weights: null, pick: "chapters", prompt: null, target_secs: 5 }, rows: [1, 2, 3].map((id) => ({ ...RUN_ROW, segment_id: id })) };
@@ -56,7 +56,7 @@ describe("R19 U-09:首次自动挑选零决定", () => {
     render(<BandAutoSelect onOutcome={onOutcome} onError={() => undefined} />);
     open();
     await waitFor(() => expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledTimes(1));
-    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "all", budgetSecs: 45 });
+    expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith({ scope: "all", budgetSecs: 45, mediaKind: "video", photoCount: null });
     expect(screen.queryByRole("group", { name: "自动挑选精选段" })).toBeNull();
     await waitFor(() => expect(onOutcome).toHaveBeenCalledTimes(1));
     const outcome = onOutcome.mock.calls[0]![0];
@@ -143,6 +143,15 @@ describe("R19 P-03:挑完出结果面板,整批进 ⌘Z 栈", () => {
 });
 
 describe("R19 P-01:一句话挑片(面板顶部输入框 → Enter → 参数 → 结果面板)", () => {
+  it("视频工作台即使输入照片指令也强制只挑视频", async () => {
+    render(<BandAutoSelect onOutcome={() => undefined} onError={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));
+    const input = screen.getByRole("textbox", { name: PROMPT_INPUT_NAME }) as HTMLInputElement;
+    expect(input.placeholder).toBe("例如:挑 60 秒,风景为主,少人脸,按时间顺序");
+    fireEvent.change(input, { target: { value: "挑 20 张照片" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(apiMocks.autoSelectEpisodeWith).toHaveBeenCalledWith(expect.objectContaining({ mediaKind: "video", photoCount: null })));
+  });
   it("输入「挑 60 秒,风景为主,少人脸,按时间顺序」→ Enter:后端收到 60 秒 / 权重偏置 / 按时间顺序 / 原句;镜头带段数 ≥ 1 且每段 reason 非空;⌘Z 后回 0", async () => {
     render(<BandAutoSelect onOutcome={() => undefined} onError={() => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "自动挑选精选段" }));

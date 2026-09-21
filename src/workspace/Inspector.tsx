@@ -1,5 +1,5 @@
+import { PhotoInspector } from "./PhotoInspector";
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
-
 import {
   clearClipRating,
   describeClipWithAi,
@@ -39,9 +39,7 @@ import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { INSPECTOR_TITLES } from "./copy";
 import { pushUndo } from "./undoStack";
-
 export type InspectorSectionId = "techcheck" | "dimensions" | "ai" | "audio" | "similar";
-
 export const INSPECTOR_SECTIONS: readonly { id: InspectorSectionId; title: string; icon: IconName }[] = [
   { id: "techcheck", title: "技术检查", icon: "check" },
   { id: "dimensions", title: INSPECTOR_TITLES.dimensions, icon: "settings-analysis" },
@@ -49,7 +47,6 @@ export const INSPECTOR_SECTIONS: readonly { id: InspectorSectionId; title: strin
   { id: "audio", title: INSPECTOR_TITLES.audio, icon: "volume" },
   { id: "similar", title: "相似镜头", icon: "similar" },
 ];
-
 /** 默认层五张卡的标题与图标(R18:tag / slot / takes 是各自的图标,不再借用别的名字)。 */
 const DEFAULT_SECTION_META: Record<DefaultSectionId, { title: string; icon: IconName }> = {
   rating: { title: "评级与收藏", icon: "star" },
@@ -58,7 +55,6 @@ const DEFAULT_SECTION_META: Record<DefaultSectionId, { title: string; icon: Icon
   segments: { title: "精选段", icon: "mark-in" },
   takes: { title: "同一镜头的多条", icon: "takes" },
 };
-
 /**
  * 「加载中」的终态窗口(R10 U-27):面板 8 秒内没上报计数就落到「未探测 / 暂无数据」,
  * 不再一直「加载中」;之后真正的计数到了照样覆盖。
@@ -66,7 +62,6 @@ const DEFAULT_SECTION_META: Record<DefaultSectionId, { title: string; icon: Icon
 export const SECTION_LOADING_TIMEOUT_MS = 8_000;
 /** 计数的哨兵值:超时未上报。与 0 分开,状态字才能说「暂无数据」而不是「无」。 */
 export const COUNT_TIMED_OUT = -1;
-
 /** 默认层的一张卡:铬条标题(图标 + 段名 + 右侧 meta)+ 内容。 */
 function DefaultSectionCard({ id, meta, children }: { id: DefaultSectionId; meta?: string; children: ReactNode }): JSX.Element {
   const { title, icon } = DEFAULT_SECTION_META[id];
@@ -77,7 +72,6 @@ function DefaultSectionCard({ id, meta, children }: { id: DefaultSectionId; meta
     </Card>
   );
 }
-
 export interface InspectorStatusContext {
   techCheckIssues: number;
   aiDescribed: boolean;
@@ -87,7 +81,6 @@ export interface InspectorStatusContext {
   similarGroupCount: number | null;
   dimensionCount: number;
 }
-
 /** 每段标题右侧那个「极简状态字」,收起时也能判断要不要展开(规格 §4)。
  * 音轨数/相似组数在面板真正上报计数之前必须显示中性的「加载中」——
  * 不能因为 state 初值是 0/未知就误报「未探测」/「无」(假阴性)。 */
@@ -108,15 +101,12 @@ export function sectionStatusText(id: InspectorSectionId, ctx: InspectorStatusCo
       return ctx.similarGroupCount > 0 ? `${ctx.similarGroupCount} 组` : "无";
   }
 }
-
 /** 折叠段的「安静」状态字:没东西可看 —— 这些段收进一个「更多信息」折叠,不占检查器版面(R11 简化专项 #4)。 */
 export const QUIET_SECTION_STATUS: readonly string[] = ["待判定", "未探测", "暂无数据", "无"];
-
 export function isQuietSection(id: InspectorSectionId, ctx: InspectorStatusContext): boolean {
   if (id === "techcheck" || id === "ai") return false;
   return QUIET_SECTION_STATUS.includes(sectionStatusText(id, ctx));
 }
-
 /** 默认层选中一条素材时的检查器主体。 */
 function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   const feed = useClipsFeed();
@@ -141,14 +131,12 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   const setAudioTrackCount = useCallback((count: number) => setAudioCount({ clipId, count }), [clipId]);
   const setSimilarGroupCount = useCallback((count: number) => setSimilarCount({ clipId, count }), [clipId]);
   const mounted = useRef(true);
-
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
     };
   }, []);
-
   useEffect(() => {
     // 8 秒没有上报就落终态(U-27);面板真的上报了会把哨兵值盖掉。
     const timer = window.setTimeout(() => {
@@ -259,8 +247,11 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   );
 
   const poolOrder = useMemo(
-    () => feed.clips.map((item) => item.id).filter((id): id is number => id !== null),
-    [feed.clips],
+    () => feed.clips
+      .filter((item) => clip?.kind !== undefined && item.kind === clip.kind)
+      .map((item) => item.id)
+      .filter((id): id is number => id !== null),
+    [feed.clips, clip?.kind],
   );
   const poolIndex = poolOrder.indexOf(clipId);
   const onStepClip = useCallback(
@@ -297,6 +288,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
   return (
     <div className="inspector-clip">
       <InspectorHeader clip={clip} index={poolIndex} total={poolOrder.length} onStep={onStepClip} />
+      {clip.kind === "photo" ? <PhotoInspector clip={clip} /> : null}
       {sections.includes("rating") ? (
         <DefaultSectionCard id="rating">
           <RatingControls clip={clip} busy={ratingBusy} onRate={onRate} onClear={onClearRating} />
@@ -319,7 +311,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
             readOnly={feed.episode.viewing !== null}
             onMoveChapter={onMoveChapter}
             onMoveSlot={onMoveSlot}
-            onAddToBand={onAddToBand}
+            onAddToBand={clip.kind === "video" ? onAddToBand : undefined}
             addBusy={slotDrag.busy}
           />
           {slotDrag.notice ? (
@@ -329,7 +321,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
           ) : null}
         </DefaultSectionCard>
       ) : null}
-      {sections.includes("segments") ? (
+      {clip.kind !== "photo" && sections.includes("segments") ? (
         <DefaultSectionCard id="segments" meta={clip.select_count > 0 ? `${clip.select_count} 段` : undefined}>
           <SelectSegmentsSection clipId={clipId} selectCount={clip.select_count} readOnly={feed.episode.viewing !== null} />
         </DefaultSectionCard>

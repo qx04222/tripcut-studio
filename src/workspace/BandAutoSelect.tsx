@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type JSX } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type JSX } from "react";
 
 import {
   autoSelectEpisodeWith,
@@ -139,7 +139,8 @@ export function BandAutoSelect({
   // 用户没点过 chip 之前,范围跟着库状态走(X-01);点过就以用户的为准。
   const [chosenScope, setScope] = useState<AutoSelectScope | null>(null);
   const { clips } = useClipsFeed();
-  const scope = chosenScope ?? defaultScopeFor(clips);
+  const videoClips = useMemo(() => clips.filter((clip) => clip.kind === "video"), [clips]);
+  const scope = chosenScope ?? defaultScopeFor(videoClips);
   const [budget, setBudget] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const budgetId = useId();
@@ -154,7 +155,7 @@ export function BandAutoSelect({
     async (chosen: AutoSelectScope, seconds: number | undefined, first: { budget: number; platform: string } | null, extra: AutoSelectParamsInput = {}) => {
       setBusy(true);
       try {
-        const outcome = await autoSelectEpisodeWith({ ...extra, scope: chosen, budgetSecs: seconds });
+        const outcome = await autoSelectEpisodeWith({ ...extra, scope: chosen, budgetSecs: seconds, mediaKind: "video", photoCount: null });
         setOpen(false);
         // P-03:整批进 ⌘Z 栈 —— 面板「全部撤销」、toast「撤销」、⌘Z 三条路同一个闭包,只跑一次。
         const undoId = pushUndo({
@@ -169,9 +170,9 @@ export function BandAutoSelect({
         setRunId(outcome.run_id ?? null);
         // Y-03:全新库(0 收藏 0 打星)按「全部」挑时,后端的 fell_back 永远走不到 —— 前端已经预选了「全部」。
         // 「为什么按全部」由前端按同一份库状态说清,toast 文案与后端降级一致。
-        const uncurated = chosen === "all" && defaultScopeFor(clips) === "all";
+        const uncurated = chosen === "all" && defaultScopeFor(videoClips) === "all";
         // R19 U-01:分析没跑完也先挑已分析的部分,剩余数写进 toast。
-        const pendingLeft = pendingAnalysisCount(clips);
+        const pendingLeft = pendingAnalysisCount(videoClips);
         onOutcome({
           ...outcome,
           fell_back: uncurated ? true : outcome.fell_back,
@@ -186,7 +187,7 @@ export function BandAutoSelect({
         setBusy(false);
       }
     },
-    [clips, onOutcome, onError],
+    [videoClips, onOutcome, onError],
   );
 
   useEffect(() => {
@@ -196,7 +197,7 @@ export function BandAutoSelect({
     const onOpen = (event: Event) => {
       if (disabled) return;
       const wantsPanel = (event as CustomEvent<{ panel?: boolean } | undefined>).detail?.panel === true;
-      if (!wantsPanel && !ranOnceRef.current && isFirstAutoSelect(clips)) {
+      if (!wantsPanel && !ranOnceRef.current && isFirstAutoSelect(videoClips)) {
         ranOnceRef.current = true;
         void platformBudget().then((budget) => run("all", budget.seconds, { budget: budget.seconds, platform: budget.platform }));
         return;
@@ -205,7 +206,7 @@ export function BandAutoSelect({
     };
     window.addEventListener(OPEN_AUTO_SELECT_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_AUTO_SELECT_EVENT, onOpen);
-  }, [disabled, clips, run]);
+  }, [disabled, videoClips, run]);
 
   useEffect(() => {
     if (!open) return;
@@ -237,11 +238,11 @@ export function BandAutoSelect({
   const runSentence = useCallback(
     async (sentence: string) => {
       const { parsed } = await parseSelectPromptSmart(sentence);
-      const params = toAutoSelectParams(parsed, sentence, chosenScope ?? defaultScopeFor(clips));
+      const params = toAutoSelectParams(parsed, sentence, chosenScope ?? defaultScopeFor(videoClips));
       setRunId(null);
       await run(params.scope ?? "all", params.budgetSecs, null, { weights: params.weights, pick: params.pick, prompt: params.prompt });
     },
-    [chosenScope, clips, run],
+    [chosenScope, videoClips, run],
   );
 
   useEffect(() => {

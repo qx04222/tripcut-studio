@@ -1,3 +1,4 @@
+import { photoSizeLabel } from "./photoModel";
 import type { JSX, RefObject } from "react";
 
 import type { ClipListItem, PlayerStatus, StoryGap } from "../api";
@@ -13,6 +14,7 @@ export function slotPlaceholderCopy(gap: StoryGap): { title: string; reason: str
 
 /** 井右上角的规格 chip(A 稿「4K · 25p · 12.5 MB」):分辨率档 · 帧率 · 文件大小。 */
 export function monitorSpecLabel(clip: ClipListItem): string {
+  if (clip.kind === "photo") return `照片 · ${photoSizeLabel(clip)}`;
   const height = Math.min(clip.width ?? 0, clip.height ?? 0) || (clip.height ?? 0);
   const long = Math.max(clip.width ?? 0, clip.height ?? 0);
   const resolution =
@@ -41,7 +43,7 @@ export function IoRail({
   inPoint: number | null;
   outPoint: number | null;
 }): JSX.Element | null {
-  if (!status || status.phase !== "ready" || status.duration <= 0) return null;
+  if (!status || status.phase !== "ready" || status.duration <= 0 || !Number.isFinite(status.duration)) return null;
   const pct = (seconds: number) => `${Math.min(100, Math.max(0, (seconds / status.duration) * 100))}%`;
   return (
     <div className="monitor-io" aria-hidden="true">

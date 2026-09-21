@@ -59,6 +59,19 @@ fn summary_by_id(connection: &Connection, id: i64) -> Result<EpisodeSummary> {
                              ORDER BY r.rated_at DESC, r.id DESC
                              LIMIT 1
                           )
+                        )
+                        AND (
+                          c2.kind != 'photo'
+                          OR COALESCE((
+                            SELECT r.value FROM ratings r
+                              JOIN segments s ON s.id = r.segment_id
+                             WHERE s.clip_id = c2.id
+                               AND s.tombstone = 0
+                               AND COALESCE(s.kind, 'whole') != 'select'
+                               AND r.rating_type = 'binary'
+                             ORDER BY r.rated_at DESC, r.id DESC
+                             LIMIT 1
+                          ), 0) != -1
                         )),
                     (SELECT COUNT(*) FROM exports x
                        WHERE x.episode_id = e.id)
@@ -352,6 +365,7 @@ pub fn delete_episode(connection: &mut Connection, episode_id: i64) -> Result<De
          ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
         [],
     )?;
+    super::similar::remove_primary_events_for_clips(&transaction, &clip_ids)?;
     transaction.execute("DELETE FROM clips WHERE id IN (SELECT value FROM json_each(?1))", [&json])?;
     transaction.execute(
         "DELETE FROM import_batch_clips WHERE batch_id IN (SELECT id FROM import_batches WHERE episode_id = ?1)",
@@ -817,6 +831,27 @@ mod tests {
         assert_eq!(current_episode(&connection).unwrap().favorite_count, 1);
         crate::core::ratings::delete_select_segment(&mut connection, second.id).unwrap();
         assert_eq!(current_episode(&connection).unwrap().favorite_count, 0);
+    }
+
+    #[test]
+    fn photo_selected_count_honors_explicit_reject_while_video_keeps_live_select_semantics() {
+        let (_dir, mut connection) = test_connection();
+        let photo = insert_clip(&connection, "photo.jpg");
+        crate::core::ratings::create_select_segment(&mut connection, photo, 0.1, 0.2).unwrap();
+        connection.execute("UPDATE clips SET kind='photo',duration_ticks=0 WHERE id=?1",[photo]).unwrap();
+        assert_eq!(current_episode(&connection).unwrap().favorite_count, 1);
+        crate::core::ratings::rate_clip(&mut connection, photo, "binary", -1).unwrap();
+        assert_eq!(current_episode(&connection).unwrap().favorite_count, 0, "照片 select→X 不再计入");
+        crate::core::ratings::rate_clip(&mut connection, photo, "binary", 0).unwrap();
+        assert_eq!(current_episode(&connection).unwrap().favorite_count, 1, "0 清除拒绝后 live select 恢复");
+        crate::core::ratings::rate_clip(&mut connection, photo, "binary", -1).unwrap();
+        crate::core::ratings::rate_clip(&mut connection, photo, "binary", 1).unwrap();
+        assert_eq!(current_episode(&connection).unwrap().favorite_count, 1, "F 恢复");
+
+        let video = insert_clip(&connection, "video.mov");
+        crate::core::ratings::create_select_segment(&mut connection, video, 0.1, 0.2).unwrap();
+        crate::core::ratings::rate_clip(&mut connection, video, "binary", -1).unwrap();
+        assert_eq!(current_episode(&connection).unwrap().favorite_count, 2, "视频 live select 的既有计数语义不变");
     }
 
     #[test]

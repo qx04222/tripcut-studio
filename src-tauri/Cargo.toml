@@ -1,6 +1,6 @@
 [package]
 name = "tripcut-studio"
-version = "0.10.2"
+version = "0.11.0"
 description = "旅剪工作台桌面应用"
 authors = ["TripCut Studio"]
 edition = "2021"
@@ -13,6 +13,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+# R21 photo-core: macOS ImageIO + future photo similarity hashing.
+objc2-image-io = { version = "=0.3.2", default-features = false, features = ["std", "CGImageSource", "CGImageProperties", "CGImageDestination", "objc2-core-graphics"] }
+image_hasher = "=3.0.0"
+# 三者早已在依赖树里(objc2 家族 / image 0.25.10 由 reqwest 等间接带入),这里只是提升为
+# 直接依赖以便按名导入;版本与 Cargo.lock 既有条目完全一致,不引入新包。
+objc2-core-foundation = "=0.3.2"
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 tauri-plugin-dialog = "2"
 # R7 Task 5：把参考帧 JPEG 编成 data URI 喂给 MiniMax。0.22.1 已经是
 # Cargo.lock 里锁定的传递版本(reqwest 等间接依赖带入),这里只是把它提升为
@@ -93,13 +101,13 @@ tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thre
 tracing = "=0.1.44"
 # R18 M-03:让 123 个 tracing 调用点真的落盘。只开 fmt + ansi 之外的最小特性集——
 # 不开 env-filter(它会拉 regex),级别用 TRIPCUT_LOG 自己解析成 LevelFilter。
-tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["fmt", "std"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
 tracing-appender = "=0.2.3"
 ttf-parser = "=0.25.1"
 # 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
 # url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
 url = "=2.5.8"
-uuid = { version = "=1.26.0", features = ["v4"] }
+uuid = { version = "=1.26.1", features = ["v4"] }
 walkdir = "=2.5.0"
 tauri-plugin-notification = "=2.4.0"
 # R18 H-16:通知上的「在 Finder 中显示」。tauri-plugin-notification 的桌面

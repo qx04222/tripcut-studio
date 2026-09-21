@@ -59,6 +59,7 @@ import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
+    kind: "video",
     id,
     episode_id: 1,
     folder_label: null,

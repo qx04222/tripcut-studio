@@ -45,6 +45,20 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "image",
+    "version": "=0.25.10",
+    "license": "MIT OR Apache-2.0",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "image_hasher",
+    "version": "=3.0.0",
+    "license": "MIT OR Apache-2.0",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
     "name": "libc",
     "version": "=0.2.189",
     "license": "MIT OR Apache-2.0",
@@ -80,9 +94,30 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
     "scope": "runtime"
   },
   {
+    "name": "objc2-core-foundation",
+    "version": "=0.3.2",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "objc2-core-graphics",
+    "version": "=0.3.2",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
     "name": "objc2-foundation",
     "version": "=0.3.2",
     "license": "MIT",
+    "ecosystem": "Cargo",
+    "scope": "runtime"
+  },
+  {
+    "name": "objc2-image-io",
+    "version": "=0.3.2",
+    "license": "Zlib OR Apache-2.0 OR MIT",
     "ecosystem": "Cargo",
     "scope": "runtime"
   },
@@ -221,7 +256,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "tracing-subscriber",
-    "version": "=0.3.20",
+    "version": "=0.3.23",
     "license": "MIT",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -242,7 +277,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "uuid",
-    "version": "=1.26.0",
+    "version": "=1.26.1",
     "license": "Apache-2.0 OR MIT",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -375,7 +410,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "pinyin-pro",
-    "version": "3.29.3",
+    "version": "3.29.4",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "runtime"

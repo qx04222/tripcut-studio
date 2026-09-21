@@ -17,6 +17,8 @@ import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests } from "./WorkspaceStore";
 import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
+const LAZY_UI_TIMEOUT_MS = 5_000;
+
 beforeEach(() => {
   // R19 P-05:这份文件描述的是「显示全部功能」打开后的形态(旅程 / 地点卡 / 模板 / 技术检查 / 快捷键 / 性能 / 云端补镜都在);默认态在 showAllFeaturesR19.test。
   __setShowAllFeaturesForTests(true);
@@ -47,7 +49,7 @@ async function pressCommandComma(): Promise<void> {
 async function openLoaded(): Promise<HTMLElement> {
   render(<WorkspaceShell />);
   await openSettingsSheet();
-  const dialog = await screen.findByRole("dialog", { name: "设置" });
+  const dialog = await screen.findByRole("dialog", { name: "设置" }, { timeout: LAZY_UI_TIMEOUT_MS });
   await waitFor(() => expect(within(dialog).getByRole("status").textContent).toContain("设置已从本地项目载入"));
   return dialog;
 }
@@ -88,7 +90,7 @@ describe("设置 sheet", () => {
   it("点「设置」打开 sheet,role=dialog aria-modal,标题「设置」,宽 880 且 Esc 关闭", async () => {
     render(<WorkspaceShell />);
     await openSettingsSheet();
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    const dialog = await screen.findByRole("dialog", { name: "设置" }, { timeout: LAZY_UI_TIMEOUT_MS });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(dialog.style.width).toBe("880px");
     expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
@@ -97,7 +99,7 @@ describe("设置 sheet", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await Promise.resolve();
     });
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull(), { timeout: LAZY_UI_TIMEOUT_MS });
   // 文件里的第一条要冷启动整棵壳 + 懒加载设置 sheet,全量并行跑时曾超过默认 1 s;只给它 5 s,不改全局。
   }, 5_000);
 

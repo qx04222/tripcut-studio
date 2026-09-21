@@ -16,7 +16,7 @@ const pipelineMock = vi.hoisted(() => ({ state: null as unknown }));
 vi.mock("./usePipeline", () => ({ usePipeline: () => pipelineMock.state }));
 vi.mock("./useClipsFeed", () => ({ refreshClipsFeed: vi.fn(async () => undefined) }));
 
-import type { Storyboard } from "../api";
+import type { ClipListItem, Storyboard } from "../api";
 import { derivePipeline, pipelineGapLabel, pipelineInputFrom, pipelineNextLabel, type PipelineInput } from "./pipelineModel";
 import { TopBar } from "./TopBar";
 import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore";
@@ -50,7 +50,8 @@ describe("derivePipeline(Z-03)", () => {
     const full = derivePipeline({ ...base, chapters: chapters.slice(0, 10), unplacedCount: 0 });
     expect(pipelineGapLabel(full)).toBeNull();
     const board = { chapters: [], items: [], candidates: [{ clip_id: 1 }, { clip_id: 2 }] } as unknown as Storyboard;
-    expect(pipelineInputFrom([], board, null).unplacedCount).toBe(2);
+    const videos = [{ id: 1, kind: "video" }, { id: 2, kind: "video" }] as ClipListItem[];
+    expect(pipelineInputFrom(videos, board, null).unplacedCount).toBe(2);
     expect(pipelineInputFrom([], null, null).unplacedCount).toBe(0);
   });
 });

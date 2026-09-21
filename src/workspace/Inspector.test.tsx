@@ -85,6 +85,7 @@ import { __setShowAllFeaturesForTests } from "./showAllFeatures";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
+    kind: "video",
     id,
     episode_id: 1,
     folder_label: null,
@@ -360,6 +361,21 @@ describe("检查器 · 默认层", () => {
     const head = document.querySelector(".inspector-head")!;
     expect(head.querySelector("img")!.getAttribute("src")).toBe("/mock-covers/1.jpg");
     expect(head.textContent).toContain("clip-1.mov");
+    expect((screen.getByRole("button", { name: "上一条" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "下一条" }));
+    expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 2 });
+    await waitFor(() => expect((screen.getByRole("button", { name: "下一条" }) as HTMLButtonElement).disabled).toBe(true));
+  });
+
+  it("视频检查器上一条/下一条只在显式 video 内导航并按同类数量判断边界", async () => {
+    apiMocks.listClips.mockResolvedValue([
+      clip(1),
+      clip(9, { kind: "photo", file_name: "photo.jpg" }),
+      clip(2),
+      clip(10, { kind: undefined }),
+    ]);
+    selectLoneClip();
+    await renderReady();
     expect((screen.getByRole("button", { name: "上一条" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "下一条" }));
     expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 2 });

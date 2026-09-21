@@ -62,6 +62,7 @@ function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
     motion: null,
     motion_status: null,
     motion_error: null,
+    kind: "video",
     binary_rating: null,
     star_rating: null,
     select_count: 0,
@@ -175,17 +176,18 @@ describe("U-03:模板套用", () => {
 
   it("有 beats 时把模板顺序回写 story_order(按章 order、beat order),提示说出镜数", async () => {
     apiMocks.getStoryboard.mockResolvedValue(beatsBoard);
+    apiMocks.listClips.mockResolvedValue([clip(7), clip(8, { kind: "photo" })]);
     await pickDiary();
     await waitFor(() =>
       expect(apiMocks.setStoryOrder).toHaveBeenCalledWith([
-        { item_kind: "segment", clip_id: 8, segment_id: 3 },
         { item_kind: "whole", clip_id: 7, segment_id: null },
       ]),
     );
-    expect(await screen.findByText(/已按模板生成 2 镜/)).toBeTruthy();
+    expect(await screen.findByText(/已按模板生成 1 镜/)).toBeTruthy();
   });
 
   it("story_order 已经与 beats 一致时不再写一次", async () => {
+    apiMocks.listClips.mockResolvedValue([clip(7), clip(8)]);
     apiMocks.getStoryboard.mockResolvedValue({
       ...beatsBoard,
       items: [

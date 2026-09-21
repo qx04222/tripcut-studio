@@ -24,10 +24,8 @@
  *    (工具提示)里——按冻结名点,用 AXHelp 判断走到哪一步,不按可见文案找按钮。
  *  - 导入文件夹的原生 NSOpenPanel:改用 `open -a <app> <fixtures-dir>`(RunEvent::Opened → 导入,
  *    src-tauri/src/lib.rs 的 M-06①)。这就是 docs/qa/2026-09-18-unattended-r19.md §2 真机验收用的同一条路。
- *  - 导出目录的原生「选择交付包保存位置」面板:这个面板本身是 AX 可达的(sheet 1 of window 1,
- *    按钮「打开」名字读得到),但 Cmd+Shift+G「前往文件夹」实测没能把路径栏改到位——退化为接受
- *    面板默认目录(通常 ~/Documents),导出成功后把落地文件夹迁回 scratch 记录、并从默认目录删除,
- *    不把测试残留留在业主真实的 Documents 里。
+ *  - 导出目录用 TRIPCUT_EXPORT_DIR 固定在隔离 profile 内;不操作业主默认目录。
+ *    这是自动化专用入口,原生选目录交互需另做真机验收。
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
@@ -126,7 +124,7 @@ async function oneRound(roundIndex, roundOutDir) {
 
   const bin = join(appPath, "Contents/MacOS", bundleExecutable(appPath));
   const t0 = Date.now();
-  const child = spawn(bin, [], { env: { ...process.env, TRIPCUT_APP_SUPPORT_DIR: profile }, stdio: "ignore", detached: true });
+  const child = spawn(bin, [], { env: { ...process.env, TRIPCUT_APP_SUPPORT_DIR: profile, TRIPCUT_EXPORT_DIR: exportRoot }, stdio: "ignore", detached: true });
   const pid = child.pid;
 
   const result = { round: roundIndex, pid, profile, clicks: 0, newWords: [], seconds: null, notes, exported: false };
@@ -311,110 +309,39 @@ end tell`).stdout?.trim() === "clicked";
     }
     click("交给剪映");
 
-    // 没记过文件夹时会弹原生「选择交付包保存位置」面板。实测(2026-09-18 手动走查)这个面板
-    // **是** AX 可达的(sheet 1 of window 1,按钮「打开 / 取消」名字都读得到)——与 lane-common
-    // 提到的「AXPress 打开的浮层」是两回事,这个是原生 NSOpenPanel,不是 WKWebView 里的浮层。
-    // 但 Cmd+Shift+G「前往文件夹」在这个 sheet 上实测没有把路径栏改到位(键盘事件目标不明确,
-    // 原因未查清)——按最接近可驱动方式替代:直接接受面板当前默认目录,不强行改路径。
-    // 默认目录通常是 ~/Documents,不在 scratch 里;落地后立刻搬进 scratch/记录实际路径,
-    // 事后清理,不把测试残留留在业主真实的 Documents 里(不假装走了「选到 scratch」这一步)。
-    let hasSheet = false;
-    {
-      const sheetDeadline = Date.now() + 10_000;
-      while (Date.now() < sheetDeadline) {
-        if (windowText().includes("选择交付包保存位置")) {
-          hasSheet = true;
-          break;
-        }
-        sleep(500);
-      }
-    }
-    if (hasSheet) {
-      notes.push("替代:原生「选择交付包保存位置」面板出现——Cmd+Shift+G 未能可靠定位到 scratch,接受面板默认目录(通常 ~/Documents),导出后再迁回 scratch 并清理原位置,不假装真的选到了 scratch");
-      const confirmed = osa(`tell application "System Events" to tell process "${UI_PROCESS}"
-  set elems to entire contents of window 1
-  repeat with elem in elems
-    try
-      if (name of elem) is "打开" or (name of elem) is "选取" or (name of elem) is "选择" then
-        perform action "AXPress" of elem
-        return "clicked"
-      end if
-    end try
-  end repeat
-  return "notfound"
-end tell`).stdout?.trim();
-      if (confirmed !== "clicked") {
-        notes.push("PROBE: 面板上找不到「打开/选取/选择」按钮");
-        result.probe = true;
-        return result;
-      }
-      click("原生「选择交付包保存位置」面板(接受默认目录)");
-    } else {
-      // 没弹面板:可能直接落在了「更多方式」四模式详情页(不是首屏三卡的一次即出路径)——
-      // 找一下常见的续跑按钮,点到底(不是真实用户会走的路,但如实记录,不假装一次即出成功了)。
-      const fallbackLabel = ["导出剪映素材包到上次文件夹", "导出剪映素材包", "更改文件夹"].find((label) => windowText().includes(label));
-      if (fallbackLabel) {
-        notes.push(`替代:「交给剪映」没有一次即出,落在详情页——点「${fallbackLabel}」续跑(记为额外步骤,不计入点击数)`);
-        // F-R19-06 取证:点之前先读按钮真实的 enabled(分开「产品把门关着」和「点了面板没来得及出现」)。
-        const enabledBefore = buttonEnabled(fallbackLabel);
-        result.exportButtonEnabledBefore = enabledBefore;
-        notes.push(`取证:点「${fallbackLabel}」前 enabled=${enabledBefore}`);
-        clickByLabel(fallbackLabel, { exact: true });
-        const pressedAt = Date.now();
-        let fallbackSheet = false;
-        // 原生面板在本机负载高时不止 10s 才起来(F-R19-06 五轮「没落地」都在这一步);等 60s 并把延迟记下来。
-        const fallbackDeadline = Date.now() + 60_000;
-        while (Date.now() < fallbackDeadline) {
-          if (nativePanelVisible("选择交付包保存位置")) {
-            fallbackSheet = true;
-            break;
-          }
-          sleep(500);
-        }
-        result.nativePanelLatencyMs = fallbackSheet ? Date.now() - pressedAt : null;
-        notes.push(
-          fallbackSheet
-            ? `取证:原生「选择交付包保存位置」面板在点击后 ${Date.now() - pressedAt} ms 出现`
-            : `取证:点击后 60s 内原生面板没出现;此刻按钮 enabled=${buttonEnabled(fallbackLabel)}`,
-        );
-        if (fallbackSheet) {
-          osa(`tell application "System Events" to tell process "${UI_PROCESS}"
-  set elems to entire contents of window 1
-  repeat with elem in elems
-    try
-      if (name of elem) is "打开" then
-        perform action "AXPress" of elem
-        return "clicked"
-      end if
-    end try
-  end repeat
-  return "notfound"
-end tell`);
-        }
-      }
-    }
-
-    // ── 落地判据:导出目录下出现文件(scratch 或面板默认目录都算,记录实际落点) ──
-    const candidateDirs = [exportRoot, `${process.env.HOME}/Documents`, `${process.env.HOME}/Desktop`, `${process.env.HOME}/Downloads`];
-    const beforeSnapshot = new Map(candidateDirs.map((dir) => [dir, new Set(existsSync(dir) ? readdirSync(dir) : [])]));
+    notes.push("自动化导出目录:隔离 profile/export-out(绕过原生面板)");
+    result.exportDirectoryMode = "isolated-env";
+    // 卡片可能进入详情页;只在按钮 enabled 时续跑一次。
     const exportDeadline = Date.now() + 90_000;
+    let pressed = false;
     let landed = false;
     let landedDir = null;
     while (Date.now() < exportDeadline) {
-      if (windowText().includes("已导出")) landed = true;
-      for (const dir of candidateDirs) {
-        if (!existsSync(dir)) continue;
-        const now = readdirSync(dir);
-        const fresh = now.find((name) => name.includes("剪映素材包") && !beforeSnapshot.get(dir).has(name));
-        if (fresh) {
+      const packageName = readdirSync(exportRoot).find((name) => name.includes("剪映素材包"));
+      if (packageName) {
+        const dir = join(exportRoot, packageName);
+        const contents = readdirSync(dir, { recursive: true });
+        // 同时要求 UI 完成与真实媒体文件,不把创建空目录或 toast 当成功。
+        if (windowText().includes("已导出") && contents.some((name) => /\.(mp4|mov|mkv|m4v)$/i.test(name))) {
           landed = true;
-          landedDir = join(dir, fresh);
+          landedDir = dir;
           break;
         }
       }
-      if (landed) break;
-      sleep(1000);
+      if (!pressed) {
+        const label = ["导出剪映素材包到上次文件夹", "导出剪映素材包"].find((name) => buttonEnabled(name) === "true");
+        if (label) {
+          result.exportButtonEnabledBefore = "true";
+          activatePid(pid);
+          if (clickByLabel(label, { exact: true })) {
+            pressed = true;
+            click(label);
+          }
+        }
+      }
+      sleep(500);
     }
+    result.landedDir = landedDir;
     result.seconds = (Date.now() - t0) / 1000;
     result.exported = landed;
     if (!landed) {
@@ -423,13 +350,6 @@ end tell`);
       notes.push(
         `取证:超时时「导出剪映素材包到上次文件夹」enabled=${buttonEnabled("导出剪映素材包到上次文件夹")};原生面板仍在=${nativePanelVisible("选择交付包保存位置")}`,
       );
-    } else if (landedDir && !landedDir.startsWith(exportRoot)) {
-      notes.push(`落地在业主真实目录:${landedDir} —— 导出后立即清理,不留残留(见文件头注释)`);
-      try {
-        rmSync(landedDir, { recursive: true, force: true });
-      } catch (error) {
-        notes.push(`警告:清理 ${landedDir} 失败:${error.message}`);
-      }
     }
   } finally {
     result.clicks = clicks;

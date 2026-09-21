@@ -25,6 +25,7 @@ import { __resetQuickExportForTests } from "./deliver/quickExportModel";
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
+    kind: "video",
     id,
     episode_id: 1,
     folder_label: null,

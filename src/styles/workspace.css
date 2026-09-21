@@ -30,6 +30,12 @@
  */
 /* R19 车道 tokens · Q-4(浅色下监视器井/镜头带/状态条深底),同样只能在头部 @import。 */
 @import "./tokens-r19.css";
+/* R21 独立照片工作台：只能写入这一份车道样式。 */
+@import "./workspace/photo-ws-r21.css";
+/* R21 车道 photo(PH-03 照片卡/镜头带照片段/静态检视),同样只能在头部 @import;在 tokens 之后、其它车道之前。 */
+@import "./workspace/photo-r21.css";
+/* R21 车道 duel(PH-05 A/B 擂台,挂在监视器 pane 内),同样只能在头部 @import;在 tokens → photo 之后。 */
+@import "./workspace/duel-r21.css";
 /* R19 车道 perf(续)(U-04/P-10 媒体池「日期 › 时段」分组摘要行),同样只能在头部 @import。 */
 @import "./workspace/perf-r19.css";
 /* R19 车道 flow(首页「新建一集 / 继续上次」),同样只能在头部 @import。 */

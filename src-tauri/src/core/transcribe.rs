@@ -131,6 +131,7 @@ pub fn enqueue_for_clip(
     path: &Path,
     source_hash: &str,
 ) -> Result<Option<i64>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(None); }
     let eligible = connection
         .query_row(
             "SELECT 1
@@ -214,6 +215,7 @@ pub fn run_transcribe(
     job: &Job,
     cache_root: &Path,
 ) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload = parse_payload(&job.payload)?;
     let Some(mut source) = load_eligible_source(connection, &payload)? else {
         return jobs::mark_done(connection, job.id, job.attempt);
@@ -883,6 +885,11 @@ mod tests {
                    GENERATED ALWAYS AS (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.clip_id') END) VIRTUAL;
                  CREATE INDEX jobs_clip_idx ON jobs(clip_id);",
             )
+            .unwrap();
+        // R21 0050 的 clips.kind(照片守卫 `photo_probe::is_photo` 要读它);这份手搭的库没有
+        // episode_id,不能整段跑 0050。
+        connection
+            .execute_batch("ALTER TABLE clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
             .unwrap();
         connection
     }

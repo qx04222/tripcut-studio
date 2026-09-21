@@ -28,6 +28,7 @@ import {
 import { onJianyingAvailabilityChanged } from "./jianyingHumanCheck";
 import { useExportCanvas, type ExportOrientation } from "./useExportCanvas";
 import type { ExportProgress } from "./useExportProgress";
+import { ensureCurrentPhotoOrderSaved } from "../photoOrderSettings";
 
 export interface DeliverForm {
   /** 当前集标题(抽屉副标题用);还没读回来时是空串。 */
@@ -193,6 +194,9 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
   const startStablePackage = useCallback(
     async (selected: string) => {
       setDestination(selected);
+      if ((status.selected_photo_count ?? 0) > 0) {
+        await ensureCurrentPhotoOrderSaved();
+      }
       const platform = overridePlatform === episodePlatform ? null : overridePlatform;
       // 手动切过画布方向才走带 overrideOrientation 的那条;没切走旧命令(行为不变)。
       const started = overrideOrientation
@@ -201,7 +205,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
       setStatus(started);
       setJobId(started.job_id);
     },
-    [episodePlatform, includeContactSheet, overrideOrientation, overridePlatform, setJobId, setStatus, targetSeconds],
+    [episodePlatform, includeContactSheet, overrideOrientation, overridePlatform, setJobId, setStatus, status.selected_photo_count, targetSeconds],
   );
 
   const generate = useCallback(async () => {

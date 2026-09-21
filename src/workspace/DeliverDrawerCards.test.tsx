@@ -170,3 +170,77 @@ describe("交付抽屉首屏三卡(U-06/P-04)", () => {
     ]);
   });
 });
+
+it("照片数只出现在素材包与整包卡，视频文件卡保持视频语义", async () => {
+  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 8, selected_photo_count: 5 });
+  apiMock.getJianyingAvailability.mockResolvedValue({ installed_version: "11.3.0", supported: true, reason: "" });
+  const dialog = await openDrawer();
+  await waitFor(() => {
+    for (const name of ["交给剪映", "整包交付"]) {
+      expect(within(dialog).getByRole("button", { name }).textContent).toContain("5 张照片");
+    }
+    expect(within(dialog).getByRole("button", { name: "导出视频文件" }).textContent).not.toContain("照片");
+  });
+  await act(async () => { within(dialog).getByRole("button", { name: "交给剪映" }).click(); });
+  expect(await within(dialog).findByText("01_海边_IMG_0003.mp4")).toBeTruthy();
+});
+
+it("混合选择的快速导出仍规划并执行视频，不再出现照片阻止", async () => {
+  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 8, selected_photo_count: 5 });
+  apiMock.quickExport.mockResolvedValue({ job_id: 71, dir: "/Users/me/Desktop", files: ["001_x.mp4"], skipped: [] });
+  const dialog = await openDrawer();
+  await act(async () => { within(dialog).getByRole("button", { name: "导出视频文件" }).click(); });
+  expect(await within(dialog).findByText("001_x.mp4")).toBeTruthy();
+  expect(within(dialog).queryByText(/photo_not_supported|本集含 5 张照片/)).toBeNull();
+  const exportButton = within(dialog).getByRole("button", { name: "导出到上次文件夹" });
+  expect((exportButton as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => { exportButton.click(); });
+  await waitFor(() => expect(apiMock.quickExport).toHaveBeenCalledWith("/Users/me/Desktop", null));
+});
+
+it("素材包与整包都列出照片，整包参考粗剪只按视频预算", async () => {
+  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 8, selected_photo_count: 5 });
+  apiMock.getJianyingAvailability.mockResolvedValue({ installed_version: "11.3.0", supported: true, reason: "" });
+  apiMock.planJianyingKit.mockResolvedValue({ ...plan, files: ["视频/001_x.mp4", "照片/001_y.jpg"] });
+  const dialog = await openDrawer();
+  await act(async () => { within(dialog).getByRole("button", { name: "交给剪映" }).click(); });
+  expect(await within(dialog).findByText("照片/001_y.jpg")).toBeTruthy();
+  await act(async () => { within(dialog).getByRole("button", { name: "完整交付包" }).click(); });
+  expect(await within(dialog).findByText("本次交付平台")).toBeTruthy();
+  expect(within(dialog).getByText("5 张 · 含伴随文件")).toBeTruthy();
+  expect(within(dialog).getByText("1 条 · 完整 · 1080p 通用 MP4")).toBeTruthy();
+  expect((within(dialog).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).disabled).toBe(false);
+  expect(within(dialog).getByText("仅用于视频，照片不计时长预算")).toBeTruthy();
+  expect((within(dialog).getByRole("switch", { name: "剪映草稿" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("纯照片整包禁用视频粗剪时长且说明不生成", async () => {
+  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 5, selected_segment_count: 0, selected_whole_count: 0, selected_photo_count: 5 });
+  const dialog = await openDrawer();
+  await act(async () => { within(dialog).getByRole("button", { name: "整包交付" }).click(); });
+  expect(await within(dialog).findByText("仅照片 · 本次不生成")).toBeTruthy();
+  expect(within(dialog).getByText("照片 + 镜头表 + 说明")).toBeTruthy();
+  expect((within(dialog).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).disabled).toBe(true);
+  expect(within(dialog).getByText("当前只选了照片，本次不生成参考粗剪")).toBeTruthy();
+});
+
+it("零素材整包首屏与详情明确暂无交付项且保持禁用", async () => {
+  apiMock.getExportStatus.mockResolvedValue({
+    ...idleStatus,
+    selected_count: 0,
+    selected_segment_count: 0,
+    selected_whole_count: 0,
+    selected_photo_count: 0,
+  });
+  const dialog = await openDrawer();
+  const fullCard = within(dialog).getByRole("button", { name: "整包交付" });
+  expect(fullCard.textContent).toContain("暂无交付项 · 请先挑选素材");
+  expect(fullCard.textContent).not.toContain("照片 + 镜头表 + 说明");
+
+  await act(async () => { fullCard.click(); });
+
+  expect(await within(dialog).findByText("当前没有已选视频或照片，本次暂无交付项")).toBeTruthy();
+  expect(within(dialog).getByText("暂无交付项 · 请先挑选素材")).toBeTruthy();
+  expect(within(dialog).queryByText("当前只选了照片，本次不生成参考粗剪")).toBeNull();
+  expect((within(dialog).getByRole("button", { name: "开始生成" }) as HTMLButtonElement).disabled).toBe(true);
+});

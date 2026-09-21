@@ -93,6 +93,7 @@ import { MediaPool } from "./MediaPool";
 import { ShotBand } from "./ShotBand";
 import { BAND_TILE_WIDTH } from "./bandTimeline";
 import { BAND_TILE_HEIGHT, BAND_VIEWPORT_HEIGHT } from "./shotBandModel";
+import { isVideoBandClip, needsFavoriteBeforeInsert } from "./useBandDrag";
 // R12 §3:提示改走全局 Toast(壳里挂一次的 ToastHost);单独渲染镜头带时得自己带上宿主。
 import { ToastHost } from "./ui/Toast";
 import { __resetToastsForTests } from "./ui/toastStore";
@@ -161,6 +162,7 @@ function clip(id: number, fileName: string, generated = false): ClipListItem {
     motion: null,
     motion_status: null,
     motion_error: null,
+    kind: "video",
     binary_rating: null,
     star_rating: null,
     select_count: 0,
@@ -297,6 +299,13 @@ async function dragSegment(fromLabel: string, toLabel: string): Promise<void> {
 }
 
 describe("镜头带", () => {
+  it("拖排写入层严格拒绝照片和缺失 kind", () => {
+    expect(isVideoBandClip(clip(1, "A.MP4"))).toBe(true);
+    expect(isVideoBandClip({ ...clip(2, "photo.jpg"), kind: "photo" })).toBe(false);
+    expect(isVideoBandClip({ ...clip(3, "legacy.mov"), kind: undefined })).toBe(false);
+    expect(needsFavoriteBeforeInsert({ ...clip(2, "photo.jpg"), kind: "photo" })).toBe(false);
+  });
+
   it("整带是 role=region aria-label=「镜头带」", async () => {
     await renderBand();
     expect(screen.getByRole("region", { name: "镜头带" })).toBeTruthy();

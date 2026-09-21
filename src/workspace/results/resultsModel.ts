@@ -16,9 +16,11 @@ export function clipName(clip: Partial<Pick<ClipListItem, "file_name">> | undefi
   return clip.file_name.replace(/\.[^.]+$/, "");
 }
 
-/** 一行的理由句:「清晰 · 运动适中 · 有人声」;后端保证非空,空时兜底说「这一段分数最高」。 */
-export function reasonText(reasons: readonly string[]): string {
-  return reasons.length > 0 ? reasons.join(" · ") : "这一段分数最高";
+export type ResultsMode = "video" | "photo";
+
+/** 一行的理由句;空理由按工作台使用对应的段/照片称呼。 */
+export function reasonText(reasons: readonly string[], mode: ResultsMode = "video"): string {
+  return reasons.length > 0 ? reasons.join(" · ") : mode === "photo" ? "这张照片分数最高" : "这一段分数最高";
 }
 
 /** 0–1 的分数 → 「86 分」。 */
@@ -26,23 +28,37 @@ export function scoreLabel(score: number): string {
   return `${Math.round(Math.min(1, Math.max(0, score)) * 100)} 分`;
 }
 
-/** 兄弟段折叠行的标题:「还有 2 条相似的没选」。 */
-export function siblingsLabel(count: number): string {
-  return `还有 ${count} 条相似的没选`;
+/** 相似候选折叠行的标题。 */
+export function siblingsLabel(count: number, mode: ResultsMode = "video"): string {
+  return `还有 ${count} ${mode === "photo" ? "张" : "条"}相似的没选`;
 }
 
-/** 面板顶部的一句:「6 段 · 共 44.6 s」。 */
-export function summaryText(rows: readonly AutoSelectRunRow[]): string {
+/** 面板顶部的一句;照片没有播放时长，只报张数。 */
+export function summaryText(rows: readonly AutoSelectRunRow[], mode: ResultsMode = "video"): string {
+  if (mode === "photo") return `${rows.length} 张`;
   const total = rows.reduce((sum, row) => sum + row.secs, 0);
   return `${rows.length} 段 · 共 ${formatSecs(total)}`;
 }
 
 /** 面板顶部第二句:这批是怎么挑的(原句优先;没原句就说范围 + 挑法)。 */
-export function paramsText(view: Pick<AutoSelectRunView, "params">): string {
+export function paramsText(view: Pick<AutoSelectRunView, "params">, mode: ResultsMode = "video"): string {
   const { prompt, scope, pick, budget_secs } = view.params;
   if (prompt && prompt.trim().length > 0) return `「${prompt.trim()}」`;
   const scopeText = scope === "all" ? "全部素材" : scope === "favorites" ? "只看收藏" : scope === "rated3" ? "3 星以上" : "收藏 + 3 星以上";
   const pickText = pick === "score" ? "按分数" : "按时间顺序";
-  const budget = budget_secs && budget_secs > 0 ? ` · 约 ${Math.round(budget_secs)} 秒` : "";
+  const budget = mode === "video" && budget_secs && budget_secs > 0 ? ` · 约 ${Math.round(budget_secs)} 秒` : "";
   return `${scopeText} · ${pickText}${budget}`;
+}
+
+
+/** 与后端 smart_select_reason 中文表一致,未知标签不透出内部键。 */
+export const QUALITY_LABELS: Readonly<Record<string, string>> = {
+  exposure_bright: "曝光偏亮", exposure_dark: "曝光偏暗", slight_shake: "轻微手抖",
+  bystander: "路人入镜", color_cast: "色偏", defocus: "失焦",
+  excessive_shake: "抖动过大", bad_timing: "时机差", high_contrast: "大光比",
+};
+export function qualityText(values: readonly string[] | undefined, prefix: string): string {
+  const known = Object.values(QUALITY_LABELS);
+  const labels = [...new Set((values ?? []).flatMap((value) => QUALITY_LABELS[value] ? [QUALITY_LABELS[value]!] : known.includes(value) ? [value] : []))];
+  return labels.length ? `${prefix}:${labels.join("、")}` : "";
 }

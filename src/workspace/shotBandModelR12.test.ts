@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Chapter, StoryItem, Storyboard } from "../api";
+import type { Chapter, ClipListItem, StoryItem, Storyboard } from "../api";
 import { applyBandView, buildBandChapters, segmentRangeLabel } from "./shotBandModel";
 
 /** R12 车道 B 的纯数据层回归:精选段镜块的「片段 a–b s」小标;「这章够了」的章不算缺口。 */
@@ -48,6 +48,10 @@ function board(items: StoryItem[]): Storyboard {
   };
 }
 
+function videoMap(...ids: number[]): ReadonlyMap<number, ClipListItem> {
+  return new Map(ids.map((id) => [id, { id, kind: "video" } as ClipListItem]));
+}
+
 describe("精选段成为镜块:「片段 a–b s」小标", () => {
   it("segmentRangeLabel 按素材自己的 time base 换算,保留一位小数、整数不带 .0", () => {
     expect(segmentRangeLabel(500, 4_500, 1, 1_000)).toBe("片段 0.5–4.5 s");
@@ -58,7 +62,7 @@ describe("精选段成为镜块:「片段 a–b s」小标", () => {
   });
 
   it("segment 项带 rangeLabel,whole 项与空槽位为 null", () => {
-    const chapters = buildBandChapters(board([item(1, 1, 0), item(2, 1, 1, 77, [500, 4_500])]), [], [], new Map());
+    const chapters = buildBandChapters(board([item(1, 1, 0), item(2, 1, 1, 77, [500, 4_500])]), [], [], videoMap(1, 2));
     const [first] = chapters;
     expect(first!.segments.map((segment) => segment.rangeLabel)).toEqual([null, "片段 0.5–4.5 s"]);
     expect(first!.segments[1]!.segmentId).toBe(77);
@@ -68,17 +72,17 @@ describe("精选段成为镜块:「片段 a–b s」小标", () => {
 describe("「这章够了」:跳过的 0 镜章不算缺口", () => {
   it("skipped 集合里的空章 gapCount = 0、skipped = true;「仅缺口」视图不再留下它;有镜头的章不受影响", () => {
     const items = [item(1, 1, 0)];
-    const plain = buildBandChapters(board(items), [], [], new Map());
+    const plain = buildBandChapters(board(items), [], [], videoMap(1));
     expect(plain.map((entry) => entry.gapCount)).toEqual([0, 1, 1]);
     expect(plain.every((entry) => !entry.skipped)).toBe(true);
 
-    const skipped = buildBandChapters(board(items), [], [], new Map(), new Set([2]));
+    const skipped = buildBandChapters(board(items), [], [], videoMap(1), new Set([2]));
     expect(skipped.map((entry) => entry.gapCount)).toEqual([0, 0, 1]);
     expect(skipped.map((entry) => entry.skipped)).toEqual([false, true, false]);
     expect(skipped[1]!.isEmpty).toBe(true);
     expect(applyBandView(skipped, "gaps").map((entry) => entry.title)).toEqual(["夜色"]);
     // 跳过一个有镜头的章:不改它的计数(跳过只对 0 镜章有意义),但记住标记。
-    const withClips = buildBandChapters(board(items), [], [], new Map(), new Set([1]));
+    const withClips = buildBandChapters(board(items), [], [], videoMap(1), new Set([1]));
     expect(withClips[0]!.gapCount).toBe(0);
     expect(withClips[0]!.skipped).toBe(true);
   });

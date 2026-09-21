@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::error::{CoreError, Result};
 use super::moments::{load_moments, score_moment, ticks_to_seconds, Moment, MomentWeights, MOMENT_WINDOW_SECS};
 
+#[path = "smart_select_reason.rs"]
+pub mod reason;
+
 pub const MAX_SUGGESTIONS: usize = 3;
 /// 平台预算 0(不限)时自动挑选的缺省预算。
 pub const DEFAULT_BUDGET_SECS: f64 = 60.0;
@@ -79,6 +82,11 @@ pub struct AutoSelectParams {
     /// 段目标时长(按平台预算分档算出),存下来给「换一段」复用;调用方不填。
     #[serde(default)]
     pub target_secs: Option<f64>,
+    /// None = mixed, true = photos, false = videos.
+    #[serde(default)]
+    pub only_photos: Option<bool>,
+    #[serde(default)]
+    pub photo_count: Option<usize>,
 }
 
 /// 按权重偏置临时重打一条素材的时刻分(`weights` 为空就是库里的原分)。
@@ -88,7 +96,21 @@ pub(crate) fn moments_with_weights(connection: &Connection, clip_id: i64, weight
         // 偏置时六项全算、无声素材的声音项记 0(不像入库打分那样把声音从分母里剔掉)——
         // 否则「有声 / 人物为主」永远压不住无声素材:它们的分母里根本没有声音这一项。
         for moment in &mut moments {
+            let quality = reason::Reason::from_labels(&moment.reasons);
             score_moment(moment, weights, true);
+            moment.reasons.extend(quality.fixable);
+            moment.reasons.extend(quality.blockers);
+        }
+    }
+    if let Some(analysis) = super::analysis::get_clip_analysis(connection, clip_id)? {
+        let threshold = super::analysis::OVEREXPOSED_RATIO_THRESHOLD;
+        for moment in &mut moments {
+            // 汇总信号不冒充逐窗定位。只给曝光不正常的窗补方向;失焦汇总保守阻止整条。
+            if !moment.exposure_ok {
+                if analysis.overexposed_ratio > threshold { moment.reasons.push("曝光偏亮".to_owned()); }
+                if analysis.underexposed_ratio > threshold { moment.reasons.push("曝光偏暗".to_owned()); }
+            }
+            if analysis.out_of_focus_ratio > threshold { moment.reasons.push("失焦".to_owned()); }
         }
     }
     Ok(moments)
@@ -121,12 +143,13 @@ pub fn default_target_secs(connection: &Connection) -> Result<f64> {
 }
 
 pub fn suggest_segments(connection: &Connection, clip_id: i64, target_secs: Option<f64>) -> Result<Vec<SegmentSuggestion>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(Vec::new()); }
     let target = match target_secs {
         Some(value) if value.is_finite() && value > 0.0 => value,
         Some(_) => return Err(CoreError::Rating("目标时长要是正数秒".to_owned())),
         None => default_target_secs(connection)?,
     };
-    let moments = load_moments(connection, clip_id)?;
+    let moments = moments_with_weights(connection, clip_id, None)?;
     Ok(suggest_from_moments(&moments, target, MAX_SUGGESTIONS))
 }
 
@@ -139,7 +162,7 @@ pub fn suggest_from_moments(moments: &[Moment], target_secs: f64, limit: usize) 
     let min_span = ((MIN_TARGET_SECS / MOMENT_WINDOW_SECS).round() as usize).max(1);
     // 整条比目标短:唯一建议就是整条。
     if moments.len() <= span {
-        return vec![whole_clip(moments)];
+        return if !reason::has_blocker(moments) { vec![whole_clip(moments)] } else { Vec::new() };
     }
     let mut candidates = candidates_for_span(moments, span, true);
     while candidates.is_empty() && span > min_span {
@@ -175,6 +198,7 @@ pub fn suggest_from_moments(moments: &[Moment], target_secs: f64, limit: usize) 
 /// 所有起点及其窗口均分;`avoid_cuts` 时段内(首窗之后)不得有场景切换。
 fn candidates_for_span(moments: &[Moment], span: usize, avoid_cuts: bool) -> Vec<(usize, f64)> {
     (0..=moments.len() - span)
+        .filter(|start| !reason::has_blocker(&moments[*start..*start + span]))
         .filter(|start| !avoid_cuts || !moments[start + 1..start + span].iter().any(|moment| moment.scene_cut))
         .map(|start| {
             let slice = &moments[start..start + span];
@@ -205,6 +229,8 @@ fn majority_reasons(slice: &[Moment]) -> Vec<String> {
     if reasons.iter().any(|reason| reason == "有人声") {
         reasons.retain(|reason| reason != "有声音");
     }
+    let quality = reason::Reason::from_moments(slice);
+    reasons.extend(quality.fixable);
     reasons
 }
 
@@ -280,15 +306,26 @@ struct Candidate {
 
 /// 候选素材:当前集、在线、有时刻分、范围内、**还没有任何存活精选段**(手打或上一批
 /// 自动的都算——不重复挑,也不动用户的段)。按章节起始时间排,未分章的排最后。
-fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs: f64, weights: Option<&MomentWeights>) -> Result<Vec<Candidate>> {
+fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs: f64, weights: Option<&MomentWeights>, only_photos: Option<bool>, unselected: &mut Vec<reason::Unselected>) -> Result<Vec<Candidate>> {
     let episode_id = active_episode_id(connection)?;
     let sql = format!(
         "SELECT c.id, COALESCE(c.chapter_id, -1), c.tb_num, c.tb_den
            FROM clips c
            LEFT JOIN chapters ch ON ch.id = c.chapter_id AND ch.tombstone = 0
           WHERE c.episode_id = ?1 AND c.missing_since IS NULL
-            AND EXISTS (SELECT 1 FROM clip_moments m WHERE m.clip_id = c.id)
+            AND (c.kind = 'photo' OR EXISTS (SELECT 1 FROM clip_moments m WHERE m.clip_id = c.id))
             AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.clip_id = c.id AND s.kind = 'select' AND s.tombstone = 0)
+            -- 照片显式按 X 后不能被 scope=all 再挑回来。只读 non-select 段上
+            -- 最新 binary，和 list_clips / selected_clips 的照片判定一致；0/F 可候选。
+            -- 视频继续沿用既有 scope 规则，不受这道照片 gate 影响。
+            AND (c.kind != 'photo' OR COALESCE((
+                SELECT r.value FROM ratings r
+                JOIN segments rs ON rs.id = r.segment_id
+                WHERE rs.clip_id = c.id AND rs.tombstone = 0
+                  AND COALESCE(rs.kind, 'whole') != 'select'
+                  AND r.rating_type = 'binary'
+                ORDER BY r.rated_at DESC, r.id DESC LIMIT 1
+            ), 0) != -1)
             AND {}
           ORDER BY ch.start_at IS NULL, ch.start_at, c.chapter_id, c.captured_at, c.id",
         scope.sql_predicate()
@@ -302,9 +339,21 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut candidates = Vec::new();
     for (clip_id, chapter_key, tb_num, tb_den) in rows {
+        let photo = super::photo_probe::is_photo(connection, clip_id)?;
+        if only_photos.is_some_and(|only| only != photo) { continue; }
+        if photo {
+            if let Some(candidate) = photo_candidate(connection, clip_id, chapter_key, groups.get(&clip_id).copied())? {
+                candidates.push(candidate);
+            }
+            continue;
+        }
         let (Some(tb_num), Some(tb_den)) = (tb_num, tb_den) else { continue };
         let moments = moments_with_weights(connection, clip_id, weights)?;
-        let Some(best) = suggest_from_moments(&moments, target_secs, 1).into_iter().next() else { continue };
+        let Some(best) = suggest_from_moments(&moments, target_secs, 1).into_iter().next() else {
+            let blockers = reason::Reason::from_moments(&moments).blockers;
+            if !blockers.is_empty() { unselected.push(reason::Unselected { clip_id, blockers }); }
+            continue;
+        };
         let secs = ticks_to_seconds(best.out_ticks - best.in_ticks, tb_num, tb_den);
         if secs <= 0.0 {
             continue;
@@ -318,6 +367,404 @@ fn load_candidates(connection: &Connection, scope: AutoSelectScope, target_secs:
         });
     }
     Ok(candidates)
+}
+
+fn photo_candidate(connection: &Connection, clip_id: i64, chapter_key: i64, group: Option<i64>) -> Result<Option<Candidate>> {
+    let Some(analysis) = super::analysis::get_clip_analysis(connection, clip_id)? else { return Ok(None); };
+    let threshold = super::analysis::OVEREXPOSED_RATIO_THRESHOLD;
+    if analysis.underexposed_ratio > threshold || analysis.overexposed_ratio > threshold
+        || analysis.out_of_focus_ratio > threshold { return Ok(None); }
+    let count = if let Some(group_id) = group {
+        let primary: bool = connection.query_row(
+            "SELECT is_primary FROM similar_group_members WHERE group_id=?1 AND clip_id=?2",
+            params![group_id,clip_id], |r| r.get(0))?;
+        if !primary {
+            // 人工/擂台选出的 persisted primary 仍优先；只有它后来被用户显式 X，
+            // 才让健康 siblings 重新参与，交给既有 dedupe_by_score 选同组最佳。
+            let primary_rejected: bool = connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM similar_group_members primary_member
+                    WHERE primary_member.group_id=?1 AND primary_member.is_primary=1
+                      AND -1=(
+                        SELECT r.value FROM ratings r
+                        JOIN segments rs ON rs.id=r.segment_id
+                        WHERE rs.clip_id=primary_member.clip_id AND rs.tombstone=0
+                          AND COALESCE(rs.kind,'whole')!='select'
+                          AND r.rating_type='binary'
+                        ORDER BY r.rated_at DESC,r.id DESC LIMIT 1
+                      )
+                )",[group_id],|r|r.get(0))?;
+            if !primary_rejected { return Ok(None); }
+        }
+        let selected: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM similar_group_members m JOIN segments s ON s.clip_id=m.clip_id
+                WHERE m.group_id=?1 AND s.kind='select' AND s.tombstone=0
+                  AND COALESCE((
+                    SELECT r.value FROM ratings r
+                    JOIN segments rs ON rs.id=r.segment_id
+                    WHERE rs.clip_id=m.clip_id AND rs.tombstone=0
+                      AND COALESCE(rs.kind,'whole')!='select'
+                      AND r.rating_type='binary'
+                    ORDER BY r.rated_at DESC,r.id DESC LIMIT 1
+                  ),0)!=-1)", [group_id], |r| r.get(0))?;
+        if selected { return Ok(None); }
+        connection.query_row("SELECT count(*) FROM similar_group_members WHERE group_id=?1", [group_id], |r| r.get::<_, i64>(0))?
+    } else { 1 };
+    let hold_ms: Option<i64> = connection.query_row("SELECT hold_ms FROM photo_meta WHERE clip_id=?1 AND error IS NULL", [clip_id], |r| r.get(0)).optional()?;
+    let Some(hold_ms) = hold_ms.filter(|v| *v > 0) else { return Ok(None); };
+    let focus = if analysis.focus_scores.is_empty() { 0.0 } else { analysis.focus_scores.iter().sum::<f64>() / analysis.focus_scores.len() as f64 };
+    Ok(Some(Candidate {
+        clip_id, chapter_key, similar_group: group, secs: hold_ms as f64 / 1000.0,
+        suggestion: SegmentSuggestion { in_ticks: 0, out_ticks: 0,
+            score: 100.0 * focus / (focus + super::analysis::SOFT_FOCUS_THRESHOLD),
+            reasons: vec![if count > 1 { format!("同组 {count} 张最清晰") } else { "唯一一张".to_owned() }],
+        },
+    }))
+}
+
+#[cfg(test)]
+mod photo_selection_tests {
+    use super::*;
+    use crate::core::{analysis, jobs, similar, smart_select_runs};
+
+    fn add_photo(connection: &mut Connection, file: &str, time: &str, hold: i64) -> i64 {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../qa/ai-eval/photos").join(file);
+        let (hash, _) = crate::core::import::quick_fingerprint(&path).unwrap();
+        connection.execute("INSERT INTO clips(volume_uuid,rel_path,quick_hash,kind,episode_id,tb_num,tb_den,duration_ticks,captured_at)
+            VALUES('v',?1,?2,'photo',(SELECT id FROM episodes WHERE status='active'),1,1000,0,?3)",params![path.to_str().unwrap(),hash,time]).unwrap();
+        let id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO photo_meta(clip_id,width,height,camera,taken_at,hold_ms) VALUES(?1,512,384,'fixture-camera',?2,?3)",params![id,time,hold]).unwrap();
+        let job_id = analysis::enqueue_for_clip(connection,id,&path,&hash).unwrap().unwrap();
+        connection.execute("UPDATE jobs SET status='running',attempt=1 WHERE id=?1",[job_id]).unwrap();
+        let job = jobs::get(connection,job_id).unwrap();
+        analysis::run_analyze_l1(connection,&job).unwrap();
+        jobs::mark_done(connection,job_id,job.attempt).unwrap();
+        id
+    }
+
+    fn regroup(connection: &mut Connection) {
+        let id = similar::enqueue_if_ready(connection).unwrap().unwrap();
+        connection.execute("UPDATE jobs SET status='running',attempt=1 WHERE id=?1",[id]).unwrap();
+        let job = jobs::get(connection,id).unwrap();
+        similar::run_similar_cluster(connection,&job).unwrap();
+        jobs::mark_done(connection,id,job.attempt).unwrap();
+    }
+
+    #[test]
+    fn photo_primary_recomputes_from_quality_and_count_is_persisted() {
+        let (_directory,mut connection) = tests::library();
+        let a = add_photo(&mut connection,"IMG_0000.png","2026-09-19T12:00:00Z",7_000);
+        let b = add_photo(&mut connection,"IMG_0010.png","2026-09-19T12:00:05Z",4_000);
+        add_photo(&mut connection,"IMG_0100.png","2026-09-19T14:00:00Z",3_000);
+        connection.execute("UPDATE clip_analysis SET focus_scores='[1000]' WHERE clip_id=?1",[a]).unwrap();
+        regroup(&mut connection);
+        assert!(similar::similar_groups(&connection).unwrap()[0].members.iter().any(|m| m.clip_id==a && m.is_primary));
+        connection.execute("UPDATE clip_analysis SET focus_scores='[2000]' WHERE clip_id=?1",[b]).unwrap();
+        regroup(&mut connection);
+        let groups = similar::similar_groups(&connection).unwrap();
+        assert_eq!(groups[0].members.iter().filter(|m|m.is_primary).count(),1);
+        assert!(groups[0].members.iter().any(|m|m.clip_id==b && m.is_primary));
+        let out = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),only_photos:Some(true),photo_count:Some(1),..Default::default()
+        }).unwrap();
+        let view = smart_select_runs::list_run(&connection,&out.run_id).unwrap();
+        assert_eq!(view.params.photo_count,Some(1));
+        assert_eq!(view.rows.len(),1);
+        assert_eq!(view.rows[0].clip_id,b);
+        assert_eq!(view.rows[0].reasons,vec!["同组 2 张最清晰"]);
+        assert_eq!(out.total_secs,4.0);
+        assert_eq!(out.placed, 0);
+        assert!(out.arrange_batch_id.is_none());
+        let on_video_band: i64 = connection.query_row("SELECT COUNT(*) FROM story_order WHERE tombstone=0", [], |row| row.get(0)).unwrap();
+        assert_eq!(on_video_band, 0);
+    }
+
+    #[test]
+    fn photo_mixed_hold_budget_and_media_filters() {
+        let (_directory,mut connection) = tests::library();
+        let photo = add_photo(&mut connection,"quality-10.png","2026-09-19T12:00:00Z",7_000);
+        let chapter = tests::add_chapter(&connection,"Video","2026-09-19T12:00:00Z");
+        let video = tests::add_clip(&mut connection,chapter,200.0,false,0);
+        for (filter, expected) in [(Some(false),video),(Some(true),photo)] {
+            let out = auto_select_episode_with(&mut connection,AutoSelectParams {
+                scope:Some("all".into()),only_photos:filter,budget_secs:Some(30.0),..Default::default()
+            }).unwrap();
+            let view = smart_select_runs::list_run(&connection,&out.run_id).unwrap();
+            assert_eq!(view.rows.len(),1); assert_eq!(view.rows[0].clip_id,expected);
+            if expected==photo { assert_eq!(view.rows[0].secs,7.0); assert_eq!(view.rows[0].reasons,vec!["唯一一张"]); }
+            undo_auto_select(&mut connection,&out.batch_id).unwrap();
+        }
+        let budget = default_target_secs(&connection).unwrap() + 7.0;
+        let out = auto_select_episode(&mut connection,Some(budget),Some("all")).unwrap();
+        assert_eq!(out.created.len(),1);
+        let view = smart_select_runs::list_run(&connection,&out.run_id).unwrap();
+        assert_eq!(view.params.only_photos,Some(false));
+        assert_eq!(view.rows.len(),1);
+        assert_eq!(view.rows[0].clip_id,video);
+        assert!(out.total_secs<budget,"照片 hold_ms 不得进入视频自动挑选预算");
+        eprintln!("R21 legacy video auto-select excludes photo hold from {budget}s budget");
+    }
+
+    #[test]
+    fn photo_candidates_honor_explicit_reject_clear_and_favorite_without_changing_video() {
+        let (_directory, mut connection) = tests::library();
+        let rejected = add_photo(&mut connection,"quality-10.png","2026-09-19T12:00:00Z",3_000);
+        let cleared = add_photo(&mut connection,"quality-11.png","2026-09-19T12:00:01Z",3_000);
+        let favorite = add_photo(&mut connection,"quality-12.png","2026-09-19T12:00:02Z",3_000);
+        crate::core::ratings::rate_clip(&mut connection,rejected,"binary",-1).unwrap();
+        crate::core::ratings::rate_clip(&mut connection,cleared,"binary",-1).unwrap();
+        crate::core::ratings::rate_clip(&mut connection,cleared,"binary",0).unwrap();
+        crate::core::ratings::rate_clip(&mut connection,favorite,"binary",1).unwrap();
+
+        let mut unselected = Vec::new();
+        let photos = load_candidates(
+            &connection,AutoSelectScope::All,5.0,None,Some(true),&mut unselected,
+        ).unwrap();
+        let photo_ids = photos.iter().map(|candidate|candidate.clip_id).collect::<Vec<_>>();
+        assert!(!photo_ids.contains(&rejected),"显式 X 的照片不能再进一句话挑选");
+        assert!(photo_ids.contains(&cleared),"binary=0 是清除，照片应恢复候选资格");
+        assert!(photo_ids.contains(&favorite),"F 收藏的照片仍是候选");
+
+        let chapter = tests::add_chapter(&connection,"视频对照","2026-09-19T12:00:00Z");
+        let video = tests::add_clip(&mut connection,chapter,1.0,false,0);
+        crate::core::ratings::rate_clip(&mut connection,video,"binary",-1).unwrap();
+        let mut video_unselected = Vec::new();
+        let videos = load_candidates(
+            &connection,AutoSelectScope::All,5.0,None,Some(false),&mut video_unselected,
+        ).unwrap();
+        assert!(videos.iter().any(|candidate|candidate.clip_id==video),"视频 scope=all 的既有候选语义不变");
+    }
+
+    #[test]
+    fn rejected_group_primary_falls_back_to_a_healthy_sibling_and_fills_the_count() {
+        let (_directory, mut connection) = tests::library();
+        let primary = add_photo(&mut connection,"quality-13.png","2026-09-19T12:00:00Z",3_000);
+        let sibling = add_photo(&mut connection,"quality-14.png","2026-09-19T12:00:01Z",3_000);
+        let outside = add_photo(&mut connection,"quality-15.png","2026-09-19T12:00:02Z",3_000);
+        connection.execute("INSERT INTO similar_groups(created_at) VALUES('2026-09-19T12:01:00Z')",[]).unwrap();
+        let group_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO similar_group_members(group_id,clip_id,is_primary) VALUES(?1,?2,1),(?1,?3,0)",
+            params![group_id,primary,sibling],
+        ).unwrap();
+
+        let mut before_unselected = Vec::new();
+        let before = load_candidates(
+            &connection,AutoSelectScope::All,5.0,None,Some(true),&mut before_unselected,
+        ).unwrap();
+        assert!(before.iter().any(|candidate|candidate.clip_id==primary));
+        assert!(!before.iter().any(|candidate|candidate.clip_id==sibling),"未 X 时保留人工 primary");
+
+        crate::core::ratings::rate_clip(&mut connection,primary,"binary",-1).unwrap();
+        let outcome = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),only_photos:Some(true),photo_count:Some(2),..Default::default()
+        }).unwrap();
+        let selected = smart_select_runs::list_run(&connection,&outcome.run_id).unwrap()
+            .rows.into_iter().map(|row|row.clip_id).collect::<Vec<_>>();
+        assert_eq!(outcome.created.len(),2,"拒绝主图后应由健康 sibling 补足 N");
+        assert!(!selected.contains(&primary));
+        assert!(selected.contains(&sibling));
+        assert!(selected.contains(&outside));
+    }
+
+    #[test]
+    fn rejecting_an_already_selected_primary_reopens_its_healthy_sibling() {
+        let (_directory, mut connection) = tests::library();
+        let primary = add_photo(&mut connection,"quality-16.png","2026-09-19T12:00:00Z",3_000);
+        let sibling = add_photo(&mut connection,"quality-17.png","2026-09-19T12:00:01Z",3_000);
+        connection.execute("INSERT INTO similar_groups(created_at) VALUES('2026-09-19T12:01:00Z')",[]).unwrap();
+        let group_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO similar_group_members(group_id,clip_id,is_primary) VALUES(?1,?2,1),(?1,?3,0)",
+            params![group_id,primary,sibling],
+        ).unwrap();
+
+        let first = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),only_photos:Some(true),photo_count:Some(1),..Default::default()
+        }).unwrap();
+        let first_ids = smart_select_runs::list_run(&connection,&first.run_id).unwrap()
+            .rows.into_iter().map(|row|row.clip_id).collect::<Vec<_>>();
+        assert_eq!(first_ids,vec![primary]);
+
+        crate::core::ratings::rate_clip(&mut connection,primary,"binary",-1).unwrap();
+        let candidates = |connection: &Connection| {
+            let mut unselected = Vec::new();
+            load_candidates(connection,AutoSelectScope::All,5.0,None,Some(true),&mut unselected)
+                .unwrap().into_iter().map(|candidate|candidate.clip_id).collect::<Vec<_>>()
+        };
+        assert!(candidates(&connection).contains(&sibling),"select→X 应重新放行健康 sibling");
+        crate::core::ratings::rate_clip(&mut connection,primary,"binary",0).unwrap();
+        assert!(!candidates(&connection).contains(&sibling),"0 清除拒绝后 live select 继续防重");
+        crate::core::ratings::rate_clip(&mut connection,primary,"binary",1).unwrap();
+        assert!(!candidates(&connection).contains(&sibling),"F 后 live select 继续防重");
+        crate::core::ratings::rate_clip(&mut connection,primary,"binary",-1).unwrap();
+
+        let second = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),only_photos:Some(true),photo_count:Some(1),..Default::default()
+        }).unwrap();
+        let second_ids = smart_select_runs::list_run(&connection,&second.run_id).unwrap()
+            .rows.into_iter().map(|row|row.clip_id).collect::<Vec<_>>();
+        assert_eq!(second_ids,vec![sibling]);
+    }
+
+    #[test]
+    fn photo_prompt_selects_exactly_twenty_with_one_per_similar_group() {
+        let (_directory, mut connection) = tests::library();
+        let mut files = Vec::new();
+        for group in 0..10 {
+            for shot in 0..3 {
+                files.push(format!("IMG_{group:02}{shot}0.png"));
+            }
+        }
+        files.extend((10..20).map(|index| format!("quality-{index}.png")));
+
+        let mut photos: Vec<i64> = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                add_photo(
+                    &mut connection,
+                    file,
+                    &format!("2026-09-19T12:00:{index:02}Z"),
+                    3_000,
+                )
+            })
+            .collect();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('v2')", []).unwrap();
+        connection.execute("UPDATE clips SET volume_uuid = 'v2' WHERE id = ?1", [photos[0]]).unwrap();
+        photos.push(add_photo(
+            &mut connection,
+            "IMG_0000.png",
+            "2026-09-19T13:00:00Z",
+            3_000,
+        ));
+        assert_eq!(photos.len(), 41, "20 个双成员相似组之外还要有一个健康候选，证明 20 张上限生效");
+        let rejected = photos[40];
+        connection.execute("UPDATE clip_analysis SET focus_scores='[999999]' WHERE clip_id=?1",[rejected]).unwrap();
+        crate::core::ratings::rate_clip(&mut connection,rejected,"binary",-1).unwrap();
+
+        for pair in photos[..40].as_chunks::<2>().0 {
+            connection
+                .execute(
+                    "INSERT INTO similar_groups(created_at) VALUES ('2026-09-19T12:01:00Z')",
+                    [],
+                )
+                .unwrap();
+            let group_id = connection.last_insert_rowid();
+            for (index, clip_id) in pair.iter().enumerate() {
+                connection
+                    .execute(
+                        "INSERT INTO similar_group_members(group_id, clip_id, is_primary) VALUES (?1, ?2, ?3)",
+                        params![group_id, clip_id, i64::from(index == 0)],
+                    )
+                    .unwrap();
+            }
+        }
+        let group_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM similar_groups", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(group_count, 20);
+
+        let chapter = tests::add_chapter(&connection, "视频对照", "2026-09-19T12:00:00Z");
+        let video = tests::add_clip(&mut connection, chapter, 1.0, false, 0);
+        let outcome = auto_select_episode_with(
+            &mut connection,
+            AutoSelectParams {
+                scope: Some("all".to_owned()),
+                prompt: Some("挑 20 张照片".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let view = smart_select_runs::list_run(&connection, &outcome.run_id).unwrap();
+
+        assert_eq!(outcome.created.len(), 20);
+        assert_eq!(view.rows.len(), 20);
+        assert_eq!(view.params.photo_count, Some(20));
+        assert_eq!(view.params.only_photos, Some(true));
+        assert!(view.rows.iter().all(|row|row.clip_id!=rejected),"X 后不得被重新挑入");
+        assert!(view.rows.iter().all(|row| {
+            !row.reasons.is_empty() && row.reasons.iter().all(|reason| !reason.trim().is_empty())
+        }));
+
+        let mut selected_groups = std::collections::BTreeSet::new();
+        for row in &view.rows {
+            let (kind, duration_ticks): (String, i64) = connection
+                .query_row(
+                    "SELECT kind, duration_ticks FROM clips WHERE id = ?1",
+                    [row.clip_id],
+                    |result| Ok((result.get(0)?, result.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((kind.as_str(), duration_ticks), ("photo", 0));
+            let group_id: Option<i64> = connection
+                .query_row(
+                    "SELECT group_id FROM similar_group_members WHERE clip_id = ?1",
+                    [row.clip_id],
+                    |result| result.get(0),
+                )
+                .optional()
+                .unwrap();
+            if let Some(group_id) = group_id {
+                assert!(selected_groups.insert(group_id), "同一相似组被挑中了两张");
+            }
+        }
+        assert!((outcome.total_secs - 60.0).abs() < f64::EPSILON, "照片预算只累计 hold_ms");
+        let video_selected: i64 = connection
+            .query_row("SELECT COUNT(*) FROM segments WHERE clip_id = ?1", [video], |row| row.get(0))
+            .unwrap();
+        assert_eq!(video_selected, 0);
+        let nonzero_photo_ticks: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM segments WHERE batch_id = ?1 AND (in_ticks != 0 OR out_ticks != 0)",
+                [&outcome.batch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nonzero_photo_ticks, 0);
+        let on_video_band: i64 = connection
+            .query_row("SELECT COUNT(*) FROM story_order WHERE tombstone = 0", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(on_video_band, 0);
+    }
+
+    #[test]
+    fn photo_legacy_skipped_analysis_job_does_not_block_reanalysis() {
+        let (_directory,mut connection) = tests::library();
+        let id = add_photo(&mut connection,"quality-10.png","2026-09-19T12:00:00Z",3_000);
+        connection.execute("DELETE FROM clip_analysis WHERE clip_id=?1",[id]).unwrap();
+        connection.execute("DELETE FROM jobs WHERE kind='analyze_l1'",[]).unwrap();
+        let (hash,path): (String,String) = connection.query_row("SELECT quick_hash,rel_path FROM clips WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let old_hash = blake3::hash(format!("analyze_l1\0{id}\0{hash}\0analyze_l1/v5").as_bytes()).to_hex().to_string();
+        let payload = serde_json::json!({"clip_id":id,"path":path,"quick_hash":hash}).to_string();
+        let old = jobs::enqueue(&mut connection,"analyze_l1",&payload,&old_hash).unwrap();
+        connection.execute("UPDATE jobs SET status='done' WHERE id=?1",[old]).unwrap();
+        assert_eq!(analysis::enqueue_missing(&mut connection).unwrap(),1);
+        let pending:i64 = connection.query_row("SELECT count(*) FROM jobs WHERE kind='analyze_l1' AND status='pending'",[],|r|r.get(0)).unwrap();
+        assert_eq!(pending,1);
+    }
+}
+
+/// Older/direct callers may only send the sentence. Structured parameters win.
+fn resolve_photo_params(params: &mut AutoSelectParams) -> Result<()> {
+    if let Some(prompt) = params.prompt.as_deref() {
+        if params.only_photos.is_none() {
+            if prompt.contains("只要视频") { params.only_photos = Some(false); }
+            else if prompt.contains("只要照片") || (prompt.contains("照片") && prompt.contains('张')) { params.only_photos = Some(true); }
+        }
+        if params.photo_count.is_none() && prompt.contains("照片") {
+            // Count immediately before 张; durations elsewhere in the sentence are not counts.
+            if let Some((before, _)) = prompt.split_once('张') {
+                let digits: String = before.trim_end().chars().rev().take_while(char::is_ascii_digit).collect::<String>().chars().rev().collect();
+                params.photo_count = digits.parse().ok();
+            }
+        }
+    }
+    if params.photo_count.is_some() && params.only_photos.is_none() { params.only_photos = Some(true); }
+    if params.photo_count == Some(0) {
+        return Err(CoreError::Rating("照片张数要是正整数".to_owned()));
+    }
+    Ok(())
 }
 
 /// R19 P-01「按分数挑」:同一份去重后的候选,不分章节、分数从高到低装满预算。
@@ -417,44 +864,69 @@ pub fn auto_select_episode(
 ) -> Result<AutoSelectOutcome> {
     auto_select_episode_with(
         connection,
-        AutoSelectParams { budget_secs, scope: scope.map(str::to_owned), ..AutoSelectParams::default() },
+        AutoSelectParams {
+            budget_secs,
+            scope: scope.map(str::to_owned),
+            only_photos: Some(false),
+            ..AutoSelectParams::default()
+        },
     )
 }
 
 /// R19 P-01 / P-03:带全部参数的自动挑选。挑完写一行 `auto_select_runs`(run_id = batch_id),
 /// 每段挂 `auto_select_run_id`,结果面板按它列出来;权重偏置只影响这一次的候选排序,不改库。
 pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSelectParams) -> Result<AutoSelectOutcome> {
+    resolve_photo_params(&mut params)?;
+    let arrange_on_video_band = params.only_photos != Some(true);
     let scope = AutoSelectScope::parse(params.scope.as_deref())?;
     let platform_budget = platform_budget_secs(connection)?;
     let budget = match params.budget_secs {
         Some(value) if value.is_finite() && value > 0.0 => value,
         Some(_) => return Err(CoreError::Rating("时长预算要是正数秒".to_owned())),
+        None if params.only_photos == Some(true) && params.photo_count.is_some() => f64::INFINITY,
         None if platform_budget > 0 => platform_budget as f64,
         None => DEFAULT_BUDGET_SECS,
     };
     let target = target_secs_for_budget(platform_budget);
     params.target_secs = Some(target);
     let weights = params.weights;
-    let mut candidates = load_candidates(connection, scope, target, weights.as_ref())?;
+    let mut unselected = Vec::new();
+    let mut candidates = load_candidates(connection, scope, target, weights.as_ref(), params.only_photos, &mut unselected)?;
     // X-01:新手默认范围在全新库(0 收藏、0 打星)里是空的——自动改按「全部」挑,不让流水线停在第 ② 步。
     let mut scope_used = scope;
     let mut fell_back = false;
     if candidates.is_empty() && scope == AutoSelectScope::FavoritesOrRated3 {
-        candidates = load_candidates(connection, AutoSelectScope::All, target, weights.as_ref())?;
+        unselected.clear();
+        candidates = load_candidates(connection, AutoSelectScope::All, target, weights.as_ref(), params.only_photos, &mut unselected)?;
         scope_used = AutoSelectScope::All;
         fell_back = !candidates.is_empty();
     }
     if candidates.is_empty() {
+        if !unselected.is_empty() {
+            let labels: std::collections::BTreeSet<_> = unselected.iter().flat_map(|r| r.blockers.clone()).collect();
+            return Err(CoreError::Rating(format!("这些素材未选:{};可换一批素材或手动挑选", labels.into_iter().collect::<Vec<_>>().join("、"))));
+        }
         return Err(CoreError::Rating(empty_scope_reason(connection, scope_used)?));
     }
     let deduped = dedupe_by_score(candidates);
-    let chosen = match params.pick {
+    let mut chosen = match params.pick {
         AutoSelectPick::Chapters => rotate_by_chapter(deduped, budget),
         AutoSelectPick::Score => greedy_by_score(deduped, budget),
     };
+    if let Some(limit) = params.photo_count {
+        let mut photos = 0;
+        chosen.retain(|candidate| {
+            if candidate.suggestion.in_ticks == 0 && candidate.suggestion.out_ticks == 0 {
+                photos += 1;
+                photos <= limit
+            } else { true }
+        });
+    }
     let batch_id = format!("auto-{}", uuid::Uuid::new_v4().simple());
-    let params_json = serde_json::to_string(&AutoSelectParams { scope: Some(scope_used.as_str().to_owned()), ..params })
+    let mut stored_params = serde_json::to_value(AutoSelectParams { scope: Some(scope_used.as_str().to_owned()), ..params })
         .map_err(|error| CoreError::Rating(format!("无法保存挑选参数:{error}")))?;
+    stored_params["unselected"] = serde_json::json!(unselected);
+    let params_json = stored_params.to_string();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "INSERT INTO auto_select_runs(run_id, episode_id, params_json, created_at)
@@ -468,7 +940,7 @@ pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSel
         super::episode::ensure_clip_writable(&transaction, candidate.clip_id)?;
         // R18 B-4:「为什么选它」跟着段一起落盘。以前 `reasons` 算出来就扔了,
         // 用户看到 11 段凭空出现、点开任何一段都问不出理由。
-        let reasons = serde_json::to_string(&candidate.suggestion.reasons)
+        let reasons = serde_json::to_string(&suggestion_reason(&candidate.suggestion))
             .map_err(|error| CoreError::Rating(format!("无法保存挑选理由:{error}")))?;
         transaction.execute(
             "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind, tombstone, source, batch_id, reason_json, auto_select_run_id)
@@ -487,6 +959,7 @@ pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSel
              VALUES (?1, 'binary', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
             [segment_id],
         )?;
+        super::clip_brief::refresh_for_clip(&transaction, candidate.clip_id)?;
         created.push(segment_id);
         total_secs += candidate.secs;
         if !chapters.contains(&candidate.chapter_key) {
@@ -494,15 +967,19 @@ pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSel
         }
     }
     transaction.commit()?;
-    // R12 §2:挑完就排进镜头带(append,只补新段)。排入失败不能吞掉已经成功的挑选,
-    // 只把 placed 记 0,前端会给「排入」按钮让用户再点一次。
-    let (placed, arrange_batch_id) = match super::arrange::arrange_selected_segments(connection, super::arrange::ArrangeMode::Append) {
-        Ok(outcome) if outcome.placed > 0 => (outcome.placed, Some(outcome.batch_id)),
-        Ok(_) => (0, None),
-        Err(error) => {
-            tracing::warn!(%error, "自动挑选后排入镜头带失败");
-            (0, None)
+    // R12 §2:视频挑完就排进视频镜头带(append,只补新段);照片留在照片工作台。
+    // 排入失败不能吞掉已经成功的挑选,只把 placed 记 0,前端会给「排入」按钮让用户再点一次。
+    let (placed, arrange_batch_id) = if arrange_on_video_band {
+        match super::arrange::arrange_selected_segments(connection, super::arrange::ArrangeMode::Append) {
+            Ok(outcome) if outcome.placed > 0 => (outcome.placed, Some(outcome.batch_id)),
+            Ok(_) => (0, None),
+            Err(error) => {
+                tracing::warn!(%error, "自动挑选后排入镜头带失败");
+                (0, None)
+            }
         }
+    } else {
+        (0, None)
     };
     Ok(AutoSelectOutcome {
         created,
@@ -515,6 +992,12 @@ pub fn auto_select_episode_with(connection: &mut Connection, mut params: AutoSel
         scope_used: scope_used.as_str().to_owned(),
         fell_back,
     })
+}
+
+pub(crate) fn suggestion_reason(suggestion: &SegmentSuggestion) -> reason::Reason {
+    let mut quality = reason::Reason::from_labels(&suggestion.reasons);
+    quality.reasons = suggestion.reasons.iter().filter(|v| !quality.fixable.contains(v) && !quality.blockers.contains(v)).cloned().collect();
+    quality
 }
 
 /// 只删该批 `source='auto'` 的段(物理删除,评级行级联);手打的段一条不碰。
@@ -656,6 +1139,73 @@ pub(crate) mod tests {
         clip_id
     }
 
+    #[test]
+    fn r20_existing_analysis_supplies_focus_and_exposure_reasons() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "分析", "2026-09-19T08:00:00Z");
+        let blurred = add_clip(&mut connection, chapter, 0.9, true, 0);
+        let dark = add_clip(&mut connection, chapter, 0.8, true, 0);
+        for (id, focus, under) in [(blurred, 0.9, 0.0), (dark, 0.0, 0.8)] {
+            connection.execute("INSERT INTO clip_analysis(clip_id, exposure_yavg, overexposed_ratio, underexposed_ratio,
+                out_of_focus_ratio, audio_clipped, has_audio, focus_scores, scene_count, analyzed_at, tool_versions)
+                VALUES (?1, 40, 0, ?3, ?2, 0, 1, '[]', 1, 'now', '{}')", params![id, focus, under]).unwrap();
+        }
+        connection.execute("UPDATE clip_moments SET exposure_ok=0 WHERE clip_id=?1", [dark]).unwrap();
+        let run = auto_select_episode(&mut connection, Some(300.0), Some("all")).unwrap();
+        let view = crate::core::smart_select_runs::list_run(&connection, &run.run_id).unwrap();
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].clip_id, dark);
+        assert_eq!(view.rows[0].fixable, vec!["曝光偏暗"]);
+        assert_eq!(view.unselected[0].clip_id, blurred);
+    }
+
+    #[test]
+    fn r20_blockers_win_over_fixable_even_after_weight_bias_and_in_short_clips() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "测试", "2026-09-19T08:00:00Z");
+        let blocked = add_clip(&mut connection, chapter, 1.0, true, 0);
+        let good = add_clip(&mut connection, chapter, 0.1, true, 0);
+        connection.execute("UPDATE clip_moments SET reasons_json='[\"high_contrast\",\"exposure_dark\"]' WHERE clip_id=?1", [blocked]).unwrap();
+        let weighted = moments_with_weights(&connection, blocked, Some(&MomentWeights::default())).unwrap();
+        assert!(suggest_from_moments(&weighted[..2], 8.0, 1).is_empty());
+        assert!(suggest_from_moments(&weighted, 8.0, 1).is_empty());
+        let outcome = auto_select_episode_with(&mut connection, AutoSelectParams { scope: Some("all".to_owned()), weights: Some(MomentWeights::default()), ..Default::default() }).unwrap();
+        let view = crate::core::smart_select_runs::list_run(&connection, &outcome.run_id).unwrap();
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].clip_id, good);
+        assert_eq!(view.unselected[0].blockers, vec!["大光比"]);
+    }
+
+    #[test]
+    fn r20_quality_blockers_precede_fixable_in_ten_clip_fixture() {
+        let (_directory, mut connection) = library();
+        let chapter = add_chapter(&connection, "质量", "2026-09-19T08:00:00Z");
+        let labels = ["失焦", "抖动过大", "时机差", "曝光偏亮", "轻微手抖", "色偏", "", "", "", ""];
+        let mut ids = Vec::new();
+        for label in labels {
+            let id = add_clip(&mut connection, chapter, 0.9, true, 0);
+            connection.execute("UPDATE clip_moments SET reasons_json = ?2 WHERE clip_id = ?1",
+                params![id, serde_json::to_string(&vec!["清晰", label]).unwrap()]).unwrap();
+            connection.execute("UPDATE clips SET local_brief='旧描述。' WHERE id=?1", [id]).unwrap();
+            ids.push(id);
+        }
+        let outcome = auto_select_episode(&mut connection, Some(300.0), Some("all")).unwrap();
+        let view = crate::core::smart_select_runs::list_run(&connection, &outcome.run_id).unwrap();
+        assert_eq!(view.rows.len(), 7);
+        assert_eq!(view.unselected.len(), 3);
+        assert_eq!(view.unselected[0].blockers, vec!["失焦"]);
+        assert!(view.rows.iter().all(|r| !ids[..3].contains(&r.clip_id)));
+        for id in &ids[3..6] {
+            let row = view.rows.iter().find(|r| r.clip_id == *id).unwrap();
+            assert!(row.reasons.iter().any(|r| r.contains("可修")), "{row:?}");
+            let json: String = connection.query_row("SELECT reason_json FROM segments WHERE id=?1", [row.segment_id], |r| r.get(0)).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["fixable"].as_array().unwrap().len(), 1);
+            assert_eq!(value["blockers"], serde_json::json!([]));
+            assert!(crate::core::clip_brief::get_clip_brief(&connection, *id).unwrap().unwrap().contains("可修"));
+        }
+    }
+
     /// R18 B-4:自动挑选写下「为什么选它」。以前 `reasons` 算出来就扔了 ——
     /// 这条在写 `reason_json` 之前必红。
     #[test]
@@ -671,7 +1221,7 @@ pub(crate) mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let parsed: Vec<String> = serde_json::from_str(&reasons).unwrap();
+        let parsed = reason::Reason::read(&reasons).display();
         assert!(parsed.iter().any(|reason| reason == "清晰"), "{reasons}");
     }
 

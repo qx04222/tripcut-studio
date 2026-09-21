@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
   getClipsRevision: vi.fn(),
@@ -60,6 +60,7 @@ function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
     motion: null,
     motion_status: null,
     motion_error: null,
+    kind: "video",
     binary_rating: null,
     star_rating: null,
     select_count: 0,
@@ -207,6 +208,10 @@ describe("媒体池 —— AX 与网格结构", () => {
   });
 
   it("U-04/P-10:有拍摄时间的素材按「日期 › 时段」出一行分组摘要 chip", async () => {
+    // 分组按本机钟面;夹具是 +08:00 的钟面,钉在东八区期望值才与字面一致。
+    const tz = process.env.TZ;
+    process.env.TZ = "Asia/Shanghai";
+    onTestFinished(() => { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; });
     apiMocks.listClips.mockResolvedValue([
       clip(1, { captured_at: "2026-08-12T08:10:00+08:00" }),
       clip(2, { captured_at: "2026-08-12T08:40:00+08:00" }),
@@ -652,5 +657,22 @@ describe("媒体池 —— R18 版面打磨(V-18)", () => {
     Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
     fireEvent(window, new Event("resize"));
     await waitFor(() => expect(grid.getAttribute("aria-colcount")).toBe("3"));
+  });
+});
+
+describe("R21 §0.5 视频工作台隔离", () => {
+  it("媒体池只显示视频，照片与疑似废片提示都不进入视频池", async () => {
+    const analysis = { clip_id: 1, exposure_yavg: 12, overexposed_ratio: 0, audio_peak_db: null, audio_clipped: false, has_audio: false, focus_scores: [20], scene_count: 0, analyzed_at: "now", tool_versions: {}, underexposed_ratio: 1, dynamic_range: 20, blur_mean: 0, entropy_mean: 6, motion_mean: 0, out_of_focus_ratio: 0 };
+    apiMocks.listClips.mockResolvedValue([
+      clip(1, { kind: "photo", duration_ticks: 0, analysis, analysis_status: "done" }),
+      clip(2, { kind: "video", analysis: { ...analysis, clip_id: 2, underexposed_ratio: 0 }, analysis_status: "done" }),
+    ]);
+    render(<MediaPool />);
+    await waitFor(() => expect(screen.getAllByRole("gridcell")).toHaveLength(1));
+    const cells = within(screen.getByRole("grid", { name: "媒体池" })).getAllByRole("gridcell");
+    expect(cells).toHaveLength(1);
+    expect(cells[0]!.textContent).toContain("clip-2");
+    expect(screen.queryByText(/疑似废片/)).toBeNull();
+    expect(apiMocks.rateClip).not.toHaveBeenCalled();
   });
 });

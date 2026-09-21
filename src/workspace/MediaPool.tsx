@@ -1,3 +1,4 @@
+import { usePoolGridNavigation } from "./usePoolGridNavigation";
 import {
   useCallback,
   useEffect,
@@ -5,10 +6,8 @@ import {
   useRef,
   useState,
   type JSX,
-  type KeyboardEvent as ReactKeyboardEvent,
   type UIEvent,
 } from "react";
-
 import { playerCommand, searchClips, searchTranscripts } from "../api";
 import { PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
 import { useMediaPoolHotkeys } from "./MediaPoolHotkeys";
@@ -16,7 +15,7 @@ import { PoolStackStrip } from "./MediaPoolStackStrip";
 import { PoolClipContextMenu } from "./ClipMenu";
 import { PaneHead } from "./PaneHead";
 import { PoolCard } from "./PoolCard";
-import { setPoolOrder } from "./poolOrder";
+import { setPoolOrder, sortPoolClips } from "./poolOrder";
 import { groupClipsByDateAndPeriod } from "./poolGrouping";
 import { INITIAL_POOL_EXTRA_FILTERS, PoolFilters, type PoolExtraFilters } from "./PoolFilters";
 import {
@@ -37,9 +36,7 @@ import { useSelection } from "./useSelection";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { isCompactWidth } from "./shellLayout";
 import { failureText } from "./errorText";
-
 const FILTER_ORDER: readonly SelectionFilter[] = ["all", "favorite", "unrated", "rejected"];
-
 export function MediaPool(): JSX.Element {
   const feed = useClipsFeed();
   const filter = useWorkspace((state) => state.filter);
@@ -48,7 +45,6 @@ export function MediaPool(): JSX.Element {
   const paneWidth = useWorkspace((state) => state.poolWidth);
   // 池内展开的 Stack(U-02):点角标「n 条候选」或在卡片上按 Tab。
   const [expandedStackId, setExpandedStackId] = useState<number | null>(null);
-
   const [extras, setExtras] = useState<PoolExtraFilters>(INITIAL_POOL_EXTRA_FILTERS);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -61,23 +57,18 @@ export function MediaPool(): JSX.Element {
     () => new Map(),
   );
   const searchRequest = useRef(0);
-
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  // 焦点是否还属于网格。卡片被虚拟化卸载时浏览器不给我们一个"去了哪里"的 blur,
-  // 只有焦点真的落到网格外的元素上才清掉这个标记。
+  // 焦点是否还属于网格。卡片被虚拟化卸载时浏览器不给我们一个"去了哪里"的 blur, 只有焦点真的落到网格外的元素上才清掉这个标记。
   const gridHadFocus = useRef(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(560);
   const [columns, setColumns] = useState(() => poolColumnCount(paneWidth));
-
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
     const measure = () => {
       setViewportHeight(Math.max(1, viewport.clientHeight));
-      // 栏宽以实测为准,store 里的值是拖动落定后的值,拖动中途它还没更新。
-      // R18 V-18:列数两档 —— 紧凑档(R19 V-11:<--bp-compact,壳的唯一断点)最多两列。此前池宽锁 320,
-      // 1280 下仍排三列,卡只是更挤;窗口窄的时候要的是更大的卡,不是更多的卡。
+      // 栏宽以实测为准,store 里的值是拖动落定后的值,拖动中途它还没更新。 R18 V-18:列数两档 —— 紧凑档(R19 V-11:<--bp-compact,壳的唯一断点)最多两列。此前池宽锁 320, 1280 下仍排三列,卡只是更挤;窗口窄的时候要的是更大的卡,不是更多的卡。
       const byWidth = poolColumnCount(viewport.clientWidth || paneWidth);
       const wide = typeof window === "undefined" || !isCompactWidth(window.innerWidth);
       setColumns(wide ? byWidth : (Math.min(byWidth, 2) as 2 | 3 | 4));
@@ -92,19 +83,14 @@ export function MediaPool(): JSX.Element {
       observer?.disconnect();
     };
   }, [paneWidth]);
-
-  const clips = useMemo(() => [...feed.clips], [feed.clips]);
-  // U-04/P-10「导入即有地图」:按拍摄时间(EXIF/mtime,分析结果之前就有)分组计数,
-  // 只是一条摘要 chip 行,不进虚拟化网格本身——导入完成的一刻就能看出「这批素材
-  // 大致是哪天、哪个时段拍的」,不用等分析跑完。
+  const clips = useMemo(() => sortPoolClips(feed.clips.filter((clip) => clip.kind === "video")), [feed.clips]);
+  // U-04/P-10「导入即有地图」:按拍摄时间(EXIF/mtime,分析结果之前就有)分组计数, 只是一条摘要 chip 行,不进虚拟化网格本身——导入完成的一刻就能看出「这批素材 大致是哪天、哪个时段拍的」,不用等分析跑完。
   const dateGroups = useMemo(() => groupClipsByDateAndPeriod(clips), [clips]);
-  // 搜索回调要读「此刻」的素材表做文件名匹配,不能把 clips 放进它的依赖里
-  // (那会让每次轮询都换一个 runSearch 身份)。
+  // 搜索回调要读「此刻」的素材表做文件名匹配,不能把 clips 放进它的依赖里 (那会让每次轮询都换一个 runSearch 身份)。
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
   const dimensions = useMemo(() => [...feed.dimensions], [feed.dimensions]);
   const shotStacks = useMemo(() => [...feed.shotStacks], [feed.shotStacks]);
-
   const qualityExemptClipIds = useMemo(() => {
     const exempt = new Set<number>();
     for (const stack of shotStacks) {
@@ -113,7 +99,6 @@ export function MediaPool(): JSX.Element {
     }
     return exempt;
   }, [shotStacks]);
-
   const counts = useMemo(() => {
     const next = {} as Record<SelectionFilter, number>;
     for (const candidate of FILTER_ORDER) {
@@ -121,7 +106,6 @@ export function MediaPool(): JSX.Element {
     }
     return next;
   }, [clips]);
-
   const dimensionLabelOptions = useMemo(() => {
     if (!dimension) return [] as string[];
     return [
@@ -130,7 +114,6 @@ export function MediaPool(): JSX.Element {
       ),
     ].sort();
   }, [dimensions, dimension]);
-
   const items = useMemo(() => {
     let filtered = filterSelectionClips(clips, filter, extras.excludeSuspect, qualityExemptClipIds);
     filtered = filterClipsByDimension(filtered, dimensions, dimension, extras.dimensionLabel);
@@ -156,20 +139,16 @@ export function MediaPool(): JSX.Element {
     shotStacks,
     semanticScores,
   ]);
-
   const visibleIds = useMemo(
     () => items.map((item) => item.clip.id).filter((id): id is number => id !== null),
     [items],
   );
   const { selection, multiSelection, selectClip } = useSelection(visibleIds);
-  // R11 §3:监视器「播完自动下一条」按这份可见顺序走。
   useEffect(() => setPoolOrder(visibleIds), [visibleIds]);
   const selectedId = selection?.kind === "clip" ? selection.clipId : null;
   const storeAnchorId = useWorkspace((state) => state.anchorClipId);
-  // 锚点 = 最后一次点击的素材。选中的是镜头带的空槽位时,网格的漫游落点仍留在
-  // 上一张卡片上,不然键盘会整个失去入口。
+  // 锚点 = 最后一次点击的素材。选中的是镜头带的空槽位时,网格的漫游落点仍留在 上一张卡片上,不然键盘会整个失去入口。
   const anchorId = selectedId ?? (storeAnchorId !== null && visibleIds.includes(storeAnchorId) ? storeAnchorId : null);
-
   const runSearch = useCallback(async (query: string) => {
     const request = ++searchRequest.current;
     if (!query) {
@@ -197,8 +176,7 @@ export function MediaPool(): JSX.Element {
           seconds.set(hit.clip_id, (hit.best_t_ticks * tbNum) / tbDen);
         }
       }
-      // U-15:文件名子串也算命中(⌘K 早就这么搜,池内搜索却只走语义/对白索引,
-      // 「登机」搜不到 IMG_0813_登机口.mov 就是这条缺口)。前端并集,不改 Rust。
+      // U-15:文件名子串也算命中(⌘K 早就这么搜,池内搜索却只走语义/对白索引, 「登机」搜不到 IMG_0813_登机口.mov 就是这条缺口)。前端并集,不改 Rust。
       const allowed = new Set<number>([
         ...hits.map((hit) => hit.clip_id),
         ...transcripts.map((match) => match.clip_id),
@@ -213,27 +191,17 @@ export function MediaPool(): JSX.Element {
       if (request === searchRequest.current) setSearching(false);
     }
   }, []);
-
   // U-15:搜索词被清空(输入框删光、Esc、⌘K)即自动复原,不必再按一次「搜索」。
   useEffect(() => {
     if (query === "") void runSearch("");
   }, [query, runSearch]);
-
   const anchorStack = anchorId === null ? null : feed.shotStackByClipId.get(anchorId) ?? null;
   // 展开的 Stack 被筛选/搜索从网格里裁掉之后,候选条也跟着收起 —— 不留一条无主的展开。
   const expandedStack = useMemo(
     () => (expandedStackId === null ? null : items.find((item) => item.stack?.id === expandedStackId)?.stack ?? null),
     [expandedStackId, items],
   );
-  // R18 W-5:`React.memo(PoolCard)` 此前被两个内联闭包打穿——`onToggleStack` 与
-  // `onSelect` 每次 MediaPool 渲染都是新函数,可见的 ~32 张卡全部重协调。
-  //
-  // 不能用自定义比较器忽略这两个回调(`onToggleStack` 捕获 `expandedStackId`,
-  // 忽略它会用旧状态切换),也不想改 PoolCard 的 props 形状。做法是:
-  // ① `toggleStack` 用函数式 setState,不再捕获 `expandedStackId`,本身恒定;
-  // ② `selectClip` 的身份每次选中都会变(它捕获 multiSelection / anchor),
-  //    所以放进 ref,外面包一层恒定的转发函数;
-  // ③ 每条素材 / 每个 Stack 的回调各缓存一份,按 id 记在 ref 里,永不换引用。
+  // R18 W-5:`React.memo(PoolCard)` 此前被两个内联闭包打穿——`onToggleStack` 与 `onSelect` 每次 MediaPool 渲染都是新函数,可见的 ~32 张卡全部重协调。  不能用自定义比较器忽略这两个回调(`onToggleStack` 捕获 `expandedStackId`, 忽略它会用旧状态切换),也不想改 PoolCard 的 props 形状。做法是: ① `toggleStack` 用函数式 setState,不再捕获 `expandedStackId`,本身恒定; ② `selectClip` 的身份每次选中都会变(它捕获 multiSelection / anchor), 所以放进 ref,外面包一层恒定的转发函数; ③ 每条素材 / 每个 Stack 的回调各缓存一份,按 id 记在 ref 里,永不换引用。
   const toggleStack = useCallback(
     (stackId: number) => setExpandedStackId((previous) => (previous === stackId ? null : stackId)),
     [],
@@ -261,8 +229,7 @@ export function MediaPool(): JSX.Element {
     selectHandlers.current.set(clipId, handler);
     return handler;
   }, []);
-  // R18 C-2:点「第 n 秒」= 先选中这条(监视器才会载它),再把播放头拉到那一秒。
-  // 和 selectHandler 一样按 clipId 缓存成恒定引用,不然 PoolCard 的 memo 每次都失效。
+  // R18 C-2:点「第 n 秒」= 先选中这条(监视器才会载它),再把播放头拉到那一秒。 和 selectHandler 一样按 clipId 缓存成恒定引用,不然 PoolCard 的 memo 每次都失效。
   const seekHandlers = useRef(new Map<number, () => void>());
   const seekHandler = useCallback((clipId: number) => {
     const cached = seekHandlers.current.get(clipId);
@@ -270,13 +237,12 @@ export function MediaPool(): JSX.Element {
     const handler = () => {
       selectClipRef.current(clipId, {});
       const seconds = secondsRef.current.get(clipId);
-      if (seconds === undefined) return;
+      if (seconds === undefined || clipsRef.current.find(clip => clip.id === clipId)?.kind === "photo") return;
       void playerCommand({ type: "seek_abs", seconds }, clipId).catch(() => undefined);
     };
     seekHandlers.current.set(clipId, handler);
     return handler;
   }, []);
-  // 没有 clip_id 的卡片(占位)点了不该做事,但也不能每次渲染换一个新函数。
   const noopSelect = useCallback(() => undefined, []);
   const hotkeys = useMediaPoolHotkeys({
     anchorId,
@@ -287,7 +253,6 @@ export function MediaPool(): JSX.Element {
     setExpandedStackId,
     selectClip,
   });
-
   const rowCount = Math.ceil(items.length / columns);
   const startRow = Math.min(
     Math.max(0, rowCount - 1),
@@ -296,79 +261,13 @@ export function MediaPool(): JSX.Element {
   const visibleRows = Math.ceil(viewportHeight / POOL_ROW_HEIGHT) + GRID_OVERSCAN_ROWS * 2;
   const endRow = Math.min(rowCount, startRow + visibleRows);
   const visible = items.slice(startRow * columns, endRow * columns);
-  // 按列数切成行。**不是**排版需要 —— CSS grid 自己会换行;这是 ARIA 的硬要求:
-  // WebKit(WKWebView)的 ARIA grid 映射只把 role=row 当作 table 的合法子节点,
-  // gridcell 上面没有 row 祖先时,整棵 AXTable 的后代会被剪光,媒体池对
-  // VoiceOver 与 AX 探针就是一张空表(R8 真机复现)。行必须是**真实盒子**:
-  // 先前写成 display:contents,WebKit 连这层 row 一起剪掉,真机上 500 条素材
-  // 只剩 1 个 AXRow / 1 个 AXCell(R8 真机 #3)。现在每行自己是一排 grid。
+  // 按列数切成行。**不是**排版需要 —— CSS grid 自己会换行;这是 ARIA 的硬要求: WebKit(WKWebView)的 ARIA grid 映射只把 role=row 当作 table 的合法子节点, gridcell 上面没有 row 祖先时,整棵 AXTable 的后代会被剪光,媒体池对 VoiceOver 与 AX 探针就是一张空表(R8 真机复现)。行必须是**真实盒子**: 先前写成 display:contents,WebKit 连这层 row 一起剪掉,真机上 500 条素材 只剩 1 个 AXRow / 1 个 AXCell(R8 真机 #3)。现在每行自己是一排 grid。
   const visibleRowsChunks = Array.from({ length: Math.max(0, endRow - startRow) }, (_, offset) =>
     visible.slice(offset * columns, (offset + 1) * columns),
   ).filter((row) => row.length > 0);
-
-  // 虚拟化会把锚点卡片整个卸载掉 —— 焦点跟着卡片一起消失,键盘就此失灵。
-  // 卡片还在就把焦点放回卡片,卡片没了就交还给容器(aria-activedescendant 仍指着锚点)。
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    if (!gridHadFocus.current) return;
-    const active = document.activeElement;
-    // 卡片被卸载时焦点会掉到 <body> —— 那正是要救的情形,所以 body 也算"还是我们的"。
-    if (active !== null && active !== document.body && !viewport.contains(active)) return;
-    const card = anchorId === null ? null : document.getElementById(`pool-clip-${anchorId}`);
-    if (card) {
-      if (active !== card) card.focus();
-    } else if (active !== viewport) {
-      viewport.focus();
-    }
-  }, [anchorId, startRow, endRow, visible.length]);
-
-  const onGridKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    // Stack 展开时 ↑↓ 在候选里移动(useMediaPoolHotkeys),不做网格漫游。
-    const inTakes = expandedStack !== null && anchorStack?.id === expandedStack.id;
-    const takesKey = event.key === "ArrowUp" || event.key === "ArrowDown";
-    if (anchorId === null || visibleIds.length === 0 || (inTakes && takesKey)) {
-      hotkeys.onKeyDown(event);
-      return;
-    }
-    const index = visibleIds.indexOf(anchorId);
-    if (index < 0) {
-      hotkeys.onKeyDown(event);
-      return;
-    }
-    const step =
-      event.key === "ArrowRight" ? 1
-      : event.key === "ArrowLeft" ? -1
-      : event.key === "ArrowDown" ? columns
-      : event.key === "ArrowUp" ? -columns
-      : 0;
-    if (step === 0) {
-      hotkeys.onKeyDown(event);
-      return;
-    }
-    event.preventDefault();
-    const nextIndex = Math.min(visibleIds.length - 1, Math.max(0, index + step));
-    const next = visibleIds[nextIndex];
-    if (next === undefined) return;
-    selectClip(next);
-    // 目标行可能在渲染窗口之外(那时 DOM 里根本没有这张卡,scrollIntoView 无从谈起),
-    // 所以先把视口滚过去,再让已经渲染出来的那张自己对齐。
-    const viewport = viewportRef.current;
-    if (viewport) {
-      const top = poolRowTop(Math.floor(nextIndex / columns));
-      const bottom = top + POOL_ROW_HEIGHT;
-      const height = viewport.clientHeight || viewportHeight;
-      let nextScrollTop = viewport.scrollTop;
-      if (top < nextScrollTop) nextScrollTop = top;
-      else if (bottom > nextScrollTop + height) nextScrollTop = bottom - height;
-      if (nextScrollTop !== viewport.scrollTop) {
-        viewport.scrollTop = nextScrollTop;
-        setScrollTop(nextScrollTop);
-      }
-    }
-    document.getElementById(`pool-clip-${next}`)?.scrollIntoView?.({ block: "nearest" });
-  };
-
+  const onGridKeyDown = usePoolGridNavigation({ viewportRef, gridHadFocus, anchorId, startRow, endRow,
+    visibleCount: visible.length, inTakes: expandedStack !== null && anchorStack?.id === expandedStack.id,
+    visibleIds, columns, viewportHeight, setScrollTop, selectClip, hotkeys });
   return (
     <div
       className="media-pool"

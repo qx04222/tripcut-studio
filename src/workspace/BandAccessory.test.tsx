@@ -317,6 +317,9 @@ function storyItem(clipId: number, chapterId: number, position: number): StoryIt
 
 describe("音乐刻度轨与镜头带同一条序号轴", () => {
   beforeEach(() => {
+    apiMocks.listClips.mockResolvedValue(
+      [1, 2, 3, 4].map((id) => ({ id, kind: "video" })) as never,
+    );
     apiMocks.getStoryboard.mockResolvedValue({
       ...board,
       items: [0, 1, 2, 3].map((offset) => storyItem(offset + 1, 1, offset)),

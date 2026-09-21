@@ -30,7 +30,7 @@ import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests, dispatchWorkspace } from "./WorkspaceStore";
 
 const CLIP = {
-  id: 1, episode_id: 1, folder_label: null, cover_url: null, path: "/x/a.mov", file_name: "a.mov", byte_size: 1, quick_hash: null, full_hash: null,
+  kind: "video", id: 1, episode_id: 1, folder_label: null, cover_url: null, path: "/x/a.mov", file_name: "a.mov", byte_size: 1, quick_hash: null, full_hash: null,
   tb_num: 1, tb_den: 1000, duration_ticks: 12_000, fps_num: 25, fps_den: 1, is_vfr: false, codec: "h264", width: 1920, height: 1080, captured_at: null,
   status: "ready", error: null, analysis: null, analysis_status: "done", analysis_error: null, motion: null, motion_status: null, motion_error: null,
   binary_rating: null, star_rating: null, select_count: 0,

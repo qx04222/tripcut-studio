@@ -218,7 +218,41 @@ export interface TranscriptMatch {
   tb_den: number;
 }
 
+export interface PhotoMetaDto {
+  width: number;
+  height: number;
+  orientation: number;
+  /** UTC RFC3339(`…Z`),与视频 `captured_at` 同口径;排序 / 分组 / 分章只拿它比。 */
+  taken_at: string | null;
+  /** 本地钟原文 + 实际用的 offset(`2026-09-19T10:02:00-04:00`),只给检查器显示。 */
+  taken_at_local: string | null;
+  /** 换算用的 offset(`UTC-04:00`),与视频 `tz_guess` 同格式。 */
+  tz_guess: string | null;
+  gps_lat: number | null;
+  gps_lon: number | null;
+  camera: string | null;
+  lens: string | null;
+  hold_ms: number;
+  color_space: string | null;
+  has_alpha: boolean;
+  companions_ambiguous: boolean;
+  preview_url?: string | null;
+}
+
+export interface CompanionDto {
+  id: number;
+  clip_id: number;
+  path: string;
+  role: "raw" | "xmp" | "live_mov" | "jpg";
+  size: number;
+  mtime: number | null;
+}
+
 export interface ClipListItem {
+  /** Absent only in pre-R21 callers/fixtures; interpret as video. */
+  kind?: "video" | "photo";
+  photo?: PhotoMetaDto | null;
+  companions?: CompanionDto[];
   id: number | null;
   episode_id: number | null;
   folder_label: string | null;
@@ -694,6 +728,8 @@ export interface ExportStatus {
   selected_count: number;
   selected_segment_count: number;
   selected_whole_count: number;
+  /** 照片项数;旧后端缺省 0。 */
+  selected_photo_count?: number;
   total_duration_seconds: number;
   completed_items: number;
   failed_items: number;
@@ -2442,6 +2478,8 @@ export interface AutoSelectParamsInput {
   pick?: AutoSelectPick;
   /** 用户原句(P-01),只做记录。 */
   prompt?: string;
+  mediaKind?: "photo" | "video" | null;
+  photoCount?: number | null;
 }
 
 /** 带全部参数的自动挑选(一句话挑片 / 预设句);挑完写一行 `auto_select_runs`,outcome 带 `run_id`。 */
@@ -2452,6 +2490,8 @@ export function autoSelectEpisodeWith(options: AutoSelectParamsInput = {}): Prom
     weightsJson: options.weights ? JSON.stringify(options.weights) : null,
     pick: options.pick ?? null,
     prompt: options.prompt ?? null,
+    onlyPhotos: options.mediaKind == null ? null : options.mediaKind === "photo",
+    photoCount: options.photoCount ?? null,
   });
 }
 
@@ -2473,6 +2513,8 @@ export interface AutoSelectRunRow {
   score: number;
   reasons: string[];
   siblings: AutoSelectRunSibling[];
+  fixable?: string[];
+  blockers?: string[];
 }
 
 export interface AutoSelectRunParams {
@@ -2482,12 +2524,15 @@ export interface AutoSelectRunParams {
   pick: AutoSelectPick;
   prompt: string | null;
   target_secs: number | null;
+  only_photos?: boolean | null;
+  photo_count?: number | null;
 }
 
 export interface AutoSelectRunView {
   run_id: string;
   params: AutoSelectRunParams;
   rows: AutoSelectRunRow[];
+  unselected?: { clip_id: number; blockers: string[] }[];
 }
 
 /** 这一批还活着的段(「不要这一段」软删掉的不列;「换一段」换进来的列)。 */
@@ -2496,8 +2541,8 @@ export function listAutoSelectRun(runId: string): Promise<AutoSelectRunView> {
 }
 
 /** 「换一段」:同组次优兄弟(或同素材下一条建议段)替掉这一段,返回新段那一行。 */
-export function replaceAutoSegment(segmentId: number): Promise<AutoSelectRunRow> {
-  return invoke<AutoSelectRunRow>("replace_auto_segment", { segmentId });
+export function replaceAutoSegment(segmentId: number): Promise<AutoSegmentReplacement> {
+  return invoke<AutoSegmentReplacement>("replace_auto_segment", { segmentId });
 }
 
 // ---------------------------------------------------------------------------
@@ -2564,4 +2609,32 @@ export async function bridgeModelProgressEvents(): Promise<() => void> {
   } catch {
     return () => undefined;
   }
+}
+
+// R20:兼容 R19 的行形状,另附旧段快照。
+export interface ReplacedAutoSegmentSnapshot {
+  segment_id: number;
+  batch_id: string;
+  position: number | null;
+  row: AutoSelectRunRow;
+}
+export interface AutoSegmentReplacement extends AutoSelectRunRow {
+  replaced: ReplacedAutoSegmentSnapshot;
+}
+export function undoReplaceAutoSegment(runId: string, replacedSegmentId: number): Promise<boolean> {
+  return invoke<boolean>("undo_replace_auto_segment", { runId, replacedSegmentId });
+}
+
+/** R21 shared photo/video duel; identities are namespaced, never ambiguous IDs. */
+export interface DuelMember { clip_id: number; segment_id: number | null; result_segment_id?: number; preview?: SelectSegment }
+export interface DuelSession {
+  id: number; members: DuelMember[]; pair: string[]; winners: string[];
+  round: number; total: number; finished: boolean; undone: boolean;
+}
+export type DuelSource = "similar_group" | "shot_stack" | "manual" | "results";
+export function startDuel(members: DuelMember[], source: DuelSource): Promise<DuelSession> {
+  return invoke<DuelSession>("start_duel", { members, source });
+}
+export function duelAction(sessionId: number, action: "get" | "decide" | "undo_last" | "finish" | "undo_session", winner: string | null = null): Promise<DuelSession> {
+  return invoke<DuelSession>("duel_action", { sessionId, action, winner });
 }

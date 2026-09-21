@@ -1,4 +1,4 @@
-import { foldKey } from "./bandGeometry";
+import { foldKey, segmentWidth } from "./bandGeometry";
 import { BAND_SEGMENT_PITCH, secondsLabel, segmentDurationMs, type BandChapter } from "./shotBandModel";
 
 /**
@@ -45,7 +45,8 @@ export function timelineSpans(
       startMs += durationMs;
       return;
     }
-    chapter.segments.forEach((segment, position) => {
+    let segmentLeft = left;
+    chapter.segments.forEach((segment) => {
       const durationMs = segmentDurationMs(segment);
       const inMs = segment.tbNum > 0 && segment.tbDen > 0 ? (segment.inTicks * segment.tbNum * 1_000) / segment.tbDen : 0;
       spans.push({
@@ -55,9 +56,10 @@ export function timelineSpans(
         startMs,
         durationMs,
         inMs,
-        left: left + position * BAND_SEGMENT_PITCH,
-        width: BAND_TILE_WIDTH,
+        left: segmentLeft,
+        width: segmentWidth(segment),
       });
+      segmentLeft += segmentWidth(segment) + 8;
       startMs += durationMs;
     });
   });
@@ -116,7 +118,7 @@ export function pxToTime(
 
 /** 监视器的 `tripcut:seek-ratio` 只认整条素材的 0..1;素材时长未知(0)时无法换算。 */
 export function seekRatioFor(span: TimelineSpan, ratio: number, clipDurationMs: number): number | null {
-  if (clipDurationMs <= 0) return null;
+  if (!Number.isFinite(clipDurationMs) || clipDurationMs <= 0) return null;
   return clamp01((span.inMs + clamp01(ratio) * span.durationMs) / clipDurationMs);
 }
 

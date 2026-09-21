@@ -49,7 +49,7 @@ pub fn list_select_segments(connection: &Connection, clip_id: i64) -> Result<Vec
             source: row.get(6)?,
             reasons: row
                 .get::<_, Option<String>>(7)?
-                .and_then(|json| serde_json::from_str(&json).ok())
+                .map(|json| super::smart_select::reason::Reason::read(&json).display())
                 .unwrap_or_default(),
         })
     })?;

@@ -4,6 +4,7 @@
  * 「这批素材大致是哪天、哪个时段拍的」,不必等分析跑完。纯函数,只读 `ClipListItem`,
  * 不碰 UI —— MediaPool.tsx 只负责把结果渲染成一条分组头 chip 行。
  */
+import { poolWallClock } from "./poolOrder";
 import type { ClipListItem } from "../api";
 
 export type TimePeriod = "凌晨" | "上午" | "下午" | "傍晚" | "夜间";
@@ -28,9 +29,10 @@ export interface PoolDateGroup {
 }
 
 /**
- * 按 `captured_at` 的日期 + 时段分组计数,组内顺序按素材原始顺序里第一次出现排列
+ * 视频按 `captured_at` 的本机钟面,照片按 `taken_at_local` 的拍摄地钟面分组计数;
+ * 组内顺序按素材原始顺序里第一次出现排列
  * (不重新按时间排序 —— 排序是媒体池网格自己的事,这里只负责「有几组、每组几条」)。
- * 没有 `captured_at` 的素材全部归进末尾的「时间未知」组,不与真实日期混在一起。
+ * 没有可用拍摄时间的素材全部归进末尾的「时间未知」组,不与真实日期混在一起。
  */
 export function groupClipsByDateAndPeriod(clips: readonly ClipListItem[]): PoolDateGroup[] {
   const order: string[] = [];
@@ -39,15 +41,12 @@ export function groupClipsByDateAndPeriod(clips: readonly ClipListItem[]): PoolD
     let key: string;
     let date: string | null = null;
     let period: TimePeriod | null = null;
-    if (clip.captured_at) {
-      const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):/.exec(clip.captured_at);
-      if (match) {
-        date = match[1]!;
-        period = timePeriodOf(Number(match[2]));
-        key = `${date} ${period}`;
-      } else {
-        key = UNKNOWN_DATE;
-      }
+    // 照片按 photo_probe 保存的拍摄地钟面;视频保持旧的审片 Mac 本地钟面。
+    const local = poolWallClock(clip);
+    if (local) {
+      date = local.date;
+      period = timePeriodOf(local.hour);
+      key = `${date} ${period}`;
     } else {
       key = UNKNOWN_DATE;
     }

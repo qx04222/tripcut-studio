@@ -231,6 +231,9 @@ function buildClips(): ClipListItem[] {
       const star: ClipListItem["star_rating"] =
         binary === 1 ? (pick([4, 5]) as 4 | 5) : id % 4 === 0 ? (pick([2, 3]) as 2 | 3) : null;
       clips.push({
+        kind: 'video',
+        photo: null,
+        companions: [],
         id,
         episode_id: EPISODE_ID,
         folder_label: `${day.date} ${day.place}`,
@@ -1018,12 +1021,17 @@ function createState(): MockState {
   };
 }
 
-let state = createState();
+const state = createState();
 let storyboard = buildStoryboard(state.clips);
 const musicAnalysis = buildMusicAnalysis();
 
 export function __resetMockForTests(): void {
-  state = createState();
+  autoBatches.clear();
+  autoSelectRuns.clear();
+  replacedAutoSegments.clear();
+  // duelHandlers keeps this object as its mutable backing store. Preserve the
+  // identity across test resets so duel writes and result-run reads share it.
+  Object.assign(state, createState());
   storyboard = buildStoryboard(state.clips);
 }
 
@@ -1840,12 +1848,19 @@ function momentHandlers(): Record<string, Handler> {
   get_clip_moments: ({ clipId }) => momentsFor(num(clipId, "clipId")),
   suggest_segments: ({ clipId, targetSecs }) =>
     suggestionsFor(num(clipId, "clipId"), typeof targetSecs === "number" && targetSecs > 0 ? targetSecs : 5),
-  auto_select_episode: ({ budgetSecs, scope }) => {
-    const budget = typeof budgetSecs === "number" && budgetSecs > 0 ? budgetSecs : 60;
+  auto_select_episode: ({ budgetSecs, scope, onlyPhotos, photoCount }) => {
+    const photoOnly = onlyPhotos === true;
+    if (photoOnly && !state.clips.some((clip) => clip.kind === "photo")) {
+      state.clips.push(...PHOTO_CLIPS_R21.map((clip) => ({ ...clip })));
+    }
+    const mediaFilter = typeof onlyPhotos === "boolean" ? onlyPhotos : null;
+    const budget = typeof budgetSecs === "number" && budgetSecs > 0 ? budgetSecs : photoOnly && typeof photoCount === "number" ? Number.POSITIVE_INFINITY : 60;
     const requested = typeof scope === "string" ? scope : "favorites_or_rated3";
     const inScope = (range: string) =>
       state.clips.filter((clip) => {
         if (clip.id === null || clip.generated_source) return false;
+        if (mediaFilter !== null && (clip.kind === "photo") !== mediaFilter) return false;
+        if (clip.kind === "photo" && clip.binary_rating === -1) return false;
         if (state.segments.some((segment) => segment.clip_id === clip.id)) return false;
         if (range === "all") return true;
         if (range === "favorites") return clip.binary_rating === 1;
@@ -1882,10 +1897,13 @@ function momentHandlers(): Record<string, Handler> {
         if (cursor >= clips.length) continue;
         cursors.set(key, cursor + 1);
         const clip = clips[cursor]!;
-        const best = suggestionsFor(clip.id as number, 5)[0];
+        const best = clip.kind === "photo"
+          ? { in_ticks: 0, out_ticks: 0, score: 0.9 - created.length * 0.01, reasons: ["清晰", "构图完整"] }
+          : suggestionsFor(clip.id as number, 5)[0];
         if (!best) continue;
-        const secs = (best.out_ticks - best.in_ticks) / 1000;
+        const secs = clip.kind === "photo" ? (clip.photo?.hold_ms ?? 3000) / 1000 : (best.out_ticks - best.in_ticks) / 1000;
         if (total + secs > budget) continue;
+        if (clip.kind === "photo" && typeof photoCount === "number" && created.length >= photoCount) continue;
         const seg: SelectSegment = {
           id: 900 + state.segments.length + 1,
           clip_id: clip.id as number,
@@ -1905,7 +1923,9 @@ function momentHandlers(): Record<string, Handler> {
     autoBatches.set(batchId, created);
     bump(state);
     // R12 车道 B:挑完默认排进镜头带(与 Rust 同步:append,只补新段)。
-    const arranged = handleMockCommand("arrange_selected_segments", { mode: "append" }) as { placed: number; batch_id: string };
+    const arranged = photoOnly
+      ? { placed: 0, batch_id: "" }
+      : handleMockCommand("arrange_selected_segments", { mode: "append" }) as { placed: number; batch_id: string };
     const outcome: AutoSelectOutcome = {
       created,
       total_secs: total,
@@ -2045,7 +2065,7 @@ HANDLERS.skip_chapter = ({ chapterId, skipped }) => {
 // ---------------------------------------------------------------------------
 if (typeof location !== "undefined" && !new URLSearchParams(location.search).has("guides")) {
   // R19 P-06 合并接线:models 也要在这里,不然它锚在状态条的气泡会挡住 32-update 的 toast 按钮。
-  for (const id of ["nav", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]) state.settings[`guide.${id}.viewed`] = "true";
+  for (const id of ["nav", "photo", "notify", "heat", "autoselect", "shot", "gap", "export", "autoplay", "models"]) state.settings[`guide.${id}.viewed`] = "true";
 }
 // R13 车道 C:「打开剪映」(open_app 白名单只放行剪映 bundle id)与拖边裁剪的顺序表重写。只追加不改上面的表。
 HANDLERS.open_app = ({ bundleId }) => {
@@ -2445,16 +2465,18 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).has(
 // `auto_select_episode_with` 复用上面的 `auto_select_episode`(范围 / 预算同一套),权重偏置在假后端里
 // 不重打分,只把参数记进 run;`pick = score` 在假后端里等价于按章节(分数都是合成的)。
 // ---------------------------------------------------------------------------
-import type { AutoSelectRunParams, AutoSelectRunRow, AutoSelectRunView } from "../api";
+import type { AutoSegmentReplacement, AutoSelectRunParams, AutoSelectRunRow, AutoSelectRunView } from "../api";
 
 const autoSelectRuns = new Map<string, AutoSelectRunParams>();
 
 function runRowFor(segment: SelectSegment): AutoSelectRunRow {
   const clip = clipById(segment.clip_id);
-  const secs = (segment.out_ticks - segment.in_ticks) / TB_DEN;
-  const best = suggestionsFor(segment.clip_id, Math.max(2, secs))[0];
+  const secs = clip.kind === "photo" ? (clip.photo?.hold_ms ?? 3000) / 1000 : (segment.out_ticks - segment.in_ticks) / TB_DEN;
+  const best = clip.kind === "photo"
+    ? { score: 0.9, reasons: ["清晰", "构图完整"] }
+    : suggestionsFor(segment.clip_id, Math.max(2, secs))[0];
   // 假后端的「相似组」:同一章里紧挨着的下一条素材当作被去重掉的兄弟(截图要看得见「可展开」)。
-  const chapterMates = state.clips.filter((candidate) => candidate.id !== null && candidate.id !== clip.id && chapterOfClip(candidate) === chapterOfClip(clip) && candidate.select_count === 0);
+  const chapterMates = state.clips.filter((candidate) => candidate.id !== null && candidate.id !== clip.id && candidate.kind === clip.kind && chapterOfClip(candidate) === chapterOfClip(clip) && candidate.select_count === 0 && (candidate.kind !== "photo" || candidate.binary_rating !== -1));
   const siblings = chapterMates.slice(0, segment.id % 3).map((mate, index) => ({ clip_id: mate.id as number, score: Math.max(0.05, (best?.score ?? 0.6) - 0.08 * (index + 1)) }));
   return {
     segment_id: segment.id,
@@ -2469,6 +2491,9 @@ function runRowFor(segment: SelectSegment): AutoSelectRunRow {
     siblings,
   };
 }
+// R20-1(接线补):假后端也给「可修」理由,结果面板截图(35)才看得见每行的「可修:…」。
+// 键与后端 smart_select_reason::FIXABLE 同一张表;按行序取模(首行必有),截图可复现。
+const MOCK_FIXABLE: readonly (readonly string[])[] = [["exposure_bright"], [], ["slight_shake", "bystander"], [], []];
 
 // 旧入口挑完也要有 run_id(真后端两条入口都带),结果面板才会在首次零决定(U-09)之后出现。
 const plainAutoSelect = HANDLERS.auto_select_episode;
@@ -2484,8 +2509,8 @@ HANDLERS.auto_select_episode = (args) => {
   });
   return { ...outcome, run_id: outcome.batch_id };
 };
-HANDLERS.auto_select_episode_with = ({ budgetSecs, scope, weightsJson, pick, prompt }) => {
-  const outcome = HANDLERS.auto_select_episode({ budgetSecs, scope }) as AutoSelectOutcome;
+HANDLERS.auto_select_episode_with = ({ budgetSecs, scope, weightsJson, pick, prompt, onlyPhotos, photoCount }) => {
+  const outcome = HANDLERS.auto_select_episode({ budgetSecs, scope, onlyPhotos, photoCount }) as AutoSelectOutcome;
   autoSelectRuns.set(outcome.batch_id, {
     budget_secs: typeof budgetSecs === "number" ? budgetSecs : null,
     scope: outcome.scope_used ?? null,
@@ -2493,6 +2518,8 @@ HANDLERS.auto_select_episode_with = ({ budgetSecs, scope, weightsJson, pick, pro
     pick: pick === "score" ? "score" : "chapters",
     prompt: typeof prompt === "string" ? prompt : null,
     target_secs: 5,
+    only_photos: typeof onlyPhotos === "boolean" ? onlyPhotos : null,
+    photo_count: typeof photoCount === "number" ? photoCount : null,
   });
   return outcome;
 };
@@ -2501,10 +2528,26 @@ HANDLERS.list_auto_select_run = ({ runId }): AutoSelectRunView => {
   const params = autoSelectRuns.get(id);
   if (!params) throw new Error("这一批挑选已经不存在了");
   const ids = autoBatches.get(id) ?? [];
-  const rows = state.segments.filter((segment) => ids.includes(segment.id)).map(runRowFor);
-  return { run_id: id, params, rows };
+  const rows = state.segments
+    .filter((segment) => ids.includes(segment.id))
+    .filter((segment) => {
+      const clip = clipById(segment.clip_id);
+      return clip.kind !== "photo" || clip.binary_rating !== -1;
+    })
+    .map(runRowFor)
+    .map((row, index) => ({ ...row, fixable: [...(MOCK_FIXABLE[index % MOCK_FIXABLE.length] ?? [])] }));
+  // R20-1(接线补):「被去重/未选」区块 —— 同章里没被选中的头两条素材各给一个 blocker(键与后端 BLOCKERS 同表)。
+  const selected = new Set(rows.map((row) => row.clip_id));
+  const mediaKind = params.only_photos === true ? "photo" : params.only_photos === false ? "video" : null;
+  const unselected = state.clips
+    .filter((clip) => clip.id !== null && !selected.has(clip.id) && clip.select_count === 0 && (mediaKind === null || clip.kind === mediaKind) && (mediaKind === "photo" || chapterOfClip(clip) !== null) && (clip.kind !== "photo" || clip.binary_rating !== -1))
+    .slice(0, 2)
+    .map((clip, index) => ({ clip_id: clip.id as number, blockers: [index === 0 ? "defocus" : "excessive_shake"] }));
+  return { run_id: id, params, rows, unselected };
 };
-HANDLERS.replace_auto_segment = ({ segmentId }): AutoSelectRunRow => {
+const replacedAutoSegments = new Map<number, { runId: string; nextId: number; segment: SelectSegment; order: Storyboard["items"][number] | undefined }>();
+let nextReplacementId = 100_000;
+HANDLERS.replace_auto_segment = ({ segmentId }): AutoSegmentReplacement => {
   const id = num(segmentId, "segmentId");
   const segment = state.segments.find((candidate) => candidate.id === id);
   const runId = [...autoBatches.entries()].find(([, ids]) => ids.includes(id))?.[0];
@@ -2513,16 +2556,42 @@ HANDLERS.replace_auto_segment = ({ segmentId }): AutoSelectRunRow => {
   const sibling = row.siblings[0];
   if (!sibling) throw new Error("这一段没有可换的备选:同组没有其它素材,这条素材也只有这一段拿得出手");
   const best = suggestionsFor(sibling.clip_id, 5)[0] ?? { in_ticks: 0, out_ticks: 5000, score: 0.6, reasons: ["清晰"] };
-  const replacement: SelectSegment = { id: 900 + state.segments.length + 1, clip_id: sibling.clip_id, in_ticks: best.in_ticks, out_ticks: best.out_ticks, tb_num: TB_NUM, tb_den: TB_DEN };
-  storyboard.items = storyboard.items.filter((item) => item.segment_id !== id);
-  state.segments = state.segments.filter((candidate) => candidate.id !== id).concat(replacement);
+  const replacement: SelectSegment = { id: nextReplacementId++, clip_id: sibling.clip_id, in_ticks: best.in_ticks, out_ticks: best.out_ticks, tb_num: TB_NUM, tb_den: TB_DEN };
+  const order = storyboard.items.find((item) => item.segment_id === id);
+  replacedAutoSegments.set(id, { runId, nextId: replacement.id, segment: { ...segment }, order: order ? { ...order } : undefined });
+  const replacementClip = clipById(replacement.clip_id);
+  storyboard.items = storyboard.items.map((item) => item.segment_id === id ? {
+    ...item, key: `segment:${replacement.id}`, segment_id: replacement.id, clip_id: replacement.clip_id,
+    file_name: replacementClip.file_name, chapter_id: chapterOfClip(replacementClip),
+    in_ticks: replacement.in_ticks, out_ticks: replacement.out_ticks, tb_num: replacement.tb_num, tb_den: replacement.tb_den,
+    long_term_memory: EMPTY_MEMORY,
+  } : item);
+  state.segments = state.segments.map((candidate) => candidate.id === id ? replacement : candidate);
   clipById(segment.clip_id).select_count = Math.max(0, clipById(segment.clip_id).select_count - 1);
   clipById(sibling.clip_id).select_count += 1;
-  autoBatches.set(runId, (autoBatches.get(runId) ?? []).filter((candidate) => candidate !== id).concat(replacement.id));
+  autoBatches.set(runId, (autoBatches.get(runId) ?? []).map((candidate) => candidate === id ? replacement.id : candidate));
   bump(state);
   handleMockCommand("arrange_selected_segments", { mode: "append" });
-  return runRowFor(replacement);
+  return { ...runRowFor(replacement), replaced: { segment_id: id, batch_id: runId, position: order?.position ?? null, row } };
 };
+HANDLERS.undo_replace_auto_segment = ({ runId, replacedSegmentId }): boolean => {
+  const id = num(replacedSegmentId, "replacedSegmentId");
+  const saved = replacedAutoSegments.get(id);
+  if (!saved || saved.runId !== runId || !autoBatches.get(saved.runId)?.includes(saved.nextId)) return false;
+  const next = state.segments.find((s) => s.id === saved.nextId);
+  if (!next) return false;
+  state.segments = state.segments.map((s) => s.id === saved.nextId ? saved.segment : s);
+  storyboard.items = storyboard.items.filter((item) => item.segment_id !== saved.nextId);
+  if (saved.order) storyboard.items.push(saved.order);
+  storyboard.items.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  clipById(next.clip_id).select_count -= 1;
+  clipById(saved.segment.clip_id).select_count += 1;
+  autoBatches.set(saved.runId, autoBatches.get(saved.runId)!.map((item) => item === saved.nextId ? id : item));
+  replacedAutoSegments.delete(id);
+  bump(state);
+  return true;
+};
+(MOCK_COMMANDS as string[]).push("undo_replace_auto_segment");
 (MOCK_COMMANDS as string[]).push("auto_select_episode_with", "list_auto_select_run", "replace_auto_segment");
 
 // ---------------------------------------------------------------------------
@@ -2534,4 +2603,28 @@ HANDLERS.replace_auto_segment = ({ segmentId }): AutoSelectRunRow => {
 if (typeof location !== "undefined") {
   const themeParam = new URLSearchParams(location.search).get("theme");
   if (themeParam === "light" || themeParam === "dark") state.settings["appearance.theme"] = themeParam;
+}
+
+// R21 PH-03: additive, opt-in mixed fixtures keep every video-only screenshot unchanged.
+import { buildPhotoFixtures } from "./photoFixtures";
+export const PHOTO_CLIPS_R21 = buildPhotoFixtures(state.clips[0]!);
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("photos")) {
+  state.clips.push(...PHOTO_CLIPS_R21);
+  const photo = PHOTO_CLIPS_R21[0]!;
+  storyboard.items.push({
+    ...storyboard.items[0]!, key: `whole:${photo.id}`, item_kind: "whole",
+    clip_id: photo.id!, segment_id: null, file_name: photo.file_name,
+    in_ticks: 0, out_ticks: 0, tb_num: 1, tb_den: 1000,
+    position: storyboard.items.length,
+  });
+  const listBeforePhotos = HANDLERS.list_clips;
+  HANDLERS.list_clips = args => (listBeforePhotos(args) as ClipListItem[]).map(clip => clip.kind === "photo" ? { ...clip, has_suggestions: false } : clip);
+}
+
+// R21 PH-05: six existing offline photos form a reproducible duel group.
+import { duelHandlers } from "./duel";
+Object.assign(HANDLERS, duelHandlers(state));
+(MOCK_COMMANDS as string[]).push("start_duel", "duel_action");
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("photos")) {
+  state.similarGroups.push({ id: 9021, min_similarity: 0.96, members: PHOTO_CLIPS_R21.map((c, i) => ({ clip_id: c.id!, is_primary: i === 0 })) });
 }

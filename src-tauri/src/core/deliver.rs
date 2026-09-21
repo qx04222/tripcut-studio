@@ -13,6 +13,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[path = "deliver_photo.rs"]
+mod photo;
+
 use super::contact_sheet;
 use super::error::{CoreError, Result};
 use super::jobs::{self, Job};
@@ -70,6 +73,12 @@ static CANCELLATIONS: OnceLock<Mutex<CancellationMap>> = OnceLock::new();
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ExportClip {
     pub(crate) clip_id: i64,
+    #[serde(default = "video_media_kind")]
+    pub(crate) media_kind: String,
+    #[serde(default)]
+    photo_hold_ms: i64,
+    #[serde(default)]
+    companions: Vec<photo::Companion>,
     #[serde(default)]
     pub(crate) segment_id: Option<i64>,
     #[serde(default = "whole_selection_kind")]
@@ -432,6 +441,8 @@ pub struct ExportItemStatus {
     pub warning: bool,
 }
 
+fn video_media_kind() -> String { "video".to_owned() }
+
 fn whole_selection_kind() -> String {
     "whole".to_owned()
 }
@@ -444,6 +455,7 @@ pub struct ExportStatus {
     pub selected_count: u64,
     pub selected_segment_count: u64,
     pub selected_whole_count: u64,
+    pub selected_photo_count: u64,
     pub total_duration_seconds: f64,
     pub completed_items: u64,
     pub failed_items: u64,
@@ -575,6 +587,7 @@ pub(crate) fn export_video_bitrate(clips: &[&ExportClip], ceiling_bps: f64) -> S
 }
 
 fn clip_duration_seconds(clip: &ExportClip) -> f64 {
+    if clip.media_kind == "photo" { return clip.photo_hold_ms.max(1) as f64 / 1000.0; }
     match (clip.in_ticks, clip.out_ticks, clip.tb_num, clip.tb_den) {
         (Some(start), Some(end), Some(num), Some(den)) if end >= start && num > 0 && den > 0 => {
             end.saturating_sub(start) as f64 * num as f64 / den as f64
@@ -589,7 +602,9 @@ fn total_duration_seconds(clips: &[ExportClip]) -> f64 {
 
 fn selection_kind_counts(clips: &[ExportClip]) -> (u64, u64) {
     clips.iter().fold((0, 0), |(segments, whole), clip| {
-        if clip.selection_kind == "select" {
+        if clip.media_kind == "photo" {
+            (segments, whole)
+        } else if clip.selection_kind == "select" {
             (segments + 1, whole)
         } else {
             (segments, whole + 1)
@@ -621,7 +636,7 @@ fn canonical_payload_hash(payload: &ExportJobPayload) -> Result<String> {
                 // R6 6b：manual_rotation 会真的改变参考粗剪的画面朝向
                 // (rough_cut_rotation_prefix)，缺了它会把"只改某片段旋转"的
                 // 两次 start_export 去重成同一个任务，复用旧 payload 导出未转正的粗剪。
-                clip.manual_rotation,
+                (clip.manual_rotation, &clip.media_kind, clip.photo_hold_ms, &clip.companions),
             )
         })
         .collect::<Vec<_>>();
@@ -723,8 +738,8 @@ pub fn start_quick_export(
     destination: &Path,
     selection: Option<&QuickExportSelection>,
 ) -> Result<QuickExportOutcome> {
-    ensure_writable_directory(destination)?;
     let plan = plan_quick_export(connection, Some(destination), selection)?;
+    ensure_writable_directory(destination)?;
     let job_id = enqueue_export(connection, destination, None, None, false, None, MODE_QUICK, selection)?;
     Ok(QuickExportOutcome {
         job_id: Some(job_id),
@@ -741,7 +756,11 @@ pub fn plan_quick_export(
     let episode_title: String = connection
         .query_row("SELECT title FROM episodes WHERE status = 'active'", [], |row| row.get(0))
         .map_err(|_| CoreError::Export("没有进行中的 Episode，无法导出".to_owned()))?;
-    let (clips, skipped) = filter_quick_selection(selected_clips(connection)?, selection)?;
+    let all = selected_clips(connection)?
+        .into_iter()
+        .filter(|clip| clip.media_kind != "photo")
+        .collect();
+    let (clips, skipped) = filter_quick_selection(all, selection)?;
     let date: String = connection.query_row(
         "SELECT strftime('%Y-%m-%d', 'now', 'localtime')",
         [],
@@ -815,19 +834,47 @@ pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) ->
         None => kit_folder_name(&project_name, &date),
     };
     let missing = missing_source_names(connection, &clips)?;
-    let ordinals = kit_chapter_ordinals(&clips);
+    let files = package_output_names(&clips, photo::count(&clips) > 0);
     Ok(KitExportOutcome {
         job_id: None,
         dir,
-        files: clips
-            .iter()
-            .zip(ordinals)
-            .enumerate()
-            .map(|(index, (clip, ordinal))| kit_relative_name(index + 1, ordinal, &clip.chapter_title, &clip.file_name))
-            .collect(),
+        files,
         order_file: KIT_ORDER_FILE.to_owned(),
         missing,
     })
+}
+
+fn package_output_names(clips: &[ExportClip], split_media: bool) -> Vec<String> {
+    let ordinals = (!split_media).then(|| kit_chapter_ordinals(clips));
+    let video_clips = clips
+        .iter()
+        .filter(|clip| clip.media_kind != "photo")
+        .cloned()
+        .collect::<Vec<_>>();
+    let video_ordinals = kit_chapter_ordinals(&video_clips);
+    let mut video_index = 0;
+    let mut photo_index = 0;
+    clips
+        .iter()
+        .enumerate()
+        .map(|(index, clip)| {
+            if !split_media {
+                return photo::relative_name(
+                    index + 1,
+                    ordinals.as_ref().expect("unsplit ordinals")[index],
+                    clip,
+                );
+            }
+            if clip.media_kind == "photo" {
+                photo_index += 1;
+                photo::split_relative_name(0, photo_index, None, clip)
+            } else {
+                let ordinal = video_ordinals[video_index];
+                video_index += 1;
+                photo::split_relative_name(video_index, 0, ordinal, clip)
+            }
+        })
+        .collect()
 }
 
 /// Z-07:交付项里此刻原片不在原位的文件名(去重,保持镜头带顺序)。
@@ -957,7 +1004,11 @@ fn enqueue_export(
         override_orientation,
     )?
     .into();
-    let (clips, _skipped) = filter_quick_selection(selected_clips(&transaction)?, selection)?;
+    let all = selected_clips(&transaction)?
+        .into_iter()
+        .filter(|clip| mode != MODE_QUICK || clip.media_kind != "photo")
+        .collect();
+    let (clips, _skipped) = filter_quick_selection(all, selection)?;
     // Z-07 / Z-08:排队前先 stat 原片——不在了就拒绝,给一句人话,不让任务跑到一半才「交付失败」。
     let missing = missing_source_names(&transaction, &clips)?;
     if !missing.is_empty() {
@@ -978,15 +1029,20 @@ fn enqueue_export(
         Some(job_id) if mode == MODE_QUICK => retry_context(&transaction, job_id)?,
         _ => None,
     };
-    let kit_ordinals = if mode == MODE_KIT { kit_chapter_ordinals(&clips) } else { Vec::new() };
+    let photo_package = photo::count(&clips) > 0;
+    let package_names = if mode == MODE_KIT || photo_package {
+        package_output_names(&clips, photo_package)
+    } else {
+        Vec::new()
+    };
     let items = clips
         .iter()
         .enumerate()
         .map(|(index, clip)| ExportItemStatus {
             clip_id: clip.clip_id,
             file_name: clip.file_name.clone(),
-            output_name: if mode == MODE_KIT {
-                kit_relative_name(index + 1, kit_ordinals[index], &clip.chapter_title, &clip.file_name)
+            output_name: if mode == MODE_KIT || photo_package {
+                package_names[index].clone()
             } else {
                 quick_output_name(retry.as_ref(), index, clip)
             },
@@ -996,7 +1052,7 @@ fn enqueue_export(
         })
         .collect();
     let payload = ExportJobPayload {
-        version: 5,
+        version: 6,
         episode_id: Some(episode_id),
         episode_memory_id: Some(episode_memory_id),
         destination: destination.to_string_lossy().into_owned(),
@@ -1105,6 +1161,7 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
             selected_count: clips.len() as u64,
             selected_segment_count,
             selected_whole_count,
+            selected_photo_count: photo::count(&clips),
             total_duration_seconds: total_duration_seconds(&clips),
             completed_items: 0,
             failed_items: 0,
@@ -1130,6 +1187,7 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
         selected_count: payload.clips.len() as u64,
         selected_segment_count,
         selected_whole_count,
+        selected_photo_count: photo::count(&payload.clips),
         total_duration_seconds: total_duration_seconds(&payload.clips),
         completed_items: payload.progress.completed_items,
         failed_items: payload.progress.failed_items,
@@ -1241,6 +1299,9 @@ pub(crate) fn export_completion_notice(
 }
 
 pub fn run_export_package(connection: &mut Connection, job: &Job) -> Result<()> {
+    if parse_payload(&job.payload)?.clips.iter().all(|clip| clip.media_kind == "photo") {
+        return run_export_package_with(connection, job, OsStr::new(""), OsStr::new(""));
+    }
     // R17 exportfix:配置的 ffmpeg 缺 VideoToolbox 时改用包内那份(见 settings::export_ffmpeg)。
     let ffmpeg = super::settings::export_ffmpeg(connection)?;
     let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
@@ -1299,6 +1360,40 @@ fn run_export_package_with(
 ) -> Result<()> {
     let cancellation = CancellationRegistration::register(cancellation_key(connection, job.id));
     let mut payload = parse_payload(&job.payload)?;
+    if payload.mode == MODE_QUICK {
+        let mut items = std::mem::take(&mut payload.progress.items).into_iter();
+        let mut video_items = Vec::new();
+        payload.clips.retain(|clip| {
+            let item = items.next();
+            if clip.media_kind == "photo" {
+                false
+            } else {
+                if let Some(item) = item {
+                    video_items.push(item);
+                }
+                true
+            }
+        });
+        payload.progress.items = video_items;
+        if payload.clips.is_empty() {
+            return Err(CoreError::Export(
+                "当前没有精选段或收藏素材；请先打点保存片段，或用 F 收藏整条素材".to_owned(),
+            ));
+        }
+        payload.selected_bytes = payload.clips.iter().map(selected_estimated_bytes).sum();
+        payload.progress.completed_items = payload
+            .progress
+            .items
+            .iter()
+            .filter(|item| item.status == "done")
+            .count() as u64;
+        payload.progress.failed_items = payload
+            .progress
+            .items
+            .iter()
+            .filter(|item| item.status == "failed")
+            .count() as u64;
+    }
     let episode_id = payload
         .episode_id
         .ok_or_else(|| CoreError::Export("旧交付任务缺少 Episode 归属；请重新创建".to_owned()))?;
@@ -1373,6 +1468,7 @@ fn run_export_package_with(
     // R14 车道 B:剪映素材包同样平铺,文件夹叫 `<集名>_剪映素材包_<日期>`,多一份「顺序.txt」。
     let kit = payload.mode == MODE_KIT;
     let quick = payload.mode == MODE_QUICK || kit;
+    let split_media = payload.version >= 6 && photo::count(&payload.clips) > 0;
     // Z-11:重试写回上一次的文件夹(它还在才算;被删了就照常新建)。
     let retry_into = payload
         .retry_into
@@ -1464,6 +1560,7 @@ fn run_export_package_with(
             &cancellation.flag,
         ) {
             Ok(warning) => {
+                photo::copy_companions(&payload.clips[index], &output_path)?;
                 std::fs::rename(&temporary_path, &output_path)?;
                 payload.progress.items[index].status = "done".to_owned();
                 payload.progress.items[index].warning = warning.is_some();
@@ -1501,11 +1598,24 @@ fn run_export_package_with(
         if let Some(episode_id) = payload.episode_id {
             copy_kit_music(connection, episode_id, &staging_path)?;
         }
-        write_synced(
-            &staging_path.join(KIT_ORDER_FILE),
-            kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
-        )?;
+        if split_media {
+            write_split_order_files(&staging_path, &payload.clips, &payload.progress.items)?;
+        } else {
+            write_synced(
+                &staging_path.join(KIT_ORDER_FILE),
+                kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
+            )?;
+        }
     } else if !quick {
+        if split_media {
+            write_split_order_files(
+                &staging_path.join(SELECTED_DIRECTORY),
+                &payload.clips,
+                &payload.progress.items,
+            )?;
+        } else if photo::count(&payload.clips) > 0 {
+            write_synced(&staging_path.join(KIT_ORDER_FILE), kit_order_text(&payload.clips, &payload.progress.items).as_bytes())?;
+        }
         write_package_extras(connection, job, &mut payload, &successful, &staging_path, ffmpeg, ffprobe, &cancellation.flag)?;
     }
 
@@ -1569,29 +1679,38 @@ fn write_package_extras(
     ffprobe: &OsStr,
     cancellation: &AtomicBool,
 ) -> Result<()> {
-    payload.progress.stage = "rough_cut".to_owned();
-    let rough_cut_canvas = ExportCanvas::from(&payload.platform_info);
-    payload.progress.message = Some(format!(
-        "正在转码 {}×{} H.264 参考粗剪",
-        rough_cut_canvas.width, rough_cut_canvas.height
-    ));
-    persist_progress(connection, job, payload)?;
-    let rough_cut_path = staging_path.join(ROUGH_CUT_FILE);
-    let rough_cut_temporary = jobs::temporary_output_path(&rough_cut_path, job.attempt);
-    remove_file_if_exists(&rough_cut_temporary)?;
-    let (rough_cut_clips, rough_cut_summary) = select_rough_cut(successful, payload.target_seconds)?;
-    transcode_rough_cut(
-        ffmpeg,
-        ffprobe,
-        &rough_cut_clips,
-        &rough_cut_temporary,
-        &rough_cut_canvas,
-        cancellation,
-    )?;
-    std::fs::rename(&rough_cut_temporary, &rough_cut_path)?;
-    payload.rough_cut_actual_ticks = Some(rough_cut_summary.actual_ticks);
-    payload.rough_cut_actual_tb_num = Some(rough_cut_summary.actual_tb_num);
-    payload.rough_cut_actual_tb_den = Some(rough_cut_summary.actual_tb_den);
+    let rough_cut_sources = successful
+        .iter()
+        .filter(|item| item.clip.media_kind != "photo")
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_photos = photo::count(&payload.clips) > 0;
+    if !rough_cut_sources.is_empty() && (!has_photos || payload.version >= 6) {
+        payload.progress.stage = "rough_cut".to_owned();
+        let rough_cut_canvas = ExportCanvas::from(&payload.platform_info);
+        payload.progress.message = Some(format!(
+            "正在转码 {}×{} H.264 参考粗剪",
+            rough_cut_canvas.width, rough_cut_canvas.height
+        ));
+        persist_progress(connection, job, payload)?;
+        let rough_cut_path = staging_path.join(ROUGH_CUT_FILE);
+        let rough_cut_temporary = jobs::temporary_output_path(&rough_cut_path, job.attempt);
+        remove_file_if_exists(&rough_cut_temporary)?;
+        let (rough_cut_clips, rough_cut_summary) =
+            select_rough_cut(&rough_cut_sources, payload.target_seconds)?;
+        transcode_rough_cut(
+            ffmpeg,
+            ffprobe,
+            &rough_cut_clips,
+            &rough_cut_temporary,
+            &rough_cut_canvas,
+            cancellation,
+        )?;
+        std::fs::rename(&rough_cut_temporary, &rough_cut_path)?;
+        payload.rough_cut_actual_ticks = Some(rough_cut_summary.actual_ticks);
+        payload.rough_cut_actual_tb_num = Some(rough_cut_summary.actual_tb_num);
+        payload.rough_cut_actual_tb_den = Some(rough_cut_summary.actual_tb_den);
+    }
 
     check_cancelled(cancellation)?;
     payload.progress.stage = "documents".to_owned();
@@ -2031,21 +2150,61 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
           )
          WHERE (c.episode_id = ?3 OR c.episode_id IS NULL)
            AND (
-             selected_segment.id IS NOT NULL
+             (
+               COALESCE(c.kind, 'video') != 'photo'
+               AND (
+                 selected_segment.id IS NOT NULL
+                 OR (
+                    NOT EXISTS (
+                        SELECT 1 FROM live_selects candidate WHERE candidate.clip_id = c.id
+                    )
+                    AND 1 = (
+                        SELECT binary.value
+                        FROM ratings binary
+                        JOIN segments binary_segment ON binary_segment.id = binary.segment_id
+                        WHERE binary_segment.clip_id = c.id
+                          AND COALESCE(binary_segment.kind, 'whole') != 'select'
+                          AND binary_segment.tombstone = 0
+                          AND binary.rating_type = 'binary'
+                        ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
+                    )
+                 )
+               )
+             )
              OR (
-                NOT EXISTS (
-                    SELECT 1 FROM live_selects candidate WHERE candidate.clip_id = c.id
-                )
-                AND 1 = (
-                    SELECT binary.value
-                    FROM ratings binary
-                    JOIN segments binary_segment ON binary_segment.id = binary.segment_id
-                    WHERE binary_segment.clip_id = c.id
-                      AND COALESCE(binary_segment.kind, 'whole') != 'select'
-                      AND binary_segment.tombstone = 0
-                      AND binary.rating_type = 'binary'
-                    ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
-                )
+               c.kind = 'photo'
+               AND COALESCE((
+                 SELECT binary.value
+                 FROM ratings binary
+                 JOIN segments binary_segment ON binary_segment.id = binary.segment_id
+                 WHERE binary_segment.clip_id = c.id
+                   AND COALESCE(binary_segment.kind, 'whole') != 'select'
+                   AND binary_segment.tombstone = 0
+                   AND binary.rating_type = 'binary'
+                 ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
+               ), CASE WHEN selected_segment.id IS NOT NULL THEN 1 END, 0) != -1
+               AND (
+                 selected_segment.id IS NOT NULL
+                 OR 1 = (
+                   SELECT binary.value
+                   FROM ratings binary
+                   JOIN segments binary_segment ON binary_segment.id = binary.segment_id
+                   WHERE binary_segment.clip_id = c.id
+                     AND COALESCE(binary_segment.kind, 'whole') != 'select'
+                     AND binary_segment.tombstone = 0
+                     AND binary.rating_type = 'binary'
+                   ORDER BY binary.rated_at DESC, binary.id DESC LIMIT 1
+                 )
+                 OR 3 <= (
+                   SELECT star.value
+                   FROM ratings star
+                   JOIN segments star_segment ON star_segment.id = star.segment_id
+                   WHERE star_segment.clip_id = c.id
+                     AND star_segment.tombstone = 0
+                     AND star.rating_type = 'star'
+                   ORDER BY star.rated_at DESC, star.id DESC LIMIT 1
+                 )
+               )
              )
            )
          ORDER BY narrative_chapter.id IS NULL,
@@ -2089,6 +2248,9 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
             .map(|shake| super::motion::shake_is_flagged(shake, jitter_threshold));
         Ok(ExportClip {
             clip_id: row.get(0)?,
+            media_kind: video_media_kind(),
+            photo_hold_ms: 3000,
+            companions: Vec::new(),
             segment_id,
             selection_kind: if segment_id.is_some() { "select" } else { "whole" }.to_owned(),
             in_ticks: Some(in_ticks),
@@ -2137,9 +2299,59 @@ pub(crate) fn selected_clips(connection: &Connection) -> Result<Vec<ExportClip>>
     let mut clips = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(CoreError::from)?;
+    photo::attach(connection, &mut clips)?;
+    let mut seen_photos = HashMap::new();
+    clips.retain(|clip| {
+        clip.media_kind != "photo" || seen_photos.insert(clip.clip_id, ()).is_none()
+    });
     sort_by_band_order(connection, &mut clips)?;
+    sort_video_then_photos(connection, active_episode, &mut clips)?;
     attach_audio_tracks(connection, &mut clips)?;
     Ok(clips)
+}
+
+fn sort_video_then_photos(
+    connection: &Connection,
+    episode_id: Option<i64>,
+    clips: &mut [ExportClip],
+) -> Result<()> {
+    let saved_order = match episode_id {
+        Some(episode_id) => super::settings::setting_value(
+            connection,
+            &format!("ui.photo.order.{episode_id}"),
+        )?,
+        None => None,
+    };
+    let mut ranks = HashMap::new();
+    if let Some(ids) = saved_order.and_then(|value| serde_json::from_str::<Vec<i64>>(&value).ok()) {
+        for id in ids {
+            let next = ranks.len();
+            ranks.entry(id).or_insert(next);
+        }
+    }
+    clips.sort_by(|left, right| {
+        match (
+            left.media_kind == "photo",
+            right.media_kind == "photo",
+        ) {
+            (false, false) => std::cmp::Ordering::Equal,
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            (true, true) => match (ranks.get(&left.clip_id), ranks.get(&right.clip_id)) {
+                (Some(left), Some(right)) => left.cmp(right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => match (&left.captured_at, &right.captured_at) {
+                    (Some(left), Some(right)) => left.cmp(right),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+                .then_with(|| left.clip_id.cmp(&right.clip_id)),
+            },
+        }
+    });
+    Ok(())
 }
 
 /// V14-01:三条导出(素材包 / 原生草稿 / 导出片段)与交付包的顺序 = 镜头带「按章节」视图的
@@ -2342,6 +2554,11 @@ fn export_clip(
     output_path: &Path,
     cancellation: &AtomicBool,
 ) -> Result<Option<String>> {
+    if clip.media_kind == "photo" {
+        check_cancelled(cancellation)?;
+        super::photo_export::export(Path::new(&clip.source_path), output_path)?;
+        return Ok(None);
+    }
     if clip.selection_kind != "select" || clip.segment_id.is_none() {
         return match remux_clip(ffmpeg, clip, output_path, cancellation) {
             Ok(()) => Ok(None),
@@ -3629,6 +3846,7 @@ fn check_cancelled(cancellation: &AtomicBool) -> Result<()> {
 /// (裁剪段的时间戳保证是错的,P3-D1 范围之外不做重新对时)、原文件此刻还在。两处只是
 /// 各自决定抄到哪儿,判断逻辑不重复。
 fn resolved_subtitle_source(cache_root: &Path, clip: &ExportClip, item: &ExportItemStatus) -> Option<PathBuf> {
+    if clip.media_kind == "photo" { return None; }
     if item.status != "done" {
         return None;
     }
@@ -3757,8 +3975,8 @@ fn build_contact_sheet_items(
             contact_sheet::ContactSheetItem {
                 order: index + 1,
                 file_name: clip.file_name.clone(),
-                in_clock: format_clock(start_seconds),
-                out_clock: format_clock(end_seconds),
+                in_clock: if clip.media_kind == "photo" { "整张".into() } else { format_clock(start_seconds) },
+                out_clock: if clip.media_kind == "photo" { format!("展示 {} s", clip_duration_seconds(clip)) } else { format_clock(end_seconds) },
                 chapter_title: (!clip.chapter_title.is_empty()).then(|| clip.chapter_title.clone()),
                 cover_jpeg: resolve_cover_jpeg(connection, cache_root, clip),
             }
@@ -3862,8 +4080,8 @@ fn build_shot_list_csv(
             (index + 1).to_string(),
             clip.file_name.clone(),
             format!("{SELECTED_DIRECTORY}/{}", item.output_name),
-            format_clock(start_seconds),
-            format_clock(end_seconds),
+            if clip.media_kind == "photo" { String::new() } else { format_clock(start_seconds) },
+            if clip.media_kind == "photo" { String::new() } else { format_clock(end_seconds) },
             format_clock(duration_seconds),
             resolution,
             clip.codec.clone().unwrap_or_default(),
@@ -3975,6 +4193,9 @@ fn build_instructions(
     narration_outcome: NarrationOutcome,
     contact_sheet: &ContactSheetOutcome,
 ) -> String {
+    let has_photos = photo::count(&payload.clips) > 0;
+    let has_videos = payload.clips.iter().any(|clip| clip.media_kind != "photo");
+    let has_rough_cut = has_videos && (!has_photos || payload.version >= 6);
     let subtitle_step = if subtitle_count > 0 {
         format!(
             "“{SUBTITLE_DIRECTORY}/”含 {subtitle_count} 条与精选素材同序号的标准 SRT；请在当前剪映版本导入并核对时间轴。"
@@ -4002,17 +4223,21 @@ fn build_instructions(
     };
     let mut steps: Vec<String> = vec![
         "打开剪映专业版，新建草稿。".to_owned(),
-        format!("将“{SELECTED_DIRECTORY}”拖入素材区；文件名前三位就是推荐顺序。"),
-        format!(
+        if has_photos && payload.version >= 6 {
+            format!("将“{SELECTED_DIRECTORY}/视频”和“{SELECTED_DIRECTORY}/照片”分别拖入素材区；各自按目录内的顺序.txt核对。")
+        } else {
+            format!("将“{SELECTED_DIRECTORY}”拖入素材区；文件名前的数字就是推荐顺序。")
+        },
+        if has_rough_cut { format!(
             "“{ROUGH_CUT_FILE}”是 {}×{} H.264/AAC 参考粗剪，可直接预览故事顺序。",
             payload.platform_info.canvas_width, payload.platform_info.canvas_height
-        ),
+        ) } else { "本次没有可用视频,未生成参考粗剪;照片请按顺序.txt导入。".to_owned() },
         subtitle_step,
         shot_list_step,
         narration_step,
         format!("“{COLOR_NOTES_DIRECTORY}/”本版本为空目录，后续版本填充色彩说明。"),
     ];
-    if let Some(target_seconds) = payload.target_seconds {
+    if let Some(target_seconds) = payload.target_seconds.filter(|_| has_rough_cut) {
         let actual_seconds = payload.rough_cut_actual_ticks.map(|ticks| {
             let tb_num = payload.rough_cut_actual_tb_num.unwrap_or(1).max(1);
             let tb_den = payload.rough_cut_actual_tb_den.unwrap_or(1).max(1);
@@ -4463,30 +4688,48 @@ fn kit_duration_label(seconds: f64) -> String {
     format!("{:.1} 秒", seconds.max(0.0))
 }
 
-/// 「顺序.txt」:有章节就用 `— NN_章名 —` 标出章节边界(与目录结构一致),每行
-/// `NN 章名 素材名 时长`(与文件顺序一致;没导出来的行照写,编号不跳)。
+/// 「顺序.txt」一行一项:`NN 章名 素材名 时长`;照片记录展示时长。
+/// 章节名写在每一行,不插入会影响行数的章节标题;失败项保留编号。
 fn kit_order_text(clips: &[ExportClip], items: &[ExportItemStatus]) -> String {
-    let ordinals = kit_chapter_ordinals(clips);
     let mut text = String::new();
-    let mut last_ordinal: Option<usize> = None;
     for (index, clip) in clips.iter().enumerate() {
-        if let Some(ordinal) = ordinals[index] {
-            if last_ordinal != Some(ordinal) {
-                text.push_str(&format!("— {} —\n", kit_chapter_directory(ordinal, &clip.chapter_title)));
-                last_ordinal = Some(ordinal);
-            }
-        }
         let failed = items.get(index).is_some_and(|item| item.status == "failed");
         text.push_str(&format!(
             "{:02} {} {} {}{}\n",
             index + 1,
             kit_chapter_name(&clip.chapter_title),
             clip.file_name,
-            kit_duration_label(clip_duration_seconds(clip)),
+            if clip.media_kind == "photo" { format!("照片 · {} s", clip_duration_seconds(clip)) } else { kit_duration_label(clip_duration_seconds(clip)) },
             if failed { "(没导出来)" } else { "" }
         ));
     }
     text
+}
+
+fn write_split_order_files(
+    root: &Path,
+    clips: &[ExportClip],
+    items: &[ExportItemStatus],
+) -> Result<()> {
+    for (directory, photo_kind) in [("视频", false), ("照片", true)] {
+        let directory = root.join(directory);
+        std::fs::create_dir_all(&directory)?;
+        let mut kind_clips = Vec::new();
+        let mut kind_items = Vec::new();
+        for (index, clip) in clips.iter().enumerate() {
+            if (clip.media_kind == "photo") == photo_kind {
+                kind_clips.push(clip.clone());
+                if let Some(item) = items.get(index) {
+                    kind_items.push(item.clone());
+                }
+            }
+        }
+        write_synced(
+            &directory.join(KIT_ORDER_FILE),
+            kit_order_text(&kind_clips, &kind_items).as_bytes(),
+        )?;
+    }
+    Ok(())
 }
 
 fn staging_path(final_path: &Path, job_id: i64, attempt: i64) -> PathBuf {
@@ -4591,9 +4834,9 @@ mod tests {
         assert!(text.contains("超过 30 秒"), "{text}");
         assert!(!text.contains("找不到"), "超时不是找不到工具:{text}");
     }
-    use crate::core::{db, test_support::TestDirectory};
+    pub(super) use crate::core::{db, test_support::TestDirectory};
 
-    fn insert_clip(
+    pub(super) fn insert_clip(
         connection: &Connection,
         path: &Path,
         captured_at: &str,
@@ -4675,6 +4918,9 @@ mod tests {
     ) -> ExportClip {
         ExportClip {
             clip_id: 1,
+            media_kind: video_media_kind(),
+            photo_hold_ms: 3000,
+            companions: Vec::new(),
             segment_id: Some(1),
             selection_kind: "select".to_owned(),
             in_ticks: Some(in_ticks),
@@ -4709,7 +4955,7 @@ mod tests {
         }
     }
 
-    fn export_payload_fixture(clips: Vec<ExportClip>) -> ExportJobPayload {
+    pub(super) fn export_payload_fixture(clips: Vec<ExportClip>) -> ExportJobPayload {
         ExportJobPayload {
             version: 5,
             episode_id: Some(1),
@@ -5023,7 +5269,7 @@ mod tests {
         assert_eq!(fields[fields.len() - 2], "1");
     }
 
-    fn insert_select_segment(
+    pub(super) fn insert_select_segment(
         connection: &Connection,
         clip_id: i64,
         in_ticks: i64,
@@ -5048,7 +5294,7 @@ mod tests {
         segment_id
     }
 
-    fn ffmpeg_tools() -> Option<(OsString, OsString)> {
+    pub(super) fn ffmpeg_tools() -> Option<(OsString, OsString)> {
         let connection = Connection::open_in_memory().unwrap();
         let ffmpeg = crate::core::settings::configured_executable(
             &connection,
@@ -5077,7 +5323,7 @@ mod tests {
         Some((ffmpeg, ffprobe))
     }
 
-    fn generate_fixture(ffmpeg: &OsStr, path: &Path) -> bool {
+    pub(super) fn generate_fixture(ffmpeg: &OsStr, path: &Path) -> bool {
         Command::new(ffmpeg)
             .args([
                 "-y",
@@ -7725,7 +7971,7 @@ esac
     // ---------- R14 车道 B:剪映素材包 ----------
 
     /// 章的 `start_at` 决定它在镜头带上的先后(V14-01:导出顺序 = 镜头带顺序)。
-    fn insert_chapter_at(connection: &Connection, title: &str, start_at: &str) -> i64 {
+    pub(super) fn insert_chapter_at(connection: &Connection, title: &str, start_at: &str) -> i64 {
         connection
             .execute(
                 "INSERT INTO chapters(title, start_at, end_at, manual, episode_id)
@@ -7737,7 +7983,7 @@ esac
         connection.last_insert_rowid()
     }
 
-    fn put_in_story_order(connection: &Connection, clip_id: i64, segment_id: Option<i64>, position: i64) {
+    pub(super) fn put_in_story_order(connection: &Connection, clip_id: i64, segment_id: Option<i64>, position: i64) {
         connection
             .execute(
                 "INSERT INTO story_order(
@@ -7789,7 +8035,7 @@ esac
         let items: Vec<ExportItemStatus> = Vec::new();
         assert_eq!(
             kit_order_text(&clips, &items),
-            "— 01_山里 —\n01 山里 IMG_0003.mov 2.0 秒\n— 02_海边 —\n02 海边 IMG_0002.mov 1.2 秒\n03 海边 IMG_0001.mov 2.0 秒\n"
+            "01 山里 IMG_0003.mov 2.0 秒\n02 海边 IMG_0002.mov 1.2 秒\n03 海边 IMG_0001.mov 2.0 秒\n"
         );
     }
 
@@ -7975,15 +8221,17 @@ esac
         assert!(output.join("02_海边").join("03_海边_first.mp4").is_file());
         let order = std::fs::read_to_string(output.join(KIT_ORDER_FILE)).unwrap();
         let lines: Vec<&str> = order.lines().collect();
-        assert_eq!(lines.len(), 5, "{order}");
-        assert_eq!(lines[0], "— 01_山里 —");
-        assert!(lines[1].starts_with("01 山里 third.mp4 "), "{order}");
-        assert_eq!(lines[2], "— 02_海边 —");
-        assert!(lines[3].starts_with("02 海边 second.mp4 0.4 秒"), "{order}");
-        assert!(lines[4].starts_with("03 海边 first.mp4 "), "{order}");
+        assert_eq!(lines.len(), 3, "{order}");
+        assert!(lines[0].starts_with("01 山里 third.mp4 "), "{order}");
+        assert!(lines[1].starts_with("02 海边 second.mp4 0.4 秒"), "{order}");
+        assert!(lines[2].starts_with("03 海边 first.mp4 "), "{order}");
         assert!(!output.join(SELECTED_DIRECTORY).exists());
         assert!(!output.join(README_FILE).exists());
         let payload = parse_payload(&connection.query_row("SELECT payload FROM jobs WHERE id = ?1", [job_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();
         assert_eq!(completion_message(&payload), "已导出 3 个片段");
     }
 }
+
+#[cfg(test)]
+#[path = "deliver_photo_tests.rs"]
+mod photo_tests;

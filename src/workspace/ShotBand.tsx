@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
-
 import { BandJianyingButton } from "./BandJianyingButton";
 import { BandTimelineStage } from "./BandTimeRuler";
-import { foldKey } from "./bandGeometry";
+import { foldKey, musicPitchCount } from "./bandGeometry";
 import { useBandTimeline } from "./useBandTimeline";
-
 import {
   DndContext,
   DragOverlay,
@@ -16,7 +14,6 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { SortableContext, horizontalListSortingStrategy } from "@dnd-kit/sortable";
-
 import {
   dismissStoryGap,
   generationAvailability,
@@ -57,10 +54,8 @@ import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 import { BandEmpty } from "./emptyStates";
 import { failureText } from "./errorText";
 import { Button, showToast } from "./ui";
-
 export { BAND_CHAPTER_HEADER_WIDTH, chapterOffsets } from "./bandGeometry";
 export { ratingPatch } from "./useBandTakes";
-
 /** 一个分段的固定宽度(含间距);章节横向偏移按它算,虚拟化窗口才有尺可量。 */
 export const BAND_SEGMENT_WIDTH = BAND_SEGMENT_PITCH;
 /** 提示自动消失的时长(R12 起走全局 Toast,这两个数只是它的停留时长)。 */
@@ -88,7 +83,6 @@ export function ShotBand(): JSX.Element {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   // R12 §2 / §3:一键排入、这章够了、回到第 2 步、自动挑选结果 toast(逻辑在 useBandArrange)。
   const { skipped, onSkipChapter, arranging, onArrange, onBackToSelect, onAutoSelected } = useBandArrange();
-
   useEffect(() => {
     let active = true;
     void generationAvailability()
@@ -101,16 +95,13 @@ export function ShotBand(): JSX.Element {
       active = false;
     };
   }, []);
-
   const disabledHint = generationDisabledHint(availability);
   // 查看历史集 = 只读档案:生成/取消/重试/忽略一律不许写(与 MusicPanel 同一条判定)。
   const readOnly = feed.episode.viewing !== null;
-
   const effectiveBoard = useMemo<Storyboard | null>(() => {
     if (board === null) return null;
     return drag.optimisticItems ? { ...board, items: [...drag.optimisticItems] } : board;
   }, [board, drag.optimisticItems]);
-
   const allChapters = useMemo(
     () =>
       effectiveBoard === null
@@ -128,7 +119,6 @@ export function ShotBand(): JSX.Element {
     [segments],
   );
   const { selection, selectClip, selectSlot, selectedClip, selectedStack } = useSelection(visibleIds);
-
   const selectedIndex = useMemo(
     () =>
       segments.findIndex((segment) =>
@@ -141,7 +131,6 @@ export function ShotBand(): JSX.Element {
     [segments, selection],
   );
   const indexOf = useCallback((key: string) => segments.findIndex((segment) => segment.key === key), [segments]);
-
   // R13 §4:时间线化 —— 折叠 / 刻度 / 播放头 / 点击定位 / 拖边裁剪(状态在 useBandTimeline,换算在 bandTimeline)。
   const selectedClipId = selection?.kind === "clip" ? selection.clipId : null;
   const timeline = useBandTimeline({ chapters, board: effectiveBoard, clipsById: feed.clipsById, selectedClipId, selectClip });
@@ -302,7 +291,7 @@ export function ShotBand(): JSX.Element {
       <BandTimelineStage
         timeline={timeline}
         scrollLeft={scrollLeft ?? 0}
-        ruler={bandMode === "music" ? <MusicRuler segmentCount={segments.length} scrollLeft={scrollLeft ?? 0} /> : chapters.length > 0 ? "time" : null}
+        ruler={bandMode === "music" ? <MusicRuler segmentCount={musicPitchCount(segments)} scrollLeft={scrollLeft ?? 0} /> : chapters.length > 0 ? "time" : null}
         actions={<BandJianyingButton disabled={readOnly} />}
       >
       <div

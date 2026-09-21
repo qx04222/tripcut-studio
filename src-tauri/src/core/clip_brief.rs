@@ -34,6 +34,7 @@ pub struct BriefFacts {
     pub speech: Option<String>,
     /// 时刻分里分数最高的那一窗(秒),给云端 prompt 说"最好的一段在哪"。
     pub best_moment: Option<(f64, f64)>,
+    pub fixable: Vec<String>,
 }
 
 fn motion_label(class: &str) -> &'static str {
@@ -138,6 +139,8 @@ pub fn collect_facts(connection: &Connection, clip_id: i64) -> Result<BriefFacts
             )
         });
 
+    let moments = super::smart_select::moments_with_weights(connection, clip_id, None)?;
+    facts.fixable = super::smart_select::reason::Reason::from_moments(&moments).fixable;
     Ok(facts)
 }
 
@@ -184,6 +187,9 @@ pub fn render(facts: &BriefFacts) -> String {
         parts.push(format!("有人说「{speech}」", speech = speech.trim_end_matches('。')));
     }
 
+    if !facts.fixable.is_empty() {
+        parts.push(format!("可修:{}", facts.fixable.join("、")));
+    }
     if parts.is_empty() {
         // 什么都没有也要给一句话 —— 空字符串会让界面显示成"还没有描述",
         // 而事实是"分析还没跑完",两件事不能长一个样。
@@ -233,6 +239,7 @@ mod tests {
             ocr_phrases: ocr.iter().map(|text| (*text).to_owned()).collect(),
             speech: speech.map(str::to_owned),
             best_moment: None,
+            fixable: Vec::new(),
         }
     }
 

@@ -50,7 +50,7 @@ export function heatPoints(
   durationSeconds: number,
   maxPoints = HEAT_MAX_POINTS,
 ): HeatPoint[] {
-  if (moments.length === 0 || durationSeconds <= 0 || maxPoints <= 0) return [];
+  if (moments.length === 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || maxPoints <= 0) return [];
   const buckets = Math.min(maxPoints, moments.length);
   const scores = new Array<number>(buckets).fill(0);
   for (const moment of moments) {

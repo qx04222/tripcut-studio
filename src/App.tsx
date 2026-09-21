@@ -9,7 +9,7 @@ import { ExitConfirm } from "./workspace/ExitConfirm";
 import { GlobalDropOverlay } from "./workspace/GlobalDropOverlay";
 import { useMenuBridge } from "./workspace/menuBridge";
 import { WorkspaceShell } from "./workspace/WorkspaceShell";
-import { dispatchWorkspace, type BandMode } from "./workspace/WorkspaceStore";
+import { dispatchWorkspace, useWorkspace, type BandMode } from "./workspace/WorkspaceStore";
 
 export { documentTitleForRoute };
 export type { RoutePath };
@@ -74,6 +74,7 @@ function useHashRoute(): RoutePath {
 
 export default function App() {
   const route = useHashRoute();
+  const workspaceMode = useWorkspace((state) => state.workspaceMode);
   // R18 M-01:原生菜单栏(`src-tauri/src/menu.rs`)的点击落到已有的那些入口。
   useMenuBridge();
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
@@ -153,7 +154,7 @@ export default function App() {
       <ExitConfirm />
       {/* R18 M-06①:窗口任意位置都能接素材(Dock 图标拖入走同一个入口)。 */}
       <GlobalDropOverlay />
-      <CommandPalette onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
+      <CommandPalette workspaceMode={workspaceMode} onNavigate={navigateWorkspace} onSelectClip={(clipId) => dispatchWorkspace({ type: "select-clip", clipId })} />
     </>
   );
 }

@@ -35,11 +35,12 @@ import {
 import { __resetClipsFeedForTests } from "./useClipsFeed";
 import type { ClipListItem } from "../api";
 import { __setShowAllFeaturesForTests } from "./showAllFeatures";
+import { reportLibraryState } from "./homeStore";
 
 /** 挂壳用的最小素材夹具(字段齐全,不走 as unknown)。 */
 function shellClip(id: number): ClipListItem {
   return {
-    id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`,
+    kind: "video", id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`,
     file_name: `clip-${id}.mov`, byte_size: 2048, quick_hash: null, full_hash: null, tb_num: 1, tb_den: 1000,
     duration_ticks: 12_000, fps_num: 25, fps_den: 1, is_vfr: false, codec: "h264", width: 1920, height: 1080,
     captured_at: null, status: "ready", error: null, analysis: null, analysis_status: null, analysis_error: null,
@@ -76,6 +77,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("工作区骨架", () => {
+  it("照片模式 F6 只聚焦三个真实栏，切回视频后重新绑定镜头带 ResizeObserver", () => {
+    const observed: Element[] = [];
+    const Original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { observe(node: Element) { observed.push(node); } unobserve() {} disconnect() {} };
+    try {
+      render(<WorkspaceShell />);
+      act(() => reportLibraryState({ loading: false, clipCount: 3 }));
+      fireEvent.click(screen.getByRole("tab", { name: "照片工作台" }));
+      for (const name of ["照片静态检视", "照片精选带", "照片网格"] as const) {
+        act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "F6", code: "F6", bubbles: true })));
+        expect(document.activeElement?.getAttribute("aria-label")).toBe(name);
+      }
+      fireEvent.click(screen.getByRole("tab", { name: "视频工作台" }));
+      expect(observed.filter((node) => node.classList.contains("workspace-band-fit")).length).toBe(2);
+    } finally { globalThis.ResizeObserver = Original; }
+  });
   it("五个 landmark 的 AX 名一字不差且同屏并存(冒烟 workspace.panes.* 的依据)", () => {
     render(<WorkspaceShell />);
     for (const name of ["媒体池", "预览监视器", "镜头带", "检查器", "后台状态"]) {
@@ -510,6 +527,32 @@ describe("R10 U-23:启动恢复选中", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    expect(getWorkspaceSnapshot().selection).toBeNull();
+    expect(getWorkspaceSnapshot().restoreClipId).toBeNull();
+  });
+
+  it("R21:照片工作台启动时不恢复上次的视频选择", async () => {
+    __resetClipsFeedForTests();
+    apiMocks.getClipsRevision.mockResolvedValue("rev-photo-isolation" as never);
+    apiMocks.getAiDescription.mockResolvedValue(null);
+    apiMocks.listClips.mockResolvedValue([shellClip(7), { ...shellClip(8), kind: "photo", file_name: "IMG_0008.HEIC" }]);
+    __resetWorkspaceForTests({ workspaceMode: "photo", restoreClipId: 7 });
+    render(<WorkspaceShell />);
+    await screen.findByRole("region", { name: "照片网格" });
+    await act(async () => { await Promise.resolve(); });
+    expect(getWorkspaceSnapshot().selection).toBeNull();
+    expect(getWorkspaceSnapshot().restoreClipId).toBeNull();
+  });
+
+  it("R21:视频工作台启动时不恢复上次的照片选择", async () => {
+    __resetClipsFeedForTests();
+    apiMocks.getClipsRevision.mockResolvedValue("rev-video-isolation" as never);
+    apiMocks.getAiDescription.mockResolvedValue(null);
+    apiMocks.listClips.mockResolvedValue([{ ...shellClip(7), kind: "photo", file_name: "IMG_0007.HEIC" }, shellClip(8)]);
+    __resetWorkspaceForTests({ workspaceMode: "video", restoreClipId: 7 });
+    render(<WorkspaceShell />);
+    await screen.findByRole("region", { name: "媒体池" });
+    await act(async () => { await Promise.resolve(); });
     expect(getWorkspaceSnapshot().selection).toBeNull();
     expect(getWorkspaceSnapshot().restoreClipId).toBeNull();
   });

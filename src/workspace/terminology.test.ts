@@ -95,3 +95,15 @@ describe("首页不含首轮词表(R19 U-03)", () => {
     expect(hits).toEqual([]);
   });
 });
+
+
+it("R20 可修文案逐项译成中文,未知内部键不展示", async () => {
+  const { qualityText, QUALITY_LABELS } = await import("./results/resultsModel");
+  const rust = readFileSync("src-tauri/src/core/smart_select_reason.rs", "utf8");
+  for (const [key, label] of Object.entries(QUALITY_LABELS)) expect(rust).toContain(`("${key}", "${label}")`);
+  expect(qualityText(["exposure_bright", "exposure_dark", "slight_shake", "bystander", "color_cast", "future_internal_key"], "可修"))
+    .toBe("可修:曝光偏亮、曝光偏暗、轻微手抖、路人入镜、色偏");
+  expect(qualityText(["defocus", "excessive_shake", "bad_timing", "high_contrast"], "未选"))
+    .toBe("未选:失焦、抖动过大、时机差、大光比");
+  expect(qualityText(["future_internal_key"], "可修")).toBe("");
+});

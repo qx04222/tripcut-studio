@@ -1,0 +1,98 @@
+.media-pool .photo-r21-card .pool-card-image img,
+.shot-band .photo-r21-segment .band-tile-thumb img {
+  object-fit: contain;
+}
+.media-pool .photo-r21-badge,
+.media-pool .photo-r21-raw {
+  position: absolute;
+  top: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-4);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  z-index: var(--z-sticky);
+}
+.media-pool .photo-r21-badge { right: var(--space-1); }
+.media-pool .photo-r21-raw { left: var(--space-1); cursor: pointer; }
+.media-pool .photo-r21-companions {
+  /* R21 W1 验收 P2:封面框只有 56px 高,列表铺满整个框、顶部留出角标那一行(角标抬到列表之上,
+     再点 RAW 能收);每个文件一行,不换行、超长省略。 */
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: var(--space-5) var(--space-1) var(--space-1);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  box-shadow: var(--shadow-card);
+  z-index: var(--z-sticky);
+}
+.media-pool .photo-r21-companions [role="listitem"] {
+  display: flex;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+.media-pool .photo-r21-companion-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-pool .photo-r21-companion-role {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+.media-pool .photo-r21-card[aria-expanded="true"] .photo-r21-badge,
+.media-pool .photo-r21-card[aria-expanded="true"] .photo-r21-raw {
+  /* tokens.test 门禁只认 var(--z-*):伴随列表在 DOM 里排角标之后、同为 --z-sticky 会盖住角标,
+     展开时角标抬一档到 --z-band-playhead(20),仍在 --z-overlay 之下。 */
+  z-index: var(--z-band-playhead);
+}
+.monitor .photo-r21-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background: var(--well-bg);
+  min-height: 0;
+}
+.monitor .photo-r21-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.monitor .photo-r21-zoomed { display: block; }
+.monitor .photo-r21-zoomed .photo-r21-preview {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+.monitor .photo-r21-controls,
+.monitor .photo-r21-disabled {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.monitor .photo-r21-controls { padding: var(--space-2); }
+.monitor .photo-r21-disabled { margin-left: auto; }
+.inspector .photo-r21-metadata {
+  padding: var(--space-3);
+  border-radius: var(--radius-6);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+.inspector .photo-r21-metadata dl { margin: 0; }
+.inspector .photo-r21-metadata dl > div { display: flex; gap: var(--space-2); padding: var(--space-1) 0; }
+.inspector .photo-r21-metadata dt { color: var(--text-secondary); flex-shrink: 0; }
+.inspector .photo-r21-metadata dd { margin: 0; overflow-wrap: anywhere; }

@@ -18,6 +18,7 @@ export function GuideHost(): JSX.Element | null {
   const pinned = useHomePinned();
   const selection = useWorkspace((state) => state.selection);
   const openDrawer = useWorkspace((state) => state.openDrawer);
+  const workspaceMode = useWorkspace((state) => state.workspaceMode);
   const { active, seen, signals } = useGuides();
 
   useEffect(() => {
@@ -33,6 +34,7 @@ export function GuideHost(): JSX.Element | null {
   useEffect(() => {
     reportGuideSignals({
       inWorkspace,
+      photoWorkspace: workspaceMode === "photo",
       selectedClipHasSuggestions,
       pipelineStep: pipeline.step,
       bandHasShots,
@@ -42,7 +44,7 @@ export function GuideHost(): JSX.Element | null {
       // R18 F1:还有素材在排队 / 分析 = 后台在干活,完成通知就在后面 —— 这只气泡要赶在它前面。
       backgroundRunning: pipeline.counts.analysisPending > 0,
     });
-  }, [inWorkspace, selectedClipHasSuggestions, pipeline.step, bandHasShots, gapVisible, openDrawer, pipeline.counts.analysisPending]);
+  }, [inWorkspace, workspaceMode, selectedClipHasSuggestions, pipeline.step, bandHasShots, gapVisible, openDrawer, pipeline.counts.analysisPending]);
 
   const onDismiss = useCallback(() => {
     if (active !== null) dismissGuide(active);

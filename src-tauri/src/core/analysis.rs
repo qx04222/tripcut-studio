@@ -87,6 +87,7 @@ const FOCUS_HEIGHT: usize = 180;
 // 场景检测改在 10 fps/640 上比较相邻帧(2 fps 下摇镜与夜景硬切分不开),阈值 0.35→0.25。
 // 版本号变化会让旧结果被 enqueue_missing 重新排队重算。
 const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v5";
+const PHOTO_ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/photo-v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipAnalysis {
@@ -170,11 +171,11 @@ pub fn enqueue_missing(connection: &mut Connection) -> Result<usize> {
              WHERE c.missing_since IS NULL AND c.quick_hash IS NOT NULL
                AND (
                  a.clip_id IS NULL
-                 OR COALESCE(json_extract(a.tool_versions, '$.pipeline'), '') != ?1
+                 OR COALESCE(json_extract(a.tool_versions, '$.pipeline'), '') != CASE WHEN c.kind='photo' THEN ?2 ELSE ?1 END
                )
              ORDER BY c.id",
         )?;
-        let rows = statement.query_map([ANALYSIS_PIPELINE_VERSION], |row| {
+        let rows = statement.query_map([ANALYSIS_PIPELINE_VERSION, PHOTO_ANALYSIS_PIPELINE_VERSION], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -203,6 +204,18 @@ pub fn enqueue_for_clip(
     path: &Path,
     quick_hash: &str,
 ) -> Result<Option<i64>> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let enqueued=enqueue_for_clip_within(&transaction,clip_id,path,quick_hash)?;
+    transaction.commit()?;
+    Ok(enqueued)
+}
+
+pub(crate) fn enqueue_for_clip_within(
+    connection: &Connection,
+    clip_id: i64,
+    path: &Path,
+    quick_hash: &str,
+) -> Result<Option<i64>> {
     let payload = AnalyzeL1Payload {
         clip_id,
         path: path.to_string_lossy().into_owned(),
@@ -210,14 +223,14 @@ pub fn enqueue_for_clip(
     };
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| CoreError::Analysis(format!("无法创建 L1 分析任务：{error}")))?;
+    let pipeline = if super::photo_probe::is_photo(connection, clip_id)? { PHOTO_ANALYSIS_PIPELINE_VERSION } else { ANALYSIS_PIPELINE_VERSION };
     let payload_hash = blake3::hash(
-        format!("analyze_l1\0{clip_id}\0{quick_hash}\0{ANALYSIS_PIPELINE_VERSION}").as_bytes(),
+        format!("analyze_l1\0{clip_id}\0{quick_hash}\0{pipeline}").as_bytes(),
     )
     .to_hex()
     .to_string();
 
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing = transaction
+    let existing = connection
         .query_row(
             "SELECT id FROM jobs
              WHERE kind = 'analyze_l1' AND payload_hash = ?1
@@ -233,10 +246,9 @@ pub fn enqueue_for_clip(
         )
         .optional()?;
     if existing.is_some() {
-        transaction.commit()?;
         return Ok(None);
     }
-    transaction.execute(
+    connection.execute(
         "INSERT INTO jobs(
             kind, payload, payload_hash, status, attempt,
             next_attempt_at, created_at, updated_at
@@ -248,8 +260,7 @@ pub fn enqueue_for_clip(
          )",
         params![payload_json, payload_hash],
     )?;
-    let id = transaction.last_insert_rowid();
-    transaction.commit()?;
+    let id = connection.last_insert_rowid();
     Ok(Some(id))
 }
 
@@ -259,6 +270,12 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
     let mut source = load_source(connection, &payload)?;
     source.path = super::media_source::verified_clip_path(connection, payload.clip_id)
         .map_err(|error| CoreError::Analysis(error.to_string()))?;
+    if super::photo_probe::is_photo(connection, source.clip_id)? {
+        let computation = analyze_photo(&source.path)?;
+        super::photo_hash::check_cancelled()?;
+        persist_analysis(connection, &source, &computation)?;
+        return Ok(());
+    }
     let ffmpeg = crate::core::settings::configured_executable(
         connection,
         crate::core::settings::FFMPEG_PATH_KEY,
@@ -307,6 +324,50 @@ pub fn run_analyze_l1(connection: &mut Connection, job: &Job) -> Result<()> {
         &source.quick_hash,
     )?;
     Ok(())
+}
+
+/// One oriented SDR cover, no ffmpeg/audio/motion/scene work for stills.
+fn analyze_photo(path: &Path) -> Result<AnalysisComputation> {
+    let rgb = super::photo_hash::cover(path)?.to_rgb8();
+    let focus = laplacian_variance_rgb(rgb.as_raw(), rgb.width() as usize, rgb.height() as usize)?;
+    let mut histogram = [0_usize; 256];
+    for pixel in rgb.pixels() {
+        let y = (77 * u32::from(pixel[0]) + 150 * u32::from(pixel[1]) + 29 * u32::from(pixel[2])) / 256;
+        histogram[y as usize] += 1;
+    }
+    let count = (rgb.width() * rgb.height()) as f64;
+    let mean = histogram.iter().enumerate().map(|(y, n)| y as f64 * *n as f64).sum::<f64>() / count;
+    let percentile = |fraction: f64| {
+        let mut accumulated = 0;
+        for (y, n) in histogram.iter().enumerate() {
+            accumulated += n;
+            if accumulated as f64 >= (count * fraction).max(1.0) { return y as f64; }
+        }
+        255.0
+    };
+    let entropy = histogram.iter().filter(|n| **n > 0).map(|n| {
+        let p = *n as f64 / count;
+        -p * p.log2()
+    }).sum::<f64>();
+    let under = frame_underexposed(percentile(0.1), mean, percentile(1.0));
+    let over = percentile(0.9) >= OVEREXPOSED_YHIGH_THRESHOLD && mean >= OVEREXPOSED_YAVG_THRESHOLD;
+    // Low-texture scenes have no reliable focus evidence. Night highlights also
+    // survive the exposure guard above, even when most pixels are near black.
+    let blur = focus < SOFT_FOCUS_THRESHOLD && entropy >= LOW_ENTROPY_GUARD;
+    Ok(AnalysisComputation {
+        signals: ParsedSignals {
+            scene_cuts: Vec::new(), exposure_yavg: mean,
+            overexposed_ratio: f64::from(over), underexposed_ratio: f64::from(under),
+            dynamic_range: percentile(0.9) - percentile(0.1),
+            blur_mean: 0.0, entropy_mean: entropy, motion_mean: 0.0,
+            out_of_focus_ratio: f64::from(blur), audio_peak_db: None,
+            audio_dynamic_range_db: None, audio_clipped: false, has_audio: false,
+        },
+        focus_scores: vec![focus],
+        tool_versions: json!({"pipeline": PHOTO_ANALYSIS_PIPELINE_VERSION,
+            "focus_kernel": "3x3-laplacian-cross", "cover_size": 512, "suspect_junk": under || over || blur}),
+        windows: super::moments::WindowSignals::default(),
+    })
 }
 
 /// 场景阈值:读设置;旧库里种下的 0.35(v4 的默认,从未在界面暴露)当作没改过,
@@ -1226,11 +1287,12 @@ fn persist_analysis(
         "DELETE FROM segments WHERE clip_id = ?1 AND kind = 'scene'",
         [source.clip_id],
     )?;
+    let photo = super::photo_probe::is_photo(&transaction, source.clip_id)?;
     let mut start = 0_i64;
     for (scene_index, end) in cuts
         .iter()
         .copied()
-        .chain(std::iter::once(source.duration_ticks.max(0)))
+        .chain((!photo).then_some(source.duration_ticks.max(0)))
         .enumerate()
     {
         transaction.execute(
@@ -1240,6 +1302,7 @@ fn persist_analysis(
         )?;
         start = end;
     }
+    // Existing schema requires >= 1: a photo has one frame, but no scene segment.
     let scene_count = cuts.len() as i64 + 1;
     let focus_scores = serde_json::to_string(&computation.focus_scores)
         .map_err(|error| CoreError::Analysis(format!("无法保存失焦分数：{error}")))?;
@@ -1565,6 +1628,11 @@ mod tests {
         connection.execute_batch(MIGRATION_0001).unwrap();
         connection.execute_batch(MIGRATION_0003).unwrap();
         connection.execute_batch(MIGRATION_0025).unwrap();
+        // R21 0050 的 clips.kind(照片守卫 `photo_probe::is_photo` 要读它);这份手搭的库没有
+        // episode_id,不能整段跑 0050。
+        connection
+            .execute_batch("ALTER TABLE clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
+            .unwrap();
         connection
     }
 

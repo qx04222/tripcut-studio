@@ -252,7 +252,9 @@ fn rebuild_cache_blocking(
             let mut connection = core::db::open_project(db_path)?;
             core::jobs::wait_until_no_running(
                 &connection,
-                &format!("kind IN {}", core::jobs::CACHE_JOB_KINDS_SQL),
+                // photo_probe 会直接向 cache_root 发布 cover；暂停新认领后等当前探测
+                // 结束，避免它跨越目录换代把封面写进已退役目录或刚清空的新目录。
+                &format!("kind IN {} OR kind='photo_probe'", core::jobs::CACHE_JOB_KINDS_SQL),
                 &[],
                 std::time::Duration::from_secs(5),
             )?;
@@ -1002,6 +1004,14 @@ fn startup_backfill(
     if strip_jobs > 0 {
         tracing::info!(strip_jobs, "enqueued missing film-strip jobs");
     }
+    let photo_cover_jobs=core::photo_decode::enqueue_missing_covers(&mut connection,cache_root)?;
+    if photo_cover_jobs>0 {
+        tracing::info!(photo_cover_jobs,"enqueued missing photo cover jobs");
+    }
+    let photo_preview_jobs=core::photo_decode::enqueue_missing_previews(&mut connection,cache_root)?;
+    if photo_preview_jobs>0 {
+        tracing::info!(photo_preview_jobs,"enqueued missing photo preview jobs");
+    }
     let clip_embeddings = if core::memory_profile::sidecars_enabled(&connection) {
         core::clip_search::enqueue_missing(&mut connection, cache_root)?
     } else {
@@ -1424,6 +1434,12 @@ async fn pick_lut_file() -> std::result::Result<Option<String>, String> {
 /// 传「选择导出文件夹」);不传仍是交付包那句,旧调用方一字不动。
 #[tauri::command]
 async fn pick_export_folder(title: Option<String>) -> std::result::Result<Option<String>, String> {
+    if let Some(directory) = isolated_export_directory(
+        std::env::var_os("TRIPCUT_EXPORT_DIR").map(PathBuf::from),
+        std::env::var_os("TRIPCUT_APP_SUPPORT_DIR").map(PathBuf::from),
+    )? {
+        return Ok(Some(directory));
+    }
     Ok(rfd::AsyncFileDialog::new()
         .set_title(title.as_deref().unwrap_or("选择交付包保存位置"))
         .pick_folder()
@@ -1574,6 +1590,11 @@ fn list_clips(
     .map_err(|error| error.to_string())?;
     for clip in &mut clips {
         clip.cover_url = clip.id.and_then(|id| cover_urls.get(&id).cloned());
+        if let (Some(id),Some(photo)) = (clip.id,clip.photo.as_mut()) {
+            if let Some((cover,preview))=core::photo_decode::urls(&connection,&state.cache_root,id,state.media_server.port,&state.media_server.token).map_err(|e|e.to_string())? {
+                clip.cover_url=Some(cover); photo.preview_url=preview;
+            }
+        }
     }
     Ok(clips)
 }
@@ -2169,12 +2190,15 @@ fn auto_select_episode(
 /// R19 P-01 / P-03:带全部参数的自动挑选(一句话挑片 / 预设句)。`weights_json` 是权重偏置
 /// (键限 `WEIGHT_KEYS`),`pick` = chapters(按时间顺序,缺省)/ score(按分数),`prompt` 只做记录。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Flat command arguments preserve existing Tauri callers.
 fn auto_select_episode_with(
     budget_secs: Option<f64>,
     scope: Option<String>,
     weights_json: Option<String>,
     pick: Option<String>,
     prompt: Option<String>,
+    only_photos: Option<bool>,
+    photo_count: Option<usize>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<core::smart_select::AutoSelectOutcome, String> {
     let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
@@ -2185,6 +2209,8 @@ fn auto_select_episode_with(
         pick: core::smart_select::AutoSelectPick::parse(pick.as_deref()).map_err(|error| error.to_string())?,
         prompt,
         target_secs: None,
+        only_photos,
+        photo_count,
     };
     core::smart_select::auto_select_episode_with(&mut connection, params).map_err(|error| error.to_string())
 }
@@ -2204,9 +2230,17 @@ fn list_auto_select_run(
 fn replace_auto_segment(
     segment_id: i64,
     state: tauri::State<'_, RuntimeState>,
-) -> std::result::Result<core::smart_select_runs::RunRow, String> {
+) -> std::result::Result<core::smart_select_runs::Replacement, String> {
+    if state.read_only { return Err("只读窗口不能换一段".to_owned()); }
     let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
     core::smart_select_runs::replace_auto_segment(&mut connection, segment_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn undo_replace_auto_segment(run_id: String, replaced_segment_id: i64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<bool, String> {
+    if state.read_only { return Err("只读窗口不能撤销换一段".to_owned()); }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::smart_select_runs::undo_replace_auto_segment(&mut connection, &run_id, replaced_segment_id).map_err(|error| error.to_string())
 }
 
 /// 撤销一批自动挑选:只删该批 `source='auto'` 的段,返回删掉的条数。
@@ -3799,6 +3833,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            start_duel, duel_action,
             confirm_exit,
             open_url,
             mark_first_paint,
@@ -3920,6 +3955,7 @@ pub fn run() {
             auto_select_episode_with,
             list_auto_select_run,
             replace_auto_segment,
+            undo_replace_auto_segment,
             undo_auto_select,
             arrange_selected_segments,
             undo_arrange,
@@ -4116,4 +4152,66 @@ mod wake_simulation_tests {
             std::env::remove_var("TRIPCUT_SIMULATE_WAKE");
         }
     }
+}
+
+
+// 自动化只能把导出目录放在显式隔离 profile 之内;无环境变量时保留原生面板。
+fn isolated_export_directory(directory: Option<PathBuf>, profile: Option<PathBuf>) -> std::result::Result<Option<String>, String> {
+    let Some(directory) = directory else { return Ok(None) };
+    let profile = profile.ok_or("自动化导出需要隔离素材库目录")?;
+    let profile = profile.canonicalize().map_err(|error| error.to_string())?;
+    let directory = directory.canonicalize().map_err(|error| error.to_string())?;
+    if !directory.is_dir() || directory == profile || !directory.starts_with(&profile) {
+        return Err("自动化导出目录必须位于隔离素材库内".to_owned());
+    }
+    Ok(Some(directory.to_string_lossy().into_owned()))
+}
+
+#[cfg(test)]
+mod r20_export_tests {
+    use super::*;
+    #[test]
+    fn export_override_is_scoped_to_an_explicit_isolated_profile() {
+        let temp = core::test_support::TestDirectory::new();
+        let inside = temp.path().join("export-out");
+        std::fs::create_dir(&inside).unwrap();
+        assert_eq!(isolated_export_directory(None, None).unwrap(), None);
+        assert!(isolated_export_directory(Some(inside.clone()), None).is_err());
+        assert!(isolated_export_directory(Some(std::env::temp_dir()), Some(temp.path().to_path_buf())).is_err());
+        assert!(isolated_export_directory(Some(inside), Some(temp.path().to_path_buf())).unwrap().is_some());
+    }
+}
+
+use crate::core::duel;
+
+/// R21 PH-05:擂台会话在 `core::duel`;只读窗口一律拒绝写命令。
+#[tauri::command]
+fn start_duel(members: Vec<duel::Member>, source: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<duel::Session, String> {
+    if state.read_only {
+        return Err("只读窗口不能裁决".into());
+    }
+    let mut c = core::db::open_project(&state.db_path).map_err(|e| e.to_string())?;
+    duel::start_duel(&mut c, members, &source).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn duel_action(
+    session_id: i64,
+    action: String,
+    winner: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<duel::Session, String> {
+    if state.read_only && action != "get" {
+        return Err("只读窗口不能裁决".into());
+    }
+    let mut c = core::db::open_project(&state.db_path).map_err(|e| e.to_string())?;
+    match action.as_str() {
+        "get" => duel::get_session(&c, session_id),
+        "decide" => duel::decide(&mut c, session_id, winner),
+        "undo_last" => duel::undo_last(&mut c, session_id),
+        "finish" => duel::finish(&mut c, session_id),
+        "undo_session" => duel::undo_session(&mut c, session_id),
+        _ => Err(core::error::CoreError::Rating("未知擂台操作".into())),
+    }
+    .map_err(|e| e.to_string())
 }

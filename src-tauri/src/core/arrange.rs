@@ -19,8 +19,8 @@ use serde::Serialize;
 use super::error::{CoreError, Result};
 use super::settings;
 use super::story::{
-    active_episode_id, capture_snapshot, story_key, upsert_story_order, ArrangeMeta, StoryOrderRef,
-    StoryOrderSnapshot, StorySnapshot,
+    active_episode_id, capture_snapshot, is_video_clip_in_episode, story_key, upsert_story_order,
+    ArrangeMeta, StoryOrderRef, StoryOrderSnapshot, StorySnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -59,6 +59,7 @@ fn ordered_select_segments(connection: &Connection, episode_id: i64) -> Result<V
            ON chapter.id = c.chapter_id AND chapter.tombstone = 0 AND chapter.episode_id = ?1
          WHERE segment.kind = 'select' AND segment.tombstone = 0
            AND c.missing_since IS NULL
+           AND c.kind = 'video'
            AND (c.episode_id = ?1 OR c.episode_id IS NULL)
          ORDER BY chapter.id IS NULL, chapter.start_at, chapter.id,
                   c.captured_at IS NULL,
@@ -80,12 +81,24 @@ pub fn arrange_selected_segments(connection: &mut Connection, mode: ArrangeMode)
     let batch_id = format!("arr-{}", uuid::Uuid::new_v4().simple());
 
     let mut snapshot: StorySnapshot = capture_snapshot(&transaction, episode_id)?;
+    transaction.execute(
+        "UPDATE story_order SET tombstone = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE episode_id = ?1 AND tombstone = 0
+           AND clip_id IN (SELECT id FROM clips WHERE kind <> 'video')",
+        [episode_id],
+    )?;
     let already: BTreeSet<String> = snapshot
         .order
         .iter()
         .map(|item| story_key(&item.item_kind, item.clip_id, item.segment_id))
         .collect();
-    let mut next_position = snapshot.order.iter().map(|item| item.position + 1).max().unwrap_or(0);
+    let mut next_position = transaction.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0)
+         FROM story_order WHERE episode_id = ?1 AND tombstone = 0",
+        [episode_id],
+        |row| row.get::<_, i64>(0),
+    )?;
 
     if mode == ArrangeMode::Replace {
         transaction.execute(
@@ -168,6 +181,9 @@ pub fn undo_arrange(connection: &mut Connection, batch_id: &str) -> Result<usize
         )?;
     }
     for item in &snapshot.order {
+        if !is_video_clip_in_episode(&transaction, item.clip_id, episode_id)? {
+            continue;
+        }
         let item_ref = StoryOrderRef {
             item_kind: item.item_kind.clone(),
             clip_id: item.clip_id,
@@ -362,6 +378,85 @@ mod tests {
 
         undo_arrange(&mut connection, &outcome.batch_id).unwrap();
         assert_eq!(live_order(&connection), vec![(None, 0)]);
+    }
+
+    #[test]
+    fn photo_select_segments_never_enter_video_story_order() {
+        let (_directory, mut connection) = setup();
+        let video = insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z");
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:01:00Z");
+        connection.execute("UPDATE clips SET kind = 'video' WHERE id = ?1", [video]).unwrap();
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        let video_segment = select(&connection, video, 0, 3000, "manual");
+        select(&connection, photo, 0, 0, "auto");
+
+        let outcome = arrange_selected_segments(&mut connection, ArrangeMode::Append).unwrap();
+        assert_eq!(outcome.placed, 1);
+        assert_eq!(live_order(&connection), vec![(Some(video_segment), 0)]);
+    }
+
+    #[test]
+    fn replace_undo_does_not_restore_historical_photo_order() {
+        let (_directory, mut connection) = setup();
+        let video = insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z");
+        let next = insert_clip(&connection, "next.mov", "2026-08-31T10:01:00Z");
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:02:00Z");
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        chapterize(&mut connection).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+        for (clip_id, position) in [(video, 0_i64), (photo, 1_i64)] {
+            connection.execute(
+                "INSERT INTO story_order(item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id)
+                 VALUES ('whole', ?1, NULL, ?2, 0, '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z', ?3)",
+                params![clip_id, position, episode],
+            ).unwrap();
+        }
+        select(&connection, next, 0, 3000, "manual");
+
+        let outcome = arrange_selected_segments(&mut connection, ArrangeMode::Replace).unwrap();
+        undo_arrange(&mut connection, &outcome.batch_id).unwrap();
+        let live: Vec<i64> = connection.prepare("SELECT clip_id FROM story_order WHERE tombstone = 0 ORDER BY position").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(live, vec![video]);
+    }
+
+    #[test]
+    fn append_cleans_historical_photo_position_before_placing_video_segment() {
+        let (_directory, mut connection) = setup();
+        let video = insert_clip(&connection, "video.mov", "2026-08-31T10:00:00Z");
+        let photo = insert_clip(&connection, "photo.jpg", "2026-08-31T10:01:00Z");
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id = ?1", [photo]).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+        connection.execute(
+            "INSERT INTO story_order(item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id)
+             VALUES ('whole', ?1, NULL, 0, 0, '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z', ?2)",
+            params![photo, episode],
+        ).unwrap();
+        let video_segment = select(&connection, video, 0, 3000, "manual");
+
+        let outcome = arrange_selected_segments(&mut connection, ArrangeMode::Append).unwrap();
+        assert_eq!(outcome.placed, 1);
+        assert_eq!(live_order(&connection), vec![(Some(video_segment), 0)]);
+        assert_eq!(connection.query_row("SELECT tombstone FROM story_order WHERE clip_id = ?1", [photo], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn append_keeps_missing_video_order_and_places_available_segment_after_it() {
+        let (_directory, mut connection) = setup();
+        let missing = insert_clip(&connection, "offline.mov", "2026-08-31T10:00:00Z");
+        let available = insert_clip(&connection, "available.mov", "2026-08-31T10:01:00Z");
+        connection.execute("UPDATE clips SET missing_since = '2026-09-19T00:00:00Z' WHERE id = ?1", [missing]).unwrap();
+        let episode = active_episode_id(&connection).unwrap();
+        connection.execute(
+            "INSERT INTO story_order(item_kind, clip_id, segment_id, position, tombstone, created_at, updated_at, episode_id)
+             VALUES ('whole', ?1, NULL, 0, 0, '2026-09-19T00:00:00Z', '2026-09-19T00:00:00Z', ?2)",
+            params![missing, episode],
+        ).unwrap();
+        let available_segment = select(&connection, available, 0, 3000, "manual");
+
+        let outcome = arrange_selected_segments(&mut connection, ArrangeMode::Append).unwrap();
+        assert_eq!(outcome.placed, 1);
+        assert_eq!(live_order(&connection), vec![(None, 0), (Some(available_segment), 1)]);
+        assert_eq!(connection.query_row("SELECT tombstone FROM story_order WHERE clip_id = ?1", [missing], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     /// 跳过章:settings 键 `story.chapter_skipped.<id>`,不存在的章拒绝;取消跳过即消失。

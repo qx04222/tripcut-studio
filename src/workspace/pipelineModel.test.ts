@@ -67,13 +67,13 @@ describe("导航条计数与主按钮文案", () => {
 
 describe("pipelineInputFrom:从 feed 原始数据拼输入", () => {
   const clip = (id: number, patch: Partial<ClipListItem>): ClipListItem =>
-    ({ id, analysis_status: "done", select_count: 0, ...patch }) as ClipListItem;
+    ({ id, kind: "video", analysis_status: "done", select_count: 0, ...patch }) as ClipListItem;
   const board = {
     chapters: [{ id: 10, title: "a" }, { id: 11, title: "b" }],
     items: [
-      { key: "1", chapter_id: 10 },
-      { key: "2", chapter_id: 10 },
-      { key: "3", chapter_id: null },
+      { key: "1", clip_id: 1, chapter_id: 10 },
+      { key: "2", clip_id: 2, chapter_id: 10 },
+      { key: "3", clip_id: 3, chapter_id: null },
     ],
     candidates: [],
   } as unknown as Storyboard;
@@ -97,5 +97,35 @@ describe("pipelineInputFrom:从 feed 原始数据拼输入", () => {
 
   it("storyboard / 集为 null 时也不炸", () => {
     expect(pipelineInputFrom([], null, null)).toEqual({ clipCount: 0, analysisPending: 0, segmentCount: 0, chapters: [], skippedChapterIds: undefined, exportCount: 0, unplacedCount: 0 });
+  });
+
+  it("视频工作台的素材、分析、精选、章镜与候选统计严格排除照片和缺失 kind", () => {
+    const mixedBoard = {
+      chapters: [{ id: 10 }, { id: 11 }],
+      items: [
+        { clip_id: 1, chapter_id: 10 },
+        { clip_id: 2, chapter_id: 11 },
+        { clip_id: 3, chapter_id: 11 },
+      ],
+      candidates: [{ clip_id: 1 }, { clip_id: 2 }, { clip_id: 3 }],
+    } as unknown as Storyboard;
+    const input = pipelineInputFrom(
+      [
+        clip(1, { analysis_status: "pending", select_count: 2 }),
+        clip(2, { kind: "photo", analysis_status: "running", select_count: 5 }),
+        clip(3, { kind: undefined, analysis_status: "pending", select_count: 7 }),
+      ],
+      mixedBoard,
+      { export_count: 0 } as never,
+    );
+    expect(input).toEqual({
+      clipCount: 1,
+      analysisPending: 1,
+      segmentCount: 2,
+      chapters: [{ id: 10, shotCount: 1 }, { id: 11, shotCount: 0 }],
+      skippedChapterIds: undefined,
+      exportCount: 0,
+      unplacedCount: 1,
+    });
   });
 });

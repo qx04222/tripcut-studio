@@ -53,7 +53,7 @@ export function useBandTimeline({
   const offsets = useMemo(() => chapterOffsets(chapters, folded), [chapters, folded]);
   const spans = useMemo(() => timelineSpans(chapters, offsets, folded), [chapters, offsets, folded]);
   const totalMs = useMemo(() => timelineTotalMs(spans), [spans]);
-  const playhead = useBandPlayhead(spans, selectedClipId);
+  const playhead = useBandPlayhead(spans, selectedClipId !== null && clipsById.get(selectedClipId)?.kind === "photo" ? null : selectedClipId);
   const trim = useBandTrim(board, clipsById);
   const { requestSeek } = playhead;
 
@@ -71,14 +71,15 @@ export function useBandTimeline({
       if (!hit || hit.span.clipId === null) return;
       const ratio = seekRatioFor(hit.span, hit.ratio, clipMs(hit.span.clipId));
       if (hit.span.clipId !== selectedClipId) selectClip(hit.span.clipId);
+      if (clipsById.get(hit.span.clipId)?.kind === "photo") return;
       if (ratio !== null) requestSeek(hit.span.clipId, ratio);
     },
-    [spans, clipMs, selectedClipId, selectClip, requestSeek],
+    [spans, clipMs, selectedClipId, selectClip, requestSeek, clipsById],
   );
 
   const seekInSegment = useCallback(
     (segment: BandSegment, ratio: number) => {
-      if (segment.clipId === null) return;
+      if (segment.clipId === null || segment.mediaKind === "photo") return;
       const span = spans.find((candidate) => candidate.key === segment.key);
       if (!span) return;
       const seekRatio = seekRatioFor(span, ratio, clipMs(segment.clipId));

@@ -10,6 +10,7 @@ import { askDirector, getLlmStatus, WEIGHT_KEYS, type AutoSelectParamsInput, typ
  */
 
 export const SELECT_PROMPT_PLACEHOLDER = "例如:挑 60 秒,风景为主,少人脸,按时间顺序";
+export const PHOTO_SELECT_PROMPT_PLACEHOLDER = "例如：挑 20 张，优先清晰、构图完整，按拍摄时间排序";
 /** HomeCards / 预设卡 → BandAutoSelect 的事件:detail `{ sentence }`。 */
 export const SELECT_PROMPT_EVENT = "tripcut:select-prompt";
 
@@ -31,6 +32,8 @@ export const SELECT_PRESETS: readonly SelectPreset[] = [
 ];
 
 export interface SelectPromptParse {
+  mediaKind: "photo" | "video" | null;
+  photoCount: number | null;
   /** 「N 秒 / N 分钟 / 一分半」;没说就是 null(按平台预算)。 */
   budgetSecs: number | null;
   /** 「全部 / 收藏 / 三星以上」;没说就是 null(按库状态推导)。 */
@@ -167,12 +170,18 @@ export function parseBias(text: string): { weights: MomentWeights | null; bias: 
 export function parseSelectPrompt(text: string): SelectPromptParse {
   const normalized = text.replace(/[,，。;;、]/g, " ").trim();
   const { weights, bias } = parseBias(normalized);
-  return { budgetSecs: parseDurationSecs(normalized), scope: parseScope(normalized), weights, pick: parsePick(normalized), bias };
+  const photo = new RegExp(`${NUMBER}\\s*张\\s*照片|照片\\s*${NUMBER}\\s*张`).exec(normalized);
+  const count = photo ? parseChineseNumber(photo[1] ?? photo[2] ?? "") : null;
+  const photoCount = count !== null && Number.isInteger(count) && count > 0 ? count : null;
+  const mediaKind = /只要视频/.test(normalized) ? "video" : /只要照片/.test(normalized) || photoCount !== null ? "photo" : null;
+  return { mediaKind, photoCount, budgetSecs: parseDurationSecs(normalized), scope: parseScope(normalized), weights, pick: parsePick(normalized), bias };
 }
 
 /** 解析结果 → 后端参数(范围没说时用调用方给的兜底,通常是按库状态推导的那个)。 */
-export function toAutoSelectParams(parsed: SelectPromptParse, sentence: string, fallbackScope: AutoSelectScope): AutoSelectParamsInput {
+export function toAutoSelectParams(parsed: SelectPromptParse, sentence: string, fallbackScope: AutoSelectScope): AutoSelectParamsInput & Pick<SelectPromptParse, "mediaKind" | "photoCount"> {
   return {
+    mediaKind: parsed.mediaKind,
+    photoCount: parsed.photoCount,
     budgetSecs: parsed.budgetSecs ?? undefined,
     scope: parsed.scope ?? fallbackScope,
     weights: parsed.weights,
@@ -184,6 +193,8 @@ export function toAutoSelectParams(parsed: SelectPromptParse, sentence: string, 
 /** 面板回显:「60 秒 · 全部素材 · 风景 · 少人脸(按少人声算)· 按时间顺序」。 */
 export function describeParse(parsed: SelectPromptParse): string {
   const parts: string[] = [];
+  if (parsed.mediaKind) parts.push(parsed.mediaKind === "photo" ? "只要照片" : "只要视频");
+  if (parsed.photoCount !== null) parts.push(`${parsed.photoCount} 张`);
   parts.push(parsed.budgetSecs === null ? "时长按平台" : `${parsed.budgetSecs} 秒`);
   parts.push(parsed.scope === "all" ? "全部素材" : parsed.scope === "favorites" ? "只看收藏" : parsed.scope === "rated3" ? "3 星以上" : parsed.scope === "favorites_or_rated3" ? "收藏 + 3 星以上" : "范围按库");
   parts.push(...parsed.bias);
@@ -222,6 +233,8 @@ export function mergeLlmParse(rules: SelectPromptParse, answer: string): SelectP
   const hits = BIAS_RULES.filter((rule) => labels.some((label) => rule.label.startsWith(label) || rule.pattern.test(label)));
   // 规则命中的优先;LLM 只补规则没看出来的那几项。
   return {
+    mediaKind: rules.mediaKind,
+    photoCount: rules.photoCount,
     budgetSecs: rules.budgetSecs ?? budget,
     scope: rules.scope ?? scope,
     weights: rules.weights ?? (hits.length > 0 ? applyBias(hits.map((rule) => rule.multipliers)) : null),

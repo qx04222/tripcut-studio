@@ -119,6 +119,7 @@ pub fn cache_root_for_db(db_path: &Path) -> PathBuf {
 pub fn run_artifact_job(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
     match job.kind.as_str() {
         "thumbnail" => run_thumbnail(connection, job, cache_root),
+        "photo_preview" => super::photo_decode::run_preview(connection, job, cache_root),
         "strip" => run_strip(connection, job, cache_root),
         "waveform" => run_waveform(connection, job, cache_root),
         "proxy" => run_proxy(connection, job, cache_root),
@@ -134,6 +135,7 @@ pub fn enqueue_for_clip(
     path: &Path,
     source_hash: &str,
 ) -> Result<()> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return super::photo_decode::enqueue(connection, clip_id, path, source_hash); }
     let payload = ArtifactJobPayload {
         clip_id,
         path: path.to_string_lossy().into_owned(),
@@ -181,6 +183,7 @@ pub fn enqueue_for_clip(
 }
 
 pub fn run_thumbnail(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::job_is_photo(connection, job)? { return super::photo_decode::run_thumbnail(connection, job, cache_root); }
     let ffmpeg = super::settings::configured_executable(
         connection,
         super::settings::FFMPEG_PATH_KEY,
@@ -241,6 +244,7 @@ fn run_thumbnail_with(
 }
 
 pub fn run_strip(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let ffmpeg = super::settings::configured_executable(
         connection,
         super::settings::FFMPEG_PATH_KEY,
@@ -374,7 +378,7 @@ pub fn enqueue_missing_strips(connection: &mut Connection) -> Result<usize> {
              LEFT JOIN cache_artifacts strip
                ON strip.clip_id = c.id AND strip.kind = 'strip'
               AND strip.source_hash = cover.source_hash
-             WHERE c.missing_since IS NULL
+             WHERE c.kind = 'video' AND c.missing_since IS NULL
                AND strip.clip_id IS NULL
              ORDER BY c.id",
         )?;
@@ -422,6 +426,7 @@ pub fn enqueue_missing_strips(connection: &mut Connection) -> Result<usize> {
 }
 
 pub fn run_waveform(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let ffmpeg = super::settings::configured_executable(
         connection,
         super::settings::FFMPEG_PATH_KEY,
@@ -513,6 +518,7 @@ fn run_waveform_with(
 }
 
 pub fn run_proxy(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     if !super::settings::proxy_enabled(connection)? {
         return complete_direct(connection, job, &parse_payload(job)?);
     }

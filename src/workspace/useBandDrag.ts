@@ -74,6 +74,12 @@ export const SLOT_KEY_PREFIX = "slot:";
 export const CROSS_CHAPTER_NOTICE = "镜头仍归属原章节；请先合并章节再跨章排序";
 export const REORDER_TOAST = "已调整顺序";
 export const ALREADY_ON_BAND_NOTICE = "这条素材已经在镜头带上";
+export const VIDEO_BAND_ONLY_NOTICE = "照片请在照片工作台挑选";
+
+/** 视频镜头带只接受后端明确标注的 video；缺失/未知 kind 也拒绝。 */
+export function isVideoBandClip(clip: ClipListItem | undefined): clip is ClipListItem {
+  return clip?.kind === "video";
+}
 
 /**
  * 「加入当前章节」(R10 U-18)松手后的提示。章节是按拍摄时间派生的(`clips.chapter_id`),
@@ -88,7 +94,7 @@ export function insertNotice(chapters: readonly Chapter[], item: StoryItem, favo
 
 /** 加入镜头带前要不要先收藏:故事板(`get_storyboard`)只认收藏或有精选段的素材。 */
 export function needsFavoriteBeforeInsert(clip: ClipListItem | undefined): boolean {
-  if (!clip) return false;
+  if (!isVideoBandClip(clip)) return false;
   return clip.binary_rating !== 1 && clip.select_count === 0;
 }
 
@@ -162,6 +168,12 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
         setUndoable(false);
         return;
       }
+      const { clipsById } = getClipsFeedSnapshot();
+      if (plan.items.some((item) => !isVideoBandClip(clipsById.get(item.clip_id)))) {
+        setNotice(VIDEO_BAND_ONLY_NOTICE);
+        setUndoable(false);
+        return;
+      }
       if (busyRef.current) return;
       busyRef.current = true;
       setBusy(true);
@@ -192,12 +204,18 @@ export function useBandDrag(board: Storyboard | null): BandDragState {
   const insert = useCallback(
     (clipId: number) => {
       if (board === null || busyRef.current) return;
+      const clip = getClipsFeedSnapshot().clipsById.get(clipId);
+      if (!isVideoBandClip(clip)) {
+        setNotice(VIDEO_BAND_ONLY_NOTICE);
+        setUndoable(false);
+        return;
+      }
       busyRef.current = true;
       setBusy(true);
       void (async () => {
         try {
           let favorited = false;
-          if (needsFavoriteBeforeInsert(getClipsFeedSnapshot().clipsById.get(clipId))) {
+          if (needsFavoriteBeforeInsert(clip)) {
             await rateClip(clipId, "binary", 1);
             favorited = true;
           }

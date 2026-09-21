@@ -18,7 +18,7 @@ export interface PoolScrub {
  * 比例切帧;移开恢复封面。无帧条 → 静态封面;`prefers-reduced-motion` → 整个关掉。
  */
 export function usePoolScrub(clip: ClipListItem): PoolScrub {
-  const clipId = clip.id;
+  const clipId = clip.kind === "photo" ? null : clip.id;
   const frames = stripFrameCount(clip);
   const [strip, setStrip] = useState<string | null>(null);
   const [ratio, setRatio] = useState<number | null>(null);

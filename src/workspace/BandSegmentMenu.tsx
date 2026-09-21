@@ -1,6 +1,7 @@
 import { useEffect, type JSX } from "react";
 
 import type { Storyboard } from "../api";
+import { duelMenuItem, requestDuel } from "./duel/duelBus";
 import { MORE_BUTTON_LABEL, SHOT_MENU, SHOT_MENU_LABEL, menuAriaLabel, type ShotMenuId } from "./copy";
 import { requestQuickExport } from "./deliver/quickExportModel";
 import { failureText } from "./errorText";
@@ -87,10 +88,11 @@ export function ShotMenu({
       x={anchor.x}
       y={anchor.y}
       ariaLabel={SHOT_MENU_LABEL}
-      items={shotMenuItems(segment, { canStepBack, canStepForward, readOnly })}
+      items={[...shotMenuItems(segment, { canStepBack, canStepForward, readOnly }), duelMenuItem(readOnly)]}
       onClose={onClose}
       onSelect={(id) => {
-        if (id === "stepBack") onStep(-1);
+        if (id === "duel") requestDuel({ clipIds: segment.clipId === null ? [] : [segment.clipId], segmentId: segment.segmentId ?? undefined });
+        else if (id === "stepBack") onStep(-1);
         else if (id === "stepForward") onStep(1);
         else dispatchBandSegmentAction({ segment, action: id as ShotMenuId });
       }}

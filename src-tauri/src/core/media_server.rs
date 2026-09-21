@@ -229,7 +229,7 @@ fn is_cache_artifact_path(path: &Path) -> bool {
         Some(Component::Normal(value))
             if matches!(
                 value.to_str(),
-                Some("cover.jpg" | "strip.jpg" | "proxy.mp4" | "waveform.json")
+                Some("cover.jpg" | "cover.png" | "preview.jpg" | "preview.png" | "strip.jpg" | "proxy.mp4" | "waveform.json")
             )
     );
     clip_id_is_valid && file_is_valid && components.next().is_none()

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { groupClipsByDateAndPeriod, timePeriodOf } from "./poolGrouping";
 import type { ClipListItem } from "../api";
@@ -41,6 +41,33 @@ describe("timePeriodOf", () => {
 });
 
 describe("groupClipsByDateAndPeriod", () => {
+  // 视频保持按审片 Mac 钟面分组;照片必须按拍摄地钟面,不能被这里的东八区改写。
+  const tz = process.env.TZ;
+  beforeAll(() => { process.env.TZ = "Asia/Shanghai"; });
+  afterAll(() => { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; });
+
+  it("视频保持按本机钟面,照片按 taken_at_local 的拍摄地钟面分组", () => {
+    const clips = [
+      clip({ id: 1, captured_at: "2026-08-12T23:30:00Z" }),
+      clip({ id: 2, kind: "photo", captured_at: "2026-08-12T23:31:00Z",
+        photo: { width: 1, height: 1, orientation: 1, taken_at: "2026-08-12T23:31:00Z", taken_at_local: "2026-08-12T16:31:00-07:00", tz_guess: "UTC-07:00",
+          gps_lat: null, gps_lon: null, camera: null, lens: null, hold_ms: 3000, color_space: null, has_alpha: false, companions_ambiguous: false } }),
+    ];
+    expect(groupClipsByDateAndPeriod(clips)).toEqual([
+      { key: "2026-08-13 上午", date: "2026-08-13", period: "上午", count: 1 },
+      { key: "2026-08-12 下午", date: "2026-08-12", period: "下午", count: 1 },
+    ]);
+  });
+
+  it("taken_at_local 缺失时用 taken_at + 半小时 tz_guess 还原拍摄地钟面", () => {
+    const photo = clip({ id: 4, kind: "photo", captured_at: "2026-08-11T22:45:00Z",
+      photo: { width: 1, height: 1, orientation: 1, taken_at: "2026-08-11T22:45:00Z", taken_at_local: null, tz_guess: "UTC+05:30",
+        gps_lat: null, gps_lon: null, camera: null, lens: null, hold_ms: 3000, color_space: null, has_alpha: false, companions_ambiguous: false } });
+    expect(groupClipsByDateAndPeriod([photo])).toEqual([
+      { key: "2026-08-12 凌晨", date: "2026-08-12", period: "凌晨", count: 1 },
+    ]);
+  });
+
   it("同一天同一时段的素材合并成一组,按计数累加", () => {
     const clips = [
       clip({ id: 1, captured_at: "2026-08-12T08:10:00+08:00" }),

@@ -108,7 +108,7 @@ export function InspectorCollapsibleSections(props: InspectorCollapsibleSections
     },
   ];
   // R19 P-05(flow 车道,一行):关时按开关过滤;DOM 位置仍固定(见下),开关打开原样回来。
-  const sections = showAll ? allSections : allSections.filter((section) => !INSPECTOR_SECTIONS_ADVANCED.has(section.id));
+  const sections = allSections.filter(section => (showAll || !INSPECTOR_SECTIONS_ADVANCED.has(section.id)) && (clip.kind !== "photo" || (section.id !== "techcheck" && section.id !== "audio")));
   const quiet = sections.filter((section) => isQuietSection(section.id, ctx));
   const [moreOpen, setMoreOpen] = useState(false);
   // 五个 `<details>` 的 DOM 位置永远不变(位置一变 React 就会把面板卸了重挂,TechCheckPanel 的

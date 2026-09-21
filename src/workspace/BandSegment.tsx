@@ -27,7 +27,7 @@ export { orderedTakes } from "./shotBandModel";
 
 /** 时长角标「m:ss」。默认 time base 是毫秒;素材段必须传自己的 tb(R-02:1/19200 的 ticks 当毫秒会把 1.2 s 显示成 0:23)。 */
 export function bandDurationLabel(ticks: number, tbNum = 1, tbDen = 1_000): string {
-  if (tbDen <= 0 || tbNum <= 0) return "0:00";
+  if (![ticks, tbNum, tbDen].every(Number.isFinite) || tbDen <= 0 || tbNum <= 0) return "0:00";
   const total = Math.max(0, Math.floor((ticks * tbNum) / tbDen));
   return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`;
 }

@@ -237,7 +237,7 @@ pub(crate) enum ResourceClass {
 
 pub(crate) fn resource_class(kind: &str) -> ResourceClass {
     match kind {
-        "thumbnail" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze"
+        "photo_probe" | "thumbnail" | "photo_preview" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze"
         | "moments" => ResourceClass::Decode,
         "clip_embed" | "classify_dims" | "transcribe" => ResourceClass::HeavyModel,
         _ => ResourceClass::Light,
@@ -246,7 +246,7 @@ pub(crate) fn resource_class(kind: &str) -> ResourceClass {
 
 /// SQL 字面量:与 `resource_class` 的 Decode 分支必须逐字一致。
 pub(crate) const DECODE_KINDS_SQL: &str =
-    "('thumbnail','strip','analyze_l1','analyze_motion','proxy','music_analyze','moments')";
+    "('photo_probe','thumbnail','photo_preview','strip','analyze_l1','analyze_motion','proxy','music_analyze','moments')";
 /// SQL 字面量:与 `resource_class` 的 HeavyModel 分支必须逐字一致。
 pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcribe')";
 /// R16 P1-6:用户「全部暂停」期间仍放行的两类——导出是用户此刻点的,缓存清理是用户刚删过东西;
@@ -367,10 +367,22 @@ pub fn claim_next_for_owner_filtered(
                         -- `import::confirmed_duplicate` 疑似重复时仍会当场算完整哈希。
                         WHEN 'export_package' THEN 100
                         WHEN 'import_probe' THEN 60
+                        -- R21 W1 真机:photo_probe 没登记就落到 ELSE 0,排在 full_hash(8)之后 ——
+                        -- 126 张照片要等 10 条视频的缩略 / 分析 / 代理 / 完整哈希全跑完才建档(4.4 s 后
+                        -- 才出第一张占位卡);100 条视频时就是几分钟。照片建档与视频探测同级。
+                        WHEN 'photo_probe' THEN 60
                         WHEN 'metadata_backfill' THEN 57
                         WHEN 'align_clocks' THEN 56
                         WHEN 'chapterize' THEN 55
-                        WHEN 'thumbnail' THEN 40
+                        -- 照片 512 cover 比视频 thumbnail 轻得多；混合导入时先填满照片网格，
+                        -- 避免十条视频缩略图占用 decode worker 把 100 张照片拖过 4 秒门槛。
+                        WHEN 'thumbnail' THEN 40 + CASE WHEN jobs.clip_id IS NOT NULL AND EXISTS (
+                          SELECT 1 FROM clips photo_cover
+                           WHERE photo_cover.id = jobs.clip_id AND photo_cover.kind = 'photo'
+                        ) THEN 1 ELSE 0 END
+                        -- 照片卡片已有 512 cover 可用；2048 静态检视图排到视频分析/代理之后，
+                        -- 避免混合导入时为了后台升级照片清晰度而拖慢视频工作台。
+                        WHEN 'photo_preview' THEN 9
                         WHEN 'strip' THEN 39
                         WHEN 'analyze_l1' THEN 30
                         WHEN 'analyze_motion' THEN 28
@@ -796,13 +808,13 @@ pub fn cancel_all_jobs(connection: &mut Connection) -> Result<usize> {
 
 /// 清理缓存前取消正在跑的「可再生成文件」任务(与 `settings::clear_cache_and_rebuild`
 /// 重置的五种一致;R15 补上此前漏掉的 strip)。
-pub const CACHE_JOB_KINDS_SQL: &str = "('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')";
+pub const CACHE_JOB_KINDS_SQL: &str = "('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')";
 
 pub fn cancel_cache_jobs(connection: &mut Connection) -> Result<usize> {
     let mut statement = connection.prepare(
         "SELECT id FROM jobs
          WHERE status='running'
-           AND kind IN ('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')",
+           AND kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')",
     )?;
     let ids = statement
         .query_map([], |row| row.get::<_, i64>(0))?
@@ -1854,7 +1866,7 @@ impl JobRunner {
             return;
         };
         // X-04:每条 import_probe 落到终态就发一条,状态条按单条完成刷新计数(估算器要连续样本)。
-        if job.kind == "import_probe" {
+        if matches!(job.kind.as_str(), "import_probe" | "photo_probe") {
             match import_probe_done_event(connection, job) {
                 Ok(Some(payload)) => {
                     let sink = sink.clone();
@@ -1952,10 +1964,14 @@ impl JobRunner {
     fn execute_claimed(db_path: &Path, connection: &mut Connection, job: &Job) -> Result<()> {
         let cache_root = super::artifacts::cache_root_for_db(db_path);
 
+        // R21 PH-01:照片不进任何视频专用任务。旧库里已排的视频任务撞上 kind='photo'
+        // 一律在这里直接置 done,不再进入各 run_* 再由分支二次 mark_done。
+        if matches!(job.kind.as_str(), "classify_dims" | "metadata_backfill" | "analyze_motion" | "moments" | "transcribe" | "clip_embed" | "strip" | "waveform" | "proxy" | "ocr_scan")
+            && super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
         match job.kind.as_str() {
             "noop" => mark_done(connection, job.id, job.attempt)?,
-            "import_probe" => {
-                match super::import::run_import_probe(connection, job) {
+            "import_probe" | "photo_probe" => {
+                match super::import::run_import_probe_with_cache(connection, job, &cache_root) {
                     Ok(super::import::ImportProbeOutcome::Imported) => {
                         mark_done(connection, job.id, job.attempt)?;
                     }
@@ -1981,7 +1997,11 @@ impl JobRunner {
                     }
                 }
                 super::canonical_time::enqueue_align_if_ready(connection)?;
-                super::story::enqueue_if_import_complete(connection)?;
+                // 照片工作台不参与视频章节。每张 photo_probe 都进入这里曾让照片批次
+                // 白做一次 IMMEDIATE story 事务；视频 import_probe 仍保持原有触发语义。
+                if job.kind=="import_probe" {
+                    super::story::enqueue_if_import_complete(connection)?;
+                }
             }
             "metadata_backfill" => match super::import::run_metadata_backfill(connection, job) {
                 Ok(()) => {
@@ -2017,6 +2037,7 @@ impl JobRunner {
                 Ok(()) => {
                     mark_done(connection, job.id, job.attempt)?;
                     enqueue_dimensions_after(connection, job, &cache_root);
+                    super::similar::enqueue_if_ready(connection)?;
                 }
                 Err(error) => {
                     fail_or_retry(connection, job, &error.to_string())?;
@@ -2117,7 +2138,7 @@ impl JobRunner {
                 let project_root = db_path.parent().unwrap_or_else(|| Path::new("."));
                 super::generation::run_poll_job(connection, job, project_root)?;
             }
-            "thumbnail" | "strip" | "waveform" | "proxy" => {
+            "thumbnail" | "photo_preview" | "strip" | "waveform" | "proxy" => {
                 match super::artifacts::run_artifact_job(connection, job, &cache_root) {
                     Ok(()) if job.kind == "waveform" => {
                         enqueue_dimensions_after(connection, job, &cache_root);
@@ -2413,11 +2434,13 @@ mod tests {
         "noop",
         "export_package",
         "import_probe",
+        "photo_probe",
         "metadata_backfill",
         "align_clocks",
         "chapterize",
         "full_hash",
         "thumbnail",
+        "photo_preview",
         "strip",
         "analyze_l1",
         "analyze_motion",
@@ -3211,6 +3234,38 @@ mod tests {
     }
 
     #[test]
+    fn all_photo_covers_are_claimed_before_deferred_previews() {
+        let directory=TestDirectory::new();
+        let mut connection=db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection,"photo_preview",r#"{"clip_id":1}"#,"preview-first").unwrap();
+        enqueue(&mut connection,"thumbnail",r#"{"clip_id":2}"#,"cover-second").unwrap();
+        enqueue(&mut connection,"analyze_l1",r#"{"clip_id":3}"#,"l1-third").unwrap();
+        enqueue(&mut connection,"analyze_motion",r#"{"clip_id":4}"#,"motion-fourth").unwrap();
+        enqueue(&mut connection,"proxy",r#"{"clip_id":5}"#,"proxy-fifth").unwrap();
+        enqueue(&mut connection,"full_hash",r#"{"clip_id":6}"#,"hash-last").unwrap();
+        let mut order=Vec::new();
+        for _ in 0..6 {
+            let claimed=claim_next(&mut connection).unwrap().unwrap();
+            order.push(claimed.kind.clone());
+            mark_done(&mut connection,claimed.id,claimed.attempt).unwrap();
+        }
+        assert_eq!(order,vec!["thumbnail","analyze_l1","analyze_motion","proxy","photo_preview","full_hash"],"封面先出；延迟预览不得压住视频分析或代理");
+    }
+
+    #[test]
+    fn photo_cover_is_claimed_before_video_thumbnail_in_a_mixed_import() {
+        let directory=TestDirectory::new();
+        let mut connection=db::open_project(&directory.db_path()).unwrap();
+        connection.execute_batch("INSERT INTO clips(id,rel_path,kind) VALUES(1,'video.mov','video'),(2,'photo.heic','photo');").unwrap();
+        let video=enqueue(&mut connection,"thumbnail",r#"{"clip_id":1}"#,"mixed-video-first").unwrap();
+        let photo=enqueue(&mut connection,"thumbnail",r#"{"clip_id":2}"#,"mixed-photo-second").unwrap();
+        let first=claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(first.id,photo,"混合导入必须先填满照片网格的轻量 cover，再处理较重的视频 thumbnail");
+        mark_done(&mut connection,first.id,first.attempt).unwrap();
+        assert_eq!(claim_next(&mut connection).unwrap().unwrap().id,video);
+    }
+
+    #[test]
     fn dimension_classification_is_priority_22_between_embedding_and_waveform() {
         let directory = TestDirectory::new();
         let mut connection = db::open_project(&directory.db_path()).unwrap();
@@ -3225,6 +3280,21 @@ mod tests {
         assert_eq!(second.kind, "classify_dims");
         mark_done(&mut connection, second.id, second.attempt).unwrap();
         assert_eq!(claim_next(&mut connection).unwrap().unwrap().kind, "waveform");
+    }
+
+    /// 照片建档(`photo_probe`)与视频探测同级:排在视频的缩略 / 完整哈希前面,否则混合导入时
+    /// 照片要等视频流水线全跑完才出现在媒体池。改回 ELSE 0 这条必须红。
+    #[test]
+    fn r21_photo_probe_is_claimed_with_import_probe_before_video_thumbnails() {
+        let directory = TestDirectory::new();
+        let mut connection = db::open_project(&directory.db_path()).unwrap();
+        enqueue(&mut connection, "full_hash", "{}", "hash-first-in-queue").unwrap();
+        enqueue(&mut connection, "thumbnail", "{}", "thumb-second-in-queue").unwrap();
+        enqueue(&mut connection, "photo_probe", "{}", "photo-last-in-queue").unwrap();
+        let first = claim_next(&mut connection).unwrap().unwrap();
+        assert_eq!(first.kind, "photo_probe");
+        mark_done(&mut connection, first.id, first.attempt).unwrap();
+        assert_eq!(claim_next(&mut connection).unwrap().unwrap().kind, "thumbnail");
     }
 
     #[test]
@@ -3571,6 +3641,8 @@ mod tests {
     #[test]
     fn resource_classes_map_each_job_kind() {
         assert!(matches!(resource_class("thumbnail"), ResourceClass::Decode));
+        assert!(matches!(resource_class("photo_probe"), ResourceClass::Decode));
+        assert!(matches!(resource_class("photo_preview"), ResourceClass::Decode));
         assert!(matches!(resource_class("proxy"), ResourceClass::Decode));
         assert!(matches!(
             resource_class("clip_embed"),
@@ -3593,6 +3665,33 @@ mod tests {
         // 必须是 Light,`generation_poll_is_light_and_not_paused_by_memory_pressure`
         // 靠这一点保证内存压力暂停挡不住它。
         assert!(matches!(resource_class("generation_poll"), ResourceClass::Light));
+    }
+
+    /// R21 P1:`photo_probe` 已在导入任务内执行 ImageIO cover 解码，低配档必须把它
+    /// 计入同一 decode 预算，第三条要等前两条释放许可。
+    #[test]
+    fn photo_probe_respects_low_profile_decode_limit() {
+        use super::super::memory_profile::MemoryProfile;
+        let directory=TestDirectory::new();
+        let mut connection=db::open_project(&directory.db_path()).unwrap();
+        for clip_id in 1..=3 {
+            enqueue(
+                &mut connection,
+                "photo_probe",
+                &format!(r#"{{"clip_id":{clip_id},"path":"{clip_id}.heic"}}"#),
+                &format!("photo-probe-{clip_id}"),
+            ).unwrap();
+        }
+        let coordinator=Arc::new(WorkerPoolCoordinator::default());
+        let control=WorkerControl::new(coordinator.clone());
+        control.set_decode_limit(MemoryProfile::Low.decode_permits());
+        let first=coordinator.claim_for_owner(&mut connection,"photo-low-1").unwrap().unwrap();
+        let second=coordinator.claim_for_owner(&mut connection,"photo-low-2").unwrap().unwrap();
+        assert_eq!(control.active_decode(),2);
+        assert!(coordinator.claim_for_owner(&mut connection,"photo-low-3").unwrap().is_none());
+        drop(first);
+        assert!(coordinator.claim_for_owner(&mut connection,"photo-low-3").unwrap().is_some());
+        drop(second);
     }
 
     /// R7 Task 5:内存压力暂停期间(`exclude_decode=true, exclude_heavy=true`,

@@ -342,6 +342,9 @@ pub fn get_settings(connection: &Connection) -> Result<BTreeMap<String, String>>
     })?;
     for row in rows {
         let (key, value) = row?;
+        if key.starts_with("internal.") {
+            continue;
+        }
         values.insert(key, value);
     }
     // R16:Whisper 模型档与「只在空闲时做后台工作」的默认值随内存档位走,设置页要显示真正生效的那个。
@@ -1238,10 +1241,19 @@ pub fn clear_cache_and_rebuild(
              owner_id = NULL, lease_expires_at = NULL, cancel_requested = 0,
              next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE kind IN ('thumbnail', 'strip', 'waveform', 'proxy', 'clip_embed')
-           AND status != 'running'",
+         WHERE kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')
+           AND status != 'running'
+           AND NOT (
+             kind IN ('thumbnail', 'photo_preview')
+             AND EXISTS (
+               SELECT 1 FROM photo_meta pm
+               WHERE pm.clip_id = jobs.clip_id
+                 AND NULLIF(TRIM(pm.error), '') IS NOT NULL
+             )
+           )",
         [],
     )?;
+    let missing_photo_covers=super::photo_decode::enqueue_missing_covers_within(&transaction,cache_root)?;
     // R15:旧目录不在这里同步删(几 GB 的代理文件要转圈好久),登记给 cache_gc 后台删;
     // 与上面的 DELETE / 任务重置同一次提交,应用中途死掉也会在恢复后续删。
     if retired.exists() {
@@ -1251,7 +1263,7 @@ pub fn clear_cache_and_rebuild(
     swap.committed = true;
     Ok(CacheRebuildResult {
         removed_database_rows,
-        reset_jobs,
+        reset_jobs:reset_jobs+missing_photo_covers,
         removed_disk_bytes,
     })
 }
@@ -1323,7 +1335,10 @@ pub fn reset_project_library(connection: &mut Connection, cache_root: &Path) -> 
     }
     // 设置里指着旧素材 / 旧计数的键一并清掉;主题、键位、引导、工具路径都留着。
     transaction.execute(
-        "DELETE FROM settings WHERE key LIKE 'ui.selection.%' OR key IN ('removed_clip_high_water', 'import_generation')",
+        "DELETE FROM settings
+         WHERE key LIKE 'ui.selection.%'
+            OR key LIKE 'internal.similar.primary.%'
+            OR key IN ('removed_clip_high_water', 'import_generation')",
         [],
     )?;
     transaction.execute(
@@ -1706,7 +1721,7 @@ mod tests {
                 [vec![0_u8; 2_048]],
             )
             .unwrap();
-        for kind in ["thumbnail", "waveform", "proxy", "clip_embed", "transcribe"] {
+        for kind in ["thumbnail", "photo_preview", "waveform", "proxy", "clip_embed", "transcribe"] {
             connection
                 .execute(
                     "INSERT INTO jobs(
@@ -1724,7 +1739,7 @@ mod tests {
         let result = clear_cache_and_rebuild(&mut connection, &cache_root).unwrap();
 
         assert_eq!(result.removed_database_rows, 1);
-        assert_eq!(result.reset_jobs, 4);
+        assert_eq!(result.reset_jobs, 5);
         assert_eq!(result.removed_disk_bytes, 4);
         for table in ["clips", "segments", "ratings"] {
             let count: i64 = connection
@@ -1735,7 +1750,7 @@ mod tests {
         let pending: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM jobs
-                 WHERE kind IN ('thumbnail', 'waveform', 'proxy', 'clip_embed')
+                 WHERE kind IN ('thumbnail', 'photo_preview', 'waveform', 'proxy', 'clip_embed')
                    AND status = 'pending' AND attempt = 0",
                 [],
                 |row| row.get(0),
@@ -1746,7 +1761,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(pending, 4);
+        assert_eq!(pending, 5);
         assert_eq!(transcribe_status, "done");
         assert!(cache_root.is_dir());
         assert_eq!(directory_bytes(&cache_root).unwrap(), 0);
@@ -1793,6 +1808,74 @@ mod tests {
             .unwrap();
         assert_eq!(status, "pending", "重建后 strip 任务应重新变为 pending");
         assert_eq!(attempt, 0);
+    }
+
+    /// 清缓存与启动补扫必须遵守同一条坏图边界：曾经健康、已有 preview 历史的照片
+    /// 后来确认损坏时，thumbnail / photo_preview 均保持终态；NULL / 空错误仍可重建。
+    #[test]
+    fn cache_rebuild_does_not_retry_confirmed_bad_photo_thumbnail() {
+        let (directory,mut connection)=connection_with_settings();
+        connection.execute("INSERT INTO volumes(uuid) VALUES ('photos')",[]).unwrap();
+        connection.execute_batch(
+            "INSERT INTO clips(id,volume_uuid,rel_path,quick_hash,kind) VALUES
+               (41,'photos','bad.heic','bad-hash','photo'),
+               (42,'photos','retry-null.heic','retry-null-hash','photo'),
+               (43,'photos','retry-empty.heic','retry-empty-hash','photo');
+             INSERT INTO photo_meta(clip_id,error) VALUES(41,NULL);
+             INSERT INTO photo_meta(clip_id,error) VALUES(42,NULL);
+             INSERT INTO photo_meta(clip_id,error) VALUES(43,'');",
+        ).unwrap();
+        crate::core::photo_decode::enqueue(&mut connection,41,Path::new("bad.heic"),"bad-hash").unwrap();
+        crate::core::photo_decode::enqueue(&mut connection,42,Path::new("retry-null.heic"),"retry-null-hash").unwrap();
+        crate::core::photo_decode::enqueue(&mut connection,43,Path::new("retry-empty.heic"),"retry-empty-hash").unwrap();
+        let bad_preview_blocked=crate::core::jobs::enqueue(&mut connection,"photo_preview",r#"{"clip_id":41}"#,"bad-preview-blocked").unwrap();
+        let bad_preview_done=crate::core::jobs::enqueue(&mut connection,"photo_preview",r#"{"clip_id":41}"#,"bad-preview-done").unwrap();
+        crate::core::jobs::enqueue(&mut connection,"photo_preview",r#"{"clip_id":42}"#,"null-preview").unwrap();
+        crate::core::jobs::enqueue(&mut connection,"photo_preview",r#"{"clip_id":43}"#,"empty-preview").unwrap();
+        connection.execute(
+            "UPDATE jobs SET status='blocked',attempt=3,blocked_summary='decode failed',finished_at='now'
+             WHERE kind='thumbnail'",
+            [],
+        ).unwrap();
+        connection.execute(
+            "UPDATE jobs SET status='blocked',attempt=3,blocked_summary='decode failed',finished_at='now'
+             WHERE id=?1",
+            [bad_preview_blocked],
+        ).unwrap();
+        connection.execute(
+            "UPDATE jobs SET status='done',attempt=1,result_path='old-preview.jpg',finished_at='now'
+             WHERE id=?1",
+            [bad_preview_done],
+        ).unwrap();
+        connection.execute(
+            "UPDATE jobs SET status='blocked',attempt=2,blocked_summary='transient',finished_at='now'
+             WHERE kind='photo_preview' AND clip_id IN (42,43)",
+            [],
+        ).unwrap();
+        connection.execute("UPDATE photo_meta SET error='图片不完整或已损坏' WHERE clip_id=41",[]).unwrap();
+        let cache_root=directory.path().join("cache");
+        std::fs::create_dir_all(&cache_root).unwrap();
+
+        clear_cache_and_rebuild(&mut connection,&cache_root).unwrap();
+        let bad:(i64,String,i64)=connection.query_row(
+            "SELECT COUNT(*),MIN(status),MIN(attempt) FROM jobs WHERE kind='thumbnail' AND clip_id=41",
+            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(bad,(1,"blocked".into(),3),"清缓存不得复位确定性坏图");
+        let bad_previews:Vec<(String,i64)>=connection.prepare(
+            "SELECT status,attempt FROM jobs WHERE kind='photo_preview' AND clip_id=41 ORDER BY id",
+        ).unwrap().query_map([],|row|Ok((row.get(0)?,row.get(1)?))).unwrap()
+            .collect::<std::result::Result<_,_>>().unwrap();
+        assert_eq!(bad_previews,vec![("blocked".into(),3),("done".into(),1)],"坏图遗留 preview 终态不得复位");
+        for clip_id in [42,43] {
+            for kind in ["thumbnail","photo_preview"] {
+                let state:(String,i64)=connection.query_row(
+                    "SELECT status,attempt FROM jobs WHERE kind=?1 AND clip_id=?2",
+                    rusqlite::params![kind,clip_id],|row|Ok((row.get(0)?,row.get(1)?)),
+                ).unwrap();
+                assert_eq!(state,("pending".into(),0),"NULL/空错误的健康照片任务仍应重建:{clip_id}/{kind}");
+            }
+        }
     }
 
     #[test]

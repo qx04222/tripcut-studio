@@ -374,6 +374,7 @@ fn enqueue_scan(
     tb_den: i64,
     strip_path: &Path,
 ) -> Result<bool> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(false); }
     if duration_ticks <= 0 || tb_num <= 0 || tb_den <= 0 {
         return Ok(false);
     }
@@ -449,6 +450,7 @@ pub(crate) fn is_missing_tool_error(error: &CoreError) -> bool {
 }
 
 pub fn run_ocr_scan(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let ffmpeg = super::settings::configured_executable(
         connection,
         super::settings::FFMPEG_PATH_KEY,

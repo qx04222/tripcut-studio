@@ -52,19 +52,21 @@ export function autoCollapseTransition(
  */
 export function useRestoreSelection(): void {
   const restoreClipId = useWorkspace((state) => state.restoreClipId);
+  const workspaceMode = useWorkspace((state) => state.workspaceMode);
   const feed = useClipsFeed();
   useEffect(() => {
     if (restoreClipId === null || feed.loading || feed.revision === undefined) return;
     // N-1:clipsById 是未按集裁的全量表 —— 「还在库里」不等于「在当前集」;新建集后重启,
     // 上次选中的旧集素材不能回到空的新集里(与 tripcut:episode-changed 那条同一把尺)。
     const candidate = { kind: "clip" as const, clipId: restoreClipId };
+    const candidateClip = feed.clipsById.get(restoreClipId);
     if (
       getWorkspaceSnapshot().selection === null &&
-      feed.clipsById.has(restoreClipId) &&
+      candidateClip?.kind === workspaceMode &&
       selectionBelongsToEpisode(candidate, feed.episode.activeId, feed.clipsById)
     ) {
       dispatchWorkspace({ type: "select-clip", clipId: restoreClipId });
     }
     dispatchWorkspace({ type: "consume-restore-clip" });
-  }, [feed.clipsById, feed.episode.activeId, feed.loading, feed.revision, restoreClipId]);
+  }, [feed.clipsById, feed.episode.activeId, feed.loading, feed.revision, restoreClipId, workspaceMode]);
 }

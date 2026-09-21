@@ -182,7 +182,7 @@ export function BandChapterSection({
               canStepBack={clipKeys.indexOf(segment.key) > 0}
               canStepForward={clipKeys.indexOf(segment.key) < clipKeys.length - 1}
               readOnly={readOnly}
-              extra={trim && segment.kind === "clip" && segment.segmentId !== null ? <TrimHandles segment={segment} trim={trim} disabled={readOnly} /> : null}
+              extra={trim && segment.mediaKind !== "photo" && segment.kind === "clip" && segment.segmentId !== null ? <TrimHandles segment={segment} trim={trim} disabled={readOnly} /> : null}
             >
               {segment.kind === "slot" && segment.gap ? (
                 <GapSlotBody

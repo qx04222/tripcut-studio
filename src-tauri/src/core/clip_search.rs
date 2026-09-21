@@ -43,6 +43,7 @@ pub fn enqueue_for_clip(
     strip_path: &Path,
     strip_frame_count: usize,
 ) -> Result<Option<i64>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(None); }
     if !(1..=12).contains(&strip_frame_count) {
         return Err(CoreError::ClipSearch(format!(
             "素材 {clip_id} 的胶片条帧数 {strip_frame_count} 无效"
@@ -165,6 +166,7 @@ pub fn enqueue_missing(connection: &mut Connection, cache_root: &Path) -> Result
 }
 
 pub fn run_clip_embed(connection: &mut Connection, job: &Job) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload: ClipEmbedPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::ClipSearch(format!("CLIP 嵌入任务数据无效：{error}")))?;
     if payload.model != MODEL_NAME {

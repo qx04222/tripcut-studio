@@ -140,6 +140,7 @@ pub fn enqueue_for_clip(
     path: &Path,
     quick_hash: &str,
 ) -> Result<Option<i64>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(None); }
     let payload = AnalyzeMotionPayload {
         clip_id,
         path: path.to_string_lossy().into_owned(),
@@ -191,6 +192,7 @@ pub fn enqueue_for_clip(
 }
 
 pub fn run_analyze_motion(connection: &mut Connection, job: &Job) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload: AnalyzeMotionPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Motion(format!("运镜分析任务数据无效：{error}")))?;
     let mut source = load_source(connection, &payload)?;
@@ -1102,6 +1104,11 @@ mod tests {
         connection.execute_batch(MIGRATION_0001).unwrap();
         connection.execute_batch(MIGRATION_0007).unwrap();
         connection.execute_batch(MIGRATION_0008).unwrap();
+        // R21 0050 的 clips.kind(照片守卫 `photo_probe::is_photo` 要读它);这份手搭的库没有
+        // episode_id,不能整段跑 0050。
+        connection
+            .execute_batch("ALTER TABLE clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
+            .unwrap();
         connection
     }
 

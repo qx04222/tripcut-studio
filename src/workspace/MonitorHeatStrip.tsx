@@ -21,7 +21,7 @@ const H = 24;
  * slider,这里不接指针事件,所以 role=img 就够。点数由 `heatPoints` 保证 ≤ 200。
  */
 export function MonitorHeatStrip({ points, ranges, activeIndex, durationSeconds, position }: MonitorHeatStripProps): JSX.Element | null {
-  if (points.length === 0 || durationSeconds <= 0) return null;
+  if (points.length === 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return null;
   const x = (seconds: number) => Math.min(W, Math.max(0, (seconds / durationSeconds) * W));
   const bars: JSX.Element[] = [];
   for (let index = 0; index < points.length; index += 1) {

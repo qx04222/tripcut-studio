@@ -20,6 +20,8 @@ const ORIENTATION_OPTIONS: ReadonlyArray<{ value: ExportOrientation; label: stri
 
 export interface DeliverFormProps {
   form: DeliverFormState;
+  hasPhotos?: boolean;
+  hasVideos?: boolean;
   /** 剪映草稿开关(抽屉本地状态:打开时主按钮走 generateNative)。 */
   useJianyingDraft: boolean;
   onUseJianyingDraftChange(next: boolean): void;
@@ -44,7 +46,7 @@ export const FORCE_DRAFT_LABEL = "仍然试着生成";
 const FORCE_DRAFT_LINE = "试验草稿只新增一份、用新名字;就算剪映打不开,也不影响剪映里已有的草稿。";
 
 /** 交付目标(平台 / 时长)+ 输出格式(联系表 / 剪映草稿)两节(规格 §4.2 第 1 条)。 */
-export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }: DeliverFormProps): JSX.Element {
+export function DeliverForm({ form, hasPhotos = false, hasVideos = true, useJianyingDraft, onUseJianyingDraftChange }: DeliverFormProps): JSX.Element {
   const platformId = useId();
   const targetId = useId();
   const contactId = useId();
@@ -87,10 +89,23 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
               ))}
             </div>
           </Field>
-          <Field label="参考粗剪时长" htmlFor={targetId} help="按平台时长预算预选">
+          <Field
+            label="参考粗剪时长"
+            htmlFor={targetId}
+            help={
+              !hasVideos
+                ? hasPhotos
+                  ? "当前只选了照片，本次不生成参考粗剪"
+                  : "当前没有已选视频或照片，本次暂无交付项"
+                : hasPhotos
+                  ? "仅用于视频，照片不计时长预算"
+                  : "按平台时长预算预选"
+            }
+          >
             <Select
               id={targetId}
               aria-label="参考粗剪时长"
+              disabled={!hasVideos}
               value={roughCutTargetKey(form.targetSeconds)}
               onChange={(event) => form.setTargetSeconds(roughCutTargetFromKey(event.currentTarget.value))}
             >
@@ -125,10 +140,10 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
                 <Badge tone={jianyingBadge(form).tone}>{jianyingBadge(form).text}</Badge>
               </span>
               <p className="deliver-switch-help">
-                <span>{jianyingStatusText(form)}</span>
-                {form.jianying.supported ? <span> · 只新增一份草稿,不改剪映既有草稿;自检不过会自动降级为稳定包</span> : null}
+                <span>{hasPhotos ? "照片请使用剪映素材包或整包交付" : jianyingStatusText(form)}</span>
+                {!hasPhotos && form.jianying.supported ? <span> · 只新增一份草稿,不改剪映既有草稿;自检不过会自动降级为稳定包</span> : null}
               </p>
-              {!form.jianying.supported && form.jianying.force_allowed ? (
+              {!hasPhotos && !form.jianying.supported && form.jianying.force_allowed ? (
                 <div className="deliver-force-draft">
                   <p className="deliver-switch-help">{FORCE_DRAFT_LINE}</p>
                   <Button
@@ -148,7 +163,7 @@ export function DeliverForm({ form, useJianyingDraft, onUseJianyingDraftChange }
               id={jianyingId}
               label="剪映草稿"
               checked={useJianyingDraft && form.jianying.supported}
-              disabled={!form.jianying.supported}
+              disabled={hasPhotos || !form.jianying.supported}
               onChange={onUseJianyingDraftChange}
             />
           </div>

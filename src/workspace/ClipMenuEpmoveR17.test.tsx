@@ -21,7 +21,7 @@ import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } fro
 
 function clip(id: number, overrides: Partial<ClipListItem> = {}): ClipListItem {
   return {
-    id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`, file_name: `clip-${id}.mov`,
+    kind: "video", id, episode_id: 1, folder_label: null, cover_url: null, path: `/Volumes/CARD/clip-${id}.mov`, file_name: `clip-${id}.mov`,
     byte_size: 1, quick_hash: null, full_hash: null, tb_num: 1, tb_den: 1000, duration_ticks: 12_000, fps_num: 25, fps_den: 1,
     is_vfr: false, codec: "h264", width: 1920, height: 1080, captured_at: null, status: "ready", error: null, analysis: null,
     analysis_status: null, analysis_error: null, motion: null, motion_status: null, motion_error: null,

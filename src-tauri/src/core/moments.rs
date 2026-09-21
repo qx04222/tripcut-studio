@@ -752,6 +752,7 @@ pub fn enqueue_for_clip(
     path: &std::path::Path,
     quick_hash: &str,
 ) -> Result<Option<i64>> {
+    if super::photo_probe::is_photo(connection, clip_id)? { return Ok(None); }
     let payload = MomentsPayload {
         clip_id,
         path: path.to_string_lossy().into_owned(),
@@ -793,6 +794,7 @@ pub fn enqueue_for_clip(
 }
 
 pub fn run_moments_job(connection: &mut Connection, job: &Job) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload: MomentsPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Analysis(format!("时刻分任务数据无效:{error}")))?;
     let (tb_num, tb_den, duration_ticks, has_audio) = connection

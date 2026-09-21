@@ -829,11 +829,13 @@ fn selected_item_refs(
          SELECT c.id, live.id
          FROM clips c JOIN live_selects live ON live.clip_id = c.id
          WHERE c.missing_since IS NULL
+           AND c.kind = 'video'
            AND (c.episode_id = ?1 OR c.episode_id IS NULL)
          UNION ALL
          SELECT c.id, NULL
          FROM clips c
          WHERE c.missing_since IS NULL
+           AND c.kind = 'video'
            AND (c.episode_id = ?1 OR c.episode_id IS NULL)
            AND NOT EXISTS (SELECT 1 FROM live_selects live WHERE live.clip_id = c.id)
            AND {candidate}",
@@ -1006,6 +1008,7 @@ fn load_prompt_clips(connection: &Connection, episode_id: i64) -> Result<Vec<Pro
                     COALESCE(c.tb_num, 0) AS tb_num, COALESCE(c.tb_den, 0) AS tb_den
              FROM clips c JOIN live_selects live ON live.clip_id = c.id
              WHERE c.missing_since IS NULL
+               AND c.kind = 'video'
                AND (c.episode_id = ?1 OR c.episode_id IS NULL)
              UNION ALL
              SELECT c.id, NULL, c.rel_path, c.captured_at,
@@ -1014,6 +1017,7 @@ fn load_prompt_clips(connection: &Connection, episode_id: i64) -> Result<Vec<Pro
                     COALESCE(c.tb_num, 0), COALESCE(c.tb_den, 0)
              FROM clips c
              WHERE c.missing_since IS NULL
+               AND c.kind = 'video'
                AND (c.episode_id = ?1 OR c.episode_id IS NULL)
                AND NOT EXISTS (SELECT 1 FROM live_selects live WHERE live.clip_id = c.id)
                AND {candidate}
@@ -2549,6 +2553,32 @@ mod tests {
         let refs = selected_item_refs(&connection, episode).unwrap();
         assert!(refs.contains(&(2, None)));
         assert!(!refs.contains(&(3, None)));
+    }
+
+    #[test]
+    fn photo_candidates_never_enter_narrative_refs_prompt_beats_or_duration_budget() {
+        let (_directory, connection) = setup();
+        insert_selected(&connection, 1, "2026-09-01T10:00:00Z", "视频");
+        insert_selected(&connection, 2, "2026-09-01T10:01:00Z", "整张照片");
+        insert_selected(&connection, 3, "2026-09-01T10:02:00Z", "照片精选段");
+        connection.execute("UPDATE clips SET kind = 'photo' WHERE id IN (2, 3)", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO segments(clip_id, in_ticks, out_ticks, kind) VALUES (3, 1000, 5000, 'select')",
+                [],
+            )
+            .unwrap();
+
+        let episode = active_episode_id(&connection).unwrap();
+        let clips = load_prompt_clips(&connection, episode).unwrap();
+        assert_eq!(clips.iter().map(|clip| clip.clip_id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(clips.iter().map(|clip| clip.duration_seconds).sum::<f64>(), 10.0);
+        assert_eq!(selected_item_refs(&connection, episode).unwrap(), HashSet::from([(1, None)]));
+
+        let prompt = prompt_input_for_episode(&connection, episode).unwrap();
+        assert_eq!(prompt["clips"].as_array().unwrap().iter().map(|clip| clip["clip_id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![1]);
+        let draft = build_fallback_draft(&connection, Some(StoryTemplate::Diary)).unwrap();
+        assert_eq!(draft.chapters.iter().flat_map(|chapter| chapter.beats.iter()).map(|beat| beat.clip_id).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]

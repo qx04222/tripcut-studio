@@ -1,0 +1,334 @@
+{
+  "generator": "image 0.25; deterministic tile scenes; shift 0-2px; +0-6 levels; Gaussian sigma=8; -3EV divide8",
+  "groups": [
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0000.png",
+      "file_number": 0,
+      "group": 0,
+      "taken_at": "2026-09-19T12:00:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0010.png",
+      "file_number": 10,
+      "group": 0,
+      "taken_at": "2026-09-19T12:00:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0020.png",
+      "file_number": 20,
+      "group": 0,
+      "taken_at": "2026-09-19T12:00:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0100.png",
+      "file_number": 100,
+      "group": 1,
+      "taken_at": "2026-09-19T12:01:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0110.png",
+      "file_number": 110,
+      "group": 1,
+      "taken_at": "2026-09-19T12:01:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0120.png",
+      "file_number": 120,
+      "group": 1,
+      "taken_at": "2026-09-19T12:01:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0200.png",
+      "file_number": 200,
+      "group": 2,
+      "taken_at": "2026-09-19T12:02:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0210.png",
+      "file_number": 210,
+      "group": 2,
+      "taken_at": "2026-09-19T12:02:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0220.png",
+      "file_number": 220,
+      "group": 2,
+      "taken_at": "2026-09-19T12:02:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0300.png",
+      "file_number": 300,
+      "group": 3,
+      "taken_at": "2026-09-19T12:03:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0310.png",
+      "file_number": 310,
+      "group": 3,
+      "taken_at": "2026-09-19T12:03:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0320.png",
+      "file_number": 320,
+      "group": 3,
+      "taken_at": "2026-09-19T12:03:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0400.png",
+      "file_number": 400,
+      "group": 4,
+      "taken_at": "2026-09-19T12:04:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0410.png",
+      "file_number": 410,
+      "group": 4,
+      "taken_at": "2026-09-19T12:04:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0420.png",
+      "file_number": 420,
+      "group": 4,
+      "taken_at": "2026-09-19T12:04:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0500.png",
+      "file_number": 500,
+      "group": 5,
+      "taken_at": "2026-09-19T12:05:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0510.png",
+      "file_number": 510,
+      "group": 5,
+      "taken_at": "2026-09-19T12:05:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0520.png",
+      "file_number": 520,
+      "group": 5,
+      "taken_at": "2026-09-19T12:05:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0600.png",
+      "file_number": 600,
+      "group": 6,
+      "taken_at": "2026-09-19T12:06:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0610.png",
+      "file_number": 610,
+      "group": 6,
+      "taken_at": "2026-09-19T12:06:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0620.png",
+      "file_number": 620,
+      "group": 6,
+      "taken_at": "2026-09-19T12:06:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0700.png",
+      "file_number": 700,
+      "group": 7,
+      "taken_at": "2026-09-19T12:07:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0710.png",
+      "file_number": 710,
+      "group": 7,
+      "taken_at": "2026-09-19T12:07:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0720.png",
+      "file_number": 720,
+      "group": 7,
+      "taken_at": "2026-09-19T12:07:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0800.png",
+      "file_number": 800,
+      "group": 8,
+      "taken_at": "2026-09-19T12:08:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0810.png",
+      "file_number": 810,
+      "group": 8,
+      "taken_at": "2026-09-19T12:08:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0820.png",
+      "file_number": 820,
+      "group": 8,
+      "taken_at": "2026-09-19T12:08:10Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0900.png",
+      "file_number": 900,
+      "group": 9,
+      "taken_at": "2026-09-19T12:09:00Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0910.png",
+      "file_number": 910,
+      "group": 9,
+      "taken_at": "2026-09-19T12:09:05Z"
+    },
+    {
+      "camera": "fixture-camera",
+      "event": 0,
+      "file": "IMG_0920.png",
+      "file_number": 920,
+      "group": 9,
+      "taken_at": "2026-09-19T12:09:10Z"
+    }
+  ],
+  "protected": [
+    {
+      "file": "night.png",
+      "label": "night_highlights"
+    }
+  ],
+  "quality": [
+    {
+      "file": "quality-00.png",
+      "label": "blur"
+    },
+    {
+      "file": "quality-01.png",
+      "label": "blur"
+    },
+    {
+      "file": "quality-02.png",
+      "label": "blur"
+    },
+    {
+      "file": "quality-03.png",
+      "label": "blur"
+    },
+    {
+      "file": "quality-04.png",
+      "label": "blur"
+    },
+    {
+      "file": "quality-05.png",
+      "label": "underexposed"
+    },
+    {
+      "file": "quality-06.png",
+      "label": "underexposed"
+    },
+    {
+      "file": "quality-07.png",
+      "label": "underexposed"
+    },
+    {
+      "file": "quality-08.png",
+      "label": "underexposed"
+    },
+    {
+      "file": "quality-09.png",
+      "label": "underexposed"
+    },
+    {
+      "file": "quality-10.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-11.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-12.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-13.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-14.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-15.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-16.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-17.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-18.png",
+      "label": "good"
+    },
+    {
+      "file": "quality-19.png",
+      "label": "good"
+    }
+  ],
+  "version": 1
+}

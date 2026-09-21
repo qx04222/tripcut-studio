@@ -84,6 +84,30 @@ describe("CommandPalette", () => {
     expect(container.querySelector("input")?.getAttribute("placeholder")).toContain("全量搜索");
   });
 
+  it("starts an unselected command-palette duel in the current photo workspace only", async () => {
+    const details: unknown[] = [];
+    const onDuel = (event: Event) => details.push((event as CustomEvent).detail);
+    window.addEventListener("tripcut:open-duel", onDuel);
+    try {
+      await act(async () => {
+        root.render(<CommandPalette workspaceMode="photo" onNavigate={() => undefined} onSelectClip={() => undefined} />);
+      });
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("tripcut:open-command-palette"));
+        await Promise.resolve();
+      });
+
+      const duel = [...container.querySelectorAll<HTMLElement>("[cmdk-item]")]
+        .find((item) => item.textContent === "擂台");
+      expect(duel).toBeTruthy();
+      await act(async () => duel!.click());
+
+      expect(details).toEqual([{ workspaceMode: "photo" }]);
+    } finally {
+      window.removeEventListener("tripcut:open-duel", onDuel);
+    }
+  });
+
   it("labels an ocr-kind hit as 画面文字", async () => {
     apiMock.searchEverything.mockResolvedValue([
       { kind: "ocr", clip_id: 9, file_name: "/a/ninth.mov", excerpt: "TripCut 旅剪", episode_id: 100 },

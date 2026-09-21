@@ -23,6 +23,15 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     "3gp", "avi", "insv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts",
     "webm",
 ];
+pub const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif"];
+pub const RAW_EXTENSIONS: &[&str] = &["arw", "dng"];
+
+pub fn media_kind(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if PHOTO_EXTENSIONS.contains(&extension.as_str()) { Some("photo") }
+    else if is_supported_video(path) { Some("video") } else { None }
+}
+
 const PACKAGE_EXTENSIONS: &[&str] = &[
     "app",
     "bundle",
@@ -86,6 +95,9 @@ pub struct ImportProgress {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipListItem {
+    pub kind: String,
+    pub photo: Option<super::photo_probe::PhotoMetaDto>,
+    pub companions: Vec<super::companions::CompanionDto>,
     pub id: Option<i64>,
     pub episode_id: Option<i64>,
     pub folder_label: Option<String>,
@@ -276,8 +288,14 @@ fn degraded_frame_timing(metadata_is_vfr: bool) -> FrameTimingProbe {
     }
 }
 
+/// Compatibility entry point; new callers should retain the returned media kind.
 pub fn scan_video_files(root: &Path) -> Result<Vec<PathBuf>> {
-    scan_video_files_checked(root, || Ok(()))
+    Ok(scan_media_files(root)?.into_iter().map(|(path,_)|path).collect())
+}
+
+pub fn scan_media_files(root: &Path) -> Result<Vec<(PathBuf, &'static str)>> {
+    Ok(scan_video_files_checked(root, || Ok(()))?.into_iter()
+        .filter_map(|p|media_kind(&p).map(|kind|(p,kind))).collect())
 }
 
 fn scan_video_files_checked(root: &Path, check: impl Fn() -> Result<()>) -> Result<Vec<PathBuf>> {
@@ -289,6 +307,9 @@ fn scan_video_files_checked(root: &Path, check: impl Fn() -> Result<()>) -> Resu
     }
 
     let mut files = Vec::new();
+    // R21 PH-04:Live Photo 的 MOV 不单独建档。先记下每个目录里 HEIC/HEIF 的 stem,
+    // 只有撞上同目录同 stem 的 MOV 才去细查(歧义组不吞 MOV);不给每个 MOV 重读目录。
+    let mut heic_stems: std::collections::HashSet<(PathBuf, std::ffi::OsString)> = std::collections::HashSet::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -296,12 +317,32 @@ fn scan_video_files_checked(root: &Path, check: impl Fn() -> Result<()>) -> Resu
     {
         check()?;
         let entry = entry.map_err(|error| CoreError::Import(error.to_string()))?;
-        if entry.file_type().is_file() && is_supported_video(entry.path()) {
-            files.push(entry.into_path());
+        if entry.file_type().is_file() && media_kind(entry.path()).is_some() {
+            let path = entry.into_path();
+            if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("heic") || e.eq_ignore_ascii_case("heif")) {
+                if let (Some(parent), Some(stem)) = (path.parent(), path.file_stem()) {
+                    heic_stems.insert((parent.to_path_buf(), stem.to_os_string()));
+                }
+            }
+            files.push(path);
         }
     }
-    files.sort();
-    Ok(files)
+    let mut kept = Vec::with_capacity(files.len());
+    for path in files {
+        let is_mov = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+        if is_mov {
+            let sibling = match (path.parent(), path.file_stem()) {
+                (Some(parent), Some(stem)) => heic_stems.contains(&(parent.to_path_buf(), stem.to_os_string())),
+                _ => false,
+            };
+            if sibling && super::companions::is_live_companion(&path)? {
+                continue;
+            }
+        }
+        kept.push(path);
+    }
+    kept.sort();
+    Ok(kept)
 }
 
 fn should_visit_entry(entry: &DirEntry, root: &Path) -> bool {
@@ -529,9 +570,9 @@ pub fn start_import_files(connection: &mut Connection, paths: &[PathBuf]) -> Res
         let canonical = path.canonicalize().map_err(|error| {
             CoreError::Import(format!("无法打开导入文件 {}：{error}", path.display()))
         })?;
-        if !canonical.is_file() || !is_supported_video(&canonical) {
+        if !canonical.is_file() || media_kind(&canonical).is_none() {
             return Err(CoreError::Import(format!(
-                "导入路径不是支持的视频文件：{}",
+                "导入路径不是支持的媒体文件：{}",
                 canonical.display()
             )));
         }
@@ -606,7 +647,7 @@ fn enqueue_labeled_files_batch_into(
         "FFPROBE_PATH",
         "ffprobe",
     )?;
-    validate_ffprobe(&ffprobe)?;
+    if files.iter().any(|(path,_)| media_kind(path) == Some("video")) { validate_ffprobe(&ffprobe)?; }
     let episode_id: i64 = match episode_override {
         Some(pinned) => pinned,
         None => connection
@@ -644,6 +685,13 @@ fn enqueue_labeled_files_batch_into(
             skipped += 1;
             continue;
         }
+        if media_kind(path)==Some("photo") && existing_owner==Some(episode_id) {
+            let id:i64=connection.query_row("SELECT id FROM clips WHERE volume_uuid=?1 AND rel_path=?2",params![volume.uuid,rel_path],|r|r.get(0))?;
+            let group=super::companions::discover(path)?;
+            let tx=connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            super::companions::store(&tx,id,&group)?;
+            tx.commit()?;
+        }
         let payload = ImportPayload {
             path: path.to_string_lossy().into_owned(),
             episode_id,
@@ -671,7 +719,8 @@ fn enqueue_labeled_files_batch_into(
             "import_probe\0{}\0{identity}\0episode:{}",
             payload.path, payload.episode_id
         ));
-        if enqueue_unique(connection, "import_probe", &payload_json, &payload_hash, Some(batch_id))?.is_some() {
+        let job_kind = if media_kind(path) == Some("photo") { "photo_probe" } else { "import_probe" };
+        if enqueue_unique(connection, job_kind, &payload_json, &payload_hash, Some(batch_id))?.is_some() {
             enqueued += 1;
         } else {
             skipped += 1;
@@ -696,8 +745,20 @@ fn enqueue_unique(
     batch_id: Option<i64>,
 ) -> Result<Option<i64>> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(id) = batch_id { super::import_control::ensure_batch_active(&transaction, id)?; }
-    let existing = transaction
+    let enqueued=enqueue_unique_within(&transaction,kind,payload,payload_hash,batch_id)?;
+    transaction.commit()?;
+    Ok(enqueued)
+}
+
+fn enqueue_unique_within(
+    connection: &Connection,
+    kind: &str,
+    payload: &str,
+    payload_hash: &str,
+    batch_id: Option<i64>,
+) -> Result<Option<i64>> {
+    if let Some(id) = batch_id { super::import_control::ensure_batch_active(connection, id)?; }
+    let existing = connection
         .query_row(
             "SELECT id FROM jobs WHERE kind = ?1 AND payload_hash = ?2 LIMIT 1",
             params![kind, payload_hash],
@@ -705,12 +766,12 @@ fn enqueue_unique(
         )
         .optional()?;
     if let Some(id) = existing {
-        let final_failure: bool = transaction.query_row("SELECT status IN ('failed','blocked') FROM jobs WHERE id=?1", [id], |r|r.get(0))?;
-        if batch_id.is_none() || !final_failure { transaction.commit()?; return Ok(None); }
+        let final_failure: bool = connection.query_row("SELECT status IN ('failed','blocked') FROM jobs WHERE id=?1", [id], |r|r.get(0))?;
+        if batch_id.is_none() || !final_failure { return Ok(None); }
         // A retry is a new attempt history, with a fresh budget and batch owner.
-        transaction.execute("UPDATE jobs SET payload_hash=payload_hash||':history:'||id WHERE id=?1", [id])?;
+        connection.execute("UPDATE jobs SET payload_hash=payload_hash||':history:'||id WHERE id=?1", [id])?;
     }
-    transaction.execute(
+    connection.execute(
         "INSERT INTO jobs(
             kind, payload, payload_hash, status, attempt, import_batch_id,
             next_attempt_at, created_at, updated_at
@@ -722,8 +783,7 @@ fn enqueue_unique(
          )",
         params![kind, payload, payload_hash, batch_id],
     )?;
-    let id = transaction.last_insert_rowid();
-    transaction.commit()?;
+    let id = connection.last_insert_rowid();
     Ok(Some(id))
 }
 
@@ -803,12 +863,21 @@ pub fn run_import_probe(
     run_import_probe_with(connection, job, &ffprobe, FFPROBE_TIMEOUT)
 }
 
+pub(crate) fn run_import_probe_with_cache(connection:&mut Connection,job:&Job,cache_root:&Path)->Result<ImportProbeOutcome> {
+    let ffprobe=super::settings::configured_executable(connection,super::settings::FFPROBE_PATH_KEY,"FFPROBE_PATH","ffprobe")?;
+    run_import_probe_inner(connection,job,&ffprobe,FFPROBE_TIMEOUT,Some(cache_root))
+}
+
 fn run_import_probe_with(
     connection: &mut Connection,
     job: &Job,
     ffprobe: &OsStr,
     timeout: Duration,
 ) -> Result<ImportProbeOutcome> {
+    run_import_probe_inner(connection,job,ffprobe,timeout,None)
+}
+
+fn run_import_probe_inner(connection:&mut Connection,job:&Job,ffprobe:&OsStr,timeout:Duration,cache_root:Option<&Path>)->Result<ImportProbeOutcome> {
     let payload: ImportPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Import(format!("导入任务数据无效：{error}")))?;
     ensure_import_episode(connection, &payload)?;
@@ -876,6 +945,10 @@ fn run_import_probe_with(
             return Ok(ImportProbeOutcome::Duplicate(path));
         }
         return Ok(ImportProbeOutcome::Duplicate(path));
+    }
+
+    if media_kind(&path) == Some("photo") {
+        return import_photo(connection,job,&payload,&path,&quick_hash,byte_size,&volume,&rel_path,cache_root);
     }
 
     let mut metadata = probe_media_with(&path, ffprobe, timeout)?;
@@ -1094,6 +1167,67 @@ fn run_import_probe_with(
     Ok(ImportProbeOutcome::Imported)
 }
 
+// Probe/decode happens outside the write transaction; cancellation is rechecked at publication.
+#[allow(clippy::too_many_arguments)]
+fn import_photo(connection: &mut Connection, job: &Job, payload: &ImportPayload,
+    path: &Path, quick_hash: &str, byte_size: u64, volume: &VolumeIdentity, rel_path: &str,
+    cache_root:Option<&Path>,
+) -> Result<ImportProbeOutcome> {
+    let prepared=super::photo_probe::probe_with_source(path).and_then(|(metadata,source)| {
+        let cover=super::photo_decode::decode_cover_with_source(&source,metadata.has_alpha)?;
+        Ok((metadata,cover))
+    });
+    let companions = super::companions::discover(path)?;
+    let tx=connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_import_episode(&tx,payload)?;
+    super::import_control::ensure_job_current(&tx,job)?;
+    let owner: Option<i64>=tx.query_row("SELECT episode_id FROM clips WHERE volume_uuid=?1 AND rel_path=?2",params![volume.uuid,rel_path],|r|r.get(0)).optional()?.flatten();
+    if owner.is_some_and(|id|id!=payload.episode_id) {
+        return Ok(ImportProbeOutcome::OwnedElsewhere {path:path.to_owned(),note:"该照片已属于另一集".into()});
+    }
+    tx.execute("INSERT INTO volumes(uuid,label,fs_type,last_seen_at) VALUES(?1,?2,?3,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(uuid) DO UPDATE SET last_seen_at=excluded.last_seen_at",params![volume.uuid,volume.label,volume.fs_type])?;
+    tx.execute("INSERT INTO clips(id,volume_uuid,rel_path,byte_size,quick_hash,kind,tb_num,tb_den,duration_ticks,fps_num,fps_den,audio_probed,vfr_timing_checked,episode_id,folder_label,imported_at,import_batch_id)
+        VALUES((SELECT max(coalesce((SELECT max(id) FROM clips),0),coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key='removed_clip_high_water'),0))+1),?1,?2,?3,?4,'photo',1,1000,0,NULL,NULL,1,1,?5,?6,strftime('%Y-%m-%dT%H:%M:%fZ','now'),(SELECT import_batch_id FROM jobs WHERE id=?7))
+        ON CONFLICT(volume_uuid,rel_path) DO UPDATE SET byte_size=excluded.byte_size,quick_hash=excluded.quick_hash,
+        full_hash=CASE WHEN clips.quick_hash=excluded.quick_hash THEN clips.full_hash ELSE NULL END,
+        missing_since=NULL,folder_label=excluded.folder_label",
+        params![volume.uuid,rel_path,byte_size as i64,quick_hash,payload.episode_id,payload.folder_label,job.id])?;
+    let id:i64=tx.query_row("SELECT id FROM clips WHERE volume_uuid=?1 AND rel_path=?2",params![volume.uuid,rel_path],|r|r.get(0))?;
+    // `jobs.clip_id` 是从 payload 生成的虚拟列。照片在任务执行中才取得 clip id，
+    // 这里同事务回填，使解码预算与同素材互斥立即覆盖正在跑的 photo_probe。
+    tx.execute("UPDATE jobs SET payload=json_set(payload,'$.clip_id',?2) WHERE id=?1",params![job.id,id])?;
+    match &prepared {
+        Ok((meta,_))=>{
+            super::photo_probe::store(&tx,id,meta)?;
+            let (w,h)=if meta.orientation>=5 {(meta.height,meta.width)} else {(meta.width,meta.height)};
+            // `captured_at` 是 UTC 瞬时(photo_probe 已换算),`tz_guess` 是换算用的 offset —— 章名时分按它换回本地(story.rs Z-15)。
+            tx.execute("UPDATE clips SET width=?2,height=?3,rotation=0,captured_at=?4,gps_lat=?5,gps_lon=?6,device_model=?7,tz_guess=?8 WHERE id=?1",params![id,w,h,meta.taken_at,meta.gps_lat,meta.gps_lon,meta.camera,meta.tz_guess])?;
+        }
+        Err(error)=>{
+            tx.execute("INSERT INTO photo_meta(clip_id,error) VALUES(?1,?2) ON CONFLICT(clip_id) DO UPDATE SET error=excluded.error",params![id,error.to_string()])?;
+            tx.execute("DELETE FROM cache_artifacts WHERE clip_id=?1",[id])?;
+        }
+    }
+    super::companions::store(&tx,id,&companions)?;
+    tx.execute("INSERT OR IGNORE INTO import_batch_clips(batch_id,clip_id) SELECT import_batch_id,?1 FROM jobs WHERE id=?2 AND import_batch_id IS NOT NULL",params![id,job.id])?;
+    tx.commit()?;
+    if let Ok((_metadata,cover))=prepared {
+        if let Some(cache_root)=cache_root {
+            super::photo_decode::publish_import_cover(connection,job,cache_root,id,path,quick_hash,cover)?;
+        } else {
+            super::photo_decode::enqueue(connection,id,path,quick_hash)?;
+        }
+        let full=serde_json::to_string(&FullHashPayload{clip_id:id,path:payload.path.clone(),quick_hash:quick_hash.into()}).map_err(|e|CoreError::Import(e.to_string()))?;
+        // 两个后续任务共用一次提交；照片封面已经原子发布，减少每张照片两次串行
+        // SQLite 提交造成的固定成本，同时保持分析/full hash 仍在 cover 之后可见。
+        let downstream=connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::analysis::enqueue_for_clip_within(&downstream,id,path,quick_hash)?;
+        enqueue_unique_within(&downstream,"full_hash",&full,&hash_text(&format!("full_hash\0{id}\0{quick_hash}")),None)?;
+        downstream.commit()?;
+    }
+    Ok(ImportProbeOutcome::Imported)
+}
+
 /// 钉死了 Episode 的导入任务(补镜回流)只要求那一集**还存在**;普通导入
 /// 仍然要求它是当前活跃集。见 `ImportPayload::pinned_episode`。
 fn ensure_import_episode(connection: &Connection, payload: &ImportPayload) -> Result<()> {
@@ -1157,7 +1291,7 @@ pub fn enqueue_metadata_backfill(connection: &mut Connection) -> Result<usize> {
     let pending = {
         let mut statement = connection.prepare(
             "SELECT id, quick_hash FROM clips
-             WHERE missing_since IS NULL AND quick_hash IS NOT NULL
+             WHERE kind='video' AND missing_since IS NULL AND quick_hash IS NOT NULL
                AND (
                     vfr_timing_checked = 0
                     OR (
@@ -1195,6 +1329,7 @@ pub fn enqueue_metadata_backfill(connection: &mut Connection) -> Result<usize> {
 }
 
 pub fn run_metadata_backfill(connection: &mut Connection, job: &Job) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
     let payload: MetadataBackfillPayload = serde_json::from_str(&job.payload)
         .map_err(|error| CoreError::Import(format!("元数据回填任务数据无效：{error}")))?;
     let path = super::media_source::verified_clip_path(connection, payload.clip_id)
@@ -1276,8 +1411,9 @@ pub fn run_metadata_backfill(connection: &mut Connection, job: &Job) -> Result<(
 /// (`strip`)甚至是 `clip_embed` 的前置依赖(`run_strip_with` 完成后才入队
 /// `clip_embed`),漏掉它们会让"批量分析完成"通知在封面/胶片条/OCR 还没跑完
 /// 时就提前弹出。
-const BATCH_ANALYSIS_KINDS: [&str; 8] = [
+const BATCH_ANALYSIS_KINDS: [&str; 9] = [
     "thumbnail",
+    "photo_preview",
     "strip",
     "analyze_l1",
     "analyze_motion",
@@ -1439,7 +1575,7 @@ pub fn get_import_progress(connection: &Connection) -> Result<ImportProgress> {
                 COALESCE(SUM(status = 'running'), 0),
                 COALESCE(SUM(status = 'done' AND result_path IS NOT NULL), 0)
              FROM jobs
-             WHERE kind = 'import_probe' AND import_dismissed=0
+             WHERE kind IN ('import_probe','photo_probe') AND import_dismissed=0
                AND json_valid(payload)
                AND CAST(json_extract(payload, '$.episode_id') AS INTEGER) = (
                    SELECT id FROM episodes WHERE status = 'active'
@@ -1491,7 +1627,8 @@ pub fn pending_decode_count(connection: &Connection) -> Result<u64> {
 /// cache_artifacts 没有 `updated_at` 列,所以用「行数 + 最大 rowid」捕捉插入,
 /// 再各自加一个能捕捉「原地 UPDATE」的列(segments.tombstone 的和、
 /// clips.missing_since 是否为空的和、cache_artifacts.bytes 的和);jobs 表有
-/// `updated_at`,直接用它捕捉 pending→running→done 这类状态迁移。当前活动剧集
+/// `updated_at`,并为 photo_preview 单列完成/失败数，保证并发任务的较新时间戳
+/// 不会吞掉某张预览完成的 feed 变化。当前活动剧集
 /// id 也拼进去,切换剧集即视为修订变化。字符串本身即修订号,不需要真正哈希。
 /// clips 部分额外带 rel_path/folder_label 的字节长度总和与去重计数——「移动文件」
 /// 重绑分支在 `missing_since` 已为 NULL 时原地 UPDATE 这两列,若不额外聚合它们,
@@ -1563,13 +1700,18 @@ pub fn clips_revision(connection: &Connection) -> Result<String> {
     )?;
 
     let jobs_part: String = connection.query_row(
-        "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM jobs
-         WHERE kind IN ('analyze_l1', 'analyze_motion')",
+        "SELECT COUNT(*), COALESCE(MAX(updated_at), ''),
+                COALESCE(SUM(kind='photo_preview' AND status='done'), 0),
+                COALESCE(SUM(kind='photo_preview' AND status IN ('failed','blocked')), 0)
+           FROM jobs
+          WHERE kind IN ('analyze_l1', 'analyze_motion', 'photo_preview')",
         [],
         |row| {
             let count: i64 = row.get(0)?;
             let max_updated_at: String = row.get(1)?;
-            Ok(format!("{count}:{max_updated_at}"))
+            let previews_done: i64 = row.get(2)?;
+            let previews_failed: i64 = row.get(3)?;
+            Ok(format!("{count}:{max_updated_at}:{previews_done}:{previews_failed}"))
         },
     )?;
 
@@ -1603,6 +1745,26 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
                 aj.status, aj.blocked_summary,
                 mj.status, mj.blocked_summary,
                 CASE
+                    -- 照片的 live select 是“入选来源”，不能盖掉用户之后按下的 X/F。
+                    -- 先读非 select 段上最新的显式评级（0 也保留为清除标记）；只有
+                    -- 从未显式评级时，才由仍存活的 select 推导 binary=1。视频继续
+                    -- 沿用原来的“只要有精选段就是 1”语义。
+                    WHEN c.kind = 'photo' THEN COALESCE(
+                        (
+                            SELECT r.value FROM ratings r
+                            JOIN segments rs ON rs.id = r.segment_id
+                            WHERE rs.clip_id = c.id AND rs.tombstone = 0
+                              AND COALESCE(rs.kind, 'whole') != 'select'
+                              AND r.rating_type = 'binary'
+                            ORDER BY r.rated_at DESC, r.id DESC LIMIT 1
+                        ),
+                        CASE WHEN EXISTS (
+                            SELECT 1 FROM segments selected_segment
+                            WHERE selected_segment.clip_id = c.id
+                              AND selected_segment.kind = 'select'
+                              AND selected_segment.tombstone = 0
+                        ) THEN 1 END
+                    )
                     WHEN EXISTS (
                         SELECT 1 FROM segments selected_segment
                         WHERE selected_segment.clip_id = c.id
@@ -1635,7 +1797,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
                 c.display_lut_path, c.selected_transcribe_track, c.selected_monitor_track,
                 c.generated_source,
                 EXISTS (SELECT 1 FROM clip_moments moment WHERE moment.clip_id = c.id),
-                c.missing_since
+                c.missing_since, c.kind
          FROM clips c
          LEFT JOIN clip_analysis a ON a.clip_id = c.id
          LEFT JOIN clip_motion m ON m.clip_id = c.id
@@ -1710,6 +1872,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
             None => None,
         };
         Ok(ClipListItem {
+            kind: row.get(65)?, photo: None, companions: Vec::new(),
             id: row.get(0)?,
             file_name: file_name_from_path(&path),
             path,
@@ -1765,13 +1928,22 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
         })
     })?;
     for clip in clips {
-        items.push(clip?);
+        let mut clip=clip?;
+        if let Some(id)=clip.id {
+            if clip.kind=="photo" {
+                clip.photo=super::photo_probe::load(connection,id)?;
+                clip.companions=super::companions::list(connection,id)?;
+                let error:Option<String>=connection.query_row("SELECT error FROM photo_meta WHERE clip_id=?1",[id],|r|r.get(0)).optional()?.flatten();
+                if error.is_some() { clip.status="unreadable".into(); clip.error=error; }
+            }
+        }
+        items.push(clip);
     }
 
     let mut problem_statement = connection.prepare(
         "SELECT payload, status, blocked_summary, result_path
          FROM jobs
-         WHERE kind = 'import_probe' AND import_dismissed=0
+         WHERE kind IN ('import_probe','photo_probe') AND import_dismissed=0
            AND cancel_requested=0
            AND (status IN ('failed', 'blocked')
                 OR (status = 'done' AND result_path IS NOT NULL))
@@ -1797,6 +1969,7 @@ pub fn list_clips(connection: &Connection) -> Result<Vec<ClipListItem>> {
         };
         let duplicate = status == "done" && result_path.is_some();
         items.push(ClipListItem {
+            kind: media_kind(Path::new(&payload.path)).unwrap_or("video").into(), photo: None, companions: Vec::new(),
             id: None,
             episode_id: Some(payload.episode_id),
             folder_label: None,
@@ -2123,9 +2296,13 @@ fn timezone_offset_from_longitude(longitude: f64) -> Option<i64> {
         .map(|hours| hours * 60)
 }
 
+/// 只认文件里**声明**的时区(`+08:00` / `-0500`)。`…Z` 只是「这个瞬时按 UTC 写」——MP4/MOV
+/// 的 `creation_time` 一律这么写,不代表相机在零时区;以前把它当 `UTC+00:00`,章名就整章显示
+/// UTC 时分,还和 GPS 时区报假冲突(R21 W1 验收 P1:与照片的本地钟混排后同一分钟被排到两章)。
+/// 没声明就返回 None,交给 GPS 经度或本机 `localtime` 兜底,与照片无 offset 时同一条规则。
 fn parse_timezone_offset_minutes(value: &str) -> Option<i64> {
     if value.ends_with('Z') || value.ends_with('z') {
-        return Some(0);
+        return None;
     }
     let bytes = value.as_bytes();
     let sign_index = bytes
@@ -2401,6 +2578,130 @@ mod tests {
     use crate::core::jobs;
     use crate::core::test_support::TestDirectory;
 
+
+    #[test]
+    fn r21_photo_import_is_idempotent_and_has_no_video_jobs() {
+        let d=TestDirectory::new();
+        let path=d.path().join("photo.png");
+        image::RgbImage::from_pixel(8,6,image::Rgb([40,100,200])).save(&path).unwrap();
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        let first=start_import_files(&mut c,std::slice::from_ref(&path)).unwrap();
+        assert_eq!(first.enqueued,1);
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        let count:i64=c.query_row("SELECT count(*) FROM clips WHERE kind='photo'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1);
+        let timing:(i64,i64,i64,Option<i64>)=c.query_row("SELECT duration_ticks,tb_num,tb_den,fps_num FROM clips WHERE kind='photo'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(timing,(0,1,1000,None));
+        let bad:i64=c.query_row("SELECT count(*) FROM jobs WHERE kind IN ('import_probe','probe','proxy','waveform','strip','analyze_motion','transcribe','metadata_backfill')",[],|r|r.get(0)).unwrap();
+        assert_eq!(bad,0);
+        let analysis_count:i64=c.query_row("SELECT count(*) FROM clip_analysis a JOIN clips c ON c.id=a.clip_id WHERE c.kind='photo'",[],|r|r.get(0)).unwrap();
+        assert_eq!(analysis_count,1,"photo L1 must run through the real import worker");
+        let thumbnail_jobs:i64=c.query_row("SELECT count(*) FROM jobs WHERE kind='thumbnail'",[],|r|r.get(0)).unwrap();
+        assert_eq!(thumbnail_jobs,0,"photo_probe 必须复用同一 ImageIO source 直接发布 cover，不得再排二次解码");
+        let covers:i64=c.query_row("SELECT count(*) FROM cache_artifacts WHERE kind='cover'",[],|r|r.get(0)).unwrap();
+        assert_eq!(covers,1,"photo_probe 必须原子发布 cover");
+        let scenes:i64=c.query_row("SELECT count(*) FROM segments WHERE kind='scene'",[],|r|r.get(0)).unwrap();
+        assert_eq!(scenes,0,"photos have no video scenes");
+        assert_eq!(start_import_files(&mut c,&[path]).unwrap().enqueued,0);
+    }
+
+    /// R21 P1:新导入照片由 `photo_probe` 直接发布 cover，历史上没有 thumbnail job。
+    /// 清缓存后仍必须从照片记录补出一条真实 thumbnail，并重新生成可读 cover；原片不可改。
+    #[test]
+    fn r21_cache_rebuild_restores_direct_import_photo_cover_without_prior_thumbnail_job() {
+        let d=TestDirectory::new();
+        let path=d.path().join("direct-photo.png");
+        image::RgbImage::from_pixel(96,64,image::Rgb([30,120,210])).save(&path).unwrap();
+        let source_before=blake3::hash(&fs::read(&path).unwrap());
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        start_import_files(&mut c,std::slice::from_ref(&path)).unwrap();
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        assert_eq!(c.query_row("SELECT count(*) FROM jobs WHERE kind='thumbnail'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+
+        let cache_root=super::super::artifacts::cache_root_for_db(&d.db_path());
+        super::super::settings::clear_cache_and_rebuild(&mut c,&cache_root).unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM jobs WHERE kind='thumbnail' AND status='pending'",[],|r|r.get::<_,i64>(0)).unwrap(),
+            1,
+            "没有历史 thumbnail job 的照片也必须在清缓存后补排封面重建",
+        );
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        let (clip_id,cover_rel):(i64,String)=c.query_row(
+            "SELECT c.id,a.rel_path FROM clips c JOIN cache_artifacts a ON a.clip_id=c.id AND a.kind='cover' WHERE c.kind='photo' AND a.source_hash=c.quick_hash",
+            [],|r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert!(cache_root.join(&cover_rel).is_file(),"重建后的 cover 必须真实落盘");
+        assert!(cover_rel.starts_with(&format!("{clip_id}/cover.")));
+        assert_eq!(blake3::hash(&fs::read(&path).unwrap()),source_before,"缓存重建不得改原片");
+    }
+
+    #[test]
+    fn r21_bad_photo_does_not_abort_batch_and_companions_persist() {
+        let d=TestDirectory::new();let media=d.path().join("media");fs::create_dir(&media).unwrap();
+        image::RgbImage::from_pixel(12,8,image::Rgb([200,90,20])).save(media.join("IMG.JPG")).unwrap();
+        fs::write(media.join("IMG.ARW"),b"raw companion").unwrap();
+        fs::write(media.join("IMG.xmp"),b"<xmp/>").unwrap();
+        fs::write(media.join("broken.jpg"),[0xff,0xd8,0xff,0xe1,0,120]).unwrap();
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        assert_eq!(start_import(&mut c,&media).unwrap().total,2);
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        assert_eq!(c.query_row("SELECT count(*) FROM clips",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(c.query_row("SELECT count(*) FROM clip_companions",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        let clips=list_clips(&c).unwrap();
+        assert_eq!(clips.iter().filter(|c|c.status=="unreadable" && c.error.is_some()).count(),1);
+        let valid=clips.iter().find(|c|c.file_name=="IMG.JPG").unwrap();
+        assert_eq!(valid.kind,"photo");assert_eq!(valid.companions.len(),2);assert!(valid.photo.is_some());
+        let before=valid.companions.clone();
+        assert_eq!(start_import(&mut c,&media).unwrap().enqueued,0);
+        assert_eq!(super::super::companions::list(&c,valid.id.unwrap()).unwrap(),before);
+        fs::write(media.join("IMG.ARW.xmp"),b"<new/>").unwrap();
+        start_import(&mut c,&media).unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM clip_companions",[],|r|r.get::<_,i64>(0)).unwrap(),3);
+    }
+
+    #[test]
+    fn r21_video_entry_points_skip_photos() {
+        let d=TestDirectory::new();let mut c=db::open_project(&d.db_path()).unwrap();
+        c.execute("INSERT INTO clips(id,rel_path,kind,episode_id,tb_num,tb_den,duration_ticks) VALUES(901,'/missing.jpg','photo',1,1,1000,0)",[]).unwrap();
+        let p=Path::new("/missing.jpg");
+        // Photo L1 now has a single-frame path; other video entry points still skip.
+        assert!(super::super::motion::enqueue_for_clip(&mut c,901,p,"hash").unwrap().is_none());
+        assert!(super::super::transcribe::enqueue_for_clip(&mut c,901,p,"hash").unwrap().is_none());
+        assert!(super::super::moments::enqueue_for_clip(&mut c,901,p,"hash").unwrap().is_none());
+        assert!(super::super::clip_search::enqueue_for_clip(&mut c,901,"hash",p,1).unwrap().is_none());
+        assert!(super::super::audio_tracks::probe_and_store(&mut c,901).unwrap().is_empty());
+        assert!(super::super::smart_select::suggest_segments(&c,901,None).unwrap().is_empty());
+        for kind in ["analyze_motion","metadata_backfill","moments","strip","waveform","proxy","transcribe","ocr_scan","clip_embed"] {
+            let id=jobs::enqueue(&mut c,kind,r#"{"clip_id":901}"#,kind).unwrap();
+            assert!(jobs::JobRunner::run_one(&d.db_path()).unwrap());
+            assert_eq!(jobs::get(&c,id).unwrap().status,jobs::JobStatus::Done,"{kind}");
+        }
+    }
+
+    /// Live Photo 的 MOV 判定不能给每个 MOV 都重读一遍目录:2000 段视频的文件夹会变成
+    /// 400 万次目录项遍历。同目录 stem 索引一次建好,只有真撞上 HEIC 的 MOV 才细查。
+    #[test]
+    fn r21_scan_of_a_large_video_only_folder_stays_linear() {
+        let directory = TestDirectory::new();
+        for i in 0..3000 { fs::write(directory.path().join(format!("C{i:04}.MOV")), b"v").unwrap(); }
+        fs::write(directory.path().join("IMG_1.HEIC"), b"p").unwrap();
+        fs::write(directory.path().join("IMG_1.MOV"), b"v").unwrap();
+        let started = std::time::Instant::now();
+        let found = scan_media_files(directory.path()).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(found.len(), 3001, "3000 段视频 + 1 张 HEIC;Live MOV 不建档");
+        assert!(!found.iter().any(|(p, _)| p.ends_with("IMG_1.MOV")));
+        assert!(elapsed < std::time::Duration::from_millis(1500), "扫描 3001 个文件用了 {elapsed:?}");
+    }
+
+    #[test]
+    fn r21_mixed_scan_includes_photos_but_not_raw() {
+        let directory = TestDirectory::new();
+        for name in ["a.jpg", "b.HEIC", "c.png", "d.mov", "e.ARW", "f.dng"] {
+            fs::write(directory.path().join(name), b"fixture").unwrap();
+        }
+        assert_eq!(scan_video_files(directory.path()).unwrap().len(), 4);
+    }
 
     #[test]
     fn cancelled_import_requeues_as_new_job_and_preserves_old_batch() {
@@ -2778,6 +3079,20 @@ mod tests {
         assert_eq!(metadata.rotation, None);
         assert_eq!(metadata.manual_rotation, None);
         assert_eq!(metadata.rotation_source, None);
+    }
+
+    /// `…Z` 不是声明的时区:tz_guess 留空(章名退到本机时区),GPS 在时也不报冲突。
+    #[test]
+    fn utc_z_capture_time_is_not_a_declared_timezone() {
+        let metadata = parse_probe_json(&cfr_probe_json()).unwrap();
+        assert_eq!(metadata.captured_at.as_deref(), Some("2026-08-31T12:34:56Z"));
+        assert_eq!(metadata.tz_guess, None);
+        assert!(!metadata.tz_conflict);
+        let mut value = cfr_probe_json();
+        value["format"]["tags"]["com.apple.quicktime.location.ISO6709"] = json!("+43.6532-079.3832/");
+        let metadata = parse_probe_json(&value).unwrap();
+        assert_eq!(metadata.tz_guess.as_deref(), Some("UTC-05:00"));
+        assert!(!metadata.tz_conflict, "iPhone 的 Z + GPS 不是冲突");
     }
 
     #[test]

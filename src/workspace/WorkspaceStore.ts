@@ -19,10 +19,12 @@ export type Selection =
 export type BandMode = "story" | "music" | "journey" | "destination" | "template";
 export type DrawerKind = "import" | "deliver" | "settings" | null;
 export type PaneId = "pool" | "monitor" | "band" | "inspector";
+export type WorkspaceMode = "video" | "photo";
 /** 正在只读查看的历史集(规格 §4 的"历史集只读视角")。null = 看当前集。 */
 export type ViewingEpisode = { id: number; title: string } | null;
 
 export interface WorkspaceState {
+  workspaceMode: WorkspaceMode;
   selection: Selection;
   anchorClipId: number | null;
   multiSelection: readonly number[];
@@ -71,6 +73,7 @@ export interface WorkspaceState {
 }
 
 export type WorkspaceAction =
+  | { type: "set-workspace-mode"; mode: WorkspaceMode }
   | {
       type: "select-clip";
       clipId: number;
@@ -127,6 +130,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
+  workspaceMode: "video",
   selection: null,
   anchorClipId: null,
   multiSelection: [],
@@ -197,6 +201,16 @@ function rangeBetween(anchor: number, target: number): number[] {
 
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
+    case "set-workspace-mode":
+      if (state.workspaceMode === action.mode) return state;
+      return {
+        ...state,
+        workspaceMode: action.mode,
+        selection: null,
+        anchorClipId: null,
+        multiSelection: [],
+        inspectorDismissed: true,
+      };
     case "select-clip": {
       const selection: Selection = { kind: "clip", clipId: action.clipId };
       // R19 V-04:选中即出 —— 任何一次选中都把「收起」清零。
@@ -282,13 +296,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "focus-pane":
       return { ...state, focusedPane: action.pane };
     case "cycle-pane-focus": {
-      const start = PANE_ORDER.indexOf(state.focusedPane);
+      const paneOrder = state.workspaceMode === "photo" ? (["pool", "monitor", "band"] as const) : PANE_ORDER;
+      const start = paneOrder.indexOf(state.focusedPane as typeof paneOrder[number]);
       const direction = action.direction ?? 1;
-      const size = PANE_ORDER.length;
+      const size = paneOrder.length;
       for (let step = 1; step <= size; step += 1) {
         // +size 再取模:⇧F6 往回走时下标会变负,JS 的 % 保留负号。
-        const candidate = PANE_ORDER[(start + direction * step + size * size) % size]!;
-        if (candidate === "pool" && isPaneCollapsed(state, "pool")) continue;
+        const candidate = paneOrder[(start + direction * step + size * size) % size]!;
+        if (candidate === "pool" && state.workspaceMode !== "photo" && isPaneCollapsed(state, "pool")) continue;
         if (candidate === "inspector" && isPaneCollapsed(state, "inspector")) continue;
         return { ...state, focusedPane: candidate };
       }
@@ -307,9 +322,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "hydrate": {
       const s = action.settings;
       const bandMode = readUiSetting(s, "ui.band.mode");
+      const workspaceMode = readUiSetting(s, "ui.workspace.mode");
       const dimension = readUiSetting(s, "ui.pool.dimension") as ClipDimensionKey | "";
       const next: WorkspaceState = {
         ...state,
+        workspaceMode: workspaceMode === "photo" ? "photo" : "video",
         poolWidth: clamp(readUiNumber(s, "ui.pane.pool_width"), POOL_WIDTH_MIN, POOL_WIDTH_MAX),
         inspectorWidth: clamp(
           readUiNumber(s, "ui.pane.inspector_width"),
@@ -344,6 +361,7 @@ export function persistedPairs(
 ): ReadonlyArray<readonly [string, string]> {
   if (HYDRATED_STATES.has(next)) return [];
   const pairs: Array<readonly [string, string]> = [];
+  if (previous.workspaceMode !== next.workspaceMode) pairs.push(["ui.workspace.mode", next.workspaceMode]);
   // 选择、焦点、抽屉、搜索词都是会话态 —— 它们不在这张表里,所以永远不落盘。
   if (previous.poolWidth !== next.poolWidth) {
     pairs.push(["ui.pane.pool_width", String(Math.round(next.poolWidth))]);

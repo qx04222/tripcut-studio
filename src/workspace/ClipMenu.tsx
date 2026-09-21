@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
 import { clipMenuItems, runClipMenuAction, type ClipMenuContext } from "./clipMenuModel";
+import { duelMenuItem, requestDuel } from "./duel/duelBus";
 import { CLIP_MENU_LABEL, MORE_BUTTON_LABEL } from "./copy";
 import { EpisodeMoveMenu, useEpisodeCount } from "./EpisodeMoveMenu";
 import { Button, Menu } from "./ui";
@@ -59,9 +60,9 @@ export function PoolClipContextMenu({ multiSelection, context }: { multiSelectio
           x={menu.x}
           y={menu.y}
           ariaLabel={CLIP_MENU_LABEL}
-          items={clipMenuItems(menu.clipIds.length, { readOnly, canReveal: context?.canReveal, episodeCount })}
+          items={[...clipMenuItems(menu.clipIds.length, { readOnly, canReveal: context?.canReveal, canAddToBand: context?.canAddToBand, episodeCount }), duelMenuItem(readOnly)]}
           onSelect={(id) =>
-            void runClipMenuAction(id, menu.clipIds, {
+            id === "duel" ? requestDuel({ clipIds: menu.clipIds }) : void runClipMenuAction(id, menu.clipIds, {
               ...context,
               readOnly,
               revealClipId: menu.clicked,
@@ -105,9 +106,9 @@ export function ClipMoreButton({ clipId, multiSelection = [], context }: { clipI
           x={anchor.x}
           y={anchor.y}
           ariaLabel={CLIP_MENU_LABEL}
-          items={clipMenuItems(clipIds.length, { readOnly, canReveal: context?.canReveal, episodeCount })}
+          items={[...clipMenuItems(clipIds.length, { readOnly, canReveal: context?.canReveal, canAddToBand: context?.canAddToBand, episodeCount }), duelMenuItem(readOnly)]}
           onSelect={(id) =>
-            void runClipMenuAction(id, clipIds, {
+            id === "duel" ? requestDuel({ clipIds }) : void runClipMenuAction(id, clipIds, {
               ...context,
               readOnly,
               revealClipId: clipId,

@@ -18,6 +18,12 @@ const cargoLicenses = {
   objc2: "MIT",
   "objc2-foundation": "MIT",
   "objc2-app-kit": "Zlib OR Apache-2.0 OR MIT",
+  // R21 photo-core / photo-deliver:ImageIO 解码与哈希(许可从各 crate 的 Cargo.toml 抄的)。
+  "objc2-image-io": "Zlib OR Apache-2.0 OR MIT",
+  "objc2-core-foundation": "Zlib OR Apache-2.0 OR MIT",
+  "objc2-core-graphics": "Zlib OR Apache-2.0 OR MIT",
+  image: "MIT OR Apache-2.0",
+  image_hasher: "MIT OR Apache-2.0",
   rfd: "MIT",
   lopdf: "MIT",
   printpdf: "MIT",

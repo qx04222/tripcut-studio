@@ -27,6 +27,7 @@ export function playbackRateLabel(rate: PlaybackRate, rewinding: boolean): strin
 }
 
 export function clipFps(clip: Pick<ClipListItem, "fps_num" | "fps_den"> | null): number {
+  if (clip && (!Number.isFinite(clip.fps_num) || !Number.isFinite(clip.fps_den))) return 30;
   if (!clip || clip.fps_num === null || clip.fps_den === null || clip.fps_den <= 0 || clip.fps_num <= 0) return 30;
   return clip.fps_num / clip.fps_den;
 }

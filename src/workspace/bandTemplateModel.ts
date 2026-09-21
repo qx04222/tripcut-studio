@@ -14,6 +14,7 @@ import type { ClipListItem, StoryItem, StoryOrderRef, Storyboard } from "../api"
 export const TEMPLATE_POOL_RULE = "收藏或 ≥3 星";
 
 export function isTemplateCandidate(clip: ClipListItem): boolean {
+  if (clip.kind !== "video") return false;
   if (clip.binary_rating === -1) return false;
   if (clip.binary_rating === 1 || clip.select_count > 0) return true;
   return (clip.star_rating ?? 0) >= 3;
@@ -34,12 +35,14 @@ export function bandPickerCandidates(
  * 把 beats 的顺序换算成 `set_story_order` 的引用列表,套用后写一次——走的是拖排
  * 同一条写入路径,可撤销。beats 为空时返回空数组,调用方据此给「0 镜」的解释。
  */
-export function narrativeStoryOrder(board: Storyboard | null): StoryOrderRef[] {
+export function narrativeStoryOrder(board: Storyboard | null, clips: readonly ClipListItem[]): StoryOrderRef[] {
   const chapters = [...(board?.narrative?.chapters ?? [])].sort((left, right) => left.order - right.order);
+  const videoIds = new Set(clips.filter((clip) => clip.kind === "video" && clip.id !== null).map((clip) => clip.id));
   const seen = new Set<string>();
   const refs: StoryOrderRef[] = [];
   for (const chapter of chapters) {
     for (const beat of [...chapter.beats].sort((left, right) => left.order - right.order)) {
+      if (!videoIds.has(beat.clip_id)) continue;
       const key = beat.segment_id === null ? `whole:${beat.clip_id}` : `segment:${beat.segment_id}`;
       if (seen.has(key)) continue;
       seen.add(key);

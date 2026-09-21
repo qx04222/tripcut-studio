@@ -64,6 +64,19 @@ describe("GuideHost", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("R21:切到照片工作台后才显示照片分区气泡，关闭后持久化", async () => {
+    apiMocks.getSettings.mockResolvedValue({ [guideKey("nav")]: "true" });
+    mount('<div data-guide="photo-workspace"></div>');
+    render(<GuideHost />);
+    await waitFor(() => expect(apiMocks.getSettings).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => dispatchWorkspace({ type: "set-workspace-mode", mode: "photo" }));
+    expect((await screen.findByRole("dialog", { name: "新手引导" })).textContent).toContain("这里挑照片，那边挑视频。");
+    act(() => screen.getByRole("button", { name: "知道了" }).click());
+    expect(apiMocks.setSetting).toHaveBeenCalledWith(guideKey("photo"), "true");
+  });
+
   it("首页钉住时不算在工作区:不出导航条气泡;解开后出", async () => {
     mount('<nav class="pipeline-rail"></nav>');
     pinHome(true);
@@ -129,17 +142,17 @@ describe("GuideHost", () => {
     await act(async () => dispatchWorkspace({ type: "close-drawer" }));
     const dialog = await screen.findByRole("dialog", { name: "新手引导" });
     expect(dialog.textContent).toContain("往前 / 往后");
-    // 固定表里镜块是第 4 只;这位用户看过 3 只 → 显示 4/9;换成只看过 1 只就该是 2/9(R19 P-06 追加 models 后共 9 只)。
-    expect(dialog.textContent).toContain("4/9");
+    // R21 增加照片工作台气泡后共 10 只；这位用户看过 3 只，所以当前是 4/10。
+    expect(dialog.textContent).toContain("4/10");
   });
 
-  it("Y-05:只看过 1 只时,第二只无论是表里第几个都显示 2/8", async () => {
+  it("Y-05:只看过 1 只时，第二只无论在表里第几个都显示 2/10", async () => {
     apiMocks.getSettings.mockResolvedValue({ [guideKey("nav")]: "true" });
     mount('<div class="band-segment"></div>');
     feedMock.state = feed({ clips: [{ id: 1 }], clipsById: new Map(), storyboard: { items: [{ key: "segment:1", item_kind: "segment" }], chapters: [] } });
     render(<GuideHost />);
     const dialog = await screen.findByRole("dialog", { name: "新手引导" });
-    expect(dialog.textContent).toContain("2/9");
-    expect(dialog.textContent).not.toContain("4/9");
+    expect(dialog.textContent).toContain("2/10");
+    expect(dialog.textContent).not.toContain("5/10");
   });
 });

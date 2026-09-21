@@ -61,6 +61,9 @@ const commands = [
   // R8 Task 8:chunk 预算检测器必须在链条里,否则只是"存在"不是"把关"。
   { id: "check-chunks", command: "node", args: ["scripts/qa/check-chunks.mjs"] },
   { id: "vitest", command: "npm", args: ["test"] },
+  // 交接书定义的六门禁把 Rust build 与 test 分开计数；显式保留这一门，
+  // 避免 cargo test 的隐式编译掩盖应用目标本身的构建回归。
+  { id: "cargo-build", command: "cargo", args: ["build", "--manifest-path", "src-tauri/Cargo.toml"] },
   { id: "cargo-test", command: "cargo", args: ["test", "--manifest-path", "src-tauri/Cargo.toml"] },
   // R6 Task 2：真机剪映金丝雀——对活的 template.tmp 键集比对,剪映/草稿缺失时
   // 自己打印 SKIP 并直接 return(不假绿)。没有独立开关,就在 fast-gates 里

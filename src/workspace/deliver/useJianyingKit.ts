@@ -18,6 +18,7 @@ import { OPEN_JIANYING_ACTION, isKitDone, kitDoneLine } from "./kitExportModel";
 import { exportErrorLine, isDestUnavailable } from "./quickExportModel";
 import type { ExportProgress } from "./useExportProgress";
 import { LAST_DIR_KEY } from "./useQuickExport";
+import { ensureCurrentPhotoOrderSaved } from "../photoOrderSettings";
 
 export interface JianyingKit {
   /** 上次导出的文件夹(与快速导出共用 `ui.export.last_dir`);null = 还没选过。 */
@@ -106,13 +107,16 @@ export function useJianyingKit(progress: ExportProgress, options: { autoStart?: 
 
   const start = useCallback(
     async (dir: string) => {
+      if ((status.selected_photo_count ?? 0) > 0) {
+        await ensureCurrentPhotoOrderSaved();
+      }
       const outcome = await exportJianyingKit(dir);
       remember(dir);
       setStartedJobId(outcome.job_id);
       setJobId(outcome.job_id);
       await refresh().catch(() => undefined);
     },
-    [refresh, remember, setJobId],
+    [refresh, remember, setJobId, status.selected_photo_count],
   );
 
   // J-07:素材包不是剪映原生项目,「打开剪映」光启动 App 用户还是得自己去 Finder 摸文件夹——

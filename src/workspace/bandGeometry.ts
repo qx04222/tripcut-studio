@@ -1,4 +1,4 @@
-import { BAND_SEGMENT_PITCH, type BandChapter } from "./shotBandModel";
+import { BAND_SEGMENT_PITCH, type BandSegment, type BandChapter } from "./shotBandModel";
 
 /**
  * 镜头带横轴几何:一章占几个节距、实宽多少、每章从哪个像素开始。
@@ -28,7 +28,8 @@ export function chapterPitchCount(chapter: Pick<BandChapter, "segments">, folded
 
 /** 一章的实宽:节距数 × 节距,减掉最后一格的 8px 间距(章与章之间由视口 gap 补)。 */
 export function chapterWidth(chapter: Pick<BandChapter, "segments">, folded = false): number {
-  return chapterPitchCount(chapter, folded) * BAND_SEGMENT_PITCH - 8;
+  if (folded || chapter.segments.length === 0) return BAND_SEGMENT_PITCH - 8;
+  return chapter.segments.reduce((width, segment) => width + segmentWidth(segment) + 8, 0) - 8;
 }
 
 export function chapterOffsets(chapters: readonly BandChapter[], folded: ReadonlySet<string> = new Set()): number[] {
@@ -36,7 +37,17 @@ export function chapterOffsets(chapters: readonly BandChapter[], folded: Readonl
   let left = 0;
   for (const chapter of chapters) {
     offsets.push(left);
-    left += BAND_CHAPTER_HEADER_WIDTH + chapterPitchCount(chapter, folded.has(foldKey(chapter))) * BAND_SEGMENT_PITCH;
+    left += BAND_CHAPTER_HEADER_WIDTH + chapterWidth(chapter, folded.has(foldKey(chapter))) + 8;
   }
   return offsets;
+}
+
+/** 视频镜头带维持固定节距；照片由独立工作台承载。 */
+export function segmentWidth(_segment: Pick<BandSegment, "mediaKind" | "holdMs">): number {
+  return BAND_SEGMENT_PITCH - 8;
+}
+
+/** 音乐刻度沿用视频镜块的固定节距。 */
+export function musicPitchCount(segments: readonly Pick<BandSegment, "mediaKind" | "holdMs">[]): number {
+  return segments.length;
 }

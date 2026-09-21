@@ -105,3 +105,15 @@ describe("devMock moments (R11 lane B)", () => {
     expect(segments.some((segment) => segment.id === manual.id)).toBe(true);
   });
 });
+
+// R21: additive media DTO contract; old video fixtures remain videos.
+it("r21 mock clips carry photo-core defaults", () => {
+  __resetMockForTests();
+  const clips = handleMockCommand("list_clips", {}) as Array<Record<string, unknown>>;
+  expect(clips.length).toBeGreaterThan(0);
+  for (const clip of clips) {
+    expect(clip.kind).toBe("video");
+    expect(clip.photo).toBeNull();
+    expect(clip.companions).toEqual([]);
+  }
+});

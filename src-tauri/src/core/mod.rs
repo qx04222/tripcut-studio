@@ -14,6 +14,7 @@ pub mod db;
 pub mod deliver;
 pub mod diagnostics;
 pub mod doctor;
+pub mod duel;
 pub mod episode;
 pub mod error;
 pub mod generation;
@@ -64,3 +65,11 @@ pub mod transcribe;
 
 #[cfg(test)]
 pub mod test_support;
+
+pub mod companions;
+pub mod photo_probe;
+pub mod photo_hash;
+pub mod photo_decode;
+pub(crate) mod photo_export;
+#[cfg(all(test, target_os = "macos"))]
+mod r21_w1_e2e_tests;
