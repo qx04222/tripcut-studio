@@ -5,7 +5,7 @@ import { askDirector, getLlmStatus, WEIGHT_KEYS, type AutoSelectParamsInput, typ
  * `auto_select_episode_with` 的参数 —— 时长 / 范围 / 权重偏置 / 挑法。**本地规则是主路径**
  * (业主每天用,离线要能用);LLM(`llm.rs` 的三家 CLI 路由)可用时只做增强,拿不到就静默回落。
  *
- * 权重偏置的键就是 `moments.rs` 的 `WEIGHT_KEYS`(六项);「人脸」没有信号,用「人声」当代理并在
+ * 权重偏置的键就是 `moments.rs` 的 `WEIGHT_KEYS`(六项评分、三项待标定);「人脸」没有信号,用「人声」当代理并在
  * `bias` 里如实写「少人脸(按少人声算)」。
  */
 
@@ -46,7 +46,7 @@ export interface SelectPromptParse {
 }
 
 /** 打分缺省权重(与 `MomentWeights::default()` 逐位相同;偏置在它上面乘)。 */
-export const DEFAULT_WEIGHTS: MomentWeights = { sharp: 0.24, motion: 0.2, exposure: 0.16, sound: 0.12, no_cut: 0.08, interest: 0.2 };
+export const DEFAULT_WEIGHTS: MomentWeights = { sharp: 0.24, motion: 0.2, exposure: 0.16, sound: 0.12, no_cut: 0.08, interest: 0.2, horizon_tilt_deg: 0, exposure_worst_cell: 0, saliency_sharpness: 0 };
 
 interface BiasRule {
   pattern: RegExp;

@@ -28,8 +28,26 @@ pub const RAW_EXTENSIONS: &[&str] = &["arw", "dng"];
 
 pub fn media_kind(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if PHOTO_EXTENSIONS.contains(&extension.as_str()) { Some("photo") }
+    if PHOTO_EXTENSIONS.contains(&extension.as_str()) || RAW_EXTENSIONS.contains(&extension.as_str()) { Some("photo") }
     else if is_supported_video(path) { Some("video") } else { None }
+}
+
+/// Direct inspection is deliberately limited to these two containers.
+pub(crate) fn is_raw(path: &Path) -> bool {
+    path.extension().and_then(|value|value.to_str())
+        .is_some_and(|ext| RAW_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+fn rendered_raw_sibling(path: &Path) -> Result<bool> {
+    if !is_raw(path) { return Ok(false); }
+    let Some(parent)=path.parent() else { return Ok(false); };
+    for entry in std::fs::read_dir(parent)? {
+        let entry=entry?;let sibling=entry.path();
+        if sibling.file_stem()==path.file_stem()
+            && sibling.extension().and_then(|ext|ext.to_str()).is_some_and(|ext|matches!(ext.to_ascii_lowercase().as_str(),"jpg"|"jpeg"|"heic"|"heif"))
+            && entry.file_type()?.is_file() { return Ok(true); }
+    }
+    Ok(false)
 }
 
 const PACKAGE_EXTENSIONS: &[&str] = &[
@@ -327,8 +345,13 @@ fn scan_video_files_checked(root: &Path, check: impl Fn() -> Result<()>) -> Resu
             files.push(path);
         }
     }
+    let rendered_stems: std::collections::HashSet<_> = files.iter()
+        .filter(|path|path.extension().and_then(|ext|ext.to_str()).is_some_and(|ext|matches!(ext.to_ascii_lowercase().as_str(),"jpg"|"jpeg"|"heic"|"heif")))
+        .filter_map(|path|Some((path.parent()?.to_path_buf(),path.file_stem()?.to_os_string())))
+        .collect();
     let mut kept = Vec::with_capacity(files.len());
     for path in files {
+        if is_raw(&path) && path.parent().zip(path.file_stem()).is_some_and(|(parent,stem)|rendered_stems.contains(&(parent.to_path_buf(),stem.to_os_string()))) { continue; }
         let is_mov = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mov"));
         if is_mov {
             let sibling = match (path.parent(), path.file_stem()) {
@@ -576,7 +599,7 @@ pub fn start_import_files(connection: &mut Connection, paths: &[PathBuf]) -> Res
                 canonical.display()
             )));
         }
-        files.push(canonical);
+        if !rendered_raw_sibling(&canonical)? { files.push(canonical); }
     }
     files.sort();
     files.dedup();
@@ -597,7 +620,7 @@ pub(crate) fn start_import_files_into_episode(
         let canonical = path.canonicalize().map_err(|error| {
             CoreError::Import(format!("无法打开导入文件 {}：{error}", path.display()))
         })?;
-        files.push(canonical);
+        if !rendered_raw_sibling(&canonical)? { files.push(canonical); }
     }
     files.sort();
     files.dedup();
@@ -1174,7 +1197,7 @@ fn import_photo(connection: &mut Connection, job: &Job, payload: &ImportPayload,
     cache_root:Option<&Path>,
 ) -> Result<ImportProbeOutcome> {
     let prepared=super::photo_probe::probe_with_source(path).and_then(|(metadata,source)| {
-        let cover=super::photo_decode::decode_cover_with_source(&source,metadata.has_alpha)?;
+        let cover=super::photo_decode::decode_cover_with_source(&source,metadata.has_alpha,is_raw(path))?;
         Ok((metadata,cover))
     });
     let companions = super::companions::discover(path)?;
@@ -1193,6 +1216,12 @@ fn import_photo(connection: &mut Connection, job: &Job, payload: &ImportPayload,
         missing_since=NULL,folder_label=excluded.folder_label",
         params![volume.uuid,rel_path,byte_size as i64,quick_hash,payload.episode_id,payload.folder_label,job.id])?;
     let id:i64=tx.query_row("SELECT id FROM clips WHERE volume_uuid=?1 AND rel_path=?2",params![volume.uuid,rel_path],|r|r.get(0))?;
+    // Schema 53 has no container column. Preserve ordinary photo codec values;
+    // only standalone RAW uses this existing slot, exposed as DTO raw_container.
+    if is_raw(path) {
+        let container=path.extension().and_then(|ext|ext.to_str()).unwrap_or("").to_ascii_lowercase();
+        tx.execute("UPDATE clips SET codec=?2 WHERE id=?1",params![id,container])?;
+    }
     // `jobs.clip_id` 是从 payload 生成的虚拟列。照片在任务执行中才取得 clip id，
     // 这里同事务回填，使解码预算与同素材互斥立即覆盖正在跑的 photo_probe。
     tx.execute("UPDATE jobs SET payload=json_set(payload,'$.clip_id',?2) WHERE id=?1",params![job.id,id])?;
@@ -2580,6 +2609,84 @@ mod tests {
 
 
     #[test]
+    fn ph10_raw_scan_pairing_and_whitelist() {
+        let d=TestDirectory::new();
+        for name in ["solo.ARW","solo2.dng","pair.ARW","pair.JPG","phone.DNG","phone.HEIC","other.CR3"] {
+            fs::write(d.path().join(name),b"fixture").unwrap();
+        }
+        let files=scan_media_files(d.path()).unwrap();
+        assert_eq!(files.len(),4);
+        assert!(files.iter().all(|(_,kind)|*kind=="photo"));
+        assert!(files.iter().any(|(path,_)|path.ends_with("solo.ARW")));
+        assert!(!files.iter().any(|(path,_)|path.ends_with("pair.ARW")||path.ends_with("phone.DNG")));
+        assert_eq!(super::super::companions::discover(&d.path().join("pair.JPG")).unwrap().files.len(),1);
+    }
+
+    #[test]
+    fn ph10_explicit_pair_uses_jpeg_and_other_raw_stays_companion() {
+        let d=TestDirectory::new();let jpg=d.path().join("pair.JPG");
+        image::RgbImage::from_pixel(64,48,image::Rgb([40,100,200])).save(&jpg).unwrap();
+        let raw=d.path().join("pair.ARW");fs::write(&raw,b"raw companion").unwrap();
+        fs::write(d.path().join("pair.CR3"),b"other raw companion").unwrap();
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        assert_eq!(start_import_files(&mut c,&[raw,jpg]).unwrap().enqueued,1);
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        assert_eq!(c.query_row("SELECT count(*) FROM clips",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(c.query_row("SELECT count(*) FROM clip_companions WHERE role='raw'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    }
+
+    #[test]
+    fn ph10_dng_import_cover_orientation_and_preview_metadata() {
+        let d=TestDirectory::new();
+        let path=d.path().join("solo.dng");
+        fs::write(&path,include_bytes!("../../../qa/ai-eval/raw/minimal-rgb.dng")).unwrap();
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        assert_eq!(start_import_files(&mut c,std::slice::from_ref(&path)).unwrap().enqueued,1);
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        let (id,kind,container,w,h):(i64,String,String,i64,i64)=c.query_row("SELECT id,kind,codec AS container,width,height FROM clips",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!((kind.as_str(),container.as_str(),w,h),("photo","dng",48,64));
+        let meta=serde_json::to_value(super::super::photo_probe::load(&c,id).unwrap().unwrap()).unwrap();
+        assert_eq!(meta["orientation"],6);
+        assert_eq!(meta["preview_source"],"decoded");
+        assert_eq!(meta["preview_small"],true);
+        assert_eq!(meta["preview_width"],48);
+        assert_eq!(meta["preview_height"],64);
+        assert_eq!(c.query_row("SELECT count(*) FROM cache_artifacts WHERE kind='cover'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(c.query_row("SELECT count(*) FROM jobs WHERE status IN ('failed','blocked')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn ph10_dngs_group_duel_and_undo_without_video_story_order() {
+        use crate::core::{duel,similar};
+        let d=TestDirectory::new();let mut paths=Vec::new();
+        for index in 0..3 {
+            let path=d.path().join(format!("raw-{index}.dng"));
+            let mut bytes=include_bytes!("../../../qa/ai-eval/raw/minimal-rgb.dng").to_vec();
+            // Distinct file hashes, same scene; change one pixel, never the TIFF structure.
+            *bytes.last_mut().unwrap()+=index;
+            fs::write(&path,bytes).unwrap();paths.push(path);
+        }
+        let mut c=db::open_project(&d.db_path()).unwrap();
+        assert_eq!(start_import_files(&mut c,&paths).unwrap().enqueued,3);
+        while jobs::JobRunner::run_one(&d.db_path()).unwrap() {}
+        let groups=similar::similar_groups(&c).unwrap();
+        let group=groups.iter().find(|group|group.members.len()==3).expect("RAW must form a photo group");
+        let winner=group.members[0].clip_id;
+        let members=group.members.iter().map(|member|duel::Member {clip_id:member.clip_id,segment_id:None,result_segment_id:None,preview:None}).collect();
+        let mut session=duel::start_duel(&mut c,members,"similar_group").unwrap();
+        while !session.pair.is_empty() {
+            let winner=format!("photo:{winner}");
+            let picked=if session.pair.contains(&winner) {winner} else {session.pair[0].clone()};
+            session=duel::decide(&mut c,session.id,Some(picked)).unwrap();
+        }
+        duel::finish(&mut c,session.id).unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM segments WHERE kind='select' AND tombstone=0",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(c.query_row("SELECT count(*) FROM story_order",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        duel::undo_session(&mut c,session.id).unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM segments WHERE kind='select' AND tombstone=0",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
     fn r21_photo_import_is_idempotent_and_has_no_video_jobs() {
         let d=TestDirectory::new();
         let path=d.path().join("photo.png");
@@ -2695,12 +2802,12 @@ mod tests {
     }
 
     #[test]
-    fn r21_mixed_scan_includes_photos_but_not_raw() {
+    fn r21_mixed_scan_includes_photos_and_whitelisted_raw() {
         let directory = TestDirectory::new();
         for name in ["a.jpg", "b.HEIC", "c.png", "d.mov", "e.ARW", "f.dng"] {
             fs::write(directory.path().join(name), b"fixture").unwrap();
         }
-        assert_eq!(scan_video_files(directory.path()).unwrap().len(), 4);
+        assert_eq!(scan_video_files(directory.path()).unwrap().len(), 6);
     }
 
     #[test]

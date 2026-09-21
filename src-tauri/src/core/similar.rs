@@ -1492,7 +1492,7 @@ mod tests {
         ).unwrap();
         set_primary(&mut connection, 1, 2).unwrap();
 
-        assert_eq!(crate::core::db::schema_version(&connection).unwrap(), 53);
+        assert_eq!(crate::core::db::schema_version(&connection).unwrap(), crate::core::migrations::LATEST_SCHEMA_VERSION);
         let raw = crate::core::settings::setting_value(
             &connection,
             "internal.similar.primary.ledger.v1",

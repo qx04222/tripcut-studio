@@ -129,7 +129,8 @@ export function pipelineInputFrom(
     segmentCount,
     chapters: (storyboard?.chapters ?? []).map((chapter) => ({ id: chapter.id, shotCount: shotsByChapter.get(chapter.id) ?? 0 })),
     skippedChapterIds,
-    exportCount: episode?.export_count ?? 0,
+    // R21 W3(F-W3-03):精选照片的导出不算视频的第 ④ 步。
+    exportCount: Math.max(0, (episode?.export_count ?? 0) - (episode?.photo_export_count ?? 0)),
     unplacedCount: storyboard?.candidates?.filter((item) => videoIds.has(item.clip_id)).length ?? 0,
   };
 }

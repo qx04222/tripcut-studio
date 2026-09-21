@@ -16,6 +16,7 @@ use serde_json::Value;
 #[path = "deliver_photo.rs"]
 mod photo;
 
+use super::archive;
 use super::contact_sheet;
 use super::error::{CoreError, Result};
 use super::jobs::{self, Job};
@@ -46,6 +47,10 @@ const MODE_QUICK: &str = "quick";
 /// R14 车道 B:「剪映素材包」—— 按镜头带顺序把每个镜 remux 成 `NN_<章名>_<素材名>.mp4`,
 /// 平铺在 `<集名>_剪映素材包_<日期>`(同名 `-2`)里,附 [`KIT_ORDER_FILE`];剪映不可用时的交接路。
 const MODE_KIT: &str = "kit";
+/// 照片线唯一的导出:「导出精选照片」——只复制照片(HEIC / RAW 转 JPG + 原件 + 伴随)到
+/// `<集名>_精选照片_<日期>`,平铺 + 一份「顺序.txt」,走 archive_ops。不带视频、不建交付包目录。
+const MODE_PHOTOS: &str = "photos";
+const PHOTOS_SUFFIX: &str = "精选照片";
 const KIT_SUFFIX: &str = "剪映素材包";
 /// 素材包里的顺序清单:每行 `NN 章名 素材名 时长`,拖进剪映时间线时照着核对。
 pub const KIT_ORDER_FILE: &str = "顺序.txt";
@@ -816,7 +821,8 @@ pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) ->
     let episode_title: String = connection
         .query_row("SELECT title FROM episodes WHERE status = 'active'", [], |row| row.get(0))
         .map_err(|_| CoreError::Export("没有进行中的 Episode，无法导出".to_owned()))?;
-    let (clips, _skipped) = filter_quick_selection(selected_clips(connection)?, None)?;
+    // 照片线不套视频那一套:素材包只装视频,照片走「导出精选照片」。
+    let (clips, _skipped) = filter_quick_selection(video_only(selected_clips(connection)?), None)?;
     let date: String = connection.query_row(
         "SELECT strftime('%Y-%m-%d', 'now', 'localtime')",
         [],
@@ -834,7 +840,7 @@ pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) ->
         None => kit_folder_name(&project_name, &date),
     };
     let missing = missing_source_names(connection, &clips)?;
-    let files = package_output_names(&clips, photo::count(&clips) > 0);
+    let files = package_output_names(&clips);
     Ok(KitExportOutcome {
         job_id: None,
         dir,
@@ -844,36 +850,62 @@ pub fn plan_jianying_kit(connection: &Connection, destination: Option<&Path>) ->
     })
 }
 
-fn package_output_names(clips: &[ExportClip], split_media: bool) -> Vec<String> {
-    let ordinals = (!split_media).then(|| kit_chapter_ordinals(clips));
-    let video_clips = clips
-        .iter()
-        .filter(|clip| clip.media_kind != "photo")
-        .cloned()
-        .collect::<Vec<_>>();
-    let video_ordinals = kit_chapter_ordinals(&video_clips);
-    let mut video_index = 0;
-    let mut photo_index = 0;
+/// 照片线:「导出精选照片」—— winners = 收藏 + ≥3 星 + 擂台 winner(`selected_clips` 的照片分支),
+/// 平铺复制到 `<集名>_精选照片_<日期>`;HEIC / RAW 转 JPG,原件与伴随(RAW / XMP)原样一份,
+/// 加一份「顺序.txt」;整个复制走 archive_ops(可撤销、可对账)。
+pub fn start_photo_export(connection: &mut Connection, destination: &Path) -> Result<KitExportOutcome> {
+    ensure_writable_directory(destination)?;
+    let plan = plan_photo_export(connection, Some(destination))?;
+    let job_id = enqueue_export(connection, destination, None, None, false, None, MODE_PHOTOS, None)?;
+    Ok(KitExportOutcome { job_id: Some(job_id), ..plan })
+}
+
+/// 只算不排:导出精选照片将写哪个文件夹、哪些文件(顺序 = 精选带保存的顺序,其次拍摄时间)。
+pub fn plan_photo_export(connection: &Connection, destination: Option<&Path>) -> Result<KitExportOutcome> {
+    let episode_title: String = connection
+        .query_row("SELECT title FROM episodes WHERE status = 'active'", [], |row| row.get(0))
+        .map_err(|_| CoreError::Export("没有进行中的 Episode，无法导出".to_owned()))?;
+    let clips = photo_only(selected_clips(connection)?);
+    if clips.is_empty() {
+        return Err(CoreError::Export("当前没有精选照片：先收藏、打 3 星以上或在擂台选出主图".to_owned()));
+    }
+    let date: String = connection.query_row("SELECT strftime('%Y-%m-%d', 'now', 'localtime')", [], |row| row.get(0))?;
+    let project_name = package_project_name(&episode_title);
+    let dir = match destination {
+        Some(destination) => unique_photos_path(
+            &destination.canonicalize().unwrap_or_else(|_| destination.to_path_buf()),
+            &project_name,
+            &date,
+        )
+        .to_string_lossy()
+        .into_owned(),
+        None => photos_folder_name(&project_name, &date),
+    };
+    let missing = missing_source_names(connection, &clips)?;
+    Ok(KitExportOutcome {
+        job_id: None,
+        dir,
+        files: photo::output_names(&clips),
+        order_file: KIT_ORDER_FILE.to_owned(),
+        missing,
+    })
+}
+
+fn video_only(clips: Vec<ExportClip>) -> Vec<ExportClip> {
+    clips.into_iter().filter(|clip| clip.media_kind != "photo").collect()
+}
+
+fn photo_only(clips: Vec<ExportClip>) -> Vec<ExportClip> {
+    clips.into_iter().filter(|clip| clip.media_kind == "photo").collect()
+}
+
+/// 素材包的文件名:`NN_<章名>_<素材名>.mp4`(只有视频)。
+fn package_output_names(clips: &[ExportClip]) -> Vec<String> {
+    let ordinals = kit_chapter_ordinals(clips);
     clips
         .iter()
         .enumerate()
-        .map(|(index, clip)| {
-            if !split_media {
-                return photo::relative_name(
-                    index + 1,
-                    ordinals.as_ref().expect("unsplit ordinals")[index],
-                    clip,
-                );
-            }
-            if clip.media_kind == "photo" {
-                photo_index += 1;
-                photo::split_relative_name(0, photo_index, None, clip)
-            } else {
-                let ordinal = video_ordinals[video_index];
-                video_index += 1;
-                photo::split_relative_name(video_index, 0, ordinal, clip)
-            }
-        })
+        .map(|(index, clip)| kit_relative_name(index + 1, ordinals[index], &clip.chapter_title, &clip.file_name))
         .collect()
 }
 
@@ -1004,10 +1036,11 @@ fn enqueue_export(
         override_orientation,
     )?
     .into();
-    let all = selected_clips(&transaction)?
-        .into_iter()
-        .filter(|clip| mode != MODE_QUICK || clip.media_kind != "photo")
-        .collect();
+    // 照片线不套视频那一套:快速导出 / 素材包 / 整包只装视频;「导出精选照片」只装照片。
+    let all = if mode == MODE_PHOTOS { photo_only(selected_clips(&transaction)?) } else { video_only(selected_clips(&transaction)?) };
+    if mode == MODE_PHOTOS && all.is_empty() {
+        return Err(CoreError::Export("当前没有精选照片：先收藏、打 3 星以上或在擂台选出主图".to_owned()));
+    }
     let (clips, _skipped) = filter_quick_selection(all, selection)?;
     // Z-07 / Z-08:排队前先 stat 原片——不在了就拒绝,给一句人话,不让任务跑到一半才「交付失败」。
     let missing = missing_source_names(&transaction, &clips)?;
@@ -1029,9 +1062,10 @@ fn enqueue_export(
         Some(job_id) if mode == MODE_QUICK => retry_context(&transaction, job_id)?,
         _ => None,
     };
-    let photo_package = photo::count(&clips) > 0;
-    let package_names = if mode == MODE_KIT || photo_package {
-        package_output_names(&clips, photo_package)
+    let package_names = if mode == MODE_KIT {
+        package_output_names(&clips)
+    } else if mode == MODE_PHOTOS {
+        photo::output_names(&clips)
     } else {
         Vec::new()
     };
@@ -1041,7 +1075,7 @@ fn enqueue_export(
         .map(|(index, clip)| ExportItemStatus {
             clip_id: clip.clip_id,
             file_name: clip.file_name.clone(),
-            output_name: if mode == MODE_KIT || photo_package {
+            output_name: if mode == MODE_KIT || mode == MODE_PHOTOS {
                 package_names[index].clone()
             } else {
                 quick_output_name(retry.as_ref(), index, clip)
@@ -1152,7 +1186,11 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
     };
 
     let Some((id, status, payload_json, result_path, error)) = row else {
-        let clips = selected_clips(connection)?;
+        // R21 W3(F-W3-04):空闲态是视频交付抽屉「内容」行的数据源 —— 只数视频与视频时长;
+        // 精选照片的张数单独给 selected_photo_count(照片抽屉自己的计划另走 plan_photo_export)。
+        let all = selected_clips(connection)?;
+        let selected_photo_count = photo::count(&all);
+        let clips = video_only(all);
         let (selected_segment_count, selected_whole_count) = selection_kind_counts(&clips);
         return Ok(ExportStatus {
             job_id: None,
@@ -1161,7 +1199,7 @@ pub fn get_export_status(connection: &Connection, job_id: Option<i64>) -> Result
             selected_count: clips.len() as u64,
             selected_segment_count,
             selected_whole_count,
-            selected_photo_count: photo::count(&clips),
+            selected_photo_count,
             total_duration_seconds: total_duration_seconds(&clips),
             completed_items: 0,
             failed_items: 0,
@@ -1232,7 +1270,7 @@ pub fn cancel_export(connection: &mut Connection, job_id: i64) -> Result<()> {
     let mut payload = parse_payload(&payload_json)?;
     payload.progress.cancel_requested = true;
     payload.progress.stage = "cancelling".to_owned();
-    payload.progress.message = Some("正在取消并清理半成品".to_owned());
+    payload.progress.message = Some("正在取消；原片保持不变".to_owned());
     let serialized = serialize_payload(&payload)?;
     if status == "pending" {
         connection.execute(
@@ -1353,6 +1391,18 @@ pub fn mark_export_failed(
 }
 
 fn run_export_package_with(
+    connection: &mut Connection, job: &Job, ffmpeg: &OsStr, ffprobe: &OsStr,
+) -> Result<()> {
+    let result = run_export_package_inner(connection, job, ffmpeg, ffprobe);
+    if let Err(error) = &result {
+        if let Some(op) = archive::for_job(connection, job.id)? {
+            archive::record_failure(connection, &op.id, &error.to_string())?;
+        }
+    }
+    result
+}
+
+fn run_export_package_inner(
     connection: &mut Connection,
     job: &Job,
     ffmpeg: &OsStr,
@@ -1434,6 +1484,12 @@ fn run_export_package_with(
         [job.id],
         |row| row.get(0),
     )?;
+    if let Some(op) = archive::for_job(connection, job.id)? {
+        if !op.needs_preparation {
+            let recovered = archive::execute(connection, &op.id)?;
+            return adopt_completed_package(connection, job, &mut payload, &recovered.destination);
+        }
+    }
     if let Some(existing) = payload.output_path.clone().map(PathBuf::from) {
         if read_completion_marker(&existing)?
             .is_some_and(|marker| marker.matches(job.id, &payload_hash))
@@ -1467,29 +1523,77 @@ fn run_export_package_with(
     // R11 车道 E:快速导出平铺在 `<集名>_导出_<日期>` 根目录,不建交付包的分层目录。
     // R14 车道 B:剪映素材包同样平铺,文件夹叫 `<集名>_剪映素材包_<日期>`,多一份「顺序.txt」。
     let kit = payload.mode == MODE_KIT;
-    let quick = payload.mode == MODE_QUICK || kit;
-    let split_media = payload.version >= 6 && photo::count(&payload.clips) > 0;
+    let photos = payload.mode == MODE_PHOTOS;
+    // 素材包 / 精选照片都平铺在自己的文件夹根目录,不建交付包的分层目录。
+    let quick = payload.mode == MODE_QUICK || kit || photos;
+    let flat = kit || photos;
     // Z-11:重试写回上一次的文件夹(它还在才算;被删了就照常新建)。
-    let retry_into = payload
-        .retry_into
-        .as_deref()
+    let retry_into = (payload.mode == MODE_QUICK).then_some(&payload)
+        .and_then(|payload| payload.retry_into.as_deref())
         .map(PathBuf::from)
         .filter(|path| path.is_dir());
+    /* archive packages always publish a complete conflict group */
     let final_path = if let Some(existing) = retry_into.clone() {
         existing
     } else if kit {
         unique_kit_path(&destination, &payload.project_name, &payload.date)
+    } else if photos {
+        unique_photos_path(&destination, &payload.project_name, &payload.date)
     } else if quick {
         unique_quick_path(&destination, &payload.project_name, &payload.date)
     } else {
         unique_package_path(&destination, &payload.project_name, &payload.date)
     };
-    let staging_path = staging_path(&final_path, job.id, job.attempt);
-    if staging_path.exists() {
-        std::fs::remove_dir_all(&staging_path)?;
-    }
-    std::fs::create_dir(&staging_path)?;
+    let archive_id = if payload.mode != MODE_QUICK {
+        if let Some(op) = archive::for_job(connection, job.id)? { Some(op.id) } else {
+            let mut members = Vec::new();
+            let mut derived = Vec::new();
+            for (clip, item) in payload.clips.iter().zip(&payload.progress.items) {
+                let relative = clip_member_relative(flat, item);
+                // 视频 remux、HEIC → JPG、RAW → JPG 都不是逐字节 copy;RAW 的原片副本由 companion_copies 另计一条普通成员。
+                if clip.media_kind != "photo" || super::import::is_raw(Path::new(&clip.source_path)) || matches!(Path::new(&clip.source_path).extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "heic" | "heif") {
+                    derived.push(relative.clone());
+                }
+                members.push((PathBuf::from(&clip.source_path), relative.clone()));
+                members.extend(photo::companion_copies(clip, &relative)?);
+            }
+            // Freeze every auxiliary copy too, before the renderer starts.
+            if let Some(db_path) = connection.path() {
+                let cache = super::artifacts::cache_root_for_db(Path::new(db_path));
+                for (clip, item) in payload.clips.iter().zip(&payload.progress.items) {
+                    let mut planned_item = item.clone();
+                    planned_item.status = "done".into();
+                    if let Some(source) = resolved_subtitle_source(&cache, clip, &planned_item) {
+                        members.push((source, subtitle_member_relative(flat, item)));
+                    }
+                }
+            }
+            if kit {
+                if let Some((name, source)) = super::jianying::kit_selected_music_file(connection, episode_id)? {
+                    members.push((source, PathBuf::from(name)));
+                }
+            }
+            let kind = if photos { "photo" } else if kit { "kit" } else { "bundle" };
+            Some(archive::begin_with_transforms(connection, kind, &final_path, members, Some(job.id), &derived)?)
+        }
+    } else { None };
+    let staging_path = if let Some(id) = &archive_id {
+        // Count every companion, and allow space for preparation plus verified staging.
+        ensure_capacity(estimated_required_bytes(archive::required_bytes(connection, id)?).saturating_mul(2), available_space_bytes(&destination)?)?;
+        archive::preparation(connection, id)?
+    } else {
+        let path = staging_path(&final_path, job.id, job.attempt);
+        if path.exists() { std::fs::remove_dir_all(&path)?; }
+        std::fs::create_dir(&path)?;
+        path
+    };
     let mut staging = StagingDirectory::new(staging_path.clone());
+    // PH-11 journals own this preparation directory. Preserve it on all failures.
+    if archive_id.is_some() {
+        staging.promoted = true;
+        payload.progress.completed_items = 0;
+        payload.progress.failed_items = 0;
+    }
     if !quick {
         std::fs::create_dir(staging_path.join(SELECTED_DIRECTORY))?;
         for directory in [
@@ -1558,10 +1662,12 @@ fn run_export_package_with(
             &payload.clips[index],
             &temporary_path,
             &cancellation.flag,
-        ) {
+        ).and_then(|warning| {
+            photo::copy_companions(&payload.clips[index], &output_path)?;
+            std::fs::rename(&temporary_path, &output_path)?;
+            Ok(warning)
+        }) {
             Ok(warning) => {
-                photo::copy_companions(&payload.clips[index], &output_path)?;
-                std::fs::rename(&temporary_path, &output_path)?;
                 payload.progress.items[index].status = "done".to_owned();
                 payload.progress.items[index].warning = warning.is_some();
                 payload.progress.items[index].note = warning;
@@ -1576,46 +1682,57 @@ fn run_export_package_with(
                 return Err(error);
             }
             Err(error) => {
+                // D-1(0.11.0 语义,业主拍板):一条坏源只红它自己一行,整包照常出。
+                // PH-11 归档里把它所在的 companion 组(主文件 + 伴随 + 字幕)标 failed,
+                // 其余成员照常冻结、复制、发布;失败项在镜头表 / 顺序.txt / 交付说明里点名。
                 let _ = std::fs::remove_file(&temporary_path);
                 payload.progress.items[index].status = "failed".to_owned();
                 payload.progress.items[index].note = Some(failure_note(&error));
                 payload.progress.failed_items += 1;
+                if let Some(id) = &archive_id {
+                    let group = clip_member_group(flat, &payload.clips[index], &payload.progress.items[index])?;
+                    archive::skip_members(connection, id, &group, &failure_note(&error))?;
+                }
             }
         }
         persist_progress(connection, job, &payload)?;
     }
 
     if successful.is_empty() {
-        return Err(CoreError::Export(
-            "所有精选片段均无法读取，未生成交付包".to_owned(),
-        ));
+        let message = "所有精选片段均无法读取，未生成交付包".to_owned();
+        if let Some(id) = &archive_id {
+            // 没有任何可恢复的东西:op 终态 failed,准备目录清掉,不进「上次交付未完成」。
+            archive::abandon(connection, id, &message)?;
+        }
+        return Err(CoreError::Export(message));
     }
 
     if kit {
         // J-05:字幕/音乐跟完整交付包判断同一份逻辑(见 copy_kit_subtitles / copy_kit_music
         // 顶上的说明),只是抄到素材包自己的位置——同名同目录、根目录一份配乐。
-        copy_kit_subtitles(connection, &payload.clips, &payload.progress.items, &staging_path)?;
-        if let Some(episode_id) = payload.episode_id {
-            copy_kit_music(connection, episode_id, &staging_path)?;
-        }
-        if split_media {
-            write_split_order_files(&staging_path, &payload.clips, &payload.progress.items)?;
+        if archive_id.is_some() {
+            copy_frozen_extras(connection, job, &payload, &staging_path)?;
         } else {
-            write_synced(
-                &staging_path.join(KIT_ORDER_FILE),
-                kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
-            )?;
+            copy_kit_subtitles(connection, &payload.clips, &payload.progress.items, &staging_path)?;
+            if let Some(episode_id) = payload.episode_id {
+                copy_kit_music(connection, episode_id, &staging_path)?;
+            }
         }
+        write_synced(
+            &staging_path.join(KIT_ORDER_FILE),
+            kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
+        )?;
+    } else if photos {
+        // 精选照片:只有照片 + 一份「顺序.txt」(不带字幕、配乐、镜头表、交付说明);
+        // 归档计划里冻结的其它成员(有的话)照旧由 copy_frozen_extras 搬进准备目录。
+        if archive_id.is_some() {
+            copy_frozen_extras(connection, job, &payload, &staging_path)?;
+        }
+        write_synced(
+            &staging_path.join(KIT_ORDER_FILE),
+            kit_order_text(&payload.clips, &payload.progress.items).as_bytes(),
+        )?;
     } else if !quick {
-        if split_media {
-            write_split_order_files(
-                &staging_path.join(SELECTED_DIRECTORY),
-                &payload.clips,
-                &payload.progress.items,
-            )?;
-        } else if photo::count(&payload.clips) > 0 {
-            write_synced(&staging_path.join(KIT_ORDER_FILE), kit_order_text(&payload.clips, &payload.progress.items).as_bytes())?;
-        }
         write_package_extras(connection, job, &mut payload, &successful, &staging_path, ffmpeg, ffprobe, &cancellation.flag)?;
     }
 
@@ -1647,7 +1764,13 @@ fn run_export_package_with(
 /// 交付完成的一句话:快速导出报文件数,交付包报"已生成"(失败条数照旧点出来)。
 fn completion_message(payload: &ExportJobPayload) -> String {
     let failed = payload.progress.failed_items;
-    if payload.mode == MODE_KIT {
+    if payload.mode == MODE_PHOTOS {
+        if failed == 0 {
+            format!("已导出 {} 张照片", payload.progress.completed_items)
+        } else {
+            format!("已导出 {} 张照片；{failed} 张没导出来", payload.progress.completed_items)
+        }
+    } else if payload.mode == MODE_KIT {
         if failed == 0 {
             format!("已导出 {} 个片段", payload.progress.completed_items)
         } else {
@@ -1716,12 +1839,11 @@ fn write_package_extras(
     payload.progress.stage = "documents".to_owned();
     payload.progress.message = Some("正在写入镜头表与交付说明".to_owned());
     persist_progress(connection, job, payload)?;
-    let subtitle_count = copy_subtitles(
-        connection,
-        &payload.clips,
-        &payload.progress.items,
-        staging_path,
-    )?;
+    let subtitle_count = if archive::for_job(connection, job.id)?.is_some() {
+        copy_frozen_extras(connection, job, payload, staging_path)?
+    } else {
+        copy_subtitles(connection, &payload.clips, &payload.progress.items, staging_path)?
+    };
     let csv = build_shot_list_csv(&payload.clips, &payload.progress.items, &payload.platform_info);
     write_synced(&staging_path.join(SHOT_LIST_FILE), csv.as_bytes())?;
     let episode_id = payload
@@ -1766,7 +1888,7 @@ fn write_package_extras(
 fn finalize_export(
     connection: &mut Connection,
     job: &Job,
-    payload: ExportJobPayload,
+    mut payload: ExportJobPayload,
     successful: &[SuccessfulClip],
     staging_path: PathBuf,
     staging: &mut StagingDirectory,
@@ -1774,7 +1896,19 @@ fn finalize_export(
     cancellation: &AtomicBool,
 ) -> Result<()> {
     check_cancelled(cancellation)?;
-    if payload.retry_into.is_some() && final_path.is_dir() {
+    let archive_op = archive::for_job(connection, job.id)?;
+    let archived_path;
+    let final_path = if let Some(op) = &archive_op {
+        archive::seal_prepared(connection, &op.id, &staging_path)?;
+        let completed = archive::execute(connection, &op.id)?;
+        archived_path = completed.destination;
+        payload.output_path = Some(archived_path.to_string_lossy().into_owned());
+        staging.promoted = true;
+        archived_path.as_path()
+    } else { final_path };
+    if archive_op.is_some() {
+        // The archive publisher already fsynced and exclusively renamed the whole group.
+    } else if payload.retry_into.is_some() && final_path.is_dir() {
         // Z-11:写回已有文件夹 —— 把暂存目录里的文件逐个搬进去(只会是这次新导出的),暂存目录随后删掉。
         for entry in std::fs::read_dir(&staging_path)? {
             let entry = entry?;
@@ -1851,7 +1985,8 @@ fn finalize_export(
         // A cancellation can win in the narrow window after filesystem rename
         // but before the database CAS. This directory is uniquely owned by this
         // job/attempt, so never leave a cancelled package looking successful.
-        let _ = std::fs::remove_dir_all(final_path);
+        if let Some(op) = &archive_op { archive::undo(connection, &op.id)?; }
+        else { let _ = std::fs::remove_dir_all(final_path); }
         return Err(CoreError::InvalidTransition(format!(
             "export job {} changed during finalization",
             job.id
@@ -1959,7 +2094,11 @@ fn adopt_completed_package(
     )?;
     if changed != 1 {
         drop(transaction);
-        let _ = std::fs::remove_dir_all(final_path);
+        if let Some(op) = archive::for_job(connection, job.id)? {
+            archive::undo(connection, &op.id)?;
+        } else {
+            let _ = std::fs::remove_dir_all(final_path);
+        }
         return Err(CoreError::InvalidTransition(format!(
             "export job {} changed during completion-marker adoption",
             job.id
@@ -3796,7 +3935,7 @@ fn read_pipe<R: Read>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
 
 fn command_io_error(error: CommandError) -> CoreError {
     match error {
-        CommandError::Cancelled => CoreError::Export("用户已取消；半成品已清理".to_owned()),
+        CommandError::Cancelled => CoreError::Export("用户已取消；原片保持不变".to_owned()),
         CommandError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => {
             CoreError::Export(format!("媒体工具{error}（素材太大或电脑太忙）"))
         }
@@ -3836,7 +3975,7 @@ fn stderr_summary(stderr: &[u8]) -> String {
 
 fn check_cancelled(cancellation: &AtomicBool) -> Result<()> {
     if cancellation.load(Ordering::SeqCst) || jobs::current_cancellation_requested() {
-        Err(CoreError::Export("用户已取消；半成品已清理".to_owned()))
+        Err(CoreError::Export("用户已取消；原片保持不变".to_owned()))
     } else {
         Ok(())
     }
@@ -3860,6 +3999,51 @@ fn resolved_subtitle_source(cache_root: &Path, clip: &ExportClip, item: &ExportI
     }
     let source = cache_root.join(&expected);
     source.is_file().then_some(source)
+}
+
+/// 归档成员的目标相对路径:素材包 / 精选照片平铺在根目录,交付包在 `01_精选片段/` 下。
+fn clip_member_relative(flat: bool, item: &ExportItemStatus) -> PathBuf {
+    if flat { PathBuf::from(&item.output_name) } else { Path::new(SELECTED_DIRECTORY).join(&item.output_name) }
+}
+
+/// 字幕成员的目标相对路径(素材包同名同目录;交付包在 `03_字幕/`)。
+fn subtitle_member_relative(flat: bool, item: &ExportItemStatus) -> PathBuf {
+    let srt = Path::new(&item.output_name).with_extension("srt");
+    if flat { srt } else { Path::new(SUBTITLE_DIRECTORY).join(srt.file_name().unwrap()) }
+}
+
+/// D-1:一条素材在归档里的 companion 组 —— 主文件 + 伴随(RAW 原片 / XMP / 配对 JPG)+ 它的字幕。
+/// 坏源只让这一组标 failed;字幕路径没有对应成员时由 archive::skip_members 忽略。
+fn clip_member_group(flat: bool, clip: &ExportClip, item: &ExportItemStatus) -> Result<Vec<PathBuf>> {
+    let relative = clip_member_relative(flat, item);
+    let mut group = vec![relative.clone(), subtitle_member_relative(flat, item)];
+    group.extend(photo::companion_copies(clip, &relative)?.into_iter().map(|(_, target)| target));
+    Ok(group)
+}
+
+/// Copy the auxiliary inputs frozen before rendering; do not reread mutable music
+/// selection or discover newly appeared subtitles midway through a delivery.
+fn copy_frozen_extras(connection: &Connection, job: &Job, payload: &ExportJobPayload, staging: &Path) -> Result<u64> {
+    let op = archive::for_job(connection, job.id)?.ok_or_else(|| CoreError::Export("交付缺少归档计划".into()))?;
+    archive::verify_originals(connection, &op.id)?;
+    let mut media = std::collections::HashSet::new();
+    for (clip, item) in payload.clips.iter().zip(&payload.progress.items) {
+        let path = clip_member_relative(payload.mode == MODE_KIT || payload.mode == MODE_PHOTOS, item);
+        media.insert(path.clone());
+        for (_, companion) in photo::companion_copies(clip, &path)? { media.insert(companion); }
+    }
+    let mut subtitles = 0;
+    for member in op.files {
+        let relative = member.destination.strip_prefix(&op.destination)
+            .map_err(|e| CoreError::Export(e.to_string()))?;
+        // D-1:坏源所在 companion 组的字幕也一起跳过,不给没导出来的片段配字幕。
+        if media.contains(relative) || member.status == "failed" { continue; }
+        let target = staging.join(relative);
+        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+        archive::copy_verified(&member.source, &target)?;
+        if relative.extension().is_some_and(|ext| ext == "srt") { subtitles += 1; }
+    }
+    Ok(subtitles)
 }
 
 fn copy_subtitles(
@@ -3887,8 +4071,7 @@ fn copy_subtitles(
             .file_name()
             .ok_or_else(|| CoreError::Export("无法生成字幕文件名".to_owned()))?
             .to_owned();
-        let bytes = std::fs::read(&source)?;
-        write_synced(&subtitle_directory.join(output_name), &bytes)?;
+        archive::copy_verified(&source, &subtitle_directory.join(output_name))?;
         copied += 1;
     }
     Ok(copied)
@@ -3917,8 +4100,7 @@ fn copy_kit_subtitles(
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let bytes = std::fs::read(&source)?;
-        write_synced(&output_path, &bytes)?;
+        archive::copy_verified(&source, &output_path)?;
         copied += 1;
     }
     Ok(copied)
@@ -3931,8 +4113,7 @@ fn copy_kit_music(connection: &Connection, episode_id: i64, staging_path: &Path)
     let Some((file_name, source_path)) = super::jianying::kit_selected_music_file(connection, episode_id)? else {
         return Ok(());
     };
-    let bytes = std::fs::read(&source_path)?;
-    write_synced(&staging_path.join(&file_name), &bytes)?;
+    archive::copy_verified(Path::new(&source_path), &staging_path.join(&file_name))?;
     Ok(())
 }
 
@@ -3961,11 +4142,15 @@ fn resolve_cover_jpeg(connection: &Connection, cache_root: &Path, clip: &ExportC
 
 /// 联系表条目严格按 CSV 那一份顺序构建(同一个 `clips` 切片,同一次遍历)——
 /// 剪辑师拿着两份纸对照时,序号必须一一对应。
+///
+/// R21 W3:整包只装视频(`video_only`),照片走「导出精选照片」自己的路,这里不再有
+/// 「整张 / 展示 N s」的照片分支;`debug_assert` 守住这条前提。
 fn build_contact_sheet_items(
     connection: &Connection,
     cache_root: &Path,
     clips: &[ExportClip],
 ) -> Vec<contact_sheet::ContactSheetItem> {
+    debug_assert!(clips.iter().all(|clip| clip.media_kind != "photo"), "照片不进整包联系表");
     clips
         .iter()
         .enumerate()
@@ -3975,8 +4160,8 @@ fn build_contact_sheet_items(
             contact_sheet::ContactSheetItem {
                 order: index + 1,
                 file_name: clip.file_name.clone(),
-                in_clock: if clip.media_kind == "photo" { "整张".into() } else { format_clock(start_seconds) },
-                out_clock: if clip.media_kind == "photo" { format!("展示 {} s", clip_duration_seconds(clip)) } else { format_clock(end_seconds) },
+                in_clock: format_clock(start_seconds),
+                out_clock: format_clock(end_seconds),
                 chapter_title: (!clip.chapter_title.is_empty()).then(|| clip.chapter_title.clone()),
                 cover_jpeg: resolve_cover_jpeg(connection, cache_root, clip),
             }
@@ -4045,6 +4230,8 @@ fn build_shot_list_csv(
     items: &[ExportItemStatus],
     platform_info: &ExportPlatformInfo,
 ) -> String {
+    // R21 W3:镜头表只有视频行(照片不进整包);见 build_contact_sheet_items。
+    debug_assert!(clips.iter().all(|clip| clip.media_kind != "photo"), "照片不进整包镜头表");
     let mut csv = String::from(
         "\u{feff}顺序号,文件名,包内路径,入点,出点,段时长,分辨率,编码,FPS,VFR,拍摄时间,Chapter,Beat,星级,L1角标摘要,对白摘要,平台,画布,转录音轨,备注\r\n",
     );
@@ -4080,8 +4267,8 @@ fn build_shot_list_csv(
             (index + 1).to_string(),
             clip.file_name.clone(),
             format!("{SELECTED_DIRECTORY}/{}", item.output_name),
-            if clip.media_kind == "photo" { String::new() } else { format_clock(start_seconds) },
-            if clip.media_kind == "photo" { String::new() } else { format_clock(end_seconds) },
+            format_clock(start_seconds),
+            format_clock(end_seconds),
             format_clock(duration_seconds),
             resolution,
             clip.codec.clone().unwrap_or_default(),
@@ -4622,6 +4809,26 @@ fn unique_kit_path(destination: &Path, project_name: &str, date: &str) -> PathBu
     unreachable!()
 }
 
+fn photos_folder_name(project_name: &str, date: &str) -> String {
+    format!("{project_name}_{PHOTOS_SUFFIX}_{date}")
+}
+
+/// 精选照片的文件夹:`<集名>_精选照片_<日期>`,同名追加 `-2`、`-3`(与素材包同一规则)。
+fn unique_photos_path(destination: &Path, project_name: &str, date: &str) -> PathBuf {
+    let base = photos_folder_name(project_name, date);
+    let first = destination.join(&base);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2_u64.. {
+        let candidate = destination.join(format!("{base}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
 /// 文件名里的章名:走集名同一套清洗(非法字符、控制符、长度);空的记「未分章」。
 fn kit_chapter_name(chapter_title: &str) -> String {
     if chapter_title.trim().is_empty() {
@@ -4688,48 +4895,27 @@ fn kit_duration_label(seconds: f64) -> String {
     format!("{:.1} 秒", seconds.max(0.0))
 }
 
-/// 「顺序.txt」一行一项:`NN 章名 素材名 时长`;照片记录展示时长。
-/// 章节名写在每一行,不插入会影响行数的章节标题;失败项保留编号。
+/// 「顺序.txt」一行一项:视频 `NN 章名 素材名 时长`;照片 `NN 素材名 照片[ · RAW]`——
+/// 照片线没有章节、没有时长(`hold_ms` 只是内部字段,不露出)。失败项保留编号。
 fn kit_order_text(clips: &[ExportClip], items: &[ExportItemStatus]) -> String {
     let mut text = String::new();
     for (index, clip) in clips.iter().enumerate() {
         let failed = items.get(index).is_some_and(|item| item.status == "failed");
-        text.push_str(&format!(
-            "{:02} {} {} {}{}\n",
-            index + 1,
-            kit_chapter_name(&clip.chapter_title),
-            clip.file_name,
-            if clip.media_kind == "photo" { format!("照片 · {} s", clip_duration_seconds(clip)) } else { kit_duration_label(clip_duration_seconds(clip)) },
-            if failed { "(没导出来)" } else { "" }
-        ));
+        let suffix = if failed { "(没导出来)" } else { "" };
+        if clip.media_kind == "photo" {
+            let raw = if super::import::is_raw(Path::new(&clip.file_name)) { " · RAW" } else { "" };
+            text.push_str(&format!("{:02} {} 照片{raw}{suffix}\n", index + 1, clip.file_name));
+        } else {
+            text.push_str(&format!(
+                "{:02} {} {} {}{suffix}\n",
+                index + 1,
+                kit_chapter_name(&clip.chapter_title),
+                clip.file_name,
+                kit_duration_label(clip_duration_seconds(clip)),
+            ));
+        }
     }
     text
-}
-
-fn write_split_order_files(
-    root: &Path,
-    clips: &[ExportClip],
-    items: &[ExportItemStatus],
-) -> Result<()> {
-    for (directory, photo_kind) in [("视频", false), ("照片", true)] {
-        let directory = root.join(directory);
-        std::fs::create_dir_all(&directory)?;
-        let mut kind_clips = Vec::new();
-        let mut kind_items = Vec::new();
-        for (index, clip) in clips.iter().enumerate() {
-            if (clip.media_kind == "photo") == photo_kind {
-                kind_clips.push(clip.clone());
-                if let Some(item) = items.get(index) {
-                    kind_items.push(item.clone());
-                }
-            }
-        }
-        write_synced(
-            &directory.join(KIT_ORDER_FILE),
-            kit_order_text(&kind_clips, &kind_items).as_bytes(),
-        )?;
-    }
-    Ok(())
 }
 
 fn staging_path(final_path: &Path, job_id: i64, attempt: i64) -> PathBuf {
@@ -6702,6 +6888,8 @@ esac
     }
 
     #[test]
+    // 0.11.0 语义(D-1,业主拍板保留):一条坏源只让它自己红一行,整包照常出;
+    // PH-11 之后归档 op 仍是 done,坏源那条成员记 failed,其余 published。
     fn corrupt_source_is_red_but_does_not_interrupt_complete_package() {
         let Some((ffmpeg, ffprobe)) = ffmpeg_tools() else { return };
         let directory = TestDirectory::new();
@@ -6729,6 +6917,7 @@ esac
         );
         let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
         let job = jobs::claim_next(&mut connection).unwrap().unwrap();
+        let source_hash = blake3::hash(&std::fs::read(&source).unwrap());
         run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
 
         let finished = get_export_status(&connection, status.job_id).unwrap();
@@ -6750,6 +6939,23 @@ esac
             )
             .unwrap();
         assert_eq!(outbox_status, "done");
+        // PH-11 归档:整包 done,坏源那条成员 failed,其余全部 published;原件不动,目标旁无残留。
+        let op = archive::for_job(&connection, job.id).unwrap().unwrap();
+        assert_eq!(op.status, "done");
+        assert_eq!(op.destination, output);
+        let failed: Vec<&archive::ArchiveFile> = op.files.iter().filter(|f| f.status == "failed").collect();
+        assert_eq!(failed.len(), 1, "{:?}", op.files);
+        assert_eq!(failed[0].source, corrupt.canonicalize().unwrap());
+        assert!(!failed[0].destination.exists());
+        assert!(op.files.iter().filter(|f| f.status != "failed").all(|f| f.status == "published"), "{:?}", op.files);
+        assert!(!op.errors.is_empty());
+        assert_eq!(blake3::hash(&std::fs::read(source).unwrap()), source_hash);
+        assert_eq!(std::fs::read(corrupt).unwrap(), b"not media");
+        let leftovers: Vec<String> = std::fs::read_dir(directory.path()).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".tripcut-")).collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert!(archive::reconcile(&connection).unwrap().is_empty());
     }
 
     #[test]
@@ -6934,29 +7140,34 @@ esac
 
         let status = start_export(&mut connection, directory.path(), None, true, None).unwrap();
         let job = jobs::claim_next(&mut connection).unwrap().unwrap();
-        let queued_payload = parse_payload(&job.payload).unwrap();
-        let final_path = unique_package_path(
-            Path::new(&queued_payload.destination),
-            &queued_payload.project_name,
-            &queued_payload.date,
-        );
-        let staging = staging_path(&final_path, job.id, job.attempt);
-        let shot_list_dir = staging.join(SHOT_LIST_DIRECTORY);
-        let hijacked_pdf_path = staging.join(CONTACT_SHEET_FILE);
-
+        // PH-11:完整交付先在归档准备目录(`.tripcut-prepare-<op>-<uuid>`,位于目标
+        // 目录旁)里渲染,再由 archive.rs 逐文件复制发布;抢占动作要落在准备目录里。
+        let parent = directory.path().to_path_buf();
         let watcher = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
             while Instant::now() < deadline {
-                if shot_list_dir.is_dir() {
-                    let _ = std::fs::create_dir(&hijacked_pdf_path);
-                    return;
+                let prepare = std::fs::read_dir(&parent)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with(".tripcut-prepare-"))
+                            && path.join(SHOT_LIST_DIRECTORY).is_dir()
+                    });
+                if let Some(prepare) = prepare {
+                    // 抢占成功与否要留证:归档完成后准备目录会被清掉,事后看不到它。
+                    return std::fs::create_dir(prepare.join(CONTACT_SHEET_FILE)).is_ok().then_some(prepare);
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
+            None
         });
 
         run_export_package_with(&mut connection, &job, &ffmpeg, &ffprobe).unwrap();
-        watcher.join().unwrap();
+        let prepare = watcher.join().unwrap().expect("没抢到联系表文件名(准备目录出现前就完成了交付)");
 
         let finished = get_export_status(&connection, status.job_id).unwrap();
         assert_eq!(finished.status, "done");
@@ -6965,10 +7176,13 @@ esac
             output.join(COMPLETION_MARKER_FILE).is_file(),
             "联系表失败不应阻止完成标记落盘"
         );
+        // 归档只复制冻结清单里的文件,被抢占的空目录不会被带进交付包;交付完成后准备目录
+        // 本身也被清掉(PH-11:目标旁不留第二份拷贝)。
         assert!(
-            output.join(CONTACT_SHEET_FILE).is_dir(),
-            "本用例故意抢占了这个文件名,证明失败确实发生在这一步"
+            !output.join(CONTACT_SHEET_FILE).exists(),
+            "联系表失败后交付包里不应出现联系表"
         );
+        assert!(!prepare.exists(), "交付完成后准备目录应被清理:{}", prepare.display());
         assert!(
             !output
                 .join(CONTACT_SHEET_FILE)
@@ -7029,8 +7243,15 @@ esac
             .unwrap()
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .any(|name| name.contains("_交付_") || name.contains(".tmp-"));
+            .any(|name| name.contains("_交付_") || name.contains(".tmp-") || name.starts_with(".tripcut-"));
         assert!(!unexpected);
+        // PH-11:全部坏源没有可恢复的东西 —— op 终态 failed(不进「上次交付未完成」),原件不动。
+        let op = archive::for_job(&connection, job.id).unwrap().unwrap();
+        assert_eq!(op.status, "failed");
+        assert!(!op.destination.exists());
+        assert!(!op.errors.is_empty());
+        assert!(archive::incomplete(&connection).unwrap().is_empty());
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"not media");
         let outbox_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM channel_memory_outbox", [], |row| row.get(0))
             .unwrap();

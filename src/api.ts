@@ -236,6 +236,13 @@ export interface PhotoMetaDto {
   color_space: string | null;
   has_alpha: boolean;
   companions_ambiguous: boolean;
+  raw_container?: "arw" | "dng" | null;
+  preview_source?: "embedded" | "decoded" | null;
+  preview_width?: number | null;
+  preview_height?: number | null;
+  embedded_preview_width?: number | null;
+  embedded_preview_height?: number | null;
+  preview_small?: boolean;
   preview_url?: string | null;
 }
 
@@ -748,7 +755,7 @@ export interface ExportStatus {
   /** R10 U-05:本次交付(idle 时 = 将要)用的画布;idle 且解析失败时 `null`。 */
   canvas?: ExportCanvas | null;
   /** R11 车道 E:任务模式(`quick` = 快速导出,`full` = 完整交付包);idle 或旧后端为 null / 缺省。 */
-  mode?: "quick" | "full" | "kit" | null;
+  mode?: "quick" | "full" | "kit" | "photos" | null;
 }
 
 export interface JianyingAvailability {
@@ -1283,6 +1290,8 @@ export interface EpisodeSummary {
   clip_count: number;
   favorite_count: number;
   export_count: number;
+  /** R21 W3:其中「导出精选照片」的次数;视频流水线看 export_count − photo_export_count。可选:旧后端 / 旧夹具不发时当 0。 */
+  photo_export_count?: number;
   target_platform: TargetPlatform;
   canvas_orientation: CanvasOrientation;
 }
@@ -2044,6 +2053,16 @@ export function exportJianyingKit(destDir?: string | null): Promise<KitExportOut
   return invoke<KitExportOutcome>("export_jianying_kit", { destDir: destDir ?? null });
 }
 
+/** R21 照片线:「导出精选照片」—— 唯一的照片导出。winners(收藏 + ≥3 星 + 擂台主图)平铺复制到 `destDir/<集名>_精选照片_<日期>`:HEIC / RAW 转 JPG + 原件 + 伴随 + 顺序.txt,走归档日志。进度走 `getExportStatus`(`mode = "photos"`)。 */
+export function exportSelectedPhotos(destDir?: string | null): Promise<KitExportOutcome> {
+  return invoke<KitExportOutcome>("export_selected_photos", { destDir: destDir ?? null });
+}
+
+/** 只算不排:精选照片将写的文件夹与编号清单。 */
+export function planSelectedPhotos(destDir?: string | null): Promise<KitExportOutcome> {
+  return invoke<KitExportOutcome>("plan_selected_photos", { destDir: destDir ?? null });
+}
+
 /** 只算不排:素材包将写的文件夹与编号清单。 */
 export function planJianyingKit(destDir?: string | null): Promise<KitExportOutcome> {
   return invoke<KitExportOutcome>("plan_jianying_kit", { destDir: destDir ?? null });
@@ -2465,8 +2484,8 @@ export function downloadCloudFile(path: string): Promise<void> {
 /** 挑法:`chapters` 按章节轮转(成片按时间顺序,缺省);`score` 不分章节、只按分数装满预算。 */
 export type AutoSelectPick = "chapters" | "score";
 
-/** `moments.rs` 的 `WEIGHT_KEYS`;权重偏置的键只能是这六个(后端 `MomentWeights::parse` 再验一次)。 */
-export const WEIGHT_KEYS = ["sharp", "motion", "exposure", "sound", "no_cut", "interest"] as const;
+/** `moments.rs` 的 `WEIGHT_KEYS`;包含六项评分与三项待标定权重(后端 `MomentWeights::parse` 再验一次)。 */
+export const WEIGHT_KEYS = ["sharp", "motion", "exposure", "sound", "no_cut", "interest", "horizon_tilt_deg", "exposure_worst_cell", "saliency_sharpness"] as const;
 export type WeightKey = (typeof WEIGHT_KEYS)[number];
 export type MomentWeights = Record<WeightKey, number>;
 

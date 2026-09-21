@@ -1,0 +1,66 @@
+/* R21 车道 archive(PH-11):交付抽屉里的「上次交付未完成」入口。只加一张卡,三张交付卡不动。
+   折叠头复用 .deliver-parts-summary;颜色 / 字号 / 间距只从 tokens 取。 */
+.deliver-drawer .deliver-archive-recovery { display: grid; gap: var(--space-2); }
+.deliver-drawer .deliver-archive-recovery--unfinished {
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border-hair));
+  background: color-mix(in srgb, var(--warn-tint) 60%, var(--surface-card));
+}
+.deliver-drawer .deliver-archive-details { border-top: 0; }
+.deliver-drawer .deliver-archive-recovery--unfinished .deliver-archive-summary { color: var(--text-primary); font-weight: 600; }
+.deliver-drawer .deliver-archive-note,
+.deliver-drawer .deliver-archive-op-error,
+.deliver-drawer .deliver-archive-error {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+.deliver-drawer .deliver-archive-error,
+.deliver-drawer .deliver-archive-op-error { color: var(--danger); }
+.deliver-drawer .deliver-archive-ops {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.deliver-drawer .deliver-archive-op {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-hair);
+}
+.deliver-drawer .deliver-archive-op-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+}
+.deliver-drawer .deliver-archive-op-state {
+  flex: none;
+  color: var(--text-primary);
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--lh-13);
+}
+.deliver-drawer .deliver-archive-op--done .deliver-archive-op-state { color: var(--ok); }
+.deliver-drawer .deliver-archive-op--partial .deliver-archive-op-state,
+.deliver-drawer .deliver-archive-op--undoing .deliver-archive-op-state { color: var(--warn); }
+.deliver-drawer .deliver-archive-op-path {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.deliver-drawer .deliver-archive-files {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+  line-height: var(--lh-12);
+}
+.deliver-drawer .deliver-archive-actions { display: flex; gap: var(--space-2); }

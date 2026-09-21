@@ -2612,6 +2612,32 @@ fn preview_export_canvas(
 }
 
 #[tauri::command]
+fn list_archive_ops(state: tauri::State<'_, RuntimeState>) -> std::result::Result<Vec<core::archive::ArchiveOperation>, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|e| e.to_string())?;
+    core::archive::recent(&connection).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resume_archive(id: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<core::archive::ArchiveOperation, String> {
+    if state.read_only { return Err("只读窗口不能继续交付".into()); }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = core::db::open_project(&db_path).map_err(|e| e.to_string())?;
+        core::archive::resume(&connection, &id).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn undo_archive(id: String, state: tauri::State<'_, RuntimeState>) -> std::result::Result<core::archive::ArchiveOperation, String> {
+    if state.read_only { return Err("只读窗口不能撤销交付".into()); }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = core::db::open_project(&db_path).map_err(|e| e.to_string())?;
+        core::archive::undo_idle(&connection, &id).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn get_export_status(
     job_id: Option<i64>,
     state: tauri::State<'_, RuntimeState>,
@@ -3176,6 +3202,52 @@ async fn export_jianying_kit(
     .map_err(|error| error.to_string())
 }
 
+/// R21 照片线:「导出精选照片」—— 唯一的照片导出。winners(收藏 + ≥3 星 + 擂台主图)平铺复制到
+/// `dest_dir/<集名>_精选照片_<日期>`(同名 `-2`):HEIC / RAW 转 JPG + 原件 + 伴随 + 「顺序.txt」,
+/// 走 archive_ops。`dest_dir` 缺省用记住的 `ui.export.last_dir`;没记过时错误文本含 `dest_unavailable`。
+/// 进度走 `get_export_status`(`mode = "photos"`)。
+#[tauri::command]
+async fn export_selected_photos(
+    dest_dir: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::KitExportOutcome, String> {
+    if state.read_only {
+        return Err("只读窗口不能导出".into());
+    }
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = core::db::open_project(&db_path)?;
+        let dest = match dest_dir.filter(|dir| !dir.trim().is_empty()) {
+            Some(dir) => dir,
+            None => {
+                let remembered = core::settings::string_value(&connection, "ui.export.last_dir", "")?;
+                if remembered.trim().is_empty() {
+                    return Err(core::error::CoreError::Export(format!(
+                        "{}: 还没选过导出文件夹",
+                        core::deliver::QUICK_EXPORT_DEST_UNAVAILABLE
+                    )));
+                }
+                remembered
+            }
+        };
+        core::deliver::start_photo_export(&mut connection, &PathBuf::from(dest))
+    })
+    .await
+    .map_err(|error| format!("导出任务异常结束：{error}"))?
+    .map_err(|error| error.to_string())
+}
+
+/// R21 照片线:只算不排——精选照片将写的文件夹与编号清单。
+#[tauri::command]
+fn plan_selected_photos(
+    dest_dir: Option<String>,
+    state: tauri::State<'_, RuntimeState>,
+) -> std::result::Result<core::deliver::KitExportOutcome, String> {
+    let connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::deliver::plan_photo_export(&connection, dest_dir.as_deref().map(std::path::Path::new))
+        .map_err(|error| error.to_string())
+}
+
 /// R14 车道 B:只算不排——素材包将写的文件夹与按镜头带顺序编号的文件清单(抽屉面板读它)。
 #[tauri::command]
 fn plan_jianying_kit(
@@ -3358,6 +3430,9 @@ pub fn run() {
                 };
                 if recovered > 0 {
                     tracing::info!(recovered, "recovered interrupted job leases");
+                }
+                if let Err(error) = core::archive::reconcile(&connection) {
+                    tracing::warn!(%error, "archive startup reconciliation remains pending");
                 }
                 if let Err(error) = core::channel_memory::prepare_for_project(&connection) {
                     tracing::warn!(%error, "channel-memory identity reconciliation remains unresolved");
@@ -3987,6 +4062,9 @@ pub fn run() {
             plan_quick_export,
             preview_export_canvas,
             get_export_status,
+            list_archive_ops,
+            resume_archive,
+            undo_archive,
             cancel_export,
             cancel_job,
             preview_generation,
@@ -4000,6 +4078,8 @@ pub fn run() {
             set_jianying_human_check,
             open_app,
             export_jianying_kit,
+            export_selected_photos,
+            plan_selected_photos,
             plan_jianying_kit,
             #[cfg(target_os = "macos")]
             player_set_viewport,

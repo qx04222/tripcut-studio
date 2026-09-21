@@ -63,11 +63,13 @@ export function analysisBadgeKinds(clip: ClipListItem): AnalysisBadgeKind[] {
   if (clip.analysis.out_of_focus_ratio > OVEREXPOSED_RATIO_THRESHOLD) {
     badges.push("out_of_focus");
   }
-  if (clip.analysis.audio_clipped) badges.push("clipped");
-  if (!clip.analysis.has_audio) badges.push("silent");
+  // R21 W3(F-W3-02):照片没有音轨、没有运镜 —— 静音 / 削波 / 手持抖动是视频的角标,照片卡不挂。
+  const photo = clip.kind === "photo";
+  if (!photo && clip.analysis.audio_clipped) badges.push("clipped");
+  if (!photo && !clip.analysis.has_audio) badges.push("silent");
   const mean = focusMean(clip.analysis);
   if (mean !== null && mean < SOFT_FOCUS_THRESHOLD) badges.push("soft_focus");
-  if (clip.motion?.is_shaky) {
+  if (!photo && clip.motion?.is_shaky) {
     badges.push("handheld_shake");
   }
   return badges;

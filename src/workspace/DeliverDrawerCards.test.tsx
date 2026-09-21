@@ -17,6 +17,7 @@ import { __resetQuickExportForTests } from "./deliver/quickExportModel";
 import { __resetToastsForTests } from "./ui/toastStore";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests, dispatchWorkspace } from "./WorkspaceStore";
+import { __resetPhotoOrderPersistenceForTests, savePhotoOrder } from "./photoOrderSettings";
 
 const episode: EpisodeSummary = {
   id: 5,
@@ -67,6 +68,7 @@ beforeEach(() => {
   __resetQuickExportForTests();
   __resetExportModeForTests();
   __resetToastsForTests();
+  __resetPhotoOrderPersistenceForTests();
   apiMock.getCurrentEpisode.mockResolvedValue(episode);
   apiMock.listPlatformPresets.mockResolvedValue([]);
   apiMock.getExportStatus.mockResolvedValue(idleStatus);
@@ -171,18 +173,21 @@ describe("交付抽屉首屏三卡(U-06/P-04)", () => {
   });
 });
 
-it("照片数只出现在素材包与整包卡，视频文件卡保持视频语义", async () => {
+// R21 照片线(业主拍板:照片不套视频那一套):视频交付抽屉不再感知照片;照片工作台的抽屉只有「导出精选照片」。
+it("视频交付三卡不再提照片,「交给剪映」照旧落素材包 / 草稿", async () => {
   apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 8, selected_photo_count: 5 });
   apiMock.getJianyingAvailability.mockResolvedValue({ installed_version: "11.3.0", supported: true, reason: "" });
   const dialog = await openDrawer();
   await waitFor(() => {
-    for (const name of ["交给剪映", "整包交付"]) {
-      expect(within(dialog).getByRole("button", { name }).textContent).toContain("5 张照片");
+    for (const name of ["交给剪映", "导出视频文件", "整包交付"]) {
+      expect(within(dialog).getByRole("button", { name }).textContent).not.toContain("照片");
     }
-    expect(within(dialog).getByRole("button", { name: "导出视频文件" }).textContent).not.toContain("照片");
   });
-  await act(async () => { within(dialog).getByRole("button", { name: "交给剪映" }).click(); });
-  expect(await within(dialog).findByText("01_海边_IMG_0003.mp4")).toBeTruthy();
+  await act(async () => { within(dialog).getByRole("button", { name: "整包交付" }).click(); });
+  expect(await within(dialog).findByText("本次交付平台")).toBeTruthy();
+  expect(within(dialog).queryByText(/含伴随文件/)).toBeNull();
+  expect(within(dialog).queryByText(/照片不计时长预算/)).toBeNull();
+  expect((within(dialog).getByRole("switch", { name: "剪映草稿" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("混合选择的快速导出仍规划并执行视频，不再出现照片阻止", async () => {
@@ -198,30 +203,68 @@ it("混合选择的快速导出仍规划并执行视频，不再出现照片阻�
   await waitFor(() => expect(apiMock.quickExport).toHaveBeenCalledWith("/Users/me/Desktop", null));
 });
 
-it("素材包与整包都列出照片，整包参考粗剪只按视频预算", async () => {
-  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 8, selected_photo_count: 5 });
-  apiMock.getJianyingAvailability.mockResolvedValue({ installed_version: "11.3.0", supported: true, reason: "" });
-  apiMock.planJianyingKit.mockResolvedValue({ ...plan, files: ["视频/001_x.mp4", "照片/001_y.jpg"] });
-  const dialog = await openDrawer();
-  await act(async () => { within(dialog).getByRole("button", { name: "交给剪映" }).click(); });
-  expect(await within(dialog).findByText("照片/001_y.jpg")).toBeTruthy();
-  await act(async () => { within(dialog).getByRole("button", { name: "完整交付包" }).click(); });
-  expect(await within(dialog).findByText("本次交付平台")).toBeTruthy();
-  expect(within(dialog).getByText("5 张 · 含伴随文件")).toBeTruthy();
-  expect(within(dialog).getByText("1 条 · 完整 · 1080p 通用 MP4")).toBeTruthy();
-  expect((within(dialog).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).disabled).toBe(false);
-  expect(within(dialog).getByText("仅用于视频，照片不计时长预算")).toBeTruthy();
-  expect((within(dialog).getByRole("switch", { name: "剪映草稿" }) as HTMLButtonElement).disabled).toBe(true);
-});
+describe("照片工作台的导出抽屉(R21 照片线)", () => {
+  const photoPlan: KitExportOutcome = { job_id: null, dir: "/Users/me/Desktop/EP05_精选照片_2026-09-20", files: ["01_one.jpg", "02_two.jpg"], order_file: "顺序.txt" };
+  async function openPhotoDrawer(): Promise<HTMLElement> {
+    apiMock.planSelectedPhotos.mockResolvedValue(photoPlan);
+    render(<WorkspaceShell />);
+    await act(async () => {
+      dispatchWorkspace({ type: "set-workspace-mode", mode: "photo" });
+      dispatchWorkspace({ type: "open-drawer", drawer: "deliver" });
+      await Promise.resolve();
+    });
+    return screen.findByRole("dialog", { name: "导出" });
+  }
 
-it("纯照片整包禁用视频粗剪时长且说明不生成", async () => {
-  apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 5, selected_segment_count: 0, selected_whole_count: 0, selected_photo_count: 5 });
-  const dialog = await openDrawer();
-  await act(async () => { within(dialog).getByRole("button", { name: "整包交付" }).click(); });
-  expect(await within(dialog).findByText("仅照片 · 本次不生成")).toBeTruthy();
-  expect(within(dialog).getByText("照片 + 镜头表 + 说明")).toBeTruthy();
-  expect((within(dialog).getByRole("combobox", { name: "参考粗剪时长" }) as HTMLSelectElement).disabled).toBe(true);
-  expect(within(dialog).getByText("当前只选了照片，本次不生成参考粗剪")).toBeTruthy();
+  it("三张视频交付卡不渲染,只有「导出精选照片」+ 编号清单", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 2, selected_segment_count: 0, selected_whole_count: 0, selected_photo_count: 2 });
+    const dialog = await openPhotoDrawer();
+    expect(await within(dialog).findByText("01_one.jpg")).toBeTruthy();
+    for (const name of ["交给剪映", "导出视频文件", "整包交付", "更多方式"]) {
+      expect(within(dialog).queryByRole("button", { name })).toBeNull();
+    }
+    expect(within(dialog).queryByRole("group", { name: "交付方式" })).toBeNull();
+    expect(within(dialog).queryByRole("group", { name: "导出方式" })).toBeNull();
+    expect(within(dialog).getByRole("region", { name: "导出精选照片" })).toBeTruthy();
+    expect(dialog.textContent).not.toMatch(/剪映|镜头带|章节|交付|素材包|整包|粗剪|镜头表/);
+  });
+
+  it("导出精选照片:等精选带顺序落库后才启动;保存失败显示错误且不按旧顺序导出", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 2, selected_segment_count: 0, selected_whole_count: 0, selected_photo_count: 2 });
+    apiMock.exportSelectedPhotos.mockResolvedValue({ ...photoPlan, job_id: 9 });
+    const dialog = await openPhotoDrawer();
+    await within(dialog).findByText("01_one.jpg");
+    let finishSave: () => void = () => undefined;
+    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
+      ? new Promise<void>((resolve) => { finishSave = resolve; })
+      : Promise.resolve());
+    const pendingSave = savePhotoOrder("ui.photo.order.5", [2, 1]);
+    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[2,1]"));
+    const button = within(dialog).getByRole("button", { name: "导出精选照片到上次文件夹" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => { button.click(); await Promise.resolve(); });
+    expect(apiMock.exportSelectedPhotos).not.toHaveBeenCalled();
+    await act(async () => { finishSave(); await pendingSave; });
+    await waitFor(() => expect(apiMock.exportSelectedPhotos).toHaveBeenCalledWith("/Users/me/Desktop"));
+  });
+
+  it("导出精选照片:顺序保存失败 → 显示错误,不启动后端", async () => {
+    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_count: 2, selected_segment_count: 0, selected_whole_count: 0, selected_photo_count: 2 });
+    let rejectSave: (failure: Error) => void = () => undefined;
+    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
+      ? new Promise<void>((_resolve, reject) => { rejectSave = reject; })
+      : Promise.resolve());
+    const pendingSave = savePhotoOrder("ui.photo.order.5", [2, 1]);
+    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[2,1]"));
+    const dialog = await openPhotoDrawer();
+    await within(dialog).findByText("01_one.jpg");
+    const button = within(dialog).getByRole("button", { name: "导出精选照片到上次文件夹" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => { button.click(); await Promise.resolve(); });
+    await act(async () => { rejectSave(new Error("disk full")); await pendingSave.catch(() => undefined); });
+    expect(await within(dialog).findByText(/照片顺序未保存/)).toBeTruthy();
+    expect(apiMock.exportSelectedPhotos).not.toHaveBeenCalled();
+  });
 });
 
 it("零素材整包首屏与详情明确暂无交付项且保持禁用", async () => {
@@ -239,7 +282,7 @@ it("零素材整包首屏与详情明确暂无交付项且保持禁用", async (
 
   await act(async () => { fullCard.click(); });
 
-  expect(await within(dialog).findByText("当前没有已选视频或照片，本次暂无交付项")).toBeTruthy();
+  expect(await within(dialog).findByText("当前没有已选视频，本次暂无交付项")).toBeTruthy();
   expect(within(dialog).getByText("暂无交付项 · 请先挑选素材")).toBeTruthy();
   expect(within(dialog).queryByText("当前只选了照片，本次不生成参考粗剪")).toBeNull();
   expect((within(dialog).getByRole("button", { name: "开始生成" }) as HTMLButtonElement).disabled).toBe(true);

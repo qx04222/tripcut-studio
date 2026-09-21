@@ -1,4 +1,4 @@
-//! Read-only photo handoff. HEIC → JPG 走 photo_decode 的共用 ImageIO 渲染器(方向烘进像素、SDR sRGB),其它格式逐字节 copy。
+//! Read-only photo handoff. HEIC / ARW / DNG → JPG 走 photo_decode 的共用 ImageIO 渲染器(方向烘进像素、SDR sRGB),其它格式逐字节 copy;RAW 原片由 deliver_photo::companion_copies 作为归档成员另交一份。
 use super::error::{CoreError, Result};
 use std::path::Path;
 
@@ -7,7 +7,7 @@ pub(crate) fn output_extension(source: &str) -> String {
         .extension()
         .and_then(|v| v.to_str())
         .unwrap_or("jpg");
-    if matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif") {
+    if matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif" | "arw" | "dng") {
         "jpg".into()
     } else {
         ext.into()
@@ -20,17 +20,11 @@ pub(crate) fn export(source: &Path, destination: &Path) -> Result<()> {
         .and_then(|v| v.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if matches!(ext.as_str(), "heic" | "heif") {
+    if matches!(ext.as_str(), "heic" | "heif" | "arw" | "dng") {
         encode_jpeg(source, destination)?;
     } else {
-        // Byte-for-byte copy preserves PNG alpha and all JPEG metadata.
-        let mut input = std::fs::File::open(source)?;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)?;
-        std::io::copy(&mut input, &mut output)?;
-        output.sync_all()?;
+        // The shared archive copier checks the entire output, including metadata/alpha.
+        super::archive::copy_verified(source, destination)?;
     }
     Ok(())
 }
@@ -64,6 +58,21 @@ fn encode_jpeg(_source: &Path, _destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::core::test_support::TestDirectory;
+
+    #[test]
+    fn ph10_raw_export_is_full_size_jpeg_plus_original() {
+        let d=TestDirectory::new();let source=d.path().join("raw.dng");
+        let original=include_bytes!("../../../qa/ai-eval/raw/minimal-rgb.dng");
+        std::fs::write(&source,original).unwrap();
+        assert_eq!(output_extension("raw.DNG"),"jpg");
+        let output=d.path().join("01_raw.jpg");
+        export(&source,&output).unwrap();
+        crate::core::archive::copy_verified(&source,&d.path().join("01_raw.dng")).unwrap();
+        let image=image::open(&output).unwrap();
+        assert_eq!((image.width(),image.height()),(48,64));
+        assert_eq!(std::fs::read(d.path().join("01_raw.dng")).unwrap(),original);
+        assert_eq!(std::fs::read(&source).unwrap(),original);
+    }
 
     #[test]
     fn exif_rotation_is_baked_and_source_is_unchanged() {
@@ -111,4 +120,19 @@ mod tests {
         assert!(properties.contains("sRGB"), "{properties}");
         assert_eq!(std::fs::read(source).unwrap(), bytes);
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+#[ignore = "需真样本：设置 TRIPCUT_RAW_SAMPLE 为 Sony A7R III ARW，验证原生 ImageIO 解码与全尺寸交付"]
+fn ph10_real_arw_requires_camera_sample() {
+    let path=std::path::PathBuf::from(std::env::var("TRIPCUT_RAW_SAMPLE").expect("需真样本"));
+    assert_eq!(path.extension().unwrap().to_str().unwrap().to_ascii_lowercase(),"arw");
+    let meta=super::photo_probe::probe(&path).unwrap();
+    assert!(meta.camera.as_deref().is_some_and(|camera|camera.contains("ILCE-7RM3")));
+    let preview=super::photo_decode::decode_preview(&path,2048).unwrap();
+    assert!(preview.width>0 && preview.height>0);
+    let full=super::photo_decode::render_sdr_srgb(&path,super::photo_decode::RenderOptions {max_size:None,quality:0.92,keep_alpha:false}).unwrap();
+    let expected=if meta.orientation>=5 {(meta.height as u32,meta.width as u32)} else {(meta.width as u32,meta.height as u32)};
+    assert_eq!((full.width,full.height),expected);
 }

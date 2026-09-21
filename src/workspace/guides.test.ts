@@ -53,6 +53,28 @@ describe("guides 纯函数表", () => {
     expect(nextGuide(EMPTY_GUIDE_SIGNALS, new Set(), new Set(), new Set())).toBeNull();
   });
 
+  // R21 W3 真机 F-W3-01:照片工作台里弹出了视频的「导入 → 挑选 → 排列 → 导出」与「…再切「完整交付包」」——
+  // 视频线的气泡(nav / heat / autoselect / shot / gap / export / autoplay)在照片工作台一个都不许出;
+  // notify / models 是全局的,照出;photo 只在照片工作台出。
+  it("R21 W3:视频线的七只气泡在照片工作台一律不出;只剩 photo / notify / models", () => {
+    const everything: GuideSignals = {
+      ...inWorkspace, photoWorkspace: true, selectedClipHasSuggestions: true, pipelineStep: 2, bandHasShots: true,
+      gapVisible: true, exportDrawerOpen: true, playbackEnded: true, backgroundRunning: true, modelInstallSuggested: true,
+    };
+    const videoOnly: GuideId[] = ["nav", "heat", "autoselect", "shot", "gap", "export", "autoplay"];
+    for (const id of videoOnly) expect(GUIDES[id].when(everything), id).toBe(false);
+    for (const id of ["photo", "notify", "models"] as GuideId[]) expect(GUIDES[id].when(everything), id).toBe(true);
+    // 视频工作台原样:同样的信号翻回 photoWorkspace=false,七只都能出。
+    const video = { ...everything, photoWorkspace: false, overlayOpen: false };
+    for (const id of videoOnly) expect(GUIDES[id].when(video), id).toBe(true);
+    // 照片工作台里从头走一遍:nav 不出,第一只是 photo;把 photo 也看过后,不会落到 export(抽屉开着)。
+    const none = new Set<GuideId>();
+    expect(nextGuide(everything, new Set(), none, none)).toBe("photo");
+    const seen = new Set<string>([guideKey("photo"), guideKey("notify"), guideKey("models")]);
+    expect(nextGuide({ ...everything, overlayOpen: true }, seen, none, none)).toBeNull();
+    for (const id of GUIDE_IDS) if (!videoOnly.includes(id) && id !== "photo") expect(GUIDES[id].text).not.toMatch(/排列|交付|镜头带|片段/);
+  });
+
   it("R21:照片工作台气泡只在照片模式首次触发，文案与入口固定", () => {
     const viewed = new Set<string>([guideKey("nav")]);
     const none = new Set<GuideId>();

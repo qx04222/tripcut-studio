@@ -35,7 +35,11 @@ export async function duelScenario(context, viteUrl, shot, failures, withTheme) 
     await arena.getByRole("button", { name: "退出擂台", exact: true }).click();
     await arena.waitFor({ state: "hidden" });
     const grid = page.getByRole("grid", { name: "照片网格" });
-    const first = grid.getByRole("gridcell").first();
+    // 接线 W3:网格里另有一张独立 ARW(44-photo-raw-card),winner 是疑似废片、它所在的相似组块会排到
+    // 非废片单块之后 —— 主图断言要落在 ×6 那个相似组里,不是整个网格的第一格。
+    const group = grid.getByRole("rowgroup").filter({ hasText: "×6" });
+    await group.waitFor();
+    const first = group.getByRole("gridcell").first();
     await first.waitFor();
     if (!/山路云海\.JPG/.test(await first.locator(".pool-card").getAttribute("aria-label") ?? "")) failures.push("43-photo-duel: winner 没回写成相似组主图");
     if (!(await page.getByRole("region", { name: "照片精选带" }).getByRole("button", { name: "检视照片 · 山路云海.JPG" }).count())) failures.push("43-photo-duel: winner 没刷新到精选带");

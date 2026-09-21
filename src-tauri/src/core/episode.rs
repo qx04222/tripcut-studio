@@ -24,6 +24,9 @@ pub struct EpisodeSummary {
     pub clip_count: i64,
     pub favorite_count: i64,
     pub export_count: i64,
+    /// R21 W3(F-W3-03):其中「导出精选照片」的次数(manifest.mode = photos)。照片流水线只看这个,
+    /// 视频流水线看 export_count − photo_export_count —— 两条线的「导出过了没」互不串。
+    pub photo_export_count: i64,
     pub target_platform: String,
     pub canvas_orientation: String,
 }
@@ -74,7 +77,10 @@ fn summary_by_id(connection: &Connection, id: i64) -> Result<EpisodeSummary> {
                           ), 0) != -1
                         )),
                     (SELECT COUNT(*) FROM exports x
-                       WHERE x.episode_id = e.id)
+                       WHERE x.episode_id = e.id),
+                    (SELECT COUNT(*) FROM exports x
+                       WHERE x.episode_id = e.id
+                         AND json_extract(x.manifest, '$.mode') = 'photos')
              FROM episodes e WHERE e.id = ?1",
             [id],
             |row| {
@@ -91,6 +97,7 @@ fn summary_by_id(connection: &Connection, id: i64) -> Result<EpisodeSummary> {
                     clip_count: row.get(9)?,
                     favorite_count: row.get(10)?,
                     export_count: row.get(11)?,
+                    photo_export_count: row.get(12)?,
                 })
             },
         )
@@ -785,6 +792,17 @@ mod tests {
 
         assert_ne!(first_memory_id, next_memory_id);
         assert_eq!(summary_by_id(&connection, first.id).unwrap().export_count, 1);
+        // R21 W3(F-W3-03):精选照片导出单独计数,视频侧 = export_count − photo_export_count。
+        connection
+            .execute(
+                "INSERT INTO exports(tier, manifest, created_at, output_path, episode_id)
+                 VALUES ('stable_package', '{\"mode\":\"photos\"}', '2099-01-02T00:00:00Z', '/photos', ?1)",
+                [first.id],
+            )
+            .unwrap();
+        let first_summary = summary_by_id(&connection, first.id).unwrap();
+        assert_eq!((first_summary.export_count, first_summary.photo_export_count), (2, 1));
+        assert_eq!(summary_by_id(&connection, outcome.next.id).unwrap().photo_export_count, 0);
         assert_eq!(
             summary_by_id(&connection, outcome.next.id)
                 .unwrap()

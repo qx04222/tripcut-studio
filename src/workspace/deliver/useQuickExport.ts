@@ -96,7 +96,7 @@ export function useQuickExport(progress: ExportProgress): QuickExport {
     return () => {
       alive = false;
     };
-  }, [active, lastDir, selection, settingsLoaded, status.selected_count, status.selected_photo_count]);
+  }, [active, lastDir, selection, settingsLoaded, status.selected_count]);
 
   const remember = useCallback((dir: string) => {
     setLastDir(dir);

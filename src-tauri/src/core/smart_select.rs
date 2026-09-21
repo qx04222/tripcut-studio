@@ -450,6 +450,35 @@ mod photo_selection_tests {
         jobs::mark_done(connection,id,job.attempt).unwrap();
     }
 
+    /// R21 照片线(业主拍板):照片只按张数挑 —— 句子里的秒数预算被忽略,没说张数按默认 20 张。
+    #[test]
+    fn photos_are_picked_by_count_and_ignore_seconds_budget() {
+        let (_directory,mut connection) = tests::library();
+        add_photo(&mut connection,"IMG_0000.png","2026-09-19T12:00:00Z",7_000);
+        add_photo(&mut connection,"IMG_0010.png","2026-09-19T13:00:05Z",4_000);
+        add_photo(&mut connection,"IMG_0100.png","2026-09-19T14:00:00Z",3_000);
+        // 1 秒预算按视频逻辑一张都装不下(hold 3–7 s);照片路径必须无视它,按张数给 2 张。
+        let out = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),only_photos:Some(true),photo_count:Some(2),budget_secs:Some(1.0),..Default::default()
+        }).unwrap();
+        let view = smart_select_runs::list_run(&connection,&out.run_id).unwrap();
+        assert_eq!(view.rows.len(),2);
+        assert_eq!(view.params.budget_secs,None,"照片路径不记录秒数预算");
+        // 只说「只要照片」不说张数 → 默认 20 张(这里只有 3 张,全给)。换一个新库,上一轮的精选不占位。
+        let (_directory,mut connection) = tests::library();
+        add_photo(&mut connection,"IMG_0000.png","2026-09-19T12:00:00Z",7_000);
+        add_photo(&mut connection,"IMG_0010.png","2026-09-19T13:00:05Z",4_000);
+        add_photo(&mut connection,"IMG_0100.png","2026-09-19T14:00:00Z",3_000);
+        let out = auto_select_episode_with(&mut connection,AutoSelectParams {
+            scope:Some("all".into()),prompt:Some("只要照片,挑 5 秒".into()),..Default::default()
+        }).unwrap();
+        let view = smart_select_runs::list_run(&connection,&out.run_id).unwrap();
+        assert_eq!(view.params.only_photos,Some(true));
+        assert_eq!(view.params.photo_count,Some(DEFAULT_PHOTO_COUNT));
+        assert_eq!(view.params.budget_secs,None);
+        assert_eq!(view.rows.len(),3);
+    }
+
     #[test]
     fn photo_primary_recomputes_from_quality_and_count_is_persisted() {
         let (_directory,mut connection) = tests::library();
@@ -764,8 +793,17 @@ fn resolve_photo_params(params: &mut AutoSelectParams) -> Result<()> {
     if params.photo_count == Some(0) {
         return Err(CoreError::Rating("照片张数要是正整数".to_owned()));
     }
+    // R21 照片线(业主拍板):照片只按张数挑,不套视频的秒数预算 —— 句子里的「60 秒」对照片无意义,
+    // 没说张数就按默认 20 张;hold_ms 只是内部字段,不参与挑选。
+    if params.only_photos == Some(true) {
+        params.budget_secs = None;
+        if params.photo_count.is_none() { params.photo_count = Some(DEFAULT_PHOTO_COUNT); }
+    }
     Ok(())
 }
+
+/// 照片版一句话挑片没说张数时的默认(与前端 PhotoAutoSelect 的兜底一致)。
+pub const DEFAULT_PHOTO_COUNT: usize = 20;
 
 /// R19 P-01「按分数挑」:同一份去重后的候选,不分章节、分数从高到低装满预算。
 fn greedy_by_score(candidates: Vec<Candidate>, budget_secs: f64) -> Vec<Candidate> {

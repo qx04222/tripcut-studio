@@ -6,8 +6,8 @@ export interface PhotoOrderQueue {
   reset(): void;
 }
 
-export const PHOTO_ORDER_SAVE_ERROR = "照片顺序未保存，已停止交付。请重新调整顺序后再试。";
-export const PHOTO_ORDER_EPISODE_CHANGED_ERROR = "等待照片顺序保存时已切换集，已停止交付。请在当前集重新交付。";
+export const PHOTO_ORDER_SAVE_ERROR = "照片顺序未保存，已停止导出。请重新调整顺序后再试。";
+export const PHOTO_ORDER_EPISODE_CHANGED_ERROR = "等待照片顺序保存时已切换集，已停止导出。请在当前集重新导出。";
 export function photoOrderKey(episodeId: number | null): string {
   return `ui.photo.order.${episodeId ?? "current"}`;
 }

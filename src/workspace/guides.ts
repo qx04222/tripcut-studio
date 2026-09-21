@@ -71,12 +71,19 @@ export interface GuideSpec {
   when(signals: GuideSignals): boolean;
 }
 
+/**
+ * R21 W3(F-W3-01,业主拍板「照片的逻辑不应该是视频的那一套」):视频线的气泡只在视频工作台出 ——
+ * 真机上照片工作台弹过「导入 → 挑选 → 排列 → 导出」与「…再切「完整交付包」」(照片的 rail /
+ * 抽屉与视频共用 `nav.pipeline-rail` / `.deliver-drawer` 锚点,光靠锚点挡不住)。
+ */
+const videoWorkspace = (s: GuideSignals): boolean => s.inWorkspace && s.photoWorkspace !== true;
+
 export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
   nav: {
     text: "这一条就是流程:导入 → 挑选 → 排列 → 导出。点任一步能跳过去;右上角永远有「下一步」。",
     anchor: '[data-guide="nav"], nav.pipeline-rail',
     side: "bottom",
-    when: (s) => s.inWorkspace,
+    when: (s) => videoWorkspace(s),
   },
   photo: {
     text: "这里挑照片，那边挑视频。",
@@ -97,7 +104,7 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     text: "这条彩色条是「精彩程度」:越亮越精彩。软件已经框出几段建议,按 Enter 直接采用。",
     anchor: '[data-guide="heat"], .monitor-heat',
     side: "top",
-    when: (s) => s.inWorkspace && s.selectedClipHasSuggestions,
+    when: (s) => videoWorkspace(s) && s.selectedClipHasSuggestions,
   },
   autoselect: {
     text: "不想一条条看?点「自动挑选」,软件按收藏和星级替你挑好片段。",
@@ -105,32 +112,32 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     tryLabel: "试试自动挑选",
     tryEvent: "tripcut:open-auto-select",
     side: "top",
-    when: (s) => s.inWorkspace && s.pipelineStep === 2,
+    when: (s) => videoWorkspace(s) && s.pipelineStep === 2,
   },
   shot: {
     text: "片段已经排进镜头带。拖动镜块,或用「往前 / 往后」调顺序;选中它就能在上面预览。",
     anchor: '[data-guide="shot"], .band-segment:not(.slot)',
     side: "top",
-    when: (s) => s.inWorkspace && s.bandHasShots,
+    when: (s) => videoWorkspace(s) && s.bandHasShots,
   },
   gap: {
     text: "这一格是「缺口」:这一章还差一个镜头。点卡片上的按钮,从挑好的片段里补一条就行。",
     anchor: '[data-guide="gap"], .band-segment.slot',
     side: "top",
-    when: (s) => s.inWorkspace && s.gapVisible,
+    when: (s) => videoWorkspace(s) && s.gapVisible,
   },
   export: {
     text: "导出很简单:默认把片段导到一个文件夹;想整包交给别人再切「完整交付包」。",
     anchor: '[data-guide="export"], .deliver-drawer',
     side: "bottom",
     inOverlay: true,
-    when: (s) => s.exportDrawerOpen,
+    when: (s) => s.exportDrawerOpen && s.photoWorkspace !== true,
   },
   autoplay: {
     text: "播完了。打开「连播」,播完会自动接着放下一条,像看片一样把素材过一遍。",
     anchor: '[data-guide="autoplay"], .monitor-auto-advance',
     side: "top",
-    when: (s) => s.inWorkspace && s.playbackEnded,
+    when: (s) => videoWorkspace(s) && s.playbackEnded,
   },
   // R19 P-06(models 车道):首启按内存档提一句装模型。≥ 16 GB 推画面理解 + 转写默认档,≤ 8 GB 只推
   // 转写低内存档——「推荐哪几个」由后端清单按档位算好(ModelCard.recommended),这里只管出不出;

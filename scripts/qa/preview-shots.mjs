@@ -339,6 +339,30 @@ async function workspaceScript(page, context, viteUrl) {
   await page.keyboard.press("Escape");
   await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
 
+  // R20-3 quality 车道(接线 W3):设置 › 工具与模型 › 分析与 AI 在「显示全部功能」下多三行校准 slider
+  // (地平线端正 / 局部曝光 / 主体清晰),默认 0.00;默认态(19b)不出现,由 QualityR20.test.tsx 盯。
+  await shot(page, "07c-settings-quality-sliders", {
+    locate: (p) => p.getByRole("button", { name: "设置", exact: true }),
+    act: async (button, p) => {
+      await button.click();
+      const dialog = p.getByRole("dialog").first();
+      await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+      await dialog.getByRole("tab", { name: "工具与模型" }).click();
+      const first = dialog.getByRole("slider", { name: "地平线端正" });
+      await first.waitFor({ timeout: STEP_TIMEOUT_MS });
+      await first.scrollIntoViewIfNeeded();
+      for (const name of ["地平线端正", "局部曝光", "主体清晰"]) {
+        const slider = dialog.getByRole("slider", { name });
+        if ((await slider.count()) !== 1) failures.push(`07c: 缺校准 slider「${name}」`);
+        else if (Number(await slider.inputValue()) !== 0) failures.push(`07c: 「${name}」默认值不是 0`);
+      }
+      if ((await dialog.getByText(/标定后生效/).count()) !== 3) failures.push("07c: 三行说明「标定后生效」不齐");
+    },
+    settle: 700,
+  });
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS }).catch(() => undefined);
+
   await page.setViewportSize(NARROW);
   await shot(page, "08-narrow-1280", { settle: 900 });
   // R19 shell · V-11:壳只有一个断点 --bp-compact: 1366px。1280 是紧凑档(顶栏四步折成胶囊、池两列),
@@ -1244,6 +1268,42 @@ async function workspaceScript(page, context, viteUrl) {
       settle: 600,
     });
     await fresh.close();
+  }
+
+  // R21 车道 archive(PH-11):`?archive=1` 让假后端报一条未完成的归档日志,交付抽屉顶部出现
+  // 唯一新增的入口「上次交付未完成 · 查看与继续」;三张交付卡照旧在它下面。展开后截:冻结清单、
+  // 错误、「继续交付」「撤销复制」两个按钮。
+  // 接线 W3:它要重新载入页面(带 ?archive=1),放在主页面剧本中间会把 03 的附属带 / 04 的检查器 /
+  // 缺口选中态全部复位,07–14 对不上基线 —— 改到剧本末尾开一页干净的,与 34–36 同一做法。
+  {
+    const archivePage = await context.newPage();
+    archivePage.setDefaultTimeout(STEP_TIMEOUT_MS);
+    await archivePage.goto(withTheme(`${viteUrl}?showall=1&archive=1`), { waitUntil: "domcontentloaded" });
+    await archivePage.getByRole("region", { name: "媒体池" }).waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+    await archivePage.getByRole("gridcell").first().waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+    await shot(archivePage, "06c-deliver-archive-recovery", {
+      locate: (p) => p.getByRole("button", { name: "第 4 步 导出", exact: true }),
+      act: async (button, p) => {
+        await button.click();
+        const dialog = p.getByRole("dialog").first();
+        await dialog.waitFor({ timeout: STEP_TIMEOUT_MS });
+        const summary = dialog.getByText("上次交付未完成 · 查看与继续", { exact: true });
+        await summary.waitFor({ timeout: STEP_TIMEOUT_MS });
+        const cards = dialog.getByRole("group", { name: "交付方式" }).locator(".deliver-card");
+        if ((await cards.count()) !== 3) failures.push(`06c-deliver-archive-recovery: 三张交付卡应仍在,实际 ${await cards.count()}`);
+        await summary.click();
+        await dialog.getByRole("list", { name: "本次交付文件清单" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+        for (const name of ["继续交付", "撤销复制"]) {
+          if ((await dialog.getByRole("button", { name, exact: true }).count()) !== 1) failures.push(`06c-deliver-archive-recovery: 缺「${name}」`);
+        }
+        const text = await dialog.locator(".deliver-archive-recovery").innerText();
+        for (const phrase of ["原片始终保留", "只撤销本次创建且未修改的文件", "ENOSPC", "(转换副本)", "(原样复制)"]) {
+          if (!text.includes(phrase)) failures.push(`06c-deliver-archive-recovery: 文案缺「${phrase}」`);
+        }
+      },
+      settle: 700,
+    });
+    await archivePage.close();
   }
 }
 

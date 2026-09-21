@@ -34,7 +34,7 @@ pub const AUDIO_WINDOW_SAMPLES: u32 = AUDIO_WINDOW_SAMPLE_RATE / 2;
 /// v3(R18):加第六项 `interest`;「有人声」不再只看峰均比(见 `window_has_speech`)。
 /// 两条都改了打分口径,老库必须重算,否则同一条热力条上半段是 v2 分、下半段是 v3 分。
 pub const MOMENTS_PIPELINE_VERSION: &str = "moments/v3";
-pub const WEIGHT_KEYS: [&str; 6] = ["sharp", "motion", "exposure", "sound", "no_cut", "interest"];
+pub const WEIGHT_KEYS: [&str; 9] = ["sharp", "motion", "exposure", "sound", "no_cut", "interest", "horizon_tilt_deg", "exposure_worst_cell", "saliency_sharpness"];
 /// 热力条降采样上限。
 pub const HEATMAP_MAX_POINTS: usize = 200;
 
@@ -80,11 +80,19 @@ pub struct MomentWeights {
     /// R18 B-1:内容少见度。缺省 0.20,其余五项按比例缩到 0.80 —— 没有 CLIP 向量时
     /// 这一项连分子带分母一起剔除,`weighted/total` 与 v2 逐位相同(缩放因子约掉了)。
     pub interest: f64,
+    /// R20-3/Q-8: stored calibration controls only; excluded from numerator AND
+    /// denominator until a separately reviewed calibration enables scoring.
+    #[serde(default)]
+    pub horizon_tilt_deg: f64,
+    #[serde(default)]
+    pub exposure_worst_cell: f64,
+    #[serde(default)]
+    pub saliency_sharpness: f64,
 }
 
 impl Default for MomentWeights {
     fn default() -> Self {
-        Self { sharp: 0.24, motion: 0.20, exposure: 0.16, sound: 0.12, no_cut: 0.08, interest: 0.20 }
+        Self { sharp: 0.24, motion: 0.20, exposure: 0.16, sound: 0.12, no_cut: 0.08, interest: 0.20, horizon_tilt_deg: 0.0, exposure_worst_cell: 0.0, saliency_sharpness: 0.0 }
     }
 }
 
@@ -106,6 +114,9 @@ impl MomentWeights {
                 "sound" => weights.sound = number,
                 "no_cut" => weights.no_cut = number,
                 "interest" => weights.interest = number,
+                "horizon_tilt_deg" => weights.horizon_tilt_deg = number,
+                "exposure_worst_cell" => weights.exposure_worst_cell = number,
+                "saliency_sharpness" => weights.saliency_sharpness = number,
                 other => {
                     return Err(CoreError::InvalidSchema(format!(
                         "时刻分权重不认识「{other}」;可用:{}",
@@ -1116,7 +1127,7 @@ mod tests {
         let mut without = window(None);
         score_moment(&mut without, &MomentWeights::default(), true);
         let mut v2 = window(None);
-        let legacy = MomentWeights { sharp: 0.3, motion: 0.25, exposure: 0.2, sound: 0.15, no_cut: 0.1, interest: 0.0 };
+        let legacy = MomentWeights { sharp: 0.3, motion: 0.25, exposure: 0.2, sound: 0.15, no_cut: 0.1, interest: 0.0, ..MomentWeights::default() };
         score_moment(&mut v2, &legacy, true);
         assert!(
             (without.score - v2.score).abs() < 1e-12,

@@ -1,3 +1,6 @@
+mod quality;
+pub use quality::{measure_quality, QualityMetrics};
+
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -85,9 +88,10 @@ const FOCUS_HEIGHT: usize = 180;
 // 是分析阶段 CPU 的大头);解码阶段开硬解(VideoToolbox),失败自动软解重跑。
 // v5(R14):欠曝加「无高光」守卫(夜景不再整段判欠曝);时刻分同判据;
 // 场景检测改在 10 fps/640 上比较相邻帧(2 fps 下摇镜与夜景硬切分不开),阈值 0.35→0.25。
+// v6 / photo-v2(R20-3):JSON 中增加三项画质测量,不改既有评分或废片判据。
 // 版本号变化会让旧结果被 enqueue_missing 重新排队重算。
-const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v5";
-const PHOTO_ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/photo-v1";
+const ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/v6";
+const PHOTO_ANALYSIS_PIPELINE_VERSION: &str = "analyze_l1/photo-v2";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClipAnalysis {
@@ -365,7 +369,9 @@ fn analyze_photo(path: &Path) -> Result<AnalysisComputation> {
         },
         focus_scores: vec![focus],
         tool_versions: json!({"pipeline": PHOTO_ANALYSIS_PIPELINE_VERSION,
-            "focus_kernel": "3x3-laplacian-cross", "cover_size": 512, "suspect_junk": under || over || blur}),
+            "focus_kernel": "3x3-laplacian-cross", "cover_size": 512, "suspect_junk": under || over || blur,
+            "quality": {"version": "quality/v1", "scoring_enabled": false,
+                "samples": [{"position": 0.0, "metrics": measure_quality(&rgb)}]}}),
         windows: super::moments::WindowSignals::default(),
     })
 }
@@ -977,12 +983,17 @@ fn analyze_source_with_handoff(
         .map(|position| extract_focus_score(&source.path, duration_seconds * position, ffmpeg))
         .collect::<Result<Vec<_>>>()?;
 
+    let quality_samples = [0.1_f64, 0.5, 0.9].into_iter().map(|position| {
+        extract_quality_frame(&source.path, duration_seconds * position, ffmpeg)
+            .map(|metrics| json!({"position": position, "metrics": metrics}))
+    }).collect::<Result<Vec<_>>>()?;
     let ffmpeg_version = tool_version(ffmpeg)?;
     let ffprobe_version = tool_version(ffprobe)?;
     let tool_versions = json!({
         "pipeline": ANALYSIS_PIPELINE_VERSION,
         "ffmpeg": ffmpeg_version,
         "ffprobe": ffprobe_version,
+        "quality": {"version": "quality/v1", "scoring_enabled": false, "samples": quality_samples},
         "thresholds": {
             "scene": scene_threshold,
             "dark_yavg": DARK_YAVG_THRESHOLD,
@@ -1369,6 +1380,23 @@ fn normalized_scene_cuts(cuts: &[i64], duration_ticks: i64) -> Vec<i64> {
     normalized
 }
 
+// Keep the legacy focus sampler byte-for-byte unchanged. Quality geometry needs
+// aspect-preserving frames (the legacy 320x180 stretch corrupts portrait tilt).
+fn extract_quality_frame(path: &Path, seconds: f64, ffmpeg: &OsStr) -> Result<QualityMetrics> {
+    let args = ["-v", "error", "-nostdin", "-ss", &format!("{seconds:.6}"), "-i"]
+        .map(OsString::from);
+    let mut args = args.to_vec();
+    args.push(path.as_os_str().to_owned());
+    args.extend(["-map", "0:v:0", "-frames:v", "1", "-vf",
+        "scale=320:320:force_original_aspect_ratio=decrease,setsar=1",
+        "-pix_fmt", "rgb24", "-c:v", "png", "-f", "image2pipe", "-"].map(OsString::from));
+    let output = execute_with_timeout(ffmpeg, &args, FOCUS_FRAME_TIMEOUT)?;
+    if !output.success { return Err(command_failure("ffmpeg 画质采样", &output)); }
+    let rgb = image::load_from_memory(&output.stdout)
+        .map_err(|e| CoreError::Analysis(format!("画质采样帧无效:{e}")))?.to_rgb8();
+    Ok(measure_quality(&rgb))
+}
+
 fn extract_focus_score(path: &Path, seconds: f64, ffmpeg: &OsStr) -> Result<f64> {
     let args = [
         OsString::from("-v"),
@@ -1622,6 +1650,51 @@ mod tests {
     use crate::core::migrations::{MIGRATION_0001, MIGRATION_0003, MIGRATION_0025};
     use crate::core::test_support::TestDirectory;
 
+    #[test]
+    fn quality_r20_photo_and_video_samples_roundtrip_existing_json() {
+        let dir = TestDirectory::new();
+        let path = dir.path().join("portrait.png");
+        let angle = 7_f64.to_radians();
+        let rgb = image::RgbImage::from_fn(180, 320, |x, y| {
+            image::Rgb([if y as f64 - 160. > (x as f64 - 90.) * angle.tan() { 190 } else { 60 }; 3])
+        });
+        rgb.save(&path).unwrap();
+        let mut connection = analysis_connection();
+        let source = insert_source(&connection, &path, "photo");
+        connection.execute("UPDATE clips SET kind='photo'", []).unwrap();
+        let computation = analyze_photo(&path).unwrap();
+        persist_analysis(&mut connection, &source, &computation).unwrap();
+        let stored = get_clip_analysis(&connection, source.clip_id).unwrap().unwrap();
+        let samples = stored.tool_versions["quality"]["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0]["metrics"]["horizon_tilt_deg"].as_f64().unwrap()-7.).abs() <= 2.);
+        assert_eq!(samples[0]["metrics"]["exposure_worst_cell"]["cells"].as_array().unwrap().len(), 9);
+        assert!(samples[0]["metrics"]["saliency_sharpness"].is_number());
+        assert_eq!(stored.tool_versions["quality"]["scoring_enabled"], false);
+        let scenes: i64 = connection.query_row("SELECT COUNT(*) FROM segments", [], |r| r.get(0)).unwrap();
+        assert_eq!(scenes, 0);
+
+        let (ffmpeg, ffprobe) = ffmpeg_tools().expect("quality integration requires ffmpeg/ffprobe");
+        let video = dir.path().join("portrait.mp4");
+        let status = Command::new(&ffmpeg).args(["-v", "error", "-nostdin", "-loop", "1", "-i"])
+            .arg(&path).args(["-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&video).status().unwrap();
+        assert!(status.success());
+        let mut connection = analysis_connection();
+        let source = insert_source(&connection, &video, "video");
+        let computed = analyze_source(&source, &ffmpeg, &ffprobe, SCENE_THRESHOLD).unwrap();
+        persist_analysis(&mut connection, &source, &computed).unwrap();
+        let stored = get_clip_analysis(&connection, source.clip_id).unwrap().unwrap();
+        let samples = stored.tool_versions["quality"]["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 3);
+        for (sample, position) in samples.iter().zip([0.1,0.5,0.9]) {
+            assert_eq!(sample["position"], position);
+            assert!((sample["metrics"]["horizon_tilt_deg"].as_f64().unwrap()-7.).abs() <= 2.);
+            assert_eq!(sample["metrics"]["width"], 180);
+            assert_eq!(sample["metrics"]["height"], 320);
+        }
+    }
+
     fn analysis_connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -1743,7 +1816,7 @@ mod tests {
 
     #[test]
     fn analysis_filter_runs_scene_detection_after_downscale_and_bumps_pipeline_version() {
-        assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v5");
+        assert_eq!(ANALYSIS_PIPELINE_VERSION, "analyze_l1/v6");
         let args = analysis_args(Path::new("/x.mp4"), 0.25, false, true, None);
         let joined = args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
         assert!(joined.starts_with("-hide_banner -nostdin -hwaccel videotoolbox -i"));

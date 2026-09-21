@@ -141,3 +141,11 @@
 ## 6. 结论
 
 R21 的照片能力已按 §0.5 收束为独立工作台。照片监视器与视频播放器在数据源、控件、键盘、预算、顺序、擂台和交付上均独立；片刻的选片机制已按 TripCut 架构完成自用化实现，视频工作台像素级保持原壳。
+
+## 7. v0.11.0 发布回读
+
+- 私有 `main` 发布提交：`1f7c9d8ec00abad1704888b354272cece2cf3920`，推送后远端 SHA 一致。
+- 正式未签名预览 DMG：`TripCut-Studio_0.11.0_github-preview-v0.11.0-20260921T0043Z_preview_aarch64.dmg`，SHA-256 `d299467f1f8330dfa4bfdc2346595ce0831ca57b6d4d9840a796533a089283d2`；正式审计 `qa/runs/2026-09-21T00-48-12Z-v0.11.0-dmg-audit/gate.json` 为 **13/13 PASS**。
+- 应用内更新包 SHA-256 `1a997b3e7aa4254239e5783e9b227e4996f909048396fc358beb7d8e8ddb5c54`；本机打包设置 `TRIPCUT_UPDATER_SIGN=1`，线上 `latest.json.version` 回读为 **0.11.0**，实际重新下载的更新包哈希与本机产物一致。
+- 公开仓 `main` 与 `v0.11.0` 标签均精确指向 `bb19585b7deca2c1e93c9a5e685afcd1cecb1be9`；公开树不含 `qa/runs/` 或 `qa/preview-baseline/`，gitleaks 为 **0 命中**。
+- GitHub Release：`https://github.com/qx04222/tripcut-studio/releases/tag/v0.11.0`，**23 个资产**；`SHA256SUMS.txt` 覆盖其余 **22 个文件**且全部校验通过。线上 DMG 与更新包实际下载 SHA-256 均与发布清单一致，公开 README 为 0.11.0 且无占位符。

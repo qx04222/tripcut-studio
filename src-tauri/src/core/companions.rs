@@ -38,7 +38,7 @@ pub fn discover(primary: &Path) -> Result<CompanionGroup> {
     // Case-sensitive stem comparison respects case-sensitive source volumes.
     // Extensions alone are case-insensitive (camera exports commonly use uppercase).
     let primaries = entries.iter().filter(|p| p.file_stem() == Some(stem)
-        && super::import::media_kind(p) == Some("photo")).count();
+        && super::import::media_kind(p) == Some("photo") && !super::import::is_raw(p)).count();
     if primaries > 1 { return Ok(CompanionGroup { files: Vec::new(), ambiguous: true }); }
     let live = matches!(extension(primary).as_str(), "heic" | "heif");
     let mut group = CompanionGroup::default();
@@ -46,7 +46,7 @@ pub fn discover(primary: &Path) -> Result<CompanionGroup> {
         if path == primary { continue; }
         let ext = extension(&path);
         let same_stem = path.file_stem() == Some(stem);
-        let role = if same_stem && super::import::RAW_EXTENSIONS.contains(&ext.as_str()) {
+        let role = if same_stem && matches!(ext.as_str(),"arw"|"dng"|"cr2"|"cr3"|"nef"|"nrw"|"raf"|"rw2"|"orf"|"pef"|"srw"|"raw"|"sr2"|"srf"|"rwl") {
             Some("raw")
         } else if ext == "xmp" && (same_stem || path.file_stem().is_some_and(|s| Path::new(s).file_stem() == Some(stem))) {
             Some("xmp")

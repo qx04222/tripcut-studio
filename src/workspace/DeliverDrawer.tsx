@@ -1,3 +1,4 @@
+import { ArchiveRecoveryEntry } from "./deliver/ArchiveRecoveryEntry";
 import { useEffect, useState, type JSX } from "react";
 import { DELIVER_DRAWER_TITLE } from "./copy";
 import { onJianyingAvailabilityChanged } from "./deliver/jianyingHumanCheck";
@@ -37,6 +38,8 @@ import { CANVAS_SOURCE_LABELS } from "./deliver/useExportCanvas";
 import { useExportProgress, type ExportProgress } from "./deliver/useExportProgress";
 import { useJianyingKit } from "./deliver/useJianyingKit";
 import { useQuickExport } from "./deliver/useQuickExport";
+import { PhotoExportFooter, PhotoExportPanel } from "./deliver/PhotoExportPanel";
+import { usePhotoExport } from "./deliver/usePhotoExport";
 import { returnToActiveEpisode } from "../historyView";
 import { failureText } from "./errorText";
 import { RETURN_TO_EXPORT_LABEL } from "./TopBar";
@@ -62,9 +65,8 @@ function FullDeliverBody({ progress, mode, forceContactSheet }: { progress: Expo
   const form = useDeliverForm(progress);
   const { setUseJianyingDraft, setIncludeContactSheet } = form;
   // 剪映模式不写 ui.deliver.jianying_draft(那是「完整交付包」里那枚开关的记忆),只在本次强制打开。
-  const hasPhotos = (progress.status.selected_photo_count ?? 0) > 0;
   const hasVideos = progress.status.selected_segment_count + progress.status.selected_whole_count > 0;
-  const useJianyingDraft = !hasPhotos && (mode === "jianying" ? form.jianying.supported : form.useJianyingDraft);
+  const useJianyingDraft = mode === "jianying" ? form.jianying.supported : form.useJianyingDraft;
   useEffect(() => {
     // 等记住的选择读回来再压上去,否则会被那一次异步回填盖掉。
     if (forceContactSheet && form.loaded) setIncludeContactSheet(true);
@@ -101,7 +103,7 @@ function FullDeliverBody({ progress, mode, forceContactSheet }: { progress: Expo
     <>
       <div className="deliver-drawer-scroll">
         <p className="deliver-subtitle">{subtitle}</p>
-        <DeliverForm hasPhotos={hasPhotos} hasVideos={hasVideos} form={form} useJianyingDraft={useJianyingDraft} onUseJianyingDraftChange={setUseJianyingDraft} />
+        <DeliverForm hasVideos={hasVideos} form={form} useJianyingDraft={useJianyingDraft} onUseJianyingDraftChange={setUseJianyingDraft} />
         <DeliverContents
           status={status}
           includeContactSheet={form.includeContactSheet}
@@ -111,7 +113,7 @@ function FullDeliverBody({ progress, mode, forceContactSheet }: { progress: Expo
         />
         {form.nativeResult ? <JianyingResultCard result={form.nativeResult} /> : null}
         {active ? <DeliverProgressCard status={status} /> : <DeliverResultCard status={status} onReveal={() => void form.reveal()} />}
-        <DeliverPartsDetails canvas={canvasSize} photoCount={status.selected_photo_count ?? 0} hasVideos={hasVideos} />
+        <DeliverPartsDetails canvas={canvasSize} hasVideos={hasVideos} />
       </div>
       <DeliverFooter form={form} status={status} useJianyingDraft={useJianyingDraft && form.jianying.supported} onClose={close} />
     </>
@@ -150,6 +152,27 @@ function JianyingKitBody({ progress, autoStart = false }: { progress: ExportProg
         <JianyingKitPanel kit={kit} status={progress.status} />
       </div>
       <JianyingKitFooter kit={kit} status={progress.status} onClose={close} />
+    </>
+  );
+}
+
+/**
+ * R21 照片线(业主拍板:照片不套视频那一套):照片工作台里的导出抽屉只有一件事 ——「导出精选照片」。
+ * 没有「交给剪映」/ 素材包 / 整包三卡,没有模式 chip,没有平台 / 粗剪 / 镜头表。
+ */
+function PhotoExportBody({ progress }: { progress: ExportProgress }): JSX.Element {
+  const photos = usePhotoExport(progress);
+  const { done } = photos;
+  useEffect(() => {
+    // F-W3-03:照片导完只给照片流水线打勾,视频的第 ④ 步不动。
+    if (done) window.dispatchEvent(new CustomEvent(EXPORT_DONE_EVENT, { detail: "photo" }));
+  }, [done]);
+  return (
+    <>
+      <div className="deliver-drawer-scroll">
+        <PhotoExportPanel photos={photos} status={progress.status} />
+      </div>
+      <PhotoExportFooter photos={photos} status={progress.status} onClose={close} />
     </>
   );
 }
@@ -209,13 +232,11 @@ function ReadOnlyDeliverBody({ title }: { title: string }): JSX.Element {
  */
 function ExportCardsScreen({
   availability,
-  photoCount,
   hasVideos,
   onPick,
   onMore,
 }: {
   availability: JianyingAvailability;
-  photoCount: number;
   hasVideos: boolean;
   onPick(card: DeliverCard): void;
   onMore(): void;
@@ -232,12 +253,7 @@ function ExportCardsScreen({
         >
           <span className="deliver-card-title">{DELIVER_CARD_LABELS[card]}</span>
           <span className="deliver-card-hint">
-            {card === "full" && !hasVideos
-              ? photoCount > 0
-                ? "照片 + 镜头表 + 说明"
-                : "暂无交付项 · 请先挑选素材"
-              : DELIVER_CARD_HINTS[card]}
-            {deliverCardPhotoSuffix(card, photoCount)}
+            {card === "full" && !hasVideos ? "暂无交付项 · 请先挑选素材" : DELIVER_CARD_HINTS[card]}
           </span>
         </button>
       ))}
@@ -253,10 +269,6 @@ function ExportCardsScreen({
   );
 }
 
-export function deliverCardPhotoSuffix(card: DeliverCard, photoCount: number): string {
-  return photoCount > 0 && card !== "quick" ? ` · ${photoCount} 张照片一起交付` : "";
-}
-
 function DeliverDrawerBody(): JSX.Element {
   const progress = useExportProgress();
   const [chosen, setMode] = useState<ExportMode | null>(() => initialExportMode(takePendingExportMode(), hasPendingQuickSelection(), null));
@@ -268,14 +280,12 @@ function DeliverDrawerBody(): JSX.Element {
   const [autoKit, setAutoKit] = useState(false);
   const active = isExportActive(progress.status);
   // 没人指定模式时按可用性定默认;可用性还没回来先按「导出片段」画(chip 一回来就换,通常一帧内)。
-  const photoCount = progress.status.selected_photo_count ?? 0;
   const hasVideos = progress.status.selected_segment_count + progress.status.selected_whole_count > 0;
-  const requestedMode = chosen ?? initialExportMode(null, false, jianying) ?? DEFAULT_EXPORT_MODE;
-  const mode: ExportMode = photoCount > 0 && requestedMode === "jianying" ? "kit" : requestedMode;
+  const mode: ExportMode = chosen ?? initialExportMode(null, false, jianying) ?? DEFAULT_EXPORT_MODE;
   const availability = jianying ?? CHECKING_JIANYING;
 
   const pickCard = (card: DeliverCard): void => {
-    const resolved = card === "handoff" && photoCount > 0 ? "kit" : cardToExportMode(card, jianying);
+    const resolved = cardToExportMode(card, jianying);
     if (card === "handoff" && resolved === "kit") {
       showToast(HANDOFF_KIT_TOAST, { tone: "neutral" });
     }
@@ -306,16 +316,15 @@ function DeliverDrawerBody(): JSX.Element {
     mode === "jianying" && !availability.supported
       ? jianyingUnavailableLine(availability.installed_version, availability.force_allowed === true)
       : mode === "full" && !hasVideos
-        ? photoCount > 0
-          ? "照片 + 镜头表 + 说明"
-          : "暂无交付项 · 请先挑选素材"
-      : EXPORT_MODE_HINTS[mode];
+        ? "暂无交付项 · 请先挑选素材"
+        : EXPORT_MODE_HINTS[mode];
 
   return (
     <div className="deliver-drawer">
       <ExportStepHead />
+      <ArchiveRecoveryEntry />
       {screen === "cards" ? (
-        <ExportCardsScreen photoCount={photoCount} hasVideos={hasVideos} availability={availability} onPick={pickCard} onMore={() => setScreen("detail")} />
+        <ExportCardsScreen hasVideos={hasVideos} availability={availability} onPick={pickCard} onMore={() => setScreen("detail")} />
       ) : (
         <>
           <div className="deliver-mode" role="group" aria-label="导出方式">
@@ -360,10 +369,22 @@ function DeliverDrawerBody(): JSX.Element {
 export function DeliverDrawer(): JSX.Element | null {
   const open = useWorkspace((state: WorkspaceState) => state.openDrawer === "deliver");
   const viewingEpisode = useWorkspace((state: WorkspaceState) => state.viewingEpisode);
+  const photoMode = useWorkspace((state: WorkspaceState) => state.workspaceMode === "photo");
 
   return (
     <Drawer open={open} title={DELIVER_DRAWER_TITLE} side="right" width="min(720px, 60vw)" onClose={close}>
-      {open ? viewingEpisode ? <ReadOnlyDeliverBody title={viewingEpisode.title} /> : <DeliverDrawerBody /> : null}
+      {open ? viewingEpisode ? <ReadOnlyDeliverBody title={viewingEpisode.title} /> : photoMode ? <PhotoDeliverDrawerBody /> : <DeliverDrawerBody /> : null}
     </Drawer>
+  );
+}
+
+/** 照片工作台的抽屉:归档恢复入口(有未完成的才出现)+ 「导出精选照片」,三张视频交付卡不渲染。 */
+function PhotoDeliverDrawerBody(): JSX.Element {
+  const progress = useExportProgress();
+  return (
+    <div className="deliver-drawer deliver-drawer--photo">
+      <ArchiveRecoveryEntry variant="photo" />
+      <PhotoExportBody progress={progress} />
+    </div>
   );
 }

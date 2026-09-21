@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { DEFAULT_SETTINGS } from "../../appearance";
 import { Button, SectionHeader, Select, Toggle } from "../ui";
 import { BudgetMeter, SettingsRow, StatusPill, ThresholdRow } from "./SettingsControls";
+import { useShowAllFeatures } from "../showAllFeatures";
 import { useSettingsFormContext } from "./SettingsFormContext";
 import { llmLedgerPurposeLabel, llmLedgerStatusLabel } from "./settingsModel";
 
@@ -20,19 +21,33 @@ const BEST_TAKE_AXES = [
 const MOMENT_WEIGHTS_KEY = "moments.weights";
 const DEFAULT_INTEREST_WEIGHT = "0.20";
 
+const QUALITY_WEIGHTS = [
+  ["horizon_tilt_deg", "地平线端正"],
+  ["exposure_worst_cell", "局部曝光"],
+  ["saliency_sharpness", "主体清晰"],
+] as const;
+
 export function readInterestWeight(raw: string | undefined): string {
-  if (!raw) return DEFAULT_INTEREST_WEIGHT;
+  return readMomentWeight(raw, "interest", DEFAULT_INTEREST_WEIGHT);
+}
+
+function readMomentWeight(raw: string | undefined, key: string, fallback: string): string {
+  if (!raw) return fallback;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return DEFAULT_INTEREST_WEIGHT;
-    const value = (parsed as Record<string, unknown>).interest;
-    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : DEFAULT_INTEREST_WEIGHT;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+    const value = (parsed as Record<string, unknown>)[key];
+    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : fallback;
   } catch {
-    return DEFAULT_INTEREST_WEIGHT;
+    return fallback;
   }
 }
 
 export function writeInterestWeight(raw: string | undefined, next: string): string {
+  return writeMomentWeight(raw, "interest", next);
+}
+
+function writeMomentWeight(raw: string | undefined, key: string, next: string): string {
   let base: Record<string, unknown> = {};
   if (raw) {
     try {
@@ -44,11 +59,12 @@ export function writeInterestWeight(raw: string | undefined, next: string): stri
       base = {};
     }
   }
-  return JSON.stringify({ ...base, interest: Number(next) });
+  return JSON.stringify({ ...base, [key]: Number(next) });
 }
 
 export function AnalysisSection(): JSX.Element {
   const form = useSettingsFormContext();
+  const showAll = useShowAllFeatures();
   const { settings, llmStatus, llmLedger } = form;
   const save = (key: string, value: string) => void form.save(key, value);
 
@@ -102,6 +118,18 @@ export function AnalysisSection(): JSX.Element {
           deferCommit
         />
       </div>
+
+      {showAll && <div className="settings-sheet-group">
+        {QUALITY_WEIGHTS.map(([key, label]) => (
+          <ThresholdRow key={key} label={label}
+            description="实验权重，标定后生效；当前只记录测量结果。"
+            settingKey={MOMENT_WEIGHTS_KEY}
+            value={readMomentWeight(settings[MOMENT_WEIGHTS_KEY], key, "0.00")}
+            defaultValue="0.00" min="0.00" max="1.00" step="0.01"
+            onChange={(_key, next) => save(MOMENT_WEIGHTS_KEY, writeMomentWeight(settings[MOMENT_WEIGHTS_KEY], key, next))}
+            deferCommit />
+        ))}
+      </div>}
 
       <div className="settings-sheet-subhead">
         <strong>自动选优的六项权重</strong>

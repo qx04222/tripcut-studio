@@ -8,7 +8,7 @@ describe("duel migration contract", () => {
     expect(sql).toContain("CREATE TABLE duel_sessions");
     expect(sql).toContain("CREATE TABLE duel_verdicts");
     expect(sql).toContain("snapshot_json");
-    expect(sql).toContain("LATEST_SCHEMA_VERSION: i64 = 53");
+    expect(sql).toContain("LATEST_SCHEMA_VERSION: i64 = 54");
     expect(sql).toContain("Migration { version: 53, sql: MIGRATION_0053 }");
   });
 });

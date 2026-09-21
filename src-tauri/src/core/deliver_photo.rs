@@ -1,4 +1,5 @@
 //! Photo-specific DB projection and handoff, kept separate from video trim/copy logic.
+//! 只服务「导出精选照片」(deliver.rs 的 MODE_PHOTOS);素材包 / 整包 / 快速导出不再带照片。
 use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,40 +67,20 @@ pub(super) fn count(clips: &[ExportClip]) -> u64 {
         .count() as u64
 }
 
-pub(super) fn relative_name(sequence: usize, chapter: Option<usize>, clip: &ExportClip) -> String {
-    let path = kit_relative_name(sequence, chapter, &clip.chapter_title, &clip.file_name);
-    if clip.media_kind == "photo" {
-        Path::new(&path)
-            .with_extension(super::super::photo_export::output_extension(
-                &clip.file_name,
-            ))
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        path
-    }
+/// 「导出精选照片」的文件名:`NN_<原名>.<ext>`,平铺;HEIC / RAW 转出 JPG,原名扩展名其它照常。
+/// 没有章名、没有「视频/ 照片/」子目录——照片线不套视频那一套。
+pub(super) fn output_name(sequence: usize, clip: &ExportClip) -> String {
+    let stem = Path::new(&clip.file_name)
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "photo".into());
+    let extension = super::super::photo_export::output_extension(&clip.file_name);
+    format!("{sequence:02}_{stem}.{extension}")
 }
 
-pub(super) fn split_relative_name(
-    video_sequence: usize,
-    photo_sequence: usize,
-    chapter: Option<usize>,
-    clip: &ExportClip,
-) -> String {
-    if clip.media_kind == "photo" {
-        let stem = Path::new(&clip.file_name)
-            .file_stem()
-            .map(|value| value.to_string_lossy())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "photo".into());
-        let extension = super::super::photo_export::output_extension(&clip.file_name);
-        format!("照片/{photo_sequence:02}_{stem}.{extension}")
-    } else {
-        format!(
-            "视频/{}",
-            kit_relative_name(video_sequence, chapter, &clip.chapter_title, &clip.file_name)
-        )
-    }
+pub(super) fn output_names(clips: &[ExportClip]) -> Vec<String> {
+    clips.iter().enumerate().map(|(index, clip)| output_name(index + 1, clip)).collect()
 }
 
 fn companion_source(clip: &ExportClip, companion: &Companion) -> PathBuf {
@@ -114,13 +95,21 @@ fn companion_source(clip: &ExportClip, companion: &Companion) -> PathBuf {
     }
 }
 
-pub(super) fn copy_companions(clip: &ExportClip, output: &Path) -> Result<()> {
+pub(super) fn companion_copies(clip: &ExportClip, output: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut copies = Vec::new();
     let stem = output.file_stem().unwrap_or_default().to_string_lossy();
     let source_stem = Path::new(&clip.file_name)
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy();
     let mut reserved = vec![output.to_path_buf()];
+    // PH-10 × PH-11:RAW 交付出两份 —— 转出的 JPG(`output`,归档里记为 derived)+ 逐字节的原片。
+    // 原片作为一条普通 copy 成员交给 archive.rs(冻结哈希 → copy_verified → 发布),不在这里直接写文件。
+    if super::super::import::is_raw(Path::new(&clip.file_name)) {
+        let original = output.with_extension(Path::new(&clip.file_name).extension().unwrap_or_default());
+        reserved.push(original.clone());
+        copies.push((PathBuf::from(&clip.source_path), original));
+    }
     for (index, companion) in clip.companions.iter().enumerate() {
         let source = companion_source(clip, companion);
         let name = source
@@ -145,13 +134,14 @@ pub(super) fn copy_companions(clip: &ExportClip, output: &Path) -> Result<()> {
             target = output.with_file_name(format!("{stem}__{}_{index}_{name}", companion.role));
         }
         reserved.push(target.clone());
-        let mut input = File::open(&source)?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)?;
-        std::io::copy(&mut input, &mut file)?;
-        file.sync_all()?;
+        copies.push((source, target));
+    }
+    Ok(copies)
+}
+
+pub(super) fn copy_companions(clip: &ExportClip, output: &Path) -> Result<()> {
+    for (source, target) in companion_copies(clip, output)? {
+        super::super::archive::copy_verified(&source, &target)?;
     }
     Ok(())
 }

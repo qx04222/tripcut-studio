@@ -58,6 +58,8 @@
 @import "./workspace/chrome.css";
 /* R18 车道 settings(失败任务清单 / 缓存位置行),同样只能在头部 @import。 */
 @import "./workspace/settings-r18.css";
+/* R21 车道 archive(PH-11 交付抽屉「上次交付未完成」入口),同样只能在头部 @import。 */
+@import "./workspace/archive-r21.css";
 /* R17 车道 exportfix(交付结果卡的 ffmpeg 建议行),同样只能在头部 @import。 */
 @import "./workspace/exportfix-r17.css";
 /* R17 车道 epmove(素材「移到其他集…」的目标集菜单),同样只能在头部 @import。 */

@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod analysis;
 pub mod arrange;
 pub mod asset_safety;

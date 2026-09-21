@@ -18,7 +18,8 @@ import { useToolchainStatus } from "./ToolchainBanner";
 import { useClipsFeed } from "./useClipsFeed";
 import { clipDurationSeconds } from "./useBandTrim";
 import { Button, Icon } from "./ui";
-import { dispatchWorkspace } from "./WorkspaceStore";
+import { featuredPhotos } from "./photoWorkspaceModel";
+import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
 
 export interface BackgroundSummary {
   analyzed: number;
@@ -51,6 +52,21 @@ export interface BackgroundSummary {
    */
   importedCount?: number;
   importedDurationMs?: number;
+  /**
+   * R21 W3 P1-2(业主拍板「照片的逻辑不应该是视频的那一套」):照片工作台的摘要
+   * 「60 张 · 已选 8 张 · 正在分析 40/60」。在场时取代「已导入 N 条 · 共 X 分钟」——
+   * 照片没有分钟这回事。旧调用方不传时行为完全不变。
+   */
+  photoSummary?: PhotoStatusSummary;
+}
+
+export interface PhotoStatusSummary {
+  /** 当前集的照片张数。 */
+  count: number;
+  /** 精选带里的张数(收藏 + ≥3 星 + 擂台 / 自动挑中,与精选带同一口径)。 */
+  selected: number;
+  /** 分析落了终态的张数;< count 时带「正在分析 x/y」半句。 */
+  analysed: number;
 }
 
 const EMPTY_SUMMARY: BackgroundSummary = {
@@ -131,6 +147,14 @@ export function importMapPhrase(count: number, durationMs: number, analysing: st
   return analysing ? `${base} · 正在分析(约 ${analysing})` : base;
 }
 
+/** 照片工作台:「60 张 · 已选 8 张」/ 分析没跑完再接「 · 正在分析 40/60(约 30 秒)」。 */
+export function photoStatusPhrase(photo: PhotoStatusSummary, eta: string | null): string {
+  const base = `${photo.count} 张 · 已选 ${photo.selected} 张`;
+  if (photo.analysed >= photo.count) return base;
+  const progress = `正在分析 ${photo.analysed}/${photo.count}`;
+  return eta ? `${base} · ${progress}(约 ${eta})` : `${base} · ${progress}`;
+}
+
 /**
  * Z-01 / Z-04:把后端的登记进度与素材分析进度合成状态条用的 (analyzed, total, failed)。
  * - 分母 = 登记到的文件数(与素材数 + 失败 + 重复取大,生成物等没走登记的素材也算进来);
@@ -156,7 +180,10 @@ export function summaryPhrases(summary: BackgroundSummary, eta: string | null = 
   const phrases: string[] = [];
   // R18 W-4:启动补扫挪到开窗之后,这段时间要说人话——不说「补扫」这种内部词。
   if (summary.startupBackfill) phrases.push("正在整理素材库");
-  if (typeof summary.importedCount === "number" && typeof summary.importedDurationMs === "number") {
+  if (summary.photoSummary) {
+    // R21 W3 P1-2:照片工作台只报张数 / 已选 / 照片自己的分析进度;不报「条 / 分钟」。
+    phrases.push(photoStatusPhrase(summary.photoSummary, summary.photoSummary.analysed < summary.photoSummary.count ? eta : null));
+  } else if (typeof summary.importedCount === "number" && typeof summary.importedDurationMs === "number") {
     // U-04/P-10:有导入批次信息时,「已导入 N 条 · 共 X 分钟」取代单说「正在分析 n/m」——
     // 分析还没跑完才带「· 正在分析(约 T)」半句,跑完了就只剩导入摘要本身。
     const analysing = summary.analyzeTotal > 0 && summary.analyzed < summary.analyzeTotal ? eta : null;
@@ -383,8 +410,18 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
     () => feed.clips.reduce((total, clip) => total + (clipDurationSeconds(clip) ?? 0) * 1_000, 0),
     [feed.clips],
   );
-  const summaryWithImportMap: BackgroundSummary =
-    feed.clips.length > 0 ? { ...summary, importedCount: feed.clips.length, importedDurationMs } : summary;
+  // R21 W3 P1-2:照片工作台的摘要按张说(与照片流水线 / 精选带同一口径),没有「共 N 分钟」。
+  const photoMode = useWorkspace((state) => state.workspaceMode === "photo");
+  const photoSummary = useMemo<PhotoStatusSummary | null>(() => {
+    if (!photoMode) return null;
+    const photos = feed.clips.filter((clip) => clip.kind === "photo");
+    if (photos.length === 0) return null;
+    const pending = photos.filter((clip) => clip.analysis_status === "pending" || clip.analysis_status === "running").length;
+    return { count: photos.length, selected: featuredPhotos(photos, []).length, analysed: photos.length - pending };
+  }, [feed.clips, photoMode]);
+  const summaryWithImportMap: BackgroundSummary = photoSummary
+    ? { ...summary, photoSummary }
+    : feed.clips.length > 0 ? { ...summary, importedCount: feed.clips.length, importedDurationMs } : summary;
   const visible = summaryPhrases(summaryWithImportMap, eta).filter((phrase) => showAnalysis || !isAnalysisPhrase(phrase));
   // 「分析完成」收起后别留一条空的状态条。
   const phrases = visible.length > 0 ? visible : ["后台空闲"];

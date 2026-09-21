@@ -14,7 +14,7 @@ use std::process::Command;
 use rusqlite::Connection;
 
 use super::db;
-use super::deliver::{get_export_status, start_jianying_kit, KIT_ORDER_FILE};
+use super::deliver::{get_export_status, start_jianying_kit, start_photo_export, KIT_ORDER_FILE};
 use super::import::{list_clips, start_import};
 use super::jobs::JobRunner;
 use super::photo_probe;
@@ -204,7 +204,7 @@ fn r21_w1_e2e_import_five_videos_five_photos_then_jianying_kit() {
     // —— 选中:全部 10 条整条收藏(binary=1),照片在 W1 没有 select 段,走 whole 路径 ——
     for c in &clips { rate_clip(&mut connection, c.id.unwrap(), "binary", 1).unwrap(); }
 
-    // —— 素材包导出(真 export_package 任务,同一 JobRunner)——
+    // —— 素材包导出(真 export_package 任务,同一 JobRunner):照片线不套视频那一套,素材包只装 5 条视频 ——
     let destination = dir.path().join("kit");
     std::fs::create_dir(&destination).unwrap();
     let outcome = start_jianying_kit(&mut connection, &destination).unwrap();
@@ -212,27 +212,48 @@ fn r21_w1_e2e_import_five_videos_five_photos_then_jianying_kit() {
     drain(&dir.db_path(), "export");
     let status = get_export_status(&connection, Some(job_id)).unwrap();
     assert_eq!(status.status, "done", "{:?}", status.error);
-    assert_eq!((status.completed_items, status.failed_items, status.selected_photo_count), (10, 0, 5));
+    assert_eq!((status.completed_items, status.failed_items, status.selected_photo_count), (5, 0, 0));
     let output = Path::new(status.output_path.as_deref().unwrap());
-    let video_order = std::fs::read_to_string(output.join("视频").join(KIT_ORDER_FILE)).unwrap();
-    let photo_order = std::fs::read_to_string(output.join("照片").join(KIT_ORDER_FILE)).unwrap();
+    assert!(!output.join("视频").exists() && !output.join("照片").exists(), "素材包不再分「视频/ 照片/」");
+    let video_order = std::fs::read_to_string(output.join(KIT_ORDER_FILE)).unwrap();
     assert_eq!(video_order.lines().count(), 5, "{video_order}");
-    assert_eq!(photo_order.lines().count(), 5, "{photo_order}");
-    assert_eq!(photo_order.matches("照片 · 3 s").count(), 5, "{photo_order}");
-    // 两条顺序.txt 各自保持池序(captured_at 序),不再把照片与视频混排。
-    for (kind, order) in [("video", &video_order), ("photo", &photo_order)] {
-        let expected: Vec<&str> = by_id.iter().filter(|clip| clip.kind == kind).map(|c| c.file_name.as_str()).collect();
-        let positions: Vec<usize> = expected.iter().map(|name| {
+    assert!(!video_order.contains("照片"), "{video_order}");
+    let expected: Vec<&str> = by_id.iter().filter(|clip| clip.kind == "video").map(|c| c.file_name.as_str()).collect();
+    let positions: Vec<usize> = expected.iter().map(|name| {
         let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
-        order.lines().position(|l| l.contains(stem)).unwrap_or_else(|| panic!("{name} 不在 顺序.txt:\n{order}"))
-        }).collect();
-        assert!(positions.windows(2).all(|w| w[0] < w[1]), "顺序.txt 行序 {positions:?} 与池序不一致:\n{order}");
-    }
-    // 视频保留章节目录；照片平铺，伴随文件与主文件同目录。
-    let video_chapters: Vec<_> = std::fs::read_dir(output.join("视频")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()).collect();
+        video_order.lines().position(|l| l.contains(stem)).unwrap_or_else(|| panic!("{name} 不在 顺序.txt:\n{video_order}"))
+    }).collect();
+    assert!(positions.windows(2).all(|w| w[0] < w[1]), "顺序.txt 行序 {positions:?} 与池序不一致:\n{video_order}");
+    // 视频保留章节目录;素材包里一张照片都不能有。
+    let video_chapters: Vec<_> = std::fs::read_dir(output).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()).collect();
     assert_eq!(video_chapters.len(), 1, "{video_chapters:?}");
-    // 视频的 .srt(本机装了 whisper 时 transcribe 会产出)不算在 10 主文件 + 2 伴随里。
-    let files: Vec<String> = std::fs::read_dir(output.join("照片")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|f| f != KIT_ORDER_FILE).collect();
+    let kit_photos: Vec<String> = walkdir::WalkDir::new(output).into_iter().filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|f| f.to_ascii_lowercase().ends_with(".jpg") || f.ends_with(".PNG") || f.ends_with(".HEIC") || f.ends_with(".ARW") || f.ends_with(".xmp"))
+        .collect();
+    assert!(kit_photos.is_empty(), "素材包里不得出现照片:{kit_photos:?}");
+
+    // —— 导出精选照片(照片线唯一的导出,同一 JobRunner):5 张平铺 + 伴随,HEIC 转 JPG ——
+    let destination = dir.path().join("photos");
+    std::fs::create_dir(&destination).unwrap();
+    let outcome = start_photo_export(&mut connection, &destination).unwrap();
+    let job_id = outcome.job_id.expect("photo job");
+    drain(&dir.db_path(), "export");
+    let status = get_export_status(&connection, Some(job_id)).unwrap();
+    assert_eq!(status.status, "done", "{:?}", status.error);
+    assert_eq!((status.completed_items, status.failed_items, status.selected_photo_count), (5, 0, 5));
+    let output = Path::new(status.output_path.as_deref().unwrap());
+    let photo_order = std::fs::read_to_string(output.join(KIT_ORDER_FILE)).unwrap();
+    assert_eq!(photo_order.lines().count(), 5, "{photo_order}");
+    assert_eq!(photo_order.matches("照片").count(), 5, "{photo_order}");
+    assert!(!photo_order.contains(" s"), "照片行不带时长:{photo_order}");
+    let expected: Vec<&str> = by_id.iter().filter(|clip| clip.kind == "photo").map(|c| c.file_name.as_str()).collect();
+    let positions: Vec<usize> = expected.iter().map(|name| {
+        let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
+        photo_order.lines().position(|l| l.contains(stem)).unwrap_or_else(|| panic!("{name} 不在 顺序.txt:\n{photo_order}"))
+    }).collect();
+    assert!(positions.windows(2).all(|w| w[0] < w[1]), "顺序.txt 行序 {positions:?} 与池序不一致:\n{photo_order}");
+    let files: Vec<String> = std::fs::read_dir(output).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|f| f != KIT_ORDER_FILE && !f.starts_with('.')).collect();
     assert_eq!(files.len(), 7, "{files:?}");
     let heic_item = status.items.iter().find(|i| i.file_name == "C02.HEIC").unwrap();
     assert!(heic_item.output_name.ends_with(".jpg"), "{}", heic_item.output_name);
@@ -243,7 +264,7 @@ fn r21_w1_e2e_import_five_videos_five_photos_then_jianying_kit() {
     let raw_item = status.items.iter().find(|i| i.file_name == "DSC00042.JPG").unwrap();
     let raw_stem = Path::new(&raw_item.output_name).file_stem().unwrap().to_string_lossy().into_owned();
     assert!(files.iter().any(|f| f == &format!("{raw_stem}.ARW")) && files.iter().any(|f| f == &format!("{raw_stem}.xmp")), "伴随文件要与主文件同目录同 stem:{files:?}");
-    assert_eq!(std::fs::read(output.join("照片").join(format!("{raw_stem}.ARW"))).unwrap(), b"fake raw bytes for companion pairing");
+    assert_eq!(std::fs::read(output.join(format!("{raw_stem}.ARW"))).unwrap(), b"fake raw bytes for companion pairing");
     for item in status.items.iter().filter(|i| i.file_name.ends_with(".jpg") || i.file_name.ends_with(".JPG") || i.file_name.ends_with(".PNG")) {
         let out = output.join(&item.output_name);
         assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(media.join(&item.file_name)).unwrap(), "{} 非 HEIC 照片必须逐字节 copy", item.file_name);

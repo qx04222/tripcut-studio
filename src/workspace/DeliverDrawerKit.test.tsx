@@ -15,7 +15,7 @@ import { JIANYING_BUNDLE_ID } from "../api";
 import { __resetExportModeForTests, openDeliverAs } from "./deliver/exportModeRequest";
 import { EXPORT_MODES_R14, KIT_LEAD_LINE, defaultExportMode, isKitDone, kitDoneLine, kitFolderLine } from "./deliver/kitExportModel";
 import { __resetQuickExportForTests } from "./deliver/quickExportModel";
-import { __resetPhotoOrderPersistenceForTests, savePhotoOrder } from "./photoOrderSettings";
+import { __resetPhotoOrderPersistenceForTests } from "./photoOrderSettings";
 import { __resetToastsForTests } from "./ui/toastStore";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { __resetWorkspaceForTests, dispatchWorkspace } from "./WorkspaceStore";
@@ -210,55 +210,6 @@ describe("交付抽屉 · 剪映素材包(R14 §9 B)", () => {
     expect(within(dialog).getByRole("button", { name: "打开剪映" })).toBeTruthy();
     await click("在 Finder 中显示", dialog);
     expect(apiMock.revealExport).toHaveBeenCalledWith(42);
-  });
-
-  it("照片精选带刚拖序就交付:等待顺序落库后才启动；保存失败时显示错误且不按旧顺序导出", async () => {
-    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_photo_count: 1 });
-    let finishSave: (failure?: Error) => void = () => undefined;
-    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
-      ? new Promise<void>((resolve, reject) => { finishSave = (failure) => failure ? reject(failure) : resolve(); })
-      : Promise.resolve());
-    const pendingSave = savePhotoOrder("ui.photo.order.5", [3, 2, 1]);
-    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[3,2,1]"));
-    const dialog = await openDrawer();
-    await within(dialog).findByRole("list", { name: "将导出的文件" });
-    apiMock.getCurrentEpisode.mockClear();
-    await click("导出剪映素材包到上次文件夹", dialog);
-    expect(apiMock.exportJianyingKit).not.toHaveBeenCalled();
-
-    await act(async () => { finishSave(); await pendingSave; });
-    await waitFor(() => expect(apiMock.exportJianyingKit).toHaveBeenCalledWith("/Users/me/Desktop"));
-    expect(apiMock.getCurrentEpisode).toHaveBeenCalledTimes(2);
-
-    apiMock.exportJianyingKit.mockClear();
-    const failedSave = savePhotoOrder("ui.photo.order.5", [1, 2, 3]);
-    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[1,2,3]"));
-    await act(async () => { finishSave(new Error("disk full")); await failedSave.catch(() => undefined); });
-    await click("导出剪映素材包到上次文件夹", dialog);
-    expect(apiMock.exportJianyingKit).not.toHaveBeenCalled();
-    expect(await within(dialog).findByText(/照片顺序未保存/)).toBeTruthy();
-  });
-
-  it("素材包等待 A 集照片顺序期间切到 B 集，明确中止且绝不调用无集参数后端", async () => {
-    apiMock.getExportStatus.mockResolvedValue({ ...idleStatus, selected_photo_count: 1 });
-    const dialog = await openDrawer();
-    await within(dialog).findByRole("list", { name: "将导出的文件" });
-    let currentEpisode = episode;
-    apiMock.getCurrentEpisode.mockImplementation(async () => currentEpisode);
-    apiMock.getCurrentEpisode.mockClear();
-    let finishSave: () => void = () => undefined;
-    apiMock.setSetting.mockImplementation((key: string) => key === "ui.photo.order.5"
-      ? new Promise<void>((resolve) => { finishSave = resolve; })
-      : Promise.resolve());
-    const pendingSave = savePhotoOrder("ui.photo.order.5", [3, 2, 1]);
-    await waitFor(() => expect(apiMock.setSetting).toHaveBeenCalledWith("ui.photo.order.5", "[3,2,1]"));
-    await click("导出剪映素材包到上次文件夹", dialog);
-    await waitFor(() => expect(apiMock.getCurrentEpisode).toHaveBeenCalledTimes(1));
-    currentEpisode = { ...episode, id: 6, title: "EP06" };
-    await act(async () => { finishSave(); await pendingSave; });
-
-    expect(await within(dialog).findByText(/等待照片顺序保存时已切换集/)).toBeTruthy();
-    expect(apiMock.exportJianyingKit).not.toHaveBeenCalled();
   });
 
   it("第一次导出:没记过文件夹 → 弹一次面板 → exportJianyingKit(该目录) → 记进 ui.export.last_dir", async () => {

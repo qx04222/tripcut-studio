@@ -65,6 +65,16 @@ const analyzedClip: ClipListItem = {
 };
 
 describe("L1 analysis presentation", () => {
+  // R21 W3 真机 F-W3-02:照片卡上出现「静音」角标(照片的 has_audio=false 是常态,不是缺陷)。
+  // 照片只保留画质角标:过曝 / 欠曝 / 虚焦 / 疑似失焦;静音 / 削波 / 手持抖动是视频的。
+  it("photo cards keep only image-quality badges (no 静音 / 削波 / 手持抖动)", () => {
+    const photo: ClipListItem = { ...analyzedClip, kind: "photo", duration_ticks: 0, fps_num: null, fps_den: null };
+    const badges = renderToStaticMarkup(<AnalysisBadges clip={photo} />);
+    for (const label of ["过曝", "欠曝", "虚焦", "疑似失焦"]) expect(badges).toContain(label);
+    for (const label of ["静音", "削波", "手持抖动"]) expect(badges).not.toContain(label);
+    expect(renderToStaticMarkup(<AnalysisBadges clip={analyzedClip} />)).toContain("静音");
+  });
+
   it("renders threshold-derived badges and every raw numeric value", () => {
     const badges = renderToStaticMarkup(<AnalysisBadges clip={analyzedClip} />);
     const panel = renderToStaticMarkup(

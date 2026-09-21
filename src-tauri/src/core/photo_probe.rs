@@ -33,6 +33,9 @@ pub struct PhotoMetaDto {
     pub has_alpha: bool,
     pub companions_ambiguous: bool,
     pub preview_url: Option<String>,
+    pub raw_container: Option<String>,
+    #[serde(flatten)]
+    pub raw_preview: Option<super::photo_decode::RawPreview>,
 }
 
 pub(crate) fn error(message: &str) -> CoreError { CoreError::Import(format!("照片无法读取：{message}")) }
@@ -120,7 +123,7 @@ fn probe_source(source:&CGImageSource)->Result<PhotoMetaDto> {
         lens:exif.as_ref().and_then(|d|text(d,"LensModel")),hold_ms:3000,
         color_space:text(&props,"ProfileName").or_else(||text(&props,"ColorModel")),
         has_alpha:property::<CFBoolean>(&props,"HasAlpha").is_some_and(|b|b.as_bool()),
-        companions_ambiguous:false,preview_url:None,
+        companions_ambiguous:false,preview_url:None,raw_container:None,raw_preview:None,
     })
 }
 
@@ -222,11 +225,13 @@ pub fn store(connection: &Connection,clip_id: i64,m: &PhotoMetaDto)->Result<()> 
 }
 
 pub fn load(connection: &Connection,clip_id: i64)->Result<Option<PhotoMetaDto>> {
-    Ok(connection.query_row("SELECT p.width,p.height,p.orientation,p.taken_at,p.gps_lat,p.gps_lon,p.camera,p.lens,p.hold_ms,p.color_space,p.has_alpha,p.companions_ambiguous,p.taken_at_local,c.tz_guess
+    let mut metadata=connection.query_row("SELECT p.width,p.height,p.orientation,p.taken_at,p.gps_lat,p.gps_lon,p.camera,p.lens,p.hold_ms,p.color_space,p.has_alpha,p.companions_ambiguous,p.taken_at_local,c.tz_guess,c.codec
         FROM photo_meta p JOIN clips c ON c.id=p.clip_id WHERE p.clip_id=?1 AND p.error IS NULL",[clip_id],|r|Ok(PhotoMetaDto {
         width:r.get(0)?,height:r.get(1)?,orientation:r.get(2)?,taken_at:r.get(3)?,gps_lat:r.get(4)?,gps_lon:r.get(5)?,camera:r.get(6)?,lens:r.get(7)?,hold_ms:r.get(8)?,color_space:r.get(9)?,has_alpha:r.get(10)?,companions_ambiguous:r.get(11)?,
-        taken_at_local:r.get(12)?,tz_guess:r.get(13)?,preview_url:None,
-    })).optional()?)
+        taken_at_local:r.get(12)?,tz_guess:r.get(13)?,preview_url:None,raw_container:r.get::<_,Option<String>>(14)?.filter(|ext|matches!(ext.as_str(),"arw"|"dng")),raw_preview:None,
+    })).optional()?;
+    if let Some(metadata)=metadata.as_mut().filter(|metadata|metadata.raw_container.is_some()) {metadata.raw_preview=super::photo_decode::load_raw_preview(connection,clip_id)?;}
+    Ok(metadata)
 }
 
 #[cfg(test)]

@@ -96,3 +96,18 @@
 .inspector .photo-r21-metadata dl > div { display: flex; gap: var(--space-2); padding: var(--space-1) 0; }
 .inspector .photo-r21-metadata dt { color: var(--text-secondary); flex-shrink: 0; }
 .inspector .photo-r21-metadata dd { margin: 0; overflow-wrap: anywhere; }
+
+.photo-r21-small-preview { position: absolute; bottom: 6px; left: 6px; padding: 2px 5px; border-radius: var(--radius-4); color: var(--text-primary); background: var(--surface-card); font-size: var(--text-11); }
+
+.photo-r21-standalone-raw {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-4);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  z-index: var(--z-sticky);
+}

@@ -1,15 +1,17 @@
-import type { JSX } from "react";
+import type { JSX, ReactNode } from "react";
 import { returnToActiveEpisode } from "../historyView";
 import { EpisodeSwitcher } from "./EpisodeSwitcher";
 import { pinHome, useHomeOpen } from "./homeStore";
-import { PipelineRail } from "./PipelineRail";
+import { PhotoPipelineRail, PipelineRail } from "./PipelineRail";
 import { focusPipelineStep, runPipelineNext } from "./pipelineActions";
+import { runPhotoPipelineNext } from "./photoPipelineActions";
+import { PHOTO_PIPELINE_HINTS, photoPipelineNextLabel } from "./photoPipelineModel";
 import { pipelineGapLabel, pipelineNextDisabled, pipelineNextLabel } from "./pipelineModel";
 import { PIPELINE_HINTS } from "./pipelineHints";
 import { useAnalysisEta } from "./analysisEta";
 import { ActionKbd } from "./KeymapKbd";
 import { Button, Icon } from "./ui";
-import { usePipeline } from "./usePipeline";
+import { usePhotoPipeline, usePipeline } from "./usePipeline";
 import { UpdateTopChip } from "./update/UpdateTopChip";
 import { useUpdateState } from "./update/updateStore";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
@@ -29,14 +31,32 @@ import { WorkspaceTabs } from "./WorkspaceTabs";
 /** Z-14:只读查看已封存集时顶栏主按钮的文案 —— 导出只能对当前集做,按钮变成回到当前集。 */
 export const RETURN_TO_EXPORT_LABEL = "回到当前集再导出";
 
+/** 顶栏主按钮「下一步:…」要画的东西 —— 视频 / 照片两份流水线各算一份,壳只画。 */
+interface NextModel {
+  label: string;
+  icon: "deliver" | "import" | "star" | "grip";
+  /** 下一步落在抽屉上(导入 / 导出)时按钮是抽屉的开关,带 haspopup / expanded;落在栏里不带。 */
+  opensDrawer: boolean;
+  nextDrawer: "deliver" | "import";
+  title: string;
+  step: number;
+  disabled: boolean;
+  onClick(): void;
+}
+
+/**
+ * R21 W3 P1-1:顶栏按工作台分派 —— 视频工作台 0.11.0 原样(四步 rail + 视频「下一步」);
+ * 照片工作台换成照片自己的三步 rail(`PhotoPipelineRail`)与照片「下一步」。两份 hook 各在各的子组件里,
+ * 视频侧一个 hook 都不多跑。
+ */
 export function TopBar(): JSX.Element {
-  const openDrawer = useWorkspace((state) => state.openDrawer);
+  const photoMode = useWorkspace((state) => state.workspaceMode === "photo");
+  return photoMode ? <PhotoTopBar /> : <VideoTopBar />;
+}
+
+function VideoTopBar(): JSX.Element {
   const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
   const pipeline = usePipeline();
-  const homeOpen = useHomeOpen();
-  // V-08:更新就绪时那颗按钮降成 ghost(唯一的实心主按钮留给「下一步」),
-  // 「还有更新等着」改由齿轮右上角一枚小圆点说 —— 降级不等于藏起来。
-  const updatePhase = useUpdateState().phase;
   // R19 U-01(flow 车道):一条都没分析完时主按钮禁用,文案带进度 + 预计时间;有已分析的就「先挑已分析的 x/N 条」。
   const nextDisabled = !viewingEpisode && pipelineNextDisabled(pipeline);
   const analysisEta = useAnalysisEta(nextDisabled);
@@ -49,6 +69,63 @@ export function TopBar(): JSX.Element {
   const nextDrawer = pipeline.complete || pipeline.step === 4 ? "deliver" : "import";
   // R19 V-02:原「第 n 步提示」那一行删了,这句怎么做进按钮 tooltip(首页四步卡另有一份)。
   const nextTitle = viewingEpisode ? nextLabel : `${nextLabel} —— ${PIPELINE_HINTS[pipeline.step]}`;
+  return (
+    <TopBarFrame
+      rail={<PipelineRail state={pipeline} />}
+      gap={
+        gapLabel ? (
+          <Button variant="ghost" icon="grip" className="pipeline-gap" aria-label="补缺口" title="镜头带里还有章没镜:补一条,或点「这章够了」" onClick={() => focusPipelineStep(3)}>
+            {gapLabel}
+          </Button>
+        ) : null
+      }
+      next={{
+        label: nextLabel,
+        icon: nextIcon,
+        opensDrawer,
+        nextDrawer,
+        title: nextTitle,
+        step: pipeline.step,
+        disabled: nextDisabled,
+        onClick: () => (viewingEpisode ? returnToActiveEpisode() : runPipelineNext(pipeline)),
+      }}
+    />
+  );
+}
+
+/** 照片工作台的顶栏:三步「导入 → 挑选 → 导出精选照片」;分析中不禁用(照片不需要分析完才能挑);没有「补缺口」。 */
+function PhotoTopBar(): JSX.Element {
+  const viewingEpisode = useWorkspace((state) => state.viewingEpisode);
+  const pipeline = usePhotoPipeline();
+  const nextLabel = viewingEpisode ? RETURN_TO_EXPORT_LABEL : photoPipelineNextLabel(pipeline);
+  const nextIcon = pipeline.complete || pipeline.step === 3 ? "deliver" : pipeline.step === 1 ? "import" : "star";
+  const opensDrawer = !viewingEpisode && (pipeline.complete || pipeline.step === 1 || pipeline.step === 3);
+  const nextDrawer = pipeline.complete || pipeline.step === 3 ? "deliver" : "import";
+  const nextTitle = viewingEpisode ? nextLabel : `${nextLabel} —— ${PHOTO_PIPELINE_HINTS[pipeline.step]}`;
+  return (
+    <TopBarFrame
+      rail={<PhotoPipelineRail state={pipeline} />}
+      gap={null}
+      next={{
+        label: nextLabel,
+        icon: nextIcon,
+        opensDrawer,
+        nextDrawer,
+        title: nextTitle,
+        step: pipeline.step,
+        disabled: false,
+        onClick: () => (viewingEpisode ? returnToActiveEpisode() : runPhotoPipelineNext(pipeline)),
+      }}
+    />
+  );
+}
+
+function TopBarFrame({ rail, gap, next }: { rail: ReactNode; gap: ReactNode; next: NextModel }): JSX.Element {
+  const openDrawer = useWorkspace((state) => state.openDrawer);
+  const homeOpen = useHomeOpen();
+  // V-08:更新就绪时那颗按钮降成 ghost(唯一的实心主按钮留给「下一步」),
+  // 「还有更新等着」改由齿轮右上角一枚小圆点说 —— 降级不等于藏起来。
+  const updatePhase = useUpdateState().phase;
 
   return (
     <header className="workspace-topbar">
@@ -83,7 +160,7 @@ export function TopBar(): JSX.Element {
       <div className="workspace-topbar-center">
         <EpisodeSwitcher />
         <WorkspaceTabs />
-        <PipelineRail state={pipeline} />
+        {rail}
       </div>
 
       <div className="workspace-topbar-right" data-update-dot={updatePhase === "ready" ? "true" : undefined}>
@@ -91,25 +168,21 @@ export function TopBar(): JSX.Element {
           命令面板
           <ActionKbd action="command-palette" />
         </span>
-        {gapLabel ? (
-          <Button variant="ghost" icon="grip" className="pipeline-gap" aria-label="补缺口" title="镜头带里还有章没镜:补一条,或点「这章够了」" onClick={() => focusPipelineStep(3)}>
-            {gapLabel}
-          </Button>
-        ) : null}
+        {gap}
         <Button
           // R19 V-01:全应用唯一的实心主按钮。首页盖着三栏时,首页自己的「开始一个新旅程」是那一颗,这里让位。
           variant={homeOpen ? "secondary" : "primary"}
-          icon={nextIcon}
+          icon={next.icon}
           className="pipeline-next"
-          aria-haspopup={opensDrawer ? "dialog" : undefined}
-          aria-expanded={opensDrawer ? openDrawer === nextDrawer : undefined}
+          aria-haspopup={next.opensDrawer ? "dialog" : undefined}
+          aria-expanded={next.opensDrawer ? openDrawer === next.nextDrawer : undefined}
           aria-label="流水线下一步"
-          title={nextTitle}
-          data-step={pipeline.step}
-          disabled={nextDisabled}
-          onClick={() => (viewingEpisode ? returnToActiveEpisode() : runPipelineNext(pipeline))}
+          title={next.title}
+          data-step={next.step}
+          disabled={next.disabled}
+          onClick={next.onClick}
         >
-          {nextLabel}
+          {next.label}
         </Button>
         <UpdateTopChip />
         <Button

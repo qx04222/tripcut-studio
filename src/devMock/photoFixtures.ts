@@ -55,3 +55,32 @@ export function buildPhotoFixtures(base: ClipListItem): ClipListItem[] {
     };
   });
 }
+
+/**
+ * R21 PH-10(接线 W3):一张无伴随 JPG 的独立 ARW,让 preview-shots 能截到「RAW」角标与
+ * 「RAW 预览较小」提示。不进相似组(×6 折叠计数不变),只在 ?photos=1 下追加到媒体池。
+ */
+export function buildStandaloneRawFixture(base: ClipListItem): ClipListItem {
+  const url = preview(false, 6);
+  const name = "独立星野.ARW";
+  return {
+    ...base, id: 207, kind: "photo", file_name: name, path: `/mock/photos/${name}`,
+    cover_url: url, duration_ticks: 0, fps_num: null, fps_den: null,
+    width: 7952, height: 5304, codec: null, is_vfr: false, byte_size: 84_000_000,
+    quick_hash: null, full_hash: null, captured_at: null,
+    analysis: null, analysis_status: null, analysis_error: null, motion: null, motion_status: null, motion_error: null,
+    binary_rating: null, star_rating: null, select_count: 0,
+    rotation: 0, orientation: "landscape",
+    generated_source: null, missing_since: null, device_model: null,
+    has_suggestions: false, photo: {
+      width: 7952, height: 5304, orientation: 1,
+      taken_at: "2026-08-12T15:40:00Z", taken_at_local: "2026-08-12T23:40:00+08:00", tz_guess: "UTC+08:00", hold_ms: 3000,
+      camera: "Sony A7R III", lens: "FE 24mm F1.4", gps_lat: null, gps_lon: null,
+      color_space: "sRGB", has_alpha: false, companions_ambiguous: false,
+      preview_url: url,
+      raw_container: "arw", preview_source: "embedded",
+      preview_width: 1616, preview_height: 1080, embedded_preview_width: 1616, embedded_preview_height: 1080,
+      preview_small: true,
+    }, companions: [],
+  };
+}

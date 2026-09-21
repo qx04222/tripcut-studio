@@ -10,6 +10,22 @@ it("PH-03 preview: six additive photo fixtures include RAW companions and orient
   expect(photos.some(clip => clip.photo?.orientation === 6)).toBe(true);
   expect(photos.every(clip => clip.photo?.preview_url && clip.cover_url)).toBe(true);
 });
+it("PH-10 preview: one standalone RAW fixture outside the similar group carries the RAW badge inputs", () => {
+  const raw = fixture.PHOTO_RAW_CLIP_R21;
+  expect(fixture.PHOTO_CLIPS_R21.some(clip => clip.id === raw.id)).toBe(false);
+  expect(raw.kind).toBe("photo");
+  expect(/\.(arw|dng)$/i.test(raw.file_name)).toBe(true);
+  expect(raw.companions).toEqual([]);
+  expect(raw.photo?.raw_container).toBe("arw");
+  expect(raw.photo?.preview_source).toBe("embedded");
+  expect(raw.photo?.preview_small).toBe(true);
+  expect(raw.photo?.preview_url && raw.cover_url).toBeTruthy();
+  const scenario = readFileSync("scripts/qa/photo-scenario.mjs", "utf8");
+  expect(scenario).toContain("44-photo-raw-card");
+  expect(scenario).toContain("独立星野.ARW");
+  expect(scenario).toContain("photo-r21-standalone-raw");
+  expect(scenario).toContain("RAW 预览较小");
+});
 it("PH-03 preview: offline shots run the independent photo workspace and grouped grid scenarios", () => {
   const script = readFileSync("scripts/qa/preview-shots.mjs", "utf8");
   expect(script).toContain("await photoScenario(");

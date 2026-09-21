@@ -102,6 +102,7 @@ function PoolCardInner({
   standaloneGridCell?: boolean;
 }): JSX.Element {
   const [companionsOpen, setCompanionsOpen] = useState(false);
+  const standaloneRaw = clip.kind === "photo" && /\.(arw|dng)$/i.test(clip.file_name);
   const hasCompanions = (clip.companions?.length ?? 0) > 0;
   const [nameHead, nameTail] = fileNameLines(clip.file_name);
   // R11 §3:悬停刮擦(帧条来自已有缓存;没有就静态封面)。
@@ -158,7 +159,9 @@ function PoolCardInner({
       }}
     >
       <span className="pool-card-image">
-        {clip.kind === "photo" ? <span className="photo-r21-badge" role="img" aria-label="照片">照片</span> : null}
+        {clip.kind === "photo" && !standaloneRaw ? <span className="photo-r21-badge" role="img" aria-label="照片">照片</span> : null}
+        {standaloneRaw ? <span className="photo-r21-standalone-raw">RAW</span> : null}
+        {clip.photo?.preview_small ? <span className="photo-r21-small-preview">RAW 预览较小</span> : null}
         {hasCompanions ? <span className="photo-r21-raw" title="展开伴随文件 · ⌥Enter">{clip.companions?.some(file => file.role.toLowerCase() === "raw") ? "RAW" : "伴随"}</span> : null}
         {companionsOpen ? <span className="photo-r21-companions" role="list" aria-label="伴随文件">
           {clip.companions?.map(file => <span role="listitem" key={file.path}>

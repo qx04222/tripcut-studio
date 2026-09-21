@@ -1,7 +1,7 @@
 //! Bounded ImageIO thumbnails. Only small SDR sRGB rasters leave the decoder.
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFMutableData, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, kCGColorSpaceSRGB};
 use objc2_image_io::*;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -32,14 +32,41 @@ pub struct DecodedPhoto {
     pub extension: &'static str,
     pub width: u32,
     pub height: u32,
+    pub raw_preview: Option<RawPreview>,
+}
+
+/// Persisted in the existing settings table, tied to the source hash.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RawPreview {
+    pub preview_source: String,
+    pub preview_width: u32,
+    pub preview_height: u32,
+    pub embedded_preview_width: Option<u32>,
+    pub embedded_preview_height: Option<u32>,
+    pub preview_small: bool,
+}
+
+fn store_raw_preview(connection:&Connection,clip_id:i64,source_hash:&str,preview:&RawPreview)->Result<()> {
+    let value=serde_json::json!({"source_hash":source_hash,"preview":preview}).to_string();
+    connection.execute("INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        params![format!("photo.raw_preview.{clip_id}"),value])?;
+    Ok(())
+}
+
+pub(crate) fn load_raw_preview(connection:&Connection,clip_id:i64)->Result<Option<RawPreview>> {
+    let value:Option<String>=connection.query_row(
+        "SELECT s.value FROM settings s JOIN clips c ON s.key='photo.raw_preview.'||c.id WHERE c.id=?1 AND c.kind='photo' AND c.codec IN ('arw','dng') AND json_extract(s.value,'$.source_hash')=c.quick_hash",
+        [clip_id],|row|row.get(0)).optional()?;
+    Ok(value.and_then(|value|serde_json::from_str::<serde_json::Value>(&value).ok())
+        .and_then(|value|serde_json::from_value(value["preview"].clone()).ok()))
 }
 
 pub fn decode_cover(path: &Path,max_size: u32)->Result<DecodedPhoto> { decode(path,max_size.min(512),0.9,None) }
 pub fn decode_preview(path: &Path,max_size: u32)->Result<DecodedPhoto> { decode(path,max_size.min(2048),0.9,None) }
 
-pub(crate) fn decode_cover_with_source(source:&CGImageSource,has_alpha:bool)->Result<DecodedPhoto> {
+pub(crate) fn decode_cover_with_source(source:&CGImageSource,has_alpha:bool,raw:bool)->Result<DecodedPhoto> {
     let _permit=Permit::acquire();
-    image_io_with_source(source,512,0.9,Some(has_alpha))
+    image_io_with_source(source,512,0.9,Some(has_alpha),raw)
 }
 
 fn decode(path: &Path,max_size: u32,quality:f64,known_alpha:Option<bool>)->Result<DecodedPhoto> {
@@ -47,7 +74,7 @@ fn decode(path: &Path,max_size: u32,quality:f64,known_alpha:Option<bool>)->Resul
     let _permit=Permit::acquire();
     // 完整性门在前:半截 JPEG/PNG 在这里就被拒,不许 `image` 后备把灰掉的半张当封面。
     let source=super::photo_probe::source(path)?;
-    match image_io_with_source(&source,max_size,quality,known_alpha) {
+    match image_io_with_source(&source,max_size,quality,known_alpha,super::import::is_raw(path)) {
         Ok(image)=>Ok(image),
         Err(original)=>{
             let ext=path.extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -72,37 +99,53 @@ pub(crate) struct RenderOptions {
 #[cfg(test)]
 fn image_io(path: &Path,max_size: u32)->Result<DecodedPhoto> {
     let source=super::photo_probe::source(path)?;
-    image_io_with_source(&source,max_size,0.9,None)
+    image_io_with_source(&source,max_size,0.9,None,super::import::is_raw(path))
 }
 
-fn image_io_with_source(source:&CGImageSource,max_size:u32,quality:f64,known_alpha:Option<bool>)->Result<DecodedPhoto> {
-    render_sdr_srgb_with_source(source,RenderOptions{max_size:Some(max_size),quality,keep_alpha:true},known_alpha)
+fn image_io_with_source(source:&CGImageSource,max_size:u32,quality:f64,known_alpha:Option<bool>,raw:bool)->Result<DecodedPhoto> {
+    render_sdr_srgb_with_source(source,RenderOptions{max_size:Some(max_size),quality,keep_alpha:true},known_alpha,raw)
 }
 
 /// 共用渲染器(`image_io` 与 `photo_export::encode_jpeg` 都走这里)。完整性门(截断 JPEG/PNG)在 `photo_probe::source` 里。
 pub(crate) fn render_sdr_srgb(path: &Path,opts: RenderOptions)->Result<DecodedPhoto> {
     let source=super::photo_probe::source(path)?;
-    render_sdr_srgb_with_source(&source,opts,None)
+    render_sdr_srgb_with_source(&source,opts,None,super::import::is_raw(path))
 }
 
-fn render_sdr_srgb_with_source(source:&CGImageSource,opts:RenderOptions,known_alpha:Option<bool>)->Result<DecodedPhoto> {
-    let size=opts.max_size.map(|m|CFNumber::new_i32(m as i32));
-    // SAFETY: all option keys are ImageIO constants and all values have the
-    // documented CF types. Each source/context is confined to this worker.
+/// With both creation flags false ImageIO may only return an embedded thumbnail.
+/// Every preview request supplies MaxPixelSize. ImageIO can report the full image
+/// when this key is omitted even with both creation flags false (native regression).
+fn thumbnail(source:&CGImageSource,max_size:Option<u32>,always:bool,if_absent:bool)->Option<CFRetained<CGImage>> {
+    let size=max_size.map(|size|CFNumber::new_i32(size as i32));
     let options=unsafe {
-        let mut keys=vec![kCGImageSourceCreateThumbnailFromImageAlways,
-          kCGImageSourceCreateThumbnailWithTransform,kCGImageSourceShouldCache,
-          kCGImageSourceShouldAllowFloat,kCGImageSourceDecodeRequest];
+        let mut keys=vec![kCGImageSourceCreateThumbnailFromImageAlways,kCGImageSourceCreateThumbnailFromImageIfAbsent,
+            kCGImageSourceCreateThumbnailWithTransform,kCGImageSourceShouldCache,kCGImageSourceShouldAllowFloat,kCGImageSourceDecodeRequest];
+        let always=CFBoolean::new(always);let if_absent=CFBoolean::new(if_absent);
         let t=CFBoolean::new(true);let f=CFBoolean::new(false);
-        let mut values:Vec<&CFType>=vec![&t,&t,&f,&f,kCGImageSourceDecodeToSDR];
-        // 不给 MaxPixelSize 就是全分辨率 + 方向变换(导出路径)。
+        let mut values:Vec<&CFType>=vec![&always,&if_absent,&t,&f,&f,kCGImageSourceDecodeToSDR];
         if let Some(size)=size.as_ref() {keys.push(kCGImageSourceThumbnailMaxPixelSize);values.push(size);}
         CFDictionary::<CFString,CFType>::from_slices(&keys,&values)
     };
-    let thumb=unsafe { source.thumbnail_at_index(0,Some(options.as_opaque())) }.ok_or_else(||error("ImageIO 缩略解码失败"))?;
+    unsafe {source.thumbnail_at_index(0,Some(options.as_opaque()))}
+}
+
+fn render_sdr_srgb_with_source(source:&CGImageSource,opts:RenderOptions,known_alpha:Option<bool>,raw:bool)->Result<DecodedPhoto> {
+    let embedded_size=if raw && opts.max_size.is_some() {
+        thumbnail(source,Some(i32::MAX as u32),false,false).map(|image|(CGImage::width(Some(&image)) as u32,CGImage::height(Some(&image)) as u32))
+    } else {None};
+    let embedded=embedded_size.and_then(|_|thumbnail(source,opts.max_size,false,false));
+    let used_embedded=embedded.is_some();
+    let thumb=embedded.or_else(||thumbnail(source,opts.max_size,!raw || opts.max_size.is_none() || embedded_size.is_some(),true))
+        .ok_or_else(||error("ImageIO 缩略解码失败"))?;
     let width=CGImage::width(Some(&thumb));let height=CGImage::height(Some(&thumb));
     if width==0 || height==0 {return Err(error("缩略图尺寸越界"));}
     if let Some(max)=opts.max_size { if width>max as usize || height>max as usize {return Err(error("缩略图尺寸越界"));} }
+    let raw_preview=(raw && opts.max_size.is_some()).then(||RawPreview {
+        preview_source:if used_embedded {"embedded"} else {"decoded"}.into(),
+        preview_width:width as u32,preview_height:height as u32,
+        embedded_preview_width:embedded_size.map(|size|size.0),embedded_preview_height:embedded_size.map(|size|size.1),
+        preview_small:width.max(height)<1024,
+    });
     // 透明与否看源文件属性(与 photo_meta.has_alpha 同一来源):HEVC 解码出的缩略图
     // 一律带 alpha 通道,按 `CGImage::alpha_info` 判会把不透明 HEIC 全写成 PNG。
     let alpha=opts.keep_alpha && known_alpha.unwrap_or_else(||unsafe { source.properties_at_index(0,None) }
@@ -123,7 +166,7 @@ fn render_sdr_srgb_with_source(source:&CGImageSource,opts:RenderOptions,known_al
     let properties=unsafe { CFDictionary::<CFString,CFType>::from_slices(&[kCGImageDestinationLossyCompressionQuality],&[&quality]) };
     unsafe {destination.add_image(&image,Some(properties.as_opaque()));}
     if !unsafe {destination.finalize()} {return Err(error("图片编码失败"));}
-    Ok(DecodedPhoto{bytes:data.to_vec(),extension,width:width as u32,height:height as u32})
+    Ok(DecodedPhoto{bytes:data.to_vec(),extension,width:width as u32,height:height as u32,raw_preview})
 }
 
 fn fallback(path: &Path,max_size: u32)->Result<DecodedPhoto> {
@@ -143,7 +186,7 @@ fn fallback(path: &Path,max_size: u32)->Result<DecodedPhoto> {
     let alpha=image.color().has_alpha();
     let mut bytes=std::io::Cursor::new(Vec::new());
     image.write_to(&mut bytes,if alpha {image::ImageFormat::Png} else {image::ImageFormat::Jpeg}).map_err(|e|error(&e.to_string()))?;
-    Ok(DecodedPhoto{bytes:bytes.into_inner(),extension:if alpha {"png"} else {"jpg"},width:image.width(),height:image.height()})
+    Ok(DecodedPhoto{bytes:bytes.into_inner(),extension:if alpha {"png"} else {"jpg"},width:image.width(),height:image.height(),raw_preview:None})
 }
 
 pub fn enqueue(connection: &mut Connection,clip_id: i64,path: &Path,source_hash: &str)->Result<()> {
@@ -310,6 +353,9 @@ pub fn run_preview(connection:&mut Connection,job:&super::jobs::Job,cache_root:&
     super::import_control::ensure_job_current(&tx,job)?;
     let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM clips WHERE id=?1 AND kind='photo' AND quick_hash=?2)",params![payload.clip_id,payload.source_hash],|row|row.get(0))?;
     if !current {return Err(error("生成照片预览期间源文件已变化"));}
+    if let Some(metadata)=preview.raw_preview.as_ref() {
+        store_raw_preview(&tx,payload.clip_id,&payload.source_hash,metadata)?;
+    }
     for other in ["preview.jpg","preview.png"] {if other!=preview_name {let _=std::fs::remove_file(dir.join(other));}}
     std::fs::rename(&temp,dir.join(&preview_name))?;
     let changed=tx.execute("UPDATE jobs SET status='done',result_path=?3,owner_id=NULL,lease_expires_at=NULL,blocked_summary=NULL,finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND attempt=?2 AND status='running' AND cancel_requested=0",params![job.id,job.attempt,dir.join(&preview_name).to_string_lossy()])?;
@@ -371,6 +417,47 @@ pub fn urls(connection: &Connection,cache_root: &Path,clip_id: i64,port: u16,tok
 mod tests {
     use super::*;
     use crate::core::{db, import, import_control, jobs, test_support::TestDirectory};
+    #[test]
+    fn ph10_preview_metadata_is_bound_to_current_source_hash() {
+        let d=TestDirectory::new();let c=db::open_project(&d.db_path()).unwrap();
+        c.execute("INSERT INTO clips(id,rel_path,kind,codec,quick_hash) VALUES(42,'raw.dng','photo','dng','old')",[]).unwrap();
+        let preview=RawPreview {preview_source:"embedded".into(),preview_width:2048,preview_height:1536,embedded_preview_width:4000.into(),embedded_preview_height:3000.into(),preview_small:false};
+        store_raw_preview(&c,42,"old",&preview).unwrap();
+        assert_eq!(load_raw_preview(&c,42).unwrap(),Some(preview));
+        c.execute("UPDATE clips SET quick_hash='new' WHERE id=42",[]).unwrap();
+        assert_eq!(load_raw_preview(&c,42).unwrap(),None);
+    }
+
+    #[test]
+    fn ph10_embedded_imageio_options_and_full_resolution_export() {
+        // A genuine JPEG with an EXIF JPEG thumbnail tests ImageIO's option semantics.
+        // It is NOT renamed to DNG and is NOT evidence for any camera RAW decoder.
+        let d=TestDirectory::new();let path=d.path().join("embedded.jpg");
+        let mut full=Vec::new();let mut small=Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut full).encode_image(&image::RgbImage::from_pixel(1600,1200,image::Rgb([220,40,20]))).unwrap();
+        image::codecs::jpeg::JpegEncoder::new(&mut small).encode_image(&image::RgbImage::from_pixel(640,480,image::Rgb([20,200,40]))).unwrap();
+        let mut exif=b"Exif\0\0II\x2a\0\x08\0\0\0".to_vec();
+        exif.extend(1u16.to_le_bytes());
+        for bytes in [274u16.to_le_bytes().to_vec(),3u16.to_le_bytes().to_vec(),1u32.to_le_bytes().to_vec(),6u32.to_le_bytes().to_vec(),26u32.to_le_bytes().to_vec()] {exif.extend(bytes);}
+        exif.extend(3u16.to_le_bytes());
+        for (tag,kind,value) in [(259u16,3u16,6u32),(513,4,68),(514,4,small.len() as u32)] {
+            exif.extend(tag.to_le_bytes());exif.extend(kind.to_le_bytes());exif.extend(1u32.to_le_bytes());exif.extend(value.to_le_bytes());
+        }
+        exif.extend(0u32.to_le_bytes());exif.extend(small);
+        let mut bytes=vec![0xff,0xd8,0xff,0xe1];bytes.extend(((exif.len()+2) as u16).to_be_bytes());bytes.extend(exif);bytes.extend(&full[2..]);
+        std::fs::write(&path,bytes).unwrap();
+        let source=super::super::photo_probe::source(&path).unwrap();
+        let preview=image_io_with_source(&source,2048,0.9,None,true).unwrap();
+        let info=preview.raw_preview.unwrap();
+        assert_eq!(info.preview_source,"embedded");
+        assert_eq!((info.embedded_preview_width,info.embedded_preview_height),(Some(480),Some(640)));
+        assert_eq!((preview.width,preview.height),(480,640));assert!(info.preview_small);
+        let cover=image_io_with_source(&source,512,0.9,None,true).unwrap();
+        assert_eq!((cover.width,cover.height),(384,512));
+        let full=render_sdr_srgb_with_source(&source,RenderOptions {max_size:None,quality:0.92,keep_alpha:false},None,true).unwrap();
+        assert_eq!((full.width,full.height),(1200,1600));
+    }
+
     fn test_image()->image::RgbImage {
         image::RgbImage::from_fn(96,64,|x,y|image::Rgb(match (x<48,y<32) {
             (true,true)=>[240,20,20],(false,true)=>[20,240,20],(true,false)=>[20,20,240],(false,false)=>[230,220,20],

@@ -1517,6 +1517,32 @@ CREATE INDEX duel_verdicts_session_idx ON duel_verdicts(session_id,id);
 CREATE INDEX duel_sessions_episode_idx ON duel_sessions(episode_id,finished_at,id);
 "#;
 
+/// PH-11: append-only copy journal; undoing is durable so interrupted undo resumes.
+pub const MIGRATION_0054: &str = r#"
+CREATE TABLE archive_ops (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('kit','bundle','photo')),
+    status TEXT NOT NULL CHECK(status IN ('planned','running','partial','done','undoing','undone','failed')),
+    plan_json TEXT NOT NULL CHECK(json_valid(plan_json)),
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE TABLE archive_op_files (
+    op_id TEXT NOT NULL REFERENCES archive_ops(id),
+    file_index INTEGER NOT NULL DEFAULT 0,
+    src_path TEXT NOT NULL,
+    src_size INTEGER NOT NULL CHECK(src_size >= 0),
+    src_hash TEXT NOT NULL,
+    dst_path TEXT NOT NULL,
+    dst_temp TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('planned','copied','verified','published','undone','conflict','failed')),
+    error TEXT,
+    PRIMARY KEY(op_id,file_index),
+    UNIQUE(op_id,dst_path)
+);
+CREATE INDEX archive_ops_pending_idx ON archive_ops(status);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1671,9 +1697,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 51, sql: MIGRATION_0051 },
     Migration { version: 52, sql: MIGRATION_0052 },
     Migration { version: 53, sql: MIGRATION_0053 },
+    Migration { version: 54, sql: MIGRATION_0054 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 53;
+pub const LATEST_SCHEMA_VERSION: i64 = 54;
 
 #[cfg(test)]
 mod tests {
@@ -1965,9 +1992,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_53() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 53);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 53);
+    fn schema_version_is_54() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 54);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 54);
     }
 
     /// R19 results 车道 P-03:0049 建 `auto_select_runs` 并给 `segments` 加 `auto_select_run_id`。

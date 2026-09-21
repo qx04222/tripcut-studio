@@ -25,7 +25,6 @@ interface ContentRow {
 
 /** 「内容」节:一行汇总 + 将要产出的每一类及其数量(规格 §4.2 第 2 条)。 */
 export function DeliverContents({ status, includeContactSheet, useJianyingDraft, targetSeconds, canvas }: DeliverContentsProps): JSX.Element {
-  const photos = status.selected_photo_count ?? 0;
   const videos = status.selected_segment_count + status.selected_whole_count;
   const rows: ContentRow[] = [
     { icon: "mark-in", name: "精选片段", count: `${status.selected_segment_count} 段 · 原画质导出` },
@@ -35,9 +34,7 @@ export function DeliverContents({ status, includeContactSheet, useJianyingDraft,
       name: "参考粗剪",
       count: videos > 0
         ? `1 条 · ${ROUGH_CUT_TARGET_LABELS[roughCutTargetKey(targetSeconds)]} · ${roughCutSpec(canvas)}`
-        : photos > 0
-          ? "仅照片 · 本次不生成"
-          : "暂无交付项 · 本次不生成",
+        : "暂无交付项 · 本次不生成",
       skipped: videos === 0,
     },
     { icon: "grip", name: "镜头表(表格)", count: "1 份 · Excel 可直接打开" },
@@ -46,8 +43,7 @@ export function DeliverContents({ status, includeContactSheet, useJianyingDraft,
       : { icon: "info", name: "联系表.pdf", count: "未勾选 · 本次不放入", skipped: true },
     { icon: "save", name: "交付说明", count: "1 份 · 一屏中文" },
   ];
-  if (photos > 0) rows.splice(2, 0, { icon: "info", name: "照片", count: `${photos} 张 · 含伴随文件` });
-  if (useJianyingDraft && photos === 0) rows.push({ icon: "deliver", name: "剪映草稿", count: "1 份 · 写入剪映草稿目录" });
+  if (useJianyingDraft) rows.push({ icon: "deliver", name: "剪映草稿", count: "1 份 · 写入剪映草稿目录" });
 
   return (
     <section className="deliver-section" aria-label="内容">
@@ -80,11 +76,10 @@ function parts(canvas: CanvasSize | null | undefined): ReadonlyArray<{ title: st
 }
 
 /** 「交付包里有什么」四条说明,折叠段,默认收起,没有 01/02/03 水印(规格 §4.2 第 6 条)。 */
-export function DeliverPartsDetails({ canvas, photoCount = 0, hasVideos = true }: { canvas?: CanvasSize | null; photoCount?: number; hasVideos?: boolean }): JSX.Element {
+export function DeliverPartsDetails({ canvas, hasVideos = true }: { canvas?: CanvasSize | null; hasVideos?: boolean }): JSX.Element {
   const rows = parts(canvas).map((row) => {
     if (row.title !== "参考粗剪") return row;
-    if (!hasVideos) return { ...row, body: "当前没有已选视频,本次不生成参考粗剪;照片独立放在照片目录。" };
-    if (photoCount > 0) return { ...row, body: `仅使用视频素材生成 ${roughCutSpec(canvas)} 文件;照片独立放在照片目录,不计视频时长预算。` };
+    if (!hasVideos) return { ...row, body: "当前没有已选视频,本次不生成参考粗剪。" };
     return row;
   });
   return (

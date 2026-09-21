@@ -803,7 +803,7 @@ const EPISODE: EpisodeSummary = {
   archived_at: null,
   clip_count: CLIP_COUNT,
   favorite_count: 12,
-  export_count: 0,
+  export_count: 0, photo_export_count: 0,
   target_platform: "general",
   canvas_orientation: "landscape",
 };
@@ -818,7 +818,7 @@ const ARCHIVED_EPISODE: EpisodeSummary = {
   archived_at: "2026-08-10T22:00:00+08:00",
   clip_count: 23,
   favorite_count: 4,
-  export_count: 1,
+  export_count: 1, photo_export_count: 0,
   target_platform: "douyin",
   canvas_orientation: "portrait",
 };
@@ -1175,7 +1175,7 @@ const HANDLERS: Record<string, Handler> = {
     state.clips = [];
     const first = state.episodes[0];
     state.episodes = first
-      ? [{ ...first, id: first.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, episode_number: 1 }]
+      ? [{ ...first, id: first.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, photo_export_count: 0, episode_number: 1 }]
       : [];
     return { removed_clips: removedClips, removed_episodes: removedEpisodes, removed_disk_bytes: 0 };
   },
@@ -1507,7 +1507,7 @@ const HANDLERS: Record<string, Handler> = {
       episode_number: (current.episode_number ?? 0) + 1,
       clip_count: 0,
       favorite_count: 0,
-      export_count: 0,
+      export_count: 0, photo_export_count: 0,
       target_platform: (nextPlatform as EpisodeSummary["target_platform"] | null) ?? "general",
       canvas_orientation: (nextOrientation as EpisodeSummary["canvas_orientation"] | null) ?? "landscape",
       created_at: new Date().toISOString(),
@@ -1622,7 +1622,7 @@ const HANDLERS: Record<string, Handler> = {
       archived_at: null,
       clip_count: 0,
       favorite_count: 0,
-      export_count: 0,
+      export_count: 0, photo_export_count: 0,
       episode_number: (current.episode_number ?? state.episodes.length) + 1,
     };
     state.episodes.unshift(next);
@@ -1644,7 +1644,7 @@ const HANDLERS: Record<string, Handler> = {
         fallback.archived_at = null;
       } else {
         createdFresh = true;
-        state.episodes.unshift({ ...deleted!, id: deleted!.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, episode_number: 1 });
+        state.episodes.unshift({ ...deleted!, id: deleted!.id + 1, title: "EP01", theme: "", status: "active", archived_at: null, clip_count: 0, favorite_count: 0, export_count: 0, photo_export_count: 0, episode_number: 1 });
       }
     }
     const active = state.episodes.find((item) => item.status === "active")!;
@@ -1761,6 +1761,47 @@ export function handleMockCommand(command: string, args: Args): unknown {
  */
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("recovery")) {
   HANDLERS.get_doctor_report = () => ({ ...DOCTOR, status: "WARN", abnormal_exit: true, recovered_jobs: 2, cache_missing: 1 });
+}
+
+/**
+ * R21 车道 archive(PH-11)截图开关:`?archive=1` 让假后端报一条「上次交付未完成」的归档
+ * 日志(partial:RAW 伴随 ENOSPC 失败),交付抽屉顶部出现恢复入口;「继续交付」把它变成
+ * done,「撤销复制」把它变成 undone。默认路径不登记这三条命令——入口在真实首轮交付前本来
+ * 就不该出现,组件对缺 handler 的抛错静默处理(见 ArchiveRecoveryEntry)。
+ */
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("archive")) {
+  const destination = "/Volumes/交付盘/2026-09-20 冰岛/EP01_剪映素材包_2026-09-20";
+  const files = [
+    { source: "/Volumes/相机卡/DCIM/100MSDCF/DSC00412.JPG", destination: `${destination}/照片/01_DSC00412.jpg`, size: 8_412_301, source_hash: "b3-0412", derived: false, status: "verified" },
+    { source: "/Volumes/相机卡/DCIM/100MSDCF/DSC00412.ARW", destination: `${destination}/照片/01_DSC00412.ARW`, size: 51_220_480, source_hash: "b3-0412-raw", derived: false, status: "failed" },
+    { source: "/Volumes/相机卡/DCIM/100MSDCF/DSC00412.ARW.xmp", destination: `${destination}/照片/01_DSC00412.ARW.xmp`, size: 9_812, source_hash: "b3-0412-xmp", derived: false, status: "planned" },
+    { source: "/Volumes/相机卡/PRIVATE/M4ROOT/CLIP/C0031.MP4", destination: `${destination}/视频/01_章节/01_章节_C0031.mp4`, size: 412_000_000, source_hash: "b3-c0031", derived: true, status: "verified" },
+  ];
+  const archiveOp = {
+    id: "mock-archive-op",
+    kind: "kit",
+    status: "partial",
+    destination,
+    job_id: 7,
+    needs_preparation: false,
+    undo_requested: false,
+    errors: ["目标磁盘空间不足(ENOSPC):01_DSC00412.ARW 复制到一半;整组保持未完成,原片未动"],
+    files,
+  };
+  HANDLERS.list_archive_ops = () => [archiveOp];
+  HANDLERS.resume_archive = () => {
+    archiveOp.status = "done";
+    archiveOp.errors = [];
+    for (const file of archiveOp.files) file.status = "published";
+    return archiveOp;
+  };
+  HANDLERS.undo_archive = () => {
+    archiveOp.status = "undone";
+    archiveOp.undo_requested = true;
+    archiveOp.errors = [];
+    for (const file of archiveOp.files) file.status = "undone";
+    return archiveOp;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2194,6 +2235,39 @@ HANDLERS.export_jianying_kit = ({ destDir }) => {
   return { ...plan, job_id: 3 };
 };
 (MOCK_COMMANDS as string[]).push("plan_jianying_kit", "export_jianying_kit");
+// R21 照片线:「导出精选照片」—— winners = 收藏 + ≥3 星 + 擂台主图(有 select_count)的照片,平铺 NN_<原名>.<ext>。
+function selectedPhotosPlan(destDir: unknown): KitExportOutcome {
+  const winners = state.clips.filter((clip) => clip.kind === "photo" && clip.binary_rating !== -1
+    && (clip.binary_rating === 1 || (clip.star_rating ?? 0) >= 3 || (clip.select_count ?? 0) > 0));
+  if (winners.length === 0) throw new Error("当前没有精选照片：先收藏、打 3 星以上或在擂台选出主图");
+  const files = winners.map((clip, index) => {
+    const stem = clip.file_name.replace(/\.[^.]+$/, "");
+    const ext = /\.(heic|heif|arw|dng)$/i.test(clip.file_name) ? "jpg" : clip.file_name.replace(/^.*\./, "");
+    return `${String(index + 1).padStart(2, "0")}_${stem}.${ext}`;
+  });
+  const folder = "EP03_精选照片_2026-09-13";
+  return { job_id: null, dir: destDir ? `${str(destDir, "destDir")}/${folder}` : folder, files, order_file: "顺序.txt" };
+}
+HANDLERS.plan_selected_photos = ({ destDir }) => selectedPhotosPlan(destDir);
+HANDLERS.export_selected_photos = ({ destDir }) => {
+  const plan = selectedPhotosPlan(destDir ?? "/Users/mock/Desktop");
+  state.exportStatus = {
+    ...IDLE_EXPORT,
+    job_id: 4,
+    status: "done",
+    stage: "complete",
+    mode: "photos",
+    selected_count: plan.files.length,
+    selected_segment_count: 0,
+    selected_whole_count: plan.files.length,
+    selected_photo_count: plan.files.length,
+    completed_items: plan.files.length,
+    output_path: plan.dir,
+    items: plan.files.map((name, index) => ({ clip_id: index, file_name: name, output_name: name, status: "done", note: null, warning: false })),
+  };
+  return { ...plan, job_id: 4 };
+};
+(MOCK_COMMANDS as string[]).push("plan_selected_photos", "export_selected_photos");
 // ---------------------------------------------------------------------------
 // R16 车道 B(章节与批量)。只追加不改上面的表。
 // `delete_chapter`:镜移到相邻章(先上一章,没有就下一章),只剩一章时拒绝;`merge_chapters` 在上面只计
@@ -2606,10 +2680,12 @@ if (typeof location !== "undefined") {
 }
 
 // R21 PH-03: additive, opt-in mixed fixtures keep every video-only screenshot unchanged.
-import { buildPhotoFixtures } from "./photoFixtures";
+import { buildPhotoFixtures, buildStandaloneRawFixture } from "./photoFixtures";
 export const PHOTO_CLIPS_R21 = buildPhotoFixtures(state.clips[0]!);
+/** R21 PH-10:独立 ARW 一张,不在 PHOTO_CLIPS_R21 里(相似组 ×6 与 PH-03 断言不变)。 */
+export const PHOTO_RAW_CLIP_R21 = buildStandaloneRawFixture(state.clips[0]!);
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("photos")) {
-  state.clips.push(...PHOTO_CLIPS_R21);
+  state.clips.push(...PHOTO_CLIPS_R21, PHOTO_RAW_CLIP_R21);
   const photo = PHOTO_CLIPS_R21[0]!;
   storyboard.items.push({
     ...storyboard.items[0]!, key: `whole:${photo.id}`, item_kind: "whole",

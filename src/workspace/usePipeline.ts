@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
+import { derivePhotoPipeline, photoPipelineInputFrom, type PhotoPipelineState } from "./photoPipelineModel";
 import { derivePipeline, pipelineInputFrom, type PipelineState } from "./pipelineModel";
 import { useClipsFeed } from "./useClipsFeed";
 
@@ -9,11 +10,16 @@ import { useClipsFeed } from "./useClipsFeed";
  */
 export const EXPORT_DONE_EVENT = "tripcut:export-done";
 
+/** R21 W3(F-W3-03):事件 detail 说明是哪条线导完的;不带 detail = 视频(旧调用方)。 */
+export type ExportDoneKind = "video" | "photo";
+
 let sessionExports = 0;
+let sessionPhotoExports = 0;
 const listeners = new Set<() => void>();
 
-function onExportDone(): void {
-  sessionExports += 1;
+function onExportDone(event: Event): void {
+  if ((event as CustomEvent<ExportDoneKind | undefined>).detail === "photo") sessionPhotoExports += 1;
+  else sessionExports += 1;
   for (const listener of [...listeners]) listener();
 }
 
@@ -39,9 +45,23 @@ export function usePipeline(): PipelineState {
   }, [feed.clips, feed.storyboard, feed.episode.current, sessionCount]);
 }
 
+/**
+ * R21 W3 P1-1:照片工作台的三步流水线 —— 只看 `kind='photo'`,与视频那份互不掺和。
+ * 会话内的导出计数也分开:照片导出完成广播 `EXPORT_DONE_EVENT` 带 detail "photo"。
+ */
+export function usePhotoPipeline(): PhotoPipelineState {
+  const feed = useClipsFeed();
+  const sessionCount = useSyncExternalStore(subscribeSessionExports, () => sessionPhotoExports, () => 0);
+  return useMemo(() => {
+    const input = photoPipelineInputFrom(feed.clips, feed.episode.current);
+    return derivePhotoPipeline({ ...input, exportCount: Math.max(input.exportCount, sessionCount) });
+  }, [feed.clips, feed.episode.current, sessionCount]);
+}
+
 /** 只在开发期用:把会话计数清零。 */
 export function __resetPipelineForTests(): void {
   sessionExports = 0;
+  sessionPhotoExports = 0;
 }
 
 /** 让「切集」把会话内的导出计数清掉 —— 换了集就是另一条流水线。 */
@@ -49,6 +69,7 @@ export function useResetSessionExportsOnEpisodeChange(): void {
   useEffect(() => {
     const reset = () => {
       sessionExports = 0;
+      sessionPhotoExports = 0;
       for (const listener of [...listeners]) listener();
     };
     window.addEventListener("tripcut:episode-changed", reset);
