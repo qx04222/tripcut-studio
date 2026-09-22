@@ -7,6 +7,7 @@ import {
   type MouseEvent,
 } from "react";
 
+import { isPlaythroughActive } from "./workspace/playthrough/store";
 import {
   createSelectSegment,
   listSelectSegments,
@@ -271,7 +272,12 @@ export function PlayerOverlay({
         if (!surface || !active) return;
         const viewport = rectToPlayerViewport(visibleSurfaceRect(surface));
         if (viewport) await playerSetViewport(viewport);
-        const initial = await playerOpen(clip.id as number);
+        // R23 ISSUE-A:连播中换素材必须停在首帧开。新实例默认载入即播,从 0 跑起来,
+        // seek 到入点之前那一段放的是用户没选的原片(跨素材复现:pos 0.08 s、paused=false)。
+        // 不连播时按老签名单参数调 —— 这条路上的契约一个字没变。
+        const initial = isPlaythroughActive()
+          ? await playerOpen(clip.id as number, true)
+          : await playerOpen(clip.id as number);
         if (!active) return;
         openedClipId.current = clip.id as number;
         setStatus(initial);

@@ -14,7 +14,7 @@ const status = (clip_id = 1, pos = 0, paused = true): PlayerStatus => ({
   seek_samples: 0, seek_p50_ms: null, seek_p95_ms: null, last_seek_ms: null,
 });
 function mount() {
-  const transport = { pause: vi.fn(async () => {}), play: vi.fn(async () => {}), seekTo: vi.fn(async () => true) };
+  const transport = { pause: vi.fn(async () => {}), play: vi.fn(async () => {}), seekTo: vi.fn(async () => true), setEnd: vi.fn(async () => {}) };
   const selectClip = vi.fn();
   let props: PlaythroughDeps = { segments, selectedClipId: 1, status: status(), enabled: true, transport, selectClip };
   const hook = renderHook((p: PlaythroughDeps) => usePlaythrough(p), { initialProps: props });

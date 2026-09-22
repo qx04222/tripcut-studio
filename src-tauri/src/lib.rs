@@ -3003,6 +3003,9 @@ async fn player_set_occluded(
 #[tauri::command]
 async fn player_open(
     clip_id: i64,
+    // R23:镜头带连播换素材时传 true —— 新实例停在首帧,由连播 seek 到入点、等首帧再开播。
+    // 不传(老调用方)保持原样:载入即播。
+    start_paused: Option<bool>,
     runtime: tauri::State<'_, RuntimeState>,
     player: tauri::State<'_, PlayerManager>,
 ) -> std::result::Result<PlayerStatus, String> {
@@ -3016,7 +3019,7 @@ async fn player_open(
         if time_mapper.is_some() {
             core::artifacts::touch_proxy_played(&connection, &cache_root, clip_id);
         }
-        let status = player.open(path, clip_id, time_mapper)?;
+        let status = player.open(path, clip_id, time_mapper, start_paused.unwrap_or(false))?;
         apply_stored_display_prefs(&connection, clip_id, &player);
         Ok::<PlayerStatus, String>(status)
     })

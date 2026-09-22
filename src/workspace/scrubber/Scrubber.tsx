@@ -21,7 +21,12 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   const duration = ready ? status.duration : 0, clipId = ready ? status.clip_id : null;
   const [zoom, setZoom] = useState(() => { try { return localStorage.getItem("tripcut.scrubber.range") !== "full"; } catch { return true; } });
   const [width, setWidth] = useState(600);
-  const range = useMemo(() => visibleRange(duration, inPoint, outPoint, zoom), [duration, inPoint, outPoint, zoom]);
+  // R23 ISSUE-B:连播中刻度的唯一真值是活动选段,不是 I/O 栏 —— 那里装的是 AI 建议(报告 §4.2
+  // 的四行错误范围都正好 8 s 宽,就是建议段)。不加 10% 余量:不变量写的是 monitorRange == activeSegment。
+  const range = useMemo((): readonly [number, number] => (playthrough
+    ? [playthrough.inPoint, playthrough.outPoint]
+    : visibleRange(duration, inPoint, outPoint, zoom)),
+  [duration, inPoint, outPoint, zoom, playthrough]);
   const gesture = useScrubGesture({ ready, clipId, pos: status?.pos ?? 0, duration, fps, paused: status?.paused !== false,
     range, inPoint, outPoint, onSeek, onPause, onResume, onTrim });
   useWheelFrames(gesture.track, ready, fps, gesture.position, gesture.seek);
@@ -36,8 +41,16 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   }, [gesture.track]);
   useEffect(() => { setHover(null); }, [clipId]);
   const pct = (n: number) => `${ratioAt(n, shownRange) * 100}%`;
-  const value = gesture.local !== null ? gesture.local : clamp(status?.pos ?? 0, 0, duration);
+  // R23 §7.6:指针只从 activeSegment + 真实 currentTime 派生。切段中读数还属于上一段,
+  // 与其画一个假位置,不如停在新段入点 —— 「seek 后指针立即刷新到目标位置」。
+  const value = gesture.local !== null ? gesture.local
+    : playthrough?.switching ? playthrough.inPoint
+      : clamp(status?.pos ?? 0, 0, duration);
   const marked = inPoint !== null && outPoint !== null && outPoint > inPoint;
+  // R23 §8C:`ratioAt` 会把越界的位置 clamp 到 0%/100%,看起来只是「指针不动」。
+  // 连播中一旦真位置落在活动选段外就挂旗,验收测试盯它 —— clamp 不许把越界播放遮过去。
+  const outOfSegment = playthrough !== undefined && ready && !playthrough.switching &&
+    (value < playthrough.inPoint - 0.1 || value > playthrough.outPoint + 0.1);
   const keyboard = (event: KeyboardEvent, edge: Edge) => {
     if (!ready || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
     const from = edge === "in" ? inPoint ?? 0 : edge === "out" ? outPoint ?? duration : gesture.position();
@@ -71,6 +84,7 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
     <span className="scrubber-r22-track-wrap">
       <div ref={gesture.track} role="slider" tabIndex={ready ? 0 : -1} aria-label="播放位置" aria-valuemin={0} aria-valuemax={duration}
         aria-valuenow={value} aria-valuetext={timecode(value, fps)} aria-disabled={!ready} className="scrubber-r22-track"
+        data-out-of-range={outOfSegment ? "" : undefined}
         onKeyDown={e => keyboard(e, "play")}
         onPointerDown={e => { gesture.start(e, "play"); enter(e.clientX); }}
         onPointerMove={e => { gesture.move(e); enter(e.clientX); }}
@@ -99,9 +113,11 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
       })}
     </span>
     {playthrough && <span className="scrubber-r22-playthrough-label" title="镜头带连播:当前段">第 {playthrough.index + 1}/{playthrough.total} 段</span>}
-    <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={zoom && marked}
-      disabled={!marked} onClick={() => { const next = !zoom; setZoom(next); try { localStorage.setItem("tripcut.scrubber.range", next ? "segment" : "full"); } catch { /* optional preference */ } }}>
-      {zoom && marked ? "片段" : "全片"}
+    {/* R23:连播中刻度固定等于活动选段,这个开关此刻说了不算 —— 按下去什么都不会变,
+        就别让它看起来还能按(禁用 + 显示「片段」,与实际刻度一致)。 */}
+    <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={playthrough ? true : zoom && marked}
+      disabled={Boolean(playthrough) || !marked} onClick={() => { const next = !zoom; setZoom(next); try { localStorage.setItem("tripcut.scrubber.range", next ? "segment" : "full"); } catch { /* optional preference */ } }}>
+      {playthrough || (zoom && marked) ? "片段" : "全片"}
     </button>
     {previewVisible && createPortal(<div className="scrubber-r22-preview" role="tooltip" style={{ left: hover.x, top: hover.y }}>
       {media.preview?.url ? <img src={media.preview.url} width={160} height={90} alt="悬停位置预览" crossOrigin="anonymous" /> : <span className="scrubber-r22-no-frame">{media.preview?.url === null ? "预览暂不可用" : "正在取帧…"}</span>}

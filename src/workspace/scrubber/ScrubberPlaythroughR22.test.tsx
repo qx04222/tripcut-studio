@@ -21,8 +21,11 @@ it("draws the playthrough segment band and n/m label only while a playthrough ra
   rerender(<Scrubber status={status} fps={25} inPoint={null} outPoint={null} onSeek={vi.fn()} playthrough={{ inPoint: 6, outPoint: 18, index: 1, total: 6 }} />);
   const band = document.querySelector<HTMLElement>(".scrubber-r22-track [data-playing]");
   expect(band).toBeTruthy();
-  expect(band!.style.left).toBe("10%");
-  expect(band!.style.width).toMatch(/^calc\((30% - 10%|20%)\)$/);
+  // R23 §8C:连播中轨道的刻度范围就是活动选段(monitorRange == activeSegment),
+  // 所以这条带铺满整条轨。旧断言(10% / 20%)量的是「段在整条素材里的位置」——
+  // 那个刻度正是 ISSUE-B 里指针被 clamp 在边缘的来源。
+  expect(band!.style.left).toBe("0%");
+  expect(band!.style.width).toMatch(/^calc\((100% - 0%|100%)\)$/);
   expect(screen.getByText("第 2/6 段")).toBeTruthy();
 });
 
@@ -34,7 +37,8 @@ it("a drag during playthrough is a plain user seek (onSeek, no source) — the t
   vi.spyOn(slider, "getBoundingClientRect").mockReturnValue({ left: 0, width: 600, top: 0, height: 56 } as DOMRect);
   fireEvent.pointerDown(slider, { clientX: 300 });
   await act(async () => {});
-  expect(onSeek).toHaveBeenCalledWith(30);
+  // R23 §8C:轨道此刻代表的是 6→18 这一段,点正中 = 12 s(不再是整条素材的 30 s)。
+  expect(onSeek).toHaveBeenCalledWith(12);
   expect(onSeek.mock.calls[0]).toHaveLength(1);
 });
 

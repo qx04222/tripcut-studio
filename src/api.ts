@@ -392,7 +392,11 @@ export type PlayerCommand =
   // does not issue this itself.
   | { type: "set_rotation"; degrees: number | null }
   // R12 §5 真变速:mpv `speed` 属性,原生层夹紧到 0.25–4。
-  | { type: "set_speed"; speed: number };
+  | { type: "set_speed"; speed: number }
+  // R23 出点围栏:mpv `end` 属性。播到这一秒就停(keep-open 停在那一帧,不关实例)。
+  // 镜头带连播用它让「到 out 就结束」由播放器保证,不再只靠前端轮询位置去追。
+  // `seconds: null` = 撤掉围栏。
+  | { type: "set_end"; seconds: number | null };
 
 export interface PlayerStatus {
   phase: "closed" | "loading" | "ready" | "error";
@@ -1238,8 +1242,9 @@ export function playerSetOccluded(occluded: boolean): Promise<void> {
   return invoke<void>("player_set_occluded", { occluded });
 }
 
-export function playerOpen(clipId: number): Promise<PlayerStatus> {
-  return invoke<PlayerStatus>("player_open", { clipId });
+/** `startPaused` = 载入后停在首帧(R23 镜头带连播换素材:seek 到入点、等首帧再开播)。 */
+export function playerOpen(clipId: number, startPaused = false): Promise<PlayerStatus> {
+  return invoke<PlayerStatus>("player_open", { clipId, startPaused });
 }
 
 export function playerClose(): Promise<void> {

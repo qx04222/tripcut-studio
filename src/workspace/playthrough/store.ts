@@ -31,6 +31,8 @@ export function publishPlaythrough(next: PlaythroughController | null) {
   view = value; emit();
 }
 export const usePlaythroughView = () => useSyncExternalStore(subscribe, () => view, () => null);
+/** 不走 hook 的读法:`playerOpen` 要在换素材那一刻知道该不该停在首帧(R23 ISSUE-A 跨素材)。 */
+export const isPlaythroughActive = () => view !== null && view.phase !== 'idle';
 // 只订阅「正在播的是哪一段」:整份 view 里的 elapsed 每 80 ms 就变一次,镜头带跟着每秒重渲染十几遍,
 // 10 px 宽的修剪把手在连播中就按不动了(R22-C 真机 F-R22C-16)。带上只需要 key。
 let playingKey: string | undefined;

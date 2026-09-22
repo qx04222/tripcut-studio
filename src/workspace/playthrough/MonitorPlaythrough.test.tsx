@@ -244,7 +244,8 @@ describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
     // R22 接线:连播中进度条画出当前段 2→4 s 的区间与「第 1/2 段」。
     expect(screen.getByText('第 1/2 段')).toBeTruthy();
     const band = document.querySelector<HTMLElement>('.scrubber-r22-track [data-playing]');
-    expect(band?.style.left).toBe(`${(2 / 60) * 100}%`);
+    // R23 §8C:刻度范围 == 活动选段,连播带从轨道最左开始铺。
+    expect(band?.style.left).toBe('0%');
     // 用户在自绘轨道上按下 = 人工 seek(pointer 事件,R22-A 的 div[role=slider] 没有 change 事件)→ 连播立即停止。
     vi.stubGlobal('PointerEvent', MouseEvent);
     const slider = screen.getByRole('slider', { name: '播放位置' });
@@ -252,7 +253,9 @@ describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
     fireEvent.pointerDown(slider, { clientX: 70 });
     fireEvent.pointerUp(slider, { clientX: 70 });
     await waitFor(() => expect(screen.queryByRole('group', { name: '镜头带连播预览' })).toBeNull());
-    await waitFor(() => expect(live.pos).toBe(7));
+    // R23 §8C:轨道此刻代表活动选段 2→4 s,按在 70/600 处 = 2.2333 s,按 25 fps 量到 2.24
+    // (旧值 7 是「按整条素材 0–60 s 算」—— 那个刻度就是 ISSUE-B)。
+    await waitFor(() => expect(live.pos).toBe(2.24));
     expect(screen.queryByText(/第 \d+\/\d+ 段/)).toBeNull();
     expect(document.querySelector('.scrubber-r22-track [data-playing]')).toBeNull();
     expect(live.clip_id).toBe(9);

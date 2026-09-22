@@ -31,4 +31,8 @@ export const playthroughTime = (seconds: number) => {
   const whole = Math.floor(Math.max(0, seconds));
   return `${String(Math.floor(whole / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
 };
-export interface PlaythroughRange { inPoint: number; outPoint: number; index: number; total: number }
+export interface PlaythroughRange {
+  inPoint: number; outPoint: number; index: number; total: number;
+  /** 切段中(旧源已停、seek 还没落地):此刻的 `currentTime` 还属于上一段,不能当位置显示。 */
+  switching?: boolean;
+}

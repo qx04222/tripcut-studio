@@ -112,6 +112,11 @@ pub enum PlayerCommand {
     /// R12 §5 真变速:mpv 的 `speed` 属性,夹紧到 `PLAYBACK_SPEED_MIN..=PLAYBACK_SPEED_MAX`。
     /// mpv 不支持负速,反向由前端用 `StepBack` 定时回退实现,不经这里。
     SetSpeed { speed: f64 },
+    /// R23:出点围栏。mpv 的 `end` 属性 —— 播到这一秒就 EOF,`keep-open=yes` 让它停在那儿
+    /// 而不是关掉。镜头带连播的「到 out 就结束」因此由播放器自己保证,不再只靠前端按 80 ms
+    /// 轮询到的位置去追:前端状态机一旦掉链子(停连播没停住、卡在等首帧、事件迟到),
+    /// 以前就会一路播进用户没选的原片(ISSUE-A)。`None` = 撤掉围栏(`end=none`)。
+    SetEnd { seconds: Option<f64> },
 }
 
 /// 真变速的夹紧范围(R12 §5:0.25–4×)。
@@ -140,6 +145,7 @@ enum MpvCall {
     SetPropertyInt(&'static str, i64),
     SetPropertyBool(&'static str, bool),
     SetPropertyF64(&'static str, f64),
+    SetPropertyStr(&'static str, String),
 }
 
 fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
@@ -177,6 +183,13 @@ fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
             // 0/None, or any value outside the three real orientations: no call.
             _ => Vec::new(),
         },
+        PlayerCommand::SetEnd { seconds } => match seconds {
+            Some(value) if value.is_finite() && value > 0.0 => {
+                vec![MpvCall::SetPropertyStr("end", format!("{value:.6}"))]
+            }
+            // 负数 / 非有限 / 0 一律当成「撤掉围栏」,绝不把播放窗口关成空的。
+            _ => vec![MpvCall::SetPropertyStr("end", "none".to_owned())],
+        },
         PlayerCommand::Play | PlayerCommand::Pause | PlayerCommand::StepFwd | PlayerCommand::StepBack
         | PlayerCommand::SeekAbs { .. } => Vec::new(),
     })
@@ -205,6 +218,9 @@ fn apply_mpv_call(mpv: &Mpv, call: MpvCall) -> Result<(), String> {
             .map_err(|error| format!("设置 {name} 失败：{error}")),
         MpvCall::SetPropertyF64(name, value) => mpv
             .set_property(name, value)
+            .map_err(|error| format!("设置 {name} 失败：{error}")),
+        MpvCall::SetPropertyStr(name, value) => mpv
+            .set_property(name, value.as_str())
             .map_err(|error| format!("设置 {name} 失败：{error}")),
     }
 }
@@ -401,11 +417,14 @@ impl PlayerManager {
         lock(&self.state).occluded
     }
 
+    /// `start_paused` = 载入后停在首帧不自动播(R23:镜头带连播换素材时用它,否则新实例
+    /// 从 0 自己跑起来,seek 到入点之前那几百毫秒播的是用户没选的原片)。
     pub fn open(
         &self,
         path: PathBuf,
         clip_id: i64,
         time_mapper: Option<crate::core::canonical_time::ProxyTimeMapper>,
+        start_paused: bool,
     ) -> Result<PlayerStatus, String> {
         let _operation = lock(&self.operation);
         reap_orphans(&mut lock(&self.orphans));
@@ -428,6 +447,7 @@ impl PlayerManager {
                     window,
                     viewport,
                     occluded,
+                    start_paused,
                     path,
                     time_mapper,
                     worker_status,
@@ -914,6 +934,7 @@ fn worker_entry(
     window: WebviewWindow,
     viewport: PlayerViewport,
     occluded: bool,
+    start_paused: bool,
     path: PathBuf,
     time_mapper: Option<crate::core::canonical_time::ProxyTimeMapper>,
     status: Arc<Mutex<PlayerStatus>>,
@@ -949,6 +970,7 @@ fn worker_entry(
             &window,
             &surface,
             occluded,
+            start_paused,
             &path,
             time_mapper.as_ref(),
             &status,
@@ -984,6 +1006,7 @@ fn run_worker(
     window: &WebviewWindow,
     surface: &RenderSurface,
     occluded: bool,
+    start_paused: bool,
     path: &Path,
     time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
     status: &Arc<Mutex<PlayerStatus>>,
@@ -1054,9 +1077,9 @@ fn run_worker(
     let path_text = path.to_string_lossy();
     mpv.command("loadfile", &[&path_text, "replace"])
         .map_err(|error| format!("素材载入失败：{error}"))?;
-    mpv.set_property("pause", false)
+    mpv.set_property("pause", start_paused)
         .map_err(|error| format!("素材自动播放失败：{error}"))?;
-    lock(status).paused = false;
+    lock(status).paused = start_paused;
     let _ = started.send(Ok(()));
 
     // Exact-seek latency is closed by mpv's PlaybackRestart event. No render
@@ -1222,7 +1245,8 @@ fn execute_command(
         | PlayerCommand::SelectAudioTrack { .. }
         | PlayerCommand::SetMute { .. }
         | PlayerCommand::SetSpeed { .. }
-        | PlayerCommand::SetRotation { .. }) => {
+        | PlayerCommand::SetRotation { .. }
+        | PlayerCommand::SetEnd { .. }) => {
             for call in mpv_calls_for(command)? {
                 apply_mpv_call(mpv, call)?;
             }
@@ -1537,6 +1561,34 @@ mod tests {
 
         let mute: PlayerCommand = serde_json::from_str(r#"{"type":"set_mute","muted":true}"#).unwrap();
         assert_eq!(mute, PlayerCommand::SetMute { muted: true });
+    }
+
+    #[test]
+    fn set_end_fences_playback_at_the_out_point_and_none_clears_it() {
+        // R23 ISSUE-A:出点由播放器自己守。契约是 tagged snake_case,和别的命令同一条路。
+        let fence: PlayerCommand =
+            serde_json::from_str(r#"{"type":"set_end","seconds":45.6}"#).unwrap();
+        assert_eq!(fence, PlayerCommand::SetEnd { seconds: Some(45.6) });
+        assert_eq!(
+            mpv_calls_for(fence).unwrap(),
+            vec![MpvCall::SetPropertyStr("end", "45.600000".to_owned())]
+        );
+
+        let clear: PlayerCommand = serde_json::from_str(r#"{"type":"set_end"}"#).unwrap();
+        assert_eq!(clear, PlayerCommand::SetEnd { seconds: None });
+        assert_eq!(
+            mpv_calls_for(clear).unwrap(),
+            vec![MpvCall::SetPropertyStr("end", "none".to_owned())]
+        );
+
+        // 空窗口是最坏的失败朝开:围栏关成 0 / 负数 / NaN 时宁可不设,也不能把播放窗口关死。
+        for bad in [Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(
+                mpv_calls_for(PlayerCommand::SetEnd { seconds: bad }).unwrap(),
+                vec![MpvCall::SetPropertyStr("end", "none".to_owned())],
+                "seconds = {bad:?}"
+            );
+        }
     }
 
     #[test]

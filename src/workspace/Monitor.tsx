@@ -26,7 +26,7 @@ import { CoverImage, Icon } from "./ui";
 import { useClipsFeed } from "./useClipsFeed";
 import { useClipSuggestions } from "./useClipSuggestions";
 import { useMonitorHotkeys } from "./useMonitorHotkeys";
-import { useMonitorTransport } from "./useMonitorTransport";
+import { useMonitorTransport, type MonitorTransport } from "./useMonitorTransport";
 import { usePlayerOcclusion } from "./usePlayerOcclusion";
 import { useStageFit } from "./useStageFit";
 import { dispatchWorkspace, useWorkspace } from "./WorkspaceStore";
@@ -59,6 +59,8 @@ export function Monitor(): JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const controlsRef = useRef<EmbeddedPlayerControls | null>(null);
+  // onPlayPause 在走带建好之前就定义了 —— 按播放要撤连播留下的出点围栏,只能经 ref 拿。
+  const transportRef = useRef<MonitorTransport | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   // 覆盖层打开时藏起原生视频视图(R9 D1);挂在这里是因为监视器在壳里常驻。
@@ -144,7 +146,12 @@ export function Monitor(): JSX.Element {
     }
     // U-09:mpv keep-open 停在尾帧时单发 play 什么都不会发生(图标翻成暂停、时间不动)。
     // 播完再按播放 = 从头放。
-    void send(isAtEnd(status) ? [{ type: "seek_abs", seconds: 0 }, { type: "play" }] : [{ type: "play" }]);
+    // R23:按播放 = 人工开播,先撤出点围栏 —— 连播释放后素材停在 activeSegment.out,
+    // 围栏还留着,不撤的话按播放会当场又被挡在 out 上。
+    const fence = transportRef.current?.fenceCommands() ?? [];
+    void send(isAtEnd(status)
+      ? [...fence, { type: "seek_abs", seconds: 0 }, { type: "play" }]
+      : [...fence, { type: "play" }]);
   }, [send, status]);
 
   // R11 §1.2:时刻分 + 建议段;§3:变速 / 逐帧 / 循环 / 自动下一条 / 静音记忆 / 从最高分开播。
@@ -161,10 +168,14 @@ export function Monitor(): JSX.Element {
     momentsLoaded: suggestions.momentsLoaded,
     playthroughActive: playthroughView !== null && playthroughView.phase !== "idle",
   });
+  transportRef.current = transport;
   const playthrough = useMonitorPlaythrough(transport, status, selectedClipId, workspaceMode === "video" && !immersive && MONITOR_EMBEDDED_PLAYBACK);
-  // 仅预留 props;MonitorControls → MonitorSeekBar 的内部透传由 scrubber 车道接续。
+  // R23:这份 range 不只是画一条带 —— 连播中它就是进度条的刻度范围与指针的来源
+  // (MonitorControls → MonitorSeekBar → Scrubber)。`switching` 让切段那几拍的指针
+  // 停在新段入点,而不是画一个还属于上一段的位置。
   const playthroughProps: { playthrough?: PlaythroughRange } = playthrough.active && playthrough.segment ? { playthrough: {
     inPoint: playthrough.segment.inPoint, outPoint: playthrough.segment.outPoint, index: playthrough.index, total: playthrough.total,
+    switching: playthrough.switching,
   } } : {};
   const onNudge = transport.nudge;
   const onSeek = transport.seekTo;
@@ -185,11 +196,16 @@ export function Monitor(): JSX.Element {
 
   // 当前建议一变(载入 / N / ⇧N)就把入出点填成它 —— I / O 微调、S 或 Enter 保存,都是同一条路。
   const { current: currentSuggestion, index: suggestionIndex } = suggestions;
+  const playthroughRunning = playthroughView !== null && playthroughView.phase !== "idle";
   useEffect(() => {
     if (!currentSuggestion) return;
+    // R23 §7.1:连播播的是镜头带里已经保存的精选段。建议段一填进 I/O 栏就成了刻度的来源,
+    // 把已保存段的范围盖掉(ISSUE-B:报告 §4.2 四行错误范围都正好 8 s 宽 = 建议段)。
+    // 连播期间建议只留作候选,不落到 I/O 栏。
+    if (playthroughRunning) return;
     setInPoint(currentSuggestion.inSeconds);
     setOutPoint(currentSuggestion.outSeconds);
-  }, [currentSuggestion]);
+  }, [currentSuggestion, playthroughRunning]);
   const onStepSuggestion = useCallback(
     (direction: 1 | -1) => {
       const next = suggestions.step(direction);

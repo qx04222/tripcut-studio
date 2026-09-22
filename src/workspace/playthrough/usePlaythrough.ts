@@ -13,6 +13,8 @@ export interface PlaythroughDeps {
     seekTo(seconds: number, options?: { source: 'playthrough' | 'band-trim' }): Promise<boolean>;
     play(): Promise<void>;
     pause(): Promise<void>;
+    /** R23 出点围栏(mpv `end`):播到活动选段的 out 播放器自己停;null 撤掉。 */
+    setEnd(seconds: number | null): Promise<void>;
   };
 }
 export type PlaythroughPhase = 'idle' | 'playing' | 'paused' | 'done';
@@ -52,7 +54,20 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     heldByTrim.current = false;
     publish({ phase: 'idle', stage: 'finished', token: session.current.token + 1, error });
     clearTimer();
-    if (wasActive && !keepPlaying) void latest.current.transport.pause().catch(() => undefined);
+    // R23 业主拍板(报告 §9「连续播放期间没有任何未选帧/音频」):
+    // keepPlaying(镜头带开始编辑 → 连播释放、素材继续播)**不撤围栏** —— 素材播到
+    // activeSegment.out 就由播放器自己停住,不会溜进用户没选的原片。用户按播放 / 拖进度条 /
+    // 逐帧(任何一条人工命令)时走带才把围栏撤掉,从那一刻起才是自由播。
+    // 真停(停连播 / 出错 / 播完)照旧撤围栏 + 暂停。
+    if (wasActive && !keepPlaying) {
+      void latest.current.transport.setEnd(null).catch(() => undefined);
+      void latest.current.transport.pause().catch(() => undefined);
+    } else if (wasActive) {
+      // keepPlaying:围栏留着,而且要**重新确认**一次 —— 引起释放的那一下点击往往同时
+      // 带一次跟随 seek,走带那边可能已经把它撤了(真机 R23-N4)。
+      const segment = session.current.segments[session.current.index];
+      if (segment) void latest.current.transport.setEnd(segment.outPoint).catch(() => undefined);
+    }
   }, [publish, clearTimer]);
   const valid = useCallback((token: number) => mounted.current && session.current.token === token && active(session.current), []);
   const fail = useCallback((token: number, error: unknown) => {
@@ -63,12 +78,16 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     if (!latest.current.enabled || !list[index]) return;
     clearTimer();
     const token = session.current.token + 1;
-    publish({ token, index, segments: list, phase: phase === 'paused' ? 'paused' : 'playing', stage: 'stopping', startedAt: performance.now(), error: null });
+    // R23 §7.2:`{index, clipId, in, out}` 是一次不可拆分的提交。以前段号先换、素材与
+    // 边界后换,中间那几拍「活动选段已经是下一段、播放器还在上一段的位置上播」——
+    // 报告 §3.2 第四条,手动上一段 / 快速连切都撞得到。现在 token 立刻推进(迟到回调作废),
+    // 但 index/segments 要等旧源真的停住才和边界一起落。
+    publish({ token, phase: phase === 'paused' ? 'paused' : 'playing', stage: 'stopping', startedAt: performance.now(), error: null });
     timer.current = setTimeout(() => fail(token, '等待片段首帧超时'), PLAYTHROUGH_TIMEOUT_MS);
     void latest.current.transport.pause().then(() => {
       if (!valid(token)) return;
-      // 先暂停旧源,再改变 selection;loading 只接受目标素材的 ready。
-      publish({ stage: 'loading' });
+      // 先暂停旧源,再一次性提交段并改变 selection;loading 只接受目标素材的 ready。
+      publish({ index, segments: list, stage: 'loading' });
       latest.current.selectClip(list[index]!.clipId);
     }).catch(error => fail(token, error));
   }, [clearTimer, publish, fail, valid]);
@@ -78,7 +97,9 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     const s = session.current;
     if (!active(s)) return;
     if (!deps.enabled) { stop(); return; }
-    const segment = s.segments[s.index]!;
+    // stopping 阶段段还没提交(刚开播时 segments 甚至还是空的)—— 没段就没有可判的事。
+    const segment = s.segments[s.index];
+    if (!segment) return;
     // stopping/first loading render can still contain the previous selection.
     if (s.stage !== 'stopping' && deps.selectedClipId !== segment.clipId) {
       if (s.stage !== 'loading') stop();
@@ -92,7 +113,11 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     const token = s.token;
     if (s.stage === 'loading') {
       publish({ stage: 'seeking' });
-      void deps.transport.seekTo(segment.inPoint, { source: 'playthrough' }).then(ok => {
+      // 先撤掉上一段的出点围栏再 seek:mpv 的 `end` 会把越过它的 seek 夹回围栏上
+      // (0.41 实测 end=34.2 时 seek 39.4 落在 34.16),同素材的下一段就永远到不了入点。
+      void deps.transport.setEnd(null)
+        .catch(() => undefined)
+        .then(() => deps.transport.seekTo(segment.inPoint, { source: 'playthrough' })).then(ok => {
         if (!valid(token)) return;
         if (!ok) { stop('播放器尚未就绪'); return; }
         publish({ stage: 'frame' });
@@ -104,8 +129,14 @@ export function usePlaythrough(deps: PlaythroughDeps) {
       if (Math.abs(status.pos - segment.inPoint) > 0.5 / segment.fps + 1e-6) return;
       if (s.phase === 'paused') clearTimer();
       publish({ stage: s.phase === 'paused' ? 'running' : 'starting', switchMs: performance.now() - s.startedAt });
+      // 开播前先立出点围栏:先 seek 到入点、再设 end(反过来设会让 end 落在当前位置之前,
+      // mpv 立刻 EOF)。此后即使前端状态机掉链子,播放器也不会越过 out。
+      void deps.transport.setEnd(segment.outPoint).catch(() => undefined);
       if (s.phase === 'playing') void deps.transport.play().then(() => {
-        if (valid(token)) { clearTimer(); publish({ stage: 'running' }); }
+        if (valid(token)) { clearTimer(); publish({ stage: 'running' }); return; }
+        // 这一发 play 在切段的 pause 之后才落地(两条异步命令不保序)。令牌已经作废,
+        // 说明这段不该播了 —— 补一次 pause,别把上一段的原片留着自己往下跑。
+        void latest.current.transport.pause().catch(() => undefined);
       }).catch(error => fail(token, error));
       return;
     }
@@ -116,6 +147,7 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     if (s.index + 1 < s.segments.length) { enter(s.index + 1); return; }
     if (loopRef.current) { enter(0); return; }
     publish({ phase: 'done', stage: 'finished' });
+    void deps.transport.setEnd(null).catch(() => undefined);
     void deps.transport.pause().then(() => {
       if (mounted.current && session.current.token === token && session.current.phase === 'done') {
         return latest.current.transport.seekTo(Math.max(segment.inPoint, segment.outPoint - 1 / segment.fps), { source: 'playthrough' });

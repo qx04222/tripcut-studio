@@ -59,6 +59,20 @@ export interface MonitorTransport {
   play(): Promise<void>;
   pause(): Promise<void>;
   /**
+   * R23 出点围栏:把 mpv 的 `end` 设到活动选段的出点,播到那儿播放器自己停。
+   * `null` 撤掉。连播的「到 out 就结束」因此不再只靠前端按 80 ms 轮询去追位置 ——
+   * 状态机任何一次掉链子都不会再让原片一路播进未选区间(ISSUE-A)。
+   */
+  setEnd(seconds: number | null): Promise<void>;
+  /**
+   * 「这条人工命令要不要先撤出点围栏」。围栏没挂时永远是空数组 —— 不连播的那条路上
+   * 命令序列一个字节都不变。
+   *
+   * 撤掉出点围栏的那条命令(围栏没挂时是空数组 —— 不连播的那条路上命令序列一个字节不变)。
+   * 按播放 / L / 速度菜单这类「我现在自己播」的命令用它;seek 走 `seekTo`,那里还会补一次暂停。
+   */
+  fenceCommands(): PlayerCommand[];
+  /**
    * 「现在在哪」:暂停态下刚发出的 seek 还没落地时,状态里的 pos 是旧的 —— 以最后一次
    * 要去的位置为准(打入出点、逐帧都按它算);播放中或 seek 已落地就是状态里的 pos。
    * 没就绪返回 null。
@@ -104,6 +118,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   }, []);
   // mpv 的 `speed` 属性跨 loadfile 保留:记住最后一次发给它的值,换素材就绪时不是 1 就补发。
   const mpvRate = useRef<PlaybackRate>(1);
+  // R23 出点围栏此刻设到了哪(null = 没挂)。换素材是新实例,围栏跟着旧实例一起没了。
+  const fence = useRef<number | null>(null);
 
   // V-04:暂停态 seek 的位置锚点。mpv 的 seek 异步落地,命令回来时 status.pos 多半还是旧值;
   // 连按 . 或 ⌥→ 再按 I 都不能拿旧值算,所以记住「最后要去的位置」,状态追上(半帧内)或
@@ -127,6 +143,11 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       if (anchor.current === target) anchor.current = null;
     });
   }, []);
+  const fenceCommands = useCallback((): PlayerCommand[] => {
+    if (fence.current === null) return [];
+    fence.current = null;
+    return [{ type: "set_end", seconds: null }];
+  }, []);
   const seekTo = useCallback(
     async (seconds: number, options?: { source: "playthrough" | "band-trim" }) => {
       // 无来源 = 人工 seek(连播停);playthrough = 连播自己的;band-trim = 镜头带拖边修剪的跟随(连播挂起,见 playthrough/store)。
@@ -135,10 +156,19 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       const current = readyStatus();
       if (!current) return false;
       const target = Math.min(current.duration, Math.max(0, seconds));
-      await sendAnchored([{ type: "seek_abs", seconds: target }], target);
+      // 围栏挂着 = 连播刚被释放、素材正在播完当前选段。这时候的人工 seek 要先撤围栏
+      // (不撤的话越过 out 的 seek 会被 mpv 夹回围栏上),**并且 seek 完就停住**:
+      // 引起释放的那一下点击自己就带一次跟随 seek(⌘ 点镜块 = 多选 + seek 到卡片上那个点),
+      // 真机实测它会把播放头甩进别的镜头范围再自由播到片尾 59.96 —— 报告 §9 不许出现的未选帧。
+      // 释放之后任何一次 seek 都不自动开播,要用户自己按播放。
+      const armed = fence.current !== null;
+      const commands: PlayerCommand[] = options?.source === "playthrough"
+        ? [{ type: "seek_abs", seconds: target }]
+        : [...fenceCommands(), { type: "seek_abs", seconds: target }, ...(armed ? [{ type: "pause" as const }] : [])];
+      await sendAnchored(commands, target);
       return true;
     },
-    [sendAnchored, readyStatus],
+    [sendAnchored, readyStatus, fenceCommands],
   );
 
   const play = useCallback(async () => {
@@ -146,8 +176,20 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   }, [readyStatus]);
   const pause = useCallback(async () => {
     setRewinding(false);
-    if (readyStatus()) await latest.current.send([{ type: "pause" }]);
-  }, [readyStatus]);
+    // R23:停连播必须真的把播放器停住。这里原来要求 `readyStatus()`(状态里的 clip_id
+    // 必须等于当前 clip)—— 换素材那一拍、监视器的 clips 还没回来那一拍都不成立,
+    // 于是 pause 静默跳过:状态机停了、原片还在播,一路播到片尾(ISSUE-A 的 121.0)。
+    // 暂停跟位置无关,打在哪个实例上都是对的;只有「播放器根本不在」才跳过。
+    const current = latest.current.status;
+    if (!current || current.phase === "closed" || current.phase === "error") return;
+    await latest.current.send([{ type: "pause" }]);
+  }, []);
+  const setEnd = useCallback(async (seconds: number | null) => {
+    fence.current = seconds;
+    const current = latest.current.status;
+    if (!current || current.phase === "closed" || current.phase === "error") return;
+    await latest.current.send([{ type: "set_end", seconds }]);
+  }, []);
 
   // 换素材:速度标签、倒退、循环、位置锚点归零(入出点由监视器自己清);mpv 侧的 speed 在就绪时补发。
   useEffect(() => {
@@ -155,6 +197,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     setRewinding(false);
     setLooping(false);
     anchor.current = null;
+    fence.current = null;
   }, [clipId]);
 
   // 「倒退」:按 8 fps 发原生 step_back;退到头(不足一帧)自动停。
@@ -179,13 +222,14 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     setRewinding(false);
     setRateState(next);
     mpvRate.current = next;
-    const commands: PlayerCommand[] = [{ type: "set_speed", speed: next }];
+    // L / 速度菜单 = 人工开播:撤掉连播释放时留下的出点围栏,从这里起自由播。
+    const commands: PlayerCommand[] = [...fenceCommands(), { type: "set_speed", speed: next }];
     if (current.paused) {
       if (isAtEnd(current)) commands.push({ type: "seek_abs", seconds: 0 });
       commands.push({ type: "play" });
     }
     void latest.current.send(commands);
-  }, [readyStatus]);
+  }, [readyStatus, fenceCommands]);
 
   const shuttle = useCallback(
     (key: "j" | "k" | "l") => {
@@ -221,8 +265,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     if (!readyStatus()) return;
     setRewinding(false);
     anchor.current = null;
-    void latest.current.send([{ type: direction > 0 ? "step_fwd" : "step_back" }]);
-  }, [readyStatus]);
+    void latest.current.send([...fenceCommands(), { type: direction > 0 ? "step_fwd" : "step_back" }]);
+  }, [readyStatus, fenceCommands]);
 
   const nudge = useCallback(
     (seconds: number) => {
@@ -357,6 +401,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     seekTo,
     play,
     pause,
+    setEnd,
+    fenceCommands,
     position,
     looping,
     toggleLoop,
