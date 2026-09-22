@@ -105,7 +105,7 @@ async function measure(session, browser, page, run) {
 }
 
 async function main() {
-  makeMockCovers();
+  await makeMockCovers();
   const port = await freePort();
   const vite = await startVite(port);
   const browser = await chromium.launch({ headless: true });
@@ -114,6 +114,10 @@ async function main() {
     const page = await context.newPage();
     await page.goto(vite.url, { waitUntil: "domcontentloaded" });
     await page.getByRole("gridcell").first().waitFor({ state: "visible", timeout: 15_000 });
+    const actualBandSegments = Number(await page.getByRole("grid", { name: "镜头序列" }).getAttribute("data-segment-count"));
+    if (bandSegments > 0 && actualBandSegments !== bandSegments) {
+      throw new Error(`Invalid band fixture: requested ${bandSegments}, rendered model contains ${actualBandSegments}`);
+    }
     // 让首屏与首轮轮询都落定。
     await page.waitForTimeout(3_000);
 
@@ -139,7 +143,7 @@ async function main() {
       scroll = summarize(scrollRun.before, scrollRun.after, scrollRun.trace, { label, scenario: "scroll", wheel_events: 20 });
     }
 
-    const summary = { ...idle, scenario: "idle", band_segments: bandSegments || null, scroll };
+    const summary = { ...idle, scenario: "idle", band_segments: bandSegments || null, actual_band_segments: actualBandSegments, scroll };
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, JSON.stringify(summary, null, 2));
     console.log(JSON.stringify(summary));

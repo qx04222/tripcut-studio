@@ -1,3 +1,7 @@
+import { GroupedGapBody } from "./band/GroupedGapBody";
+import { useChapterDragHandle } from "./band/BandChapterFrame";
+import { spacerRuns } from "./band/dragWindow";
+import { segmentWidth } from "./bandGeometry";
 import type { JSX, MouseEvent } from "react";
 
 import { cancelGeneration, retryGeneration, type StoryGap } from "../api";
@@ -42,9 +46,14 @@ export function overSideFor(
  */
 export function BandChapterSection({
   chapter,
+  zoom = 1,
   folded,
   selectedKey,
+  selectedKeys,
+  playingKey,
   draggingKey,
+  draggingKeys,
+  renderKeys,
   overKey,
   indexOf,
   dragBusy,
@@ -64,17 +73,24 @@ export function BandChapterSection({
   actions,
 }: {
   chapter: BandChapter;
+  zoom?: number;
   /** 视口外的虚拟化折叠:只画带头 + 一行「n 个镜头」。 */
   folded: boolean;
   selectedKey: string | undefined;
+  selectedKeys?: ReadonlySet<string>;
+  /** R22-B 连播:正在播的那一段(镜块上打 `data-playing`,样式在 band-r22.css,只此一处)。 */
+  playingKey?: string;
   draggingKey: string | null;
+  draggingKeys?: ReadonlySet<string>;
+  /** R22-C:拖动期间的段级窗口 —— 不在集合里的镜块合成一块占位(band/dragWindow.ts);省略 = 全渲染。 */
+  renderKeys?: ReadonlySet<string>;
   overKey: string | null;
   indexOf: (key: string) => number;
   dragBusy: boolean;
   readOnly: boolean;
   disabledHint: string | null;
   /** 点选;R13 §4 第二个参数是点在块内的横向比例(0..1),镜头带按它 seek。 */
-  onSelect: (segment: BandSegment, ratio?: number) => void;
+  onSelect: (segment: BandSegment, ratio?: number, event?: MouseEvent<HTMLElement>) => void;
   onStep: (segment: BandSegment, direction: -1 | 1) => void;
   onGenerate: (gap: StoryGap) => void;
   /** 「忽略」缺口:由 ShotBand 发命令并给一条 5 秒可撤销的提示(R10 U-17)。 */
@@ -96,6 +112,7 @@ export function BandChapterSection({
   actions?: ChapterActions;
 }): JSX.Element {
   // 往前 / 往后的边界:章首禁「往前」、章尾禁「往后」(空槽位不参与)。
+  const chapterDrag = useChapterDragHandle();
   const clipKeys = chapter.segments.filter((segment) => segment.kind === "clip").map((segment) => segment.key);
   return (
     <section
@@ -106,7 +123,7 @@ export function BandChapterSection({
       // 音乐刻度轨都按「每段一个节距」算,折叠章一缩,滚到底也到不了第 2 章的偏移,
       // 后面的章节就永远展不开(R8 设计轮实测:滚到底仍是「12 个镜头」三条折叠卡)。
       // 空章也占一个节距(chapterWidth ≥ 160):0 宽会让两条带头叠在一起(R9 D2)。
-      style={{ width: chapterWidth(chapter, collapsed) }}
+      style={{ width: chapterWidth(chapter, collapsed, zoom) }}
     >
       {/*
         Y-12(0.7.0 真机):章头曾是 rowgroup 的裸子节点(Toolbar 生成的 div),WebKit 会把 grid
@@ -116,7 +133,8 @@ export function BandChapterSection({
         (Toolbar 组件不接 role,这里直接用它的 class)。
       */}
       <div className="band-chapter-headrow" role="row">
-      <div className="ui-toolbar ui-toolbar--dense band-chapter-head" role="rowheader">
+      <div className="ui-toolbar ui-toolbar--dense band-chapter-head" role="rowheader" ref={chapterDrag?.setActivatorNodeRef}
+        onPointerDown={event => { if (!readOnly && !dragBusy && !(event.target as HTMLElement).closest("button,input")) chapterDrag?.listeners?.onPointerDown?.(event); }}>
         {onToggleFold ? (
           <button
             type="button"
@@ -169,22 +187,27 @@ export function BandChapterSection({
         <p className="band-chapter-folded">{chapter.segments.length} 个镜头</p>
       ) : (
         <div className="band-chapter-segments" role="row">
-          {chapter.segments.map((segment) => (
+          {spacerRuns(chapter.segments, renderKeys, (segment) => segmentWidth(segment, zoom)).map((run) => {
+            if (run.kind === "spacer") return <div key={run.key} className="band-segment-spacer" role="gridcell" aria-hidden="true" style={{ flex: `0 0 ${run.width}px`, width: run.width }} />;
+            const segment = chapter.segments.find((candidate) => candidate.key === run.key)!;
+            return (
             <SegmentCard
               key={segment.key}
               segment={segment}
+              zoom={zoom}
               dragDisabled={dragBusy || segment.kind === "slot"}
-              selected={selectedKey === segment.key}
-              dragging={draggingKey === segment.key}
+              selected={selectedKeys ? selectedKeys.has(segment.key) || (segment.kind === "slot" && selectedKey === segment.key) : selectedKey === segment.key}
+              playing={playingKey !== undefined && playingKey === segment.key}
+              dragging={draggingKeys?.has(segment.key) ?? draggingKey === segment.key}
               overSide={overSideFor(segment, draggingKey, overKey, indexOf)}
-              onSelect={(event) => onSelect(segment, clickRatio(event))}
+              onSelect={(event) => onSelect(segment, clickRatio(event), event)}
               onStep={(direction) => onStep(segment, direction)}
               canStepBack={clipKeys.indexOf(segment.key) > 0}
               canStepForward={clipKeys.indexOf(segment.key) < clipKeys.length - 1}
               readOnly={readOnly}
               extra={trim && segment.mediaKind !== "photo" && segment.kind === "clip" && segment.segmentId !== null ? <TrimHandles segment={segment} trim={trim} disabled={readOnly} /> : null}
             >
-              {segment.kind === "slot" && segment.gap ? (
+              {segment.groupedGaps ? <GroupedGapBody gaps={segment.groupedGaps} readOnly={readOnly} disabledHint={disabledHint} onDismiss={onDismiss} onGenerate={onGenerate} /> : segment.kind === "slot" && segment.gap ? (
                 <GapSlotBody
                   gap={segment.gap}
                   slotIndex={segment.slotIndex}
@@ -204,7 +227,8 @@ export function BandChapterSection({
                 />
               ) : null}
             </SegmentCard>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
@@ -240,7 +264,7 @@ function EmptyChapterTile({
     <div className="band-chapter-segments" role="row">
       <div className="band-chapter-empty" role="gridcell" aria-label={skipped ? "这章够了" : "本章还没有镜头"}>
         <Icon name={skipped ? "check" : "film"} size={20} className="band-chapter-empty-icon" />
-        <span className="band-chapter-empty-title">{skipped ? "这章够了" : "本章还没有镜头"}</span>
+        <span className="band-chapter-empty-title">{skipped ? "这章够了" : "拖段进来或删除"}</span>
         <span className="band-chapter-empty-actions">
           {skipped ? (
             <Button size="sm" variant="ghost" disabled={readOnly || !onSkip} onClick={() => onSkip?.(false)}>

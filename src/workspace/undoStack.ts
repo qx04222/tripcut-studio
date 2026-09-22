@@ -16,6 +16,7 @@ const MAX_ENTRIES = 50;
 
 let stack: Array<UndoEntry & { id: number }> = [];
 let nextId = 1;
+let running = false;
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -39,24 +40,32 @@ export function peekUndo(): UndoEntry | null {
   return stack.length === 0 ? null : stack[stack.length - 1]!;
 }
 
-/** 撤最近一条;栈空回 null。失败时把那条丢掉(再按 ⌘Z 不会反复撞同一个错)并把错抛出去。 */
+/** 失败保留条目以便重试；异步撤销期间不并发撤另一条。 */
 export async function runUndo(): Promise<UndoEntry | null> {
+  if (running) return null;
   const top = stack[stack.length - 1];
   if (!top) return null;
   stack = stack.slice(0, -1);
   emit();
-  await top.undo();
+  running = true;
+  try { await top.undo(); }
+  catch (error) { stack = [...stack, top].sort((a, b) => a.id - b.id); emit(); throw error; }
+  finally { running = false; }
   return top;
 }
 
 /** 撤指定的那一条(toast 按钮):它已经不在栈里(被 ⌘Z 撤过)就什么都不做、回 false。 */
 export async function runUndoById(id: number): Promise<boolean> {
+  if (running) return false;
   const index = stack.findIndex((entry) => entry.id === id);
   if (index < 0) return false;
   const [entry] = stack.splice(index, 1);
   stack = [...stack];
   emit();
-  await entry!.undo();
+  running = true;
+  try { await entry!.undo(); }
+  catch (error) { stack = [...stack, entry!].sort((a, b) => a.id - b.id); emit(); throw error; }
+  finally { running = false; }
   return true;
 }
 
@@ -82,5 +91,6 @@ export function useCanUndo(): boolean {
 export function __resetUndoForTests(): void {
   stack = [];
   nextId = 1;
+  running = false;
   emit();
 }

@@ -32,6 +32,7 @@
  */
 /* R19 车道 tokens · Q-4(浅色下监视器井/镜头带/状态条深底),同样只能在头部 @import。 */
 @import "./tokens-r19.css";
+@import "./workspace/band-r22.css";
 /* R21 独立照片工作台：只能写入这一份车道样式。 */
 @import "./workspace/photo-ws-r21.css";
 /* R21 车道 photo(PH-03 照片卡/镜头带照片段/静态检视),同样只能在头部 @import;在 tokens 之后、其它车道之前。 */

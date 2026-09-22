@@ -18,6 +18,7 @@ export const SEEK_RATIO_EVENT = "tripcut:seek-ratio";
 interface PendingSeek {
   clipId: number;
   ratio: number;
+  source?: BandSeekSource;
 }
 
 export interface BandPlayhead {
@@ -25,12 +26,15 @@ export interface BandPlayhead {
   px: number | null;
   /** 正在播(播放头会动)。 */
   playing: boolean;
+  positionSec: number | null;
   /** 把播放器定位到某条素材的 0..1 处;素材未就绪则等它就绪再发。 */
-  requestSeek(clipId: number, ratio: number): void;
+  /** `source: "band-trim"` = 拖边修剪的跟随 seek:不广播 manual-seek(连播不停,改为挂起),detail 带 source 递到走带(0.11.3 接线)。 */
+  requestSeek(clipId: number, ratio: number, options?: { source: BandSeekSource }): void;
 }
 
-export function dispatchSeekRatio(ratio: number): void {
-  window.dispatchEvent(new CustomEvent(SEEK_RATIO_EVENT, { detail: { ratio } }));
+export type BandSeekSource = "band-trim";
+export function dispatchSeekRatio(ratio: number, source?: BandSeekSource): void {
+  window.dispatchEvent(new CustomEvent(SEEK_RATIO_EVENT, { detail: source ? { ratio, source } : { ratio } }));
 }
 
 export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: number | null): BandPlayhead {
@@ -62,7 +66,7 @@ export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: 
           const waiting = pending.current;
           if (waiting && next.phase === "ready" && next.clip_id === waiting.clipId) {
             pending.current = null;
-            dispatchSeekRatio(waiting.ratio);
+            dispatchSeekRatio(waiting.ratio, waiting.source);
           }
         })
         .catch(() => undefined);
@@ -75,15 +79,15 @@ export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: 
     };
   }, [onBand, selectedClipId]);
 
-  const requestSeek = useCallback((clipId: number, ratio: number) => {
-    window.dispatchEvent(new Event("tripcut:manual-seek"));
+  const requestSeek = useCallback((clipId: number, ratio: number, options?: { source: BandSeekSource }) => {
+    if (!options?.source) window.dispatchEvent(new Event("tripcut:manual-seek"));
     const current = latest.current;
     if (current && current.phase === "ready" && current.clip_id === clipId) {
       pending.current = null;
-      dispatchSeekRatio(ratio);
+      dispatchSeekRatio(ratio, options?.source);
       return;
     }
-    pending.current = { clipId, ratio };
+    pending.current = { clipId, ratio, source: options?.source };
   }, []);
 
   const px = useMemo(() => {
@@ -91,5 +95,9 @@ export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: 
     return playheadPx(spans, status.clip_id, status.pos * 1_000);
   }, [spans, status]);
 
-  return { px, playing: status?.phase === "ready" && !status.paused, requestSeek };
+  // R22-C `[` / `]`:只有播放器正放着**当前选中**这条素材时,播放头位置才能当它的入 / 出点用
+  // (连播刚切到下一条、选择还没跟上的一瞬,status.clip_id ≠ selectedClipId → null,不把别条的时刻写进来)。
+  // 播放头本身(px)不按选中过滤:它画的是播放器实际在放的那一格,与 R13 / R17 真机验收时一致。
+  const positionSec = status?.phase === "ready" && status.clip_id !== null && status.clip_id === selectedClipId ? status.pos : null;
+  return { px, positionSec, playing: status?.phase === "ready" && !status.paused, requestSeek };
 }

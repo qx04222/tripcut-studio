@@ -333,13 +333,16 @@ function inclusiveRange(from: number, to: number): number[] {
   return out;
 }
 /**
- * 视口外的章节只渲染带头;拖动期间关闭虚拟化 —— **所有章全渲染**(规格 §11,V14-02 修正)。
+ * 视口外的章节只渲染带头;拖动期间**放宽**虚拟化而不是关掉(规格 §11,V14-02 修正;R22-C 再修)。
  *
- * 拖动时**不看视口** —— dnd-kit 的落点可能在视口边缘之外几十像素,按视口算会把
- * 目标章节卸载掉,拖到一半目标消失。以前只留「当前章 ±1」:`active` 取的是视口最左那章,
- * 视口装得下 7 章时,离左缘 ≥2 章的源章一拖起就被折叠成「n 个镜头」,连源都没了、
- * 更没有落点(真机 V14-02:7 章 · 11 镜,第 7 章内拖排松手无效)。章数是几十这个量级,
- * 拖动那几秒全画得起;拖完即恢复虚拟化。
+ * V14-02 的教训:以前拖动只留「当前章 ±1」,`active` 取的是视口最左那章,视口装得下 7 章时,
+ * 离左缘 ≥2 章的源章一拖起就被折叠成「n 个镜头」,连源都没了、更没有落点(真机:7 章 · 11 镜,
+ * 第 7 章内拖排松手无效)。当时的修法是拖动期间所有章全渲染 —— 在几十镜上画得起,但 R22-C 的
+ * 300 段夹具上 dnd-kit 每次指针移动都要对 300 个 sortable 重算 → 5 s 拖动掉帧 46%。
+ *
+ * 现在拖动时按**真实 scrollLeft** 取视口,前后各留一屏余量(dnd-kit 的落点可能在视口边缘之外几十
+ * 像素;栏边缘自动滚动会推着 scrollLeft 走,窗口跟着挪),再无条件保留**源章**(`sourceChapter`,
+ * 拖起的那块所在章;它卸载了 dnd-kit 就会取消这次拖动)。折叠章仍是一个可落的目标(整章卡)。
  */
 export function renderableChapterRange(
   scrollLeftByChapter: readonly number[],
@@ -352,15 +355,22 @@ export function renderableChapterRange(
    * 「视口之外」,右半屏只剩一张折叠卡(R8 设计轮实测)。
    */
   scrollLeft?: number,
+  /** 拖动源所在章的下标;拖动期间无条件全渲染(越界 / 省略则忽略)。 */
+  sourceChapter?: number,
+  /**
+   * 整条带的内容宽(最后一个 span 的右缘)。没滚动过时「起点 = 选中章的偏移」要被它钳住:
+   * 浏览器根本滚不到那么远(内容比视口窄时滚动位置永远是 0),按选中章算会把它前面的章全折成
+   * 「n 个镜头」—— R22-C 真机:9 镜装得下 1500 宽,点第 4 章一块,第 1–3 章立刻折叠(F-R22C-08)。
+   */
+  contentWidth?: number,
 ): { from: number; to: number; fullyRendered: readonly number[] } {
   const total = scrollLeftByChapter.length;
   if (total === 0) return { from: 0, to: -1, fullyRendered: [] };
   const active = clampIndex(activeChapterIndex, total);
-  if (dragging) {
-    return { from: 0, to: total - 1, fullyRendered: inclusiveRange(0, total - 1) };
-  }
-  const start = scrollLeft ?? scrollLeftByChapter[active] ?? 0;
-  const end = start + Math.max(0, viewportWidth);
+  const margin = dragging ? Math.max(0, viewportWidth) : 0;
+  const maxScroll = contentWidth === undefined ? Number.POSITIVE_INFINITY : Math.max(0, contentWidth - Math.max(0, viewportWidth));
+  const start = (scrollLeft ?? Math.min(scrollLeftByChapter[active] ?? 0, maxScroll)) - margin;
+  const end = start + Math.max(0, viewportWidth) + margin * 2;
   let from = active;
   for (let index = 0; index < total; index += 1) {
     const chapterEnd = scrollLeftByChapter[index + 1] ?? Number.POSITIVE_INFINITY;
@@ -373,5 +383,10 @@ export function renderableChapterRange(
   for (let index = from; index < total; index += 1) {
     if ((scrollLeftByChapter[index] ?? 0) < end) to = index;
   }
-  return { from, to, fullyRendered: inclusiveRange(from, to) };
+  const fullyRendered = inclusiveRange(from, to);
+  if (dragging && sourceChapter !== undefined && sourceChapter >= 0 && sourceChapter < total && !fullyRendered.includes(sourceChapter)) {
+    fullyRendered.push(sourceChapter);
+    fullyRendered.sort((a, b) => a - b);
+  }
+  return { from, to, fullyRendered };
 }

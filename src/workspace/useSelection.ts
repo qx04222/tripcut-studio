@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo } from "react";
 
 import type { ClipListItem, ShotStack, ShotStackMember, StoryGap } from "../api";
 import { useClipsFeed } from "./useClipsFeed";
-import { dispatchWorkspace, useWorkspace, type Selection } from "./WorkspaceStore";
+import { dispatchWorkspace, getWorkspaceSnapshot, useWorkspace, type Selection } from "./WorkspaceStore";
 
 /**
  * 三栏共享的选择视图(规格 §3.1)。媒体池点卡片、镜头带点分段,都落到同一个
@@ -81,9 +81,10 @@ export function echoElementId(selection: Selection, pane: "pool" | "band"): stri
 function scrollEchoIntoView(selection: Selection): void {
   if (typeof document === "undefined") return;
   for (const pane of ["pool", "band"] as const) {
+    if (pane === "band" && getWorkspaceSnapshot().focusedPane === "band") continue;
     const id = echoElementId(selection, pane);
     if (id === null) continue;
-    const element = document.getElementById(id);
+    const element = document.getElementById(id) ?? (pane === "band" && selection?.kind === "clip" ? document.querySelector<HTMLElement>(`.shot-band [data-clip-id="${selection.clipId}"]`) : null);
     // 查不到就静默跳过 —— 虚拟化下另一栏根本没渲染这条,是正常情形,不是错。
     if (element && typeof element.scrollIntoView === "function") {
       element.scrollIntoView({ block: "nearest" });

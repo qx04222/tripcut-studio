@@ -3,7 +3,7 @@
 // 写到 qa/mock-covers/NN.jpg(不入库)。用 Playwright 的无头 Chromium 渲染——
 // 本机 ffmpeg 没编 drawtext,node-canvas 也没装,而截图装置本来就要 Chromium。
 // 用法: node scripts/qa/make-mock-covers.mjs [--force]
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
@@ -43,7 +43,10 @@ function colourFor(index) {
 
 export async function makeMockCovers({ chromium } = require("playwright-core")) {
   mkdirSync(outDir, { recursive: true });
-  const existing = existsSync(outDir) ? readdirSync(outDir).filter((name) => name.endsWith(".jpg")).length : 0;
+  // 300 band segments reuse these 60 source images. Count the actual expected
+  // names: sixty unrelated jpg files must not silently skip fixture creation.
+  const existing = Array.from({ length: COVER_COUNT }, (_, i) => `${String(i + 1).padStart(2, "0")}.jpg`)
+    .filter(name => existsSync(join(outDir, name))).length;
   if (existing >= COVER_COUNT && !force) {
     return { outDir, generated: 0, existing };
   }

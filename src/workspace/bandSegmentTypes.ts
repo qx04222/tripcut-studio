@@ -27,6 +27,7 @@ export interface BandSegment {
   /** 封面缩略图(规格 §3.3 的分段缩略图);没封面/空槽位为 null。 */
   coverUrl: string | null;
   gap: StoryGap | null;
+  groupedGaps?: readonly StoryGap[];
   /** 本章内的 1 基槽位序号(A 稿瓦片左下的「槽位 01」),按章重置;`index` 才是全带序号。 */
   slotIndex: number;
   /** 叙事模式下 beat 的角色词(瓦片右下);legacy 模式与空槽位为 null。 */

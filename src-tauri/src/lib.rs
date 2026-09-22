@@ -2485,6 +2485,20 @@ fn set_story_order(
 }
 
 #[tauri::command]
+fn set_band_order(episode_id: i64, order: Vec<core::story::band::BandOrderItem>, chapter_order: Vec<i64>, state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    if state.read_only { return Err("只读窗口不能修改镜头带".into()); }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story::band::set_order(&mut connection, episode_id, &order, &chapter_order).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn trim_band_segment(episode_id: i64, segment_id: i64, expected: [i64; 2], bounds: [i64; 2], state: tauri::State<'_, RuntimeState>) -> std::result::Result<(), String> {
+    if state.read_only { return Err("只读窗口不能修剪镜头".into()); }
+    let mut connection = core::db::open_project(&state.db_path).map_err(|error| error.to_string())?;
+    core::story::band::trim(&mut connection, episode_id, segment_id, expected, bounds).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn rename_chapter(
     chapter_id: i64,
     title: String,
@@ -4072,6 +4086,8 @@ pub fn run() {
             set_destination_card_verified,
             set_destination_field_state,
             set_story_order,
+            set_band_order,
+            trim_band_segment,
             rename_chapter,
             merge_chapters,
             delete_chapter,

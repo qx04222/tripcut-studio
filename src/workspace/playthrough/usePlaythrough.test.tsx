@@ -133,3 +133,54 @@ it('换源失败/超时回 idle 并清理计时器', async () => {
   expect(vi.getTimerCount()).toBe(0);
   h.unmount(); vi.useRealTimers();
 });
+
+// R22-C 接线债(0.11.3)
+describe('连播 × 镜头带编辑', () => {
+  it('释放事件停连播但不暂停素材(与拖进度条同语义)', async () => {
+    const h = mount(); await h.start();
+    await h.update({ status: status(1, 3, false) });
+    const pauses = h.transport.pause.mock.calls.length;
+    await act(async () => window.dispatchEvent(new Event('tripcut:playthrough-release')));
+    expect(h.result.current.phase).toBe('idle');
+    expect(h.transport.pause.mock.calls.length).toBe(pauses);
+    h.unmount();
+  });
+  it('连播中段列表变了按 key 换成新的入出点;当前段被移出则停', async () => {
+    const h = mount(); await h.start();
+    await h.update({ status: status(1, 3, false) });
+    expect(h.result.current.index).toBe(0);
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 3.2 }, segments[1]!] });
+    expect(h.result.current.segment?.outPoint).toBe(3.2);
+    await h.update({ status: status(1, 3.2, false) });
+    expect(h.result.current.index).toBe(1);
+    await h.update({ selectedClipId: 2, status: status(2, 6) });
+    await h.update({ segments: [segments[0]!] });
+    expect(h.result.current.phase).toBe('idle');
+    h.unmount();
+  });
+  it('刷新途中的空段列表不停连播(F-R22C-15)', async () => {
+    const h = mount(); await h.start();
+    await h.update({ status: status(1, 3, false) });
+    await h.update({ segments: [] });
+    expect(h.result.current.phase).toBe('playing');
+    expect(h.result.current.segment?.key).toBe('a');
+    await h.update({ segments });
+    expect(h.result.current.phase).toBe('playing');
+    h.unmount();
+  });
+  it('修剪跟随 seek 让连播挂起(暂停),修剪落地后按新出点继续', async () => {
+    const h = mount(); await h.start();
+    await h.update({ status: status(1, 3, false) });
+    await act(async () => window.dispatchEvent(new Event('tripcut:trim-seek')));
+    expect(h.result.current.phase).toBe('paused');
+    expect(h.transport.pause).toHaveBeenCalledTimes(2);
+    await h.update({ status: status(1, 3.5, true) });
+    expect(h.result.current.index).toBe(0);
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 3.4 }, segments[1]!] });
+    expect(h.result.current.phase).toBe('playing');
+    expect(h.transport.play).toHaveBeenCalledTimes(2);
+    await h.update({ status: status(1, 3.5, false) });
+    expect(h.result.current.index).toBe(1);
+    h.unmount();
+  });
+});

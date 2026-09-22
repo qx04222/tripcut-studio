@@ -4,13 +4,12 @@ import type { BandChapter, BandView } from '../shotBandModel';
 import type { BandTimeline } from '../useBandTimeline';
 import { foldKey } from '../bandGeometry';
 import { playthroughSegments } from './model';
-import { setPlaythroughSegments, usePlaythroughView } from './store';
+import { setPlaythroughSegments, usePlaythroughKey } from './store';
 
 export function useBandPlaythrough(chapters: readonly BandChapter[], clips: ReadonlyMap<number, ClipListItem>,
   viewport: RefObject<HTMLDivElement | null>, timeline: BandTimeline, setView: (view: BandView) => void) {
   const list = useMemo(() => playthroughSegments(chapters, clips), [chapters, clips]);
-  const view = usePlaythroughView();
-  const key = view?.active ? view.segment?.key : undefined;
+  const key = usePlaythroughKey();
   useEffect(() => { setPlaythroughSegments(list); }, [list]);
   useEffect(() => () => setPlaythroughSegments([]), []);
   useEffect(() => {

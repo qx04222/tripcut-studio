@@ -5,6 +5,13 @@ import type { PlaythroughController } from './usePlaythrough';
 import type { PlaythroughSegment } from './model';
 
 const EVENT = 'tripcut:playthrough';
+/** 0.11.3 接线:镜头带开始编辑(⇧/⌘ 多选、框选、拖动段)→ 连播停、素材继续播(与拖进度条同语义,不暂停)。 */
+export const PLAYTHROUGH_RELEASE_EVENT = 'tripcut:playthrough-release';
+/** 0.11.3 接线:镜头带拖边修剪的监视器跟随 seek(走带 `seekTo(s, { source: 'band-trim' })` 广播)→ 连播挂起,修剪落地后按新入出点继续。 */
+export const PLAYTHROUGH_TRIM_SEEK_EVENT = 'tripcut:trim-seek';
+export function releasePlaythrough() {
+  window.dispatchEvent(new Event(PLAYTHROUGH_RELEASE_EVENT));
+}
 const isTextFieldTarget = (target: EventTarget | null) => target instanceof HTMLElement &&
   Boolean(target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]'));
 const listeners = new Set<() => void>();
@@ -24,6 +31,14 @@ export function publishPlaythrough(next: PlaythroughController | null) {
   view = value; emit();
 }
 export const usePlaythroughView = () => useSyncExternalStore(subscribe, () => view, () => null);
+// 只订阅「正在播的是哪一段」:整份 view 里的 elapsed 每 80 ms 就变一次,镜头带跟着每秒重渲染十几遍,
+// 10 px 宽的修剪把手在连播中就按不动了(R22-C 真机 F-R22C-16)。带上只需要 key。
+let playingKey: string | undefined;
+export const usePlaythroughKey = () => useSyncExternalStore(subscribe, () => {
+  const next = view?.active ? view.segment?.key : undefined;
+  if (next !== playingKey) playingKey = next;
+  return playingKey;
+}, () => undefined);
 export const usePlaythroughSegments = () => useSyncExternalStore(subscribe, () => segments, () => segments);
 export function requestPlaythrough(key?: string) {
   window.dispatchEvent(new CustomEvent(EVENT, { detail: { key } }));

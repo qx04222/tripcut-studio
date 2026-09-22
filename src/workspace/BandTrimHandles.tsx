@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState, type JSX, type KeyboardEvent, type PointerEvent } from "react";
 
-import { BAND_TILE_WIDTH, clampTrim, snapTenth, trimDurationLabel } from "./bandTimeline";
+import { BAND_TILE_WIDTH, clampTrim, trimDurationLabel } from "./bandTimeline";
 import type { BandSegment } from "./shotBandModel";
 import type { BandTrimApi } from "./useBandTrim";
 
@@ -25,12 +25,14 @@ interface TrimBase {
 function baseFor(segment: BandSegment, clipSec: number | null): TrimBase | null {
   if (segment.tbNum <= 0 || segment.tbDen <= 0) return null;
   const toSec = (ticks: number) => (ticks * segment.tbNum) / segment.tbDen;
-  return { inSec: snapTenth(toSec(segment.inTicks)), outSec: snapTenth(toSec(segment.outTicks)), clipSec };
+  return { inSec: toSec(segment.inTicks), outSec: toSec(segment.outTicks), clipSec };
 }
 
 interface Drag {
   edge: "in" | "out";
   startX: number;
+  width: number;
+  clamped?: boolean;
   next: { inSec: number; outSec: number };
 }
 
@@ -47,24 +49,33 @@ export function TrimHandles({ segment, trim, disabled }: { segment: BandSegment;
 
   const onPointerDown = useCallback(
     (edge: "in" | "out") => (event: PointerEvent<HTMLButtonElement>) => {
-      if (!base || disabled) return;
+      if (!base || disabled || trim.busy) return;
       event.stopPropagation();
       event.preventDefault();
       // jsdom 没有指针捕获;真浏览器里捕获后指针滑出把手仍能收到 move / up。
       event.currentTarget.setPointerCapture?.(event.pointerId);
-      setDrag({ edge, startX: event.clientX, next: { inSec: base.inSec, outSec: base.outSec } });
+      trim.preview?.(segment, edge === "in" ? base.inSec : base.outSec);
+      setDrag({ edge, startX: event.clientX, width: event.currentTarget.closest("[data-band-key]")?.getBoundingClientRect().width || BAND_TILE_WIDTH, next: { inSec: base.inSec, outSec: base.outSec } });
     },
-    [base, disabled, setDrag],
+    [base, disabled, trim, segment, setDrag],
   );
 
   const onPointerMove = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
       const current = dragRef.current;
       if (!current || !base) return;
-      const deltaSec = ((event.clientX - current.startX) / BAND_TILE_WIDTH) * durationSec;
-      setDrag({ ...current, next: clampTrim(base, current.edge, deltaSec) });
+      const deltaSec = ((event.clientX - current.startX) / current.width) * durationSec;
+      const next = clampTrim(base, current.edge, deltaSec);
+      const seconds = current.edge === "in" ? next.inSec : next.outSec;
+      const requested = (current.edge === "in" ? base.inSec : base.outSec) + deltaSec;
+      const clamped = requested < 0 || (base.clipSec !== null && requested > base.clipSec) || (current.edge === "in" ? requested >= base.outSec : requested <= base.inSec);
+      const frame = trim.frameStep?.(segment.clipId) ?? 0.04;
+      const lastFrame = base.clipSec === null ? Infinity : Math.max(0, Math.ceil(base.clipSec / frame) - 1) * frame;
+      const preview = Math.max(0, Math.min(lastFrame, Math.round(seconds / frame) * frame));
+      trim.preview?.(segment, preview);
+      setDrag({ ...current, next, clamped });
     },
-    [base, durationSec, setDrag],
+    [base, durationSec, trim, segment, setDrag],
   );
 
   const onPointerUp = useCallback(
@@ -80,7 +91,7 @@ export function TrimHandles({ segment, trim, disabled }: { segment: BandSegment;
 
   const onKeyDown = useCallback(
     (edge: "in" | "out") => (event: KeyboardEvent<HTMLButtonElement>) => {
-      if (!base || disabled) return;
+      if (!base || disabled || trim.busy) return;
       if (event.key === "Escape" && drag) {
         event.stopPropagation();
         setDrag(null);
@@ -99,7 +110,7 @@ export function TrimHandles({ segment, trim, disabled }: { segment: BandSegment;
   const shared = { disabled: disabled || trim.busy, onPointerMove, onPointerUp, onPointerCancel: () => setDrag(null) };
   const previewSec = drag ? drag.next.outSec - drag.next.inSec : null;
   return (
-    <span className={drag ? "band-trim is-dragging" : "band-trim"} data-edge={drag?.edge}>
+    <span className={`band-trim${drag ? " is-dragging" : ""}${drag?.clamped ? " is-clamped" : ""}`} data-edge={drag?.edge}>
       <button
         type="button"
         className="band-trim-handle band-trim-handle--in"
@@ -122,9 +133,13 @@ export function TrimHandles({ segment, trim, disabled }: { segment: BandSegment;
       />
       {previewSec === null ? null : (
         <span className="band-trim-preview" role="status">
-          {trimDurationLabel(previewSec)}
+          {drag?.edge === "in" ? "入" : "出"} {timecode(drag?.edge === "in" ? drag.next.inSec : drag!.next.outSec)} · {trimDurationLabel(previewSec)}{drag?.clamped ? " · 已到边界" : ""}
         </span>
       )}
     </span>
   );
+}
+
+function timecode(seconds: number): string {
+  return new Date(Math.max(0, seconds) * 1000).toISOString().slice(11, 23);
 }

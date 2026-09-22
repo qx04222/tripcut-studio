@@ -2507,6 +2507,13 @@ fn sort_by_band_order(connection: &Connection, clips: &mut [ExportClip]) -> Resu
         .enumerate()
         .map(|(index, item)| (item.key, index))
         .collect();
+    let titles = super::story::band::export_titles(connection)?;
+    for clip in clips.iter_mut().filter(|clip| clip.media_kind != "photo") {
+        let kind = if clip.segment_id.is_some() { "segment" } else { "whole" };
+        if let Some(title) = titles.get(&super::story::story_key(kind, clip.clip_id, clip.segment_id)) {
+            clip.chapter_title = title.clone().unwrap_or_default();
+        }
+    }
     clips.sort_by_key(|clip| {
         let item_kind = if clip.segment_id.is_some() { "segment" } else { "whole" };
         rank.get(&super::story::story_key(item_kind, clip.clip_id, clip.segment_id))

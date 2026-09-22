@@ -34,6 +34,7 @@ export function timelineSpans(
   chapters: readonly BandChapter[],
   offsets: readonly number[],
   folded: ReadonlySet<string>,
+  zoom = 1,
 ): TimelineSpan[] {
   const spans: TimelineSpan[] = [];
   let startMs = 0;
@@ -57,9 +58,9 @@ export function timelineSpans(
         durationMs,
         inMs,
         left: segmentLeft,
-        width: segmentWidth(segment),
+        width: segmentWidth(segment, zoom),
       });
-      segmentLeft += segmentWidth(segment) + 8;
+      segmentLeft += segmentWidth(segment, zoom) + 8;
       startMs += durationMs;
     });
   });
@@ -84,9 +85,10 @@ export function timeToPx(spans: readonly TimelineSpan[], ms: number): number {
   const first = spans[0];
   if (!first) return 0;
   if (ms <= 0) return first.left;
+  const lastTimedSpan = lastTimed(spans);
   for (const span of spans) {
     if (span.durationMs <= 0) continue;
-    if (ms < span.startMs + span.durationMs || span === lastTimed(spans)) {
+    if (ms < span.startMs + span.durationMs || span === lastTimedSpan) {
       return span.left + clamp01((ms - span.startMs) / span.durationMs) * span.width;
     }
   }
@@ -139,8 +141,12 @@ export function rulerTicks(spans: readonly TimelineSpan[], totalMs: number): Rul
   if (spans.length === 0 || totalMs <= 0) return [];
   const { stepMs, labelEvery } = rulerStep(totalMs);
   const ticks: RulerTick[] = [];
+  let lastLabelPx = Number.NEGATIVE_INFINITY;
   for (let ms = 0, index = 0; ms <= totalMs; ms += stepMs, index += 1) {
-    ticks.push({ ms, px: timeToPx(spans, ms), label: index % labelEvery === 0 ? timecode(ms) : null });
+    const px = timeToPx(spans, ms);
+    const label = index % labelEvery === 0 && px - lastLabelPx >= 48 ? timecode(ms) : null;
+    if (label !== null) lastLabelPx = px;
+    if (label !== null || ticks.length === 0 || px - ticks[ticks.length - 1]!.px >= 4) ticks.push({ ms, px, label });
   }
   if (ticks[ticks.length - 1]!.ms !== totalMs) ticks.push({ ms: totalMs, px: timeToPx(spans, totalMs), label: null });
   return ticks;
@@ -169,13 +175,15 @@ export function clampTrim(
   base: { inSec: number; outSec: number; clipSec: number | null },
   edge: "in" | "out",
   deltaSec: number,
+  step = 0.1,
 ): { inSec: number; outSec: number } {
+  const snap = (seconds: number) => Number((Math.round(Math.max(0, seconds) / step) * step).toFixed(9));
   if (edge === "in") {
-    const inSec = snapTenth(Math.min(Math.max(0, base.inSec + deltaSec), snapTenth(base.outSec - 0.1)));
+    const inSec = Math.min(snap(base.inSec + deltaSec), Math.max(0, base.outSec - Math.min(step, base.outSec)));
     return { inSec, outSec: base.outSec };
   }
   const ceiling = base.clipSec === null ? Number.POSITIVE_INFINITY : base.clipSec;
-  const outSec = snapTenth(Math.max(Math.min(base.outSec + deltaSec, ceiling), base.inSec + 0.1));
+  const outSec = Math.min(ceiling, Math.max(snap(base.outSec + deltaSec), base.inSec + Math.min(step, ceiling - base.inSec)));
   return { inSec: base.inSec, outSec };
 }
 

@@ -56,8 +56,9 @@ export async function applyBatchRating(
   clipIds: readonly number[],
   action: RatingAction,
   clipsById: ReadonlyMap<number, ClipListItem>,
+  registerUndo?: (label: string, inverse: () => Promise<unknown>) => unknown,
 ): Promise<void> {
-  const ids = clipIds.filter((id) => clipsById.has(id));
+  const ids = [...new Set(clipIds)].filter((id) => clipsById.has(id));
   if (ids.length === 0) return;
   const before: RatingBefore[] = ids.map((clip_id) => {
     const clip = clipsById.get(clip_id)!;
@@ -69,6 +70,14 @@ export async function applyBatchRating(
     await rateClips(batchRatingEntries(ids, action));
   } catch (error) {
     showToast(failureText("批量评级", error), { tone: "danger" });
+    await refreshClipsFeed(true);
+    return;
+  }
+  if (registerUndo) {
+    registerUndo(`${ratingVerb(action)} ${ids.length} 条素材`, async () => {
+      await rateClips(restoreEntries(before));
+      for (const item of before) patchClipInFeed(item.clip_id, { binary_rating: item.binary_rating, star_rating: item.star_rating } as Partial<ClipListItem>);
+    });
     await refreshClipsFeed(true);
     return;
   }

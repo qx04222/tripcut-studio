@@ -2662,3 +2662,12 @@ export function duelAction(sessionId: number, action: "get" | "decide" | "undo_l
 export function frameAt(clipId: number, seconds: number): Promise<string> {
   return invoke<string>("frame_at", { clipId, seconds });
 }
+
+// R22 band placement is segment-local and episode-scoped; source chapters stay intact.
+export type BandOrderItem = StoryOrderRef & { chapter_id: number | null };
+export function setBandOrder(episodeId: number, order: BandOrderItem[], chapterOrder: number[]): Promise<void> {
+  return invoke<void>("set_band_order", { episodeId, order, chapterOrder });
+}
+export function trimBandSegment(episodeId: number, segmentId: number, expected: [number, number], bounds: [number, number]): Promise<void> {
+  return invoke<void>("trim_band_segment", { episodeId, segmentId, expected, bounds });
+}

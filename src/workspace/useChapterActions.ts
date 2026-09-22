@@ -1,12 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { deleteChapter, mergeChapters, renameChapter } from "../api";
-import { takeStoryUndoSuffix, undoStoryChangeNoticing } from "./storyUndo";
+import { undoStoryChangeNoticing } from "./storyUndo";
 import type { ChapterActions } from "./BandChapterHeadActions";
 import type { BandChapter } from "./shotBandModel";
 import { failureText } from "./errorText";
 import { showToast } from "./ui/Toast";
-import { pushUndo } from "./undoBridge";
+import { registerBandUndo } from "./useBandArrange";
 import { refreshClipsFeed } from "./useClipsFeed";
 
 export interface ChapterMenuState {
@@ -60,7 +60,7 @@ export function useChapterActions({ chapters, readOnly }: { chapters: readonly B
   const cancelRename = useCallback(() => setRenamingId(null), []);
 
   const commitRename = useCallback(async (chapter: BandChapter, title: string): Promise<boolean> => {
-    if (chapter.chapterId === null) return false;
+    if (readOnly || chapter.chapterId === null) return false;
     try {
       await renameChapter(chapter.chapterId, title);
     } catch (error) {
@@ -68,10 +68,10 @@ export function useChapterActions({ chapters, readOnly }: { chapters: readonly B
       return false;
     }
     setRenamingId(null);
-    showToast(`已改名为「${title}」`, { tone: "success" });
+    registerBandUndo("改名章节", undoStoryChangeNoticing, `已改名为「${title}」`);
     await refreshClipsFeed(true);
     return true;
-  }, []);
+  }, [readOnly]);
 
   const openMenu = useCallback((chapter: BandChapter, anchor: { x: number; y: number }) => {
     setRenamingId(null);
@@ -90,25 +90,7 @@ export function useChapterActions({ chapters, readOnly }: { chapters: readonly B
         showToast(failureText("并入上一章", error), { tone: "danger" });
         return;
       }
-      let undone = false;
-      const undo = async () => {
-        if (undone) return;
-        undone = true;
-        try {
-          await undoStoryChangeNoticing();
-          showToast(`已撤销并入${takeStoryUndoSuffix()}`, { tone: "neutral" });
-        } catch (error) {
-          showToast(failureText("撤销", error), { tone: "danger" });
-        }
-        await refreshClipsFeed(true);
-      };
-      const label = `并入上一章:「${chapter.title}」→「${target.title}」`;
-      showToast(`已把「${chapter.title}」并入「${target.title}」`, {
-        tone: "success",
-        durationMs: CHAPTER_UNDO_MS,
-        action: { label: "撤销", onClick: () => void undo() },
-      });
-      pushUndo(label, undo);
+      registerBandUndo("并入上一章", undoStoryChangeNoticing, `已把「${chapter.title}」并入「${target.title}」`);
       await refreshClipsFeed(true);
     },
     [chapters],
@@ -125,7 +107,7 @@ export function useChapterActions({ chapters, readOnly }: { chapters: readonly B
     try {
       await deleteChapter(deleting.chapterId);
       setDeleting(null);
-      showToast(`已删除「${deleting.title}」`, { tone: "success" });
+      registerBandUndo("删除章节", undoStoryChangeNoticing, `已删除「${deleting.title}」`);
       await refreshClipsFeed(true);
     } catch (error) {
       showToast(failureText("删除", error), { tone: "danger" });

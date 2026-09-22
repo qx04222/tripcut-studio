@@ -14,6 +14,7 @@ import { failureText } from "./errorText";
 import { OPEN_AUTO_SELECT_EVENT } from "./onboarding";
 import type { BandChapter } from "./shotBandModel";
 import { showToast } from "./ui/Toast";
+import { registerBandUndo } from "./band/editHistory";
 import { runUndoById } from "./undoStack";
 import { refreshClipsFeed } from "./useClipsFeed";
 import { dispatchWorkspace } from "./WorkspaceStore";
@@ -84,11 +85,10 @@ export function useBandArrange(): {
           else copy.delete(id);
           return copy;
         });
-        if (next) {
-          showToast(`「${chapter.title}」这章够了,不再算缺口`, {
-            action: { label: "撤销", onClick: () => onSkipChapter(chapter, false) },
-          });
-        }
+        registerBandUndo("标记章节", async () => {
+          await skipChapter(id, !next);
+          setSkipped(current => { const copy = new Set(current); if (next) copy.delete(id); else copy.add(id); return copy; });
+        }, next ? `「${chapter.title}」这章够了,不再算缺口` : `已恢复「${chapter.title}」缺口提示`);
       })
       .catch((error) => showToast(failureText("标记这章", error), { tone: "danger" }));
   }, []);
@@ -161,3 +161,4 @@ export function useBandArrange(): {
 }
 
 export { pushReplaceUndo } from "./useBandArrangeReplace";
+export { registerBandUndo } from "./band/editHistory";

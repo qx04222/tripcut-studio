@@ -244,21 +244,39 @@ describe("镜头带数据模型", () => {
     expect(slotLabelZh(gap(1, 1, "REAL/DETAIL", "细节镜头"))).toBe("细节镜头");
   });
 
-  it("拖动期间所有章全渲染(V14-02:虚拟化关掉,源章与每个目标章都得在,当前章 ±1 不够)", () => {
+  it("拖动期间按视口 ±1 屏渲染,再加上源章(R22-C:全渲染在 300 段上掉帧 46%)", () => {
     const idle = renderableChapterRange(offsets, 900, 4, false);
     const dragging = renderableChapterRange(offsets, 900, 4, true);
-    expect(dragging.fullyRendered).toEqual(offsets.map((_, index) => index));
-    expect(dragging).toMatchObject({ from: 0, to: offsets.length - 1 });
+    // 400 一章、视口 900 停在第 5 章(1600):前后各一屏 → 第 2–7 章;第 1 章(0–400)在一屏之外。
+    expect(dragging.fullyRendered).toEqual([1, 2, 3, 4, 5, 6]);
     expect(idle.fullyRendered.length).toBeLessThanOrEqual(dragging.fullyRendered.length);
+    // 5 章 × 60 镜(300 段):视口 1440 停在第 1 章,从第 5 章拖起 → 只有第 1 章(一屏 9600 宽,第 2 章在一屏余量之外)与源章第 5 章全渲染。
+    const wide = [0, 9_600, 19_200, 28_800, 38_400];
+    const big = renderableChapterRange(wide, 1_440, 0, true, 0, 4);
+    expect(big.fullyRendered).toEqual([0, 4]);
+    // 自动滚动到第 3 章开头附近(20000),窗口跟着走:第 2 章(余量内)、第 3 章 + 源章。
+    expect(renderableChapterRange(wide, 1_440, 2, true, 20_000, 4).fullyRendered).toEqual([1, 2, 4]);
   });
 
   it("7 章、视口停在第 1 章、从第 7 章拖起:第 7 章(源)与第 1 章(目标)都全渲染", () => {
     const seven = [0, 336, 672, 1008, 1344, 1680, 2016];
     const idle = renderableChapterRange(seven, 1_200, 0, false, 0);
     expect(idle.fullyRendered).not.toContain(6);
-    const dragging = renderableChapterRange(seven, 1_200, 0, true, 0);
+    const dragging = renderableChapterRange(seven, 1_200, 0, true, 0, 6);
     expect(dragging.fullyRendered).toContain(6);
     expect(dragging.fullyRendered).toContain(0);
+  });
+
+  it("没滚动过、整条带装得下视口:选中第 4 章不把前三章折成「n 个镜头」(R22-C 真机 F-R22C-08)", () => {
+    // 4 章各 296 宽,总 1184 < 视口 1500;选中第 4 章、从未滚动(scrollLeft undefined)。
+    const four = [0, 296, 592, 888];
+    expect(renderableChapterRange(four, 1_500, 3, false, undefined, undefined, 1_184).fullyRendered).toEqual([0, 1, 2, 3]);
+    // 装不下时按「把选中章滚进视口但不过卷」算起点:总宽 4000、视口 1500、选中第 4 章(888)→ 起点 888,前面的章折叠。
+    expect(renderableChapterRange(four, 1_500, 3, false, undefined, undefined, 4_000).fullyRendered).toEqual([3]);
+    // 总宽 2000、视口 1500:起点最多 500(不过卷)→ 第 2–4 章全渲染。
+    expect(renderableChapterRange(four, 1_500, 3, false, undefined, undefined, 2_000).fullyRendered).toEqual([1, 2, 3]);
+    // 真的滚动过就照旧以 scrollLeft 为准。
+    expect(renderableChapterRange(four, 1_500, 3, false, 888, undefined, 1_184).fullyRendered).toEqual([3]);
   });
 
   it("视口外的章节只出带头", () => {
@@ -266,8 +284,9 @@ describe("镜头带数据模型", () => {
     expect(r.to).toBeLessThan(offsets.length - 1);
   });
 
-  it("第一章拖动时也不越界(全渲染,越不了界)", () => {
-    expect(renderableChapterRange(offsets, 900, 0, true).fullyRendered).toEqual(offsets.map((_, index) => index));
+  it("第一章拖动时也不越界;源章下标越界时忽略", () => {
+    expect(renderableChapterRange(offsets, 900, 0, true).fullyRendered).toEqual([0, 1, 2, 3, 4]);
+    expect(renderableChapterRange(offsets, 900, 0, true, 0, 99).fullyRendered).toEqual([0, 1, 2, 3, 4]);
     expect(renderableChapterRange([], 900, 0, true)).toEqual({ from: 0, to: -1, fullyRendered: [] });
   });
 });

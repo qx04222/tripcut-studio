@@ -50,6 +50,7 @@ const apiMocks = vi.hoisted(() => ({
   listAssetSafety: vi.fn(),
   getCurrentEpisode: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
+  setBandOrder: vi.fn().mockResolvedValue(undefined),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   generationAvailability: vi.fn(),
@@ -175,7 +176,7 @@ beforeEach(() => {
   apiMocks.listAssetSafety.mockResolvedValue([]);
   apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
   apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-  apiMocks.setStoryOrder.mockResolvedValue(undefined);
+  apiMocks.setBandOrder.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -212,20 +213,21 @@ describe("V14-02 章数多时拖排(镜头带 7 章)", () => {
     await act(async () => {
       dnd.onDragEnd?.({ active, over });
     });
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
-    const order = (apiMocks.setStoryOrder.mock.lastCall![0] as { clip_id: number }[]).map((ref) => ref.clip_id);
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
+    const order = (apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map((ref) => ref.clip_id);
     expect(order.slice(-2)).toEqual([14, 13]);
-    expect(await screen.findByText("已调整顺序")).toBeTruthy();
+    expect(await screen.findByText("已移动 1 段")).toBeTruthy();
   });
 
-  it("从第 7 章拖到第 1 章的镜块上:跨章被拒且说出来(不是静默无效)", async () => {
+  it("从第 7 章拖到第 1 章，保存段级归属", async () => {
     await renderBand();
     const active = { id: "whole:13" };
     await act(async () => {
       dnd.onDragStart?.({ active });
       dnd.onDragEnd?.({ active, over: { id: "whole:1" } });
     });
-    expect(await screen.findByText("镜头仍归属原章节；请先合并章节再跨章排序")).toBeTruthy();
-    expect(apiMocks.setStoryOrder).not.toHaveBeenCalled();
+    expect(await screen.findByText("已移动 1 段")).toBeTruthy();
+    expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1);
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number; chapter_id: number }[]).find(ref => ref.clip_id === 13)?.chapter_id).toBe(1);
   });
 });

@@ -31,16 +31,21 @@ export function useBandTimeline({
   clipsById,
   selectedClipId,
   selectClip,
+  preferences,
 }: {
   chapters: readonly BandChapter[];
   board: Storyboard | null;
   clipsById: ReadonlyMap<number, ClipListItem>;
   selectedClipId: number | null;
   selectClip(clipId: number): void;
+  preferences?: { folded: ReadonlySet<string>; zoom: number; toggleFold(key: string): void };
 }): BandTimeline {
   // 用户手动折叠的章(轨头 aria-expanded);按 foldKey 记,切集不清也无妨(键带章 id)。
-  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
+  const [localFolded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
+  const folded = preferences?.folded ?? localFolded;
+  const zoom = preferences?.zoom ?? 1;
   const toggleFold = useCallback((chapter: BandChapter) => {
+    if (preferences) { preferences.toggleFold(foldKey(chapter)); return; }
     setFolded((current) => {
       const next = new Set(current);
       const key = foldKey(chapter);
@@ -48,10 +53,10 @@ export function useBandTimeline({
       else next.add(key);
       return next;
     });
-  }, []);
+  }, [preferences]);
 
-  const offsets = useMemo(() => chapterOffsets(chapters, folded), [chapters, folded]);
-  const spans = useMemo(() => timelineSpans(chapters, offsets, folded), [chapters, offsets, folded]);
+  const offsets = useMemo(() => chapterOffsets(chapters, folded, zoom), [chapters, folded, zoom]);
+  const spans = useMemo(() => timelineSpans(chapters, offsets, folded, zoom), [chapters, offsets, folded, zoom]);
   const totalMs = useMemo(() => timelineTotalMs(spans), [spans]);
   const playhead = useBandPlayhead(spans, selectedClipId !== null && clipsById.get(selectedClipId)?.kind === "photo" ? null : selectedClipId);
   const trim = useBandTrim(board, clipsById);
@@ -88,5 +93,13 @@ export function useBandTimeline({
     [spans, clipMs, requestSeek],
   );
 
-  return { folded, toggleFold, offsets, spans, totalMs, playhead, trim, seekAtPx, seekInSegment };
+  const preview = (segment: BandSegment, seconds: number) => {
+    if (segment.clipId === null) return;
+    const duration = clipDurationSeconds(clipsById.get(segment.clipId));
+    if (!duration) return;
+    if (segment.clipId !== selectedClipId) selectClip(segment.clipId);
+    // 0.11.3 接线:修剪的跟随 seek 带来源,连播不被它当成人工 seek 打断(挂起,落地后按新入出点继续)。
+    requestSeek(segment.clipId, Math.min(1, Math.max(0, seconds / duration)), { source: "band-trim" });
+  };
+  return { folded, toggleFold, offsets, spans, totalMs, playhead, trim: { ...trim, preview }, seekAtPx, seekInSegment };
 }

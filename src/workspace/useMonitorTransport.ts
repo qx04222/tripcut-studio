@@ -55,7 +55,7 @@ export interface MonitorTransport {
   frame(direction: 1 | -1): void;
   nudge(seconds: number): void;
   /** 绝对定位;监视器的所有 seek 都从这里走,位置锚点才跟得上(V-04)。 */
-  seekTo(seconds: number, options?: { source: "playthrough" }): Promise<boolean>;
+  seekTo(seconds: number, options?: { source: "playthrough" | "band-trim" }): Promise<boolean>;
   play(): Promise<void>;
   pause(): Promise<void>;
   /**
@@ -128,8 +128,10 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     });
   }, []);
   const seekTo = useCallback(
-    async (seconds: number, options?: { source: "playthrough" }) => {
-      if (options?.source !== "playthrough") window.dispatchEvent(new Event("tripcut:manual-seek"));
+    async (seconds: number, options?: { source: "playthrough" | "band-trim" }) => {
+      // 无来源 = 人工 seek(连播停);playthrough = 连播自己的;band-trim = 镜头带拖边修剪的跟随(连播挂起,见 playthrough/store)。
+      if (options?.source === "band-trim") window.dispatchEvent(new Event("tripcut:trim-seek"));
+      else if (options?.source !== "playthrough") window.dispatchEvent(new Event("tripcut:manual-seek"));
       const current = readyStatus();
       if (!current) return false;
       const target = Math.min(current.duration, Math.max(0, seconds));

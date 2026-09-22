@@ -1,0 +1,37 @@
+.workspace-shell .shot-band .band-viewport { position: relative; touch-action: none; }
+.shot-band .band-selection-tools, .shot-band .band-view-tools { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
+.shot-band .band-selection-tools { margin-left: auto; }
+.shot-band .band-selected-count { color: var(--text-secondary); font-size: var(--text-11); white-space: nowrap; }
+.shot-band .band-selection-box { position: absolute; pointer-events: none; border: 1px solid var(--accent); background: var(--accent-tint); z-index: var(--z-overlay); }
+.shot-band .band-chapter-frame { flex: 0 0 auto; }
+.shot-band .band-chapter-frame[data-dragging="true"] { opacity: 0.45; }
+.shot-band .band-chapter-head { cursor: grab; user-select: none; }
+.shot-band[data-panning="true"] .band-viewport, .shot-band[data-panning="true"] .band-segment { cursor: grabbing; }
+.shot-band .band-group-ghost { position: relative; }
+.shot-band .band-drag-count { position: absolute; top: 0; right: 0; padding: var(--space-1) var(--space-2); color: var(--accent-ink); background: var(--accent); border-radius: var(--radius-4); }
+.workspace-shell .shot-band .band-segment[data-playing="true"] { box-shadow: var(--shadow-select-inset), var(--shadow-select-glow); border-color: var(--accent); }
+.shot-band .band-trim.is-clamped { animation: band-boundary-shake var(--motion-fast); }
+.shot-band .band-trim.is-clamped .band-trim-preview { color: var(--warn); }
+@keyframes band-boundary-shake { 25% { transform: translateX(-2px); } 75% { transform: translateX(2px); } }
+.shot-band .band-detail-badges { display: flex; position: absolute; top: var(--space-1); left: var(--space-1); right: var(--space-1); gap: var(--space-1); pointer-events: none; font-size: var(--text-11); color: var(--accent-ink); }
+.shot-band .band-detail-badges span { background: var(--well-bg); padding: 0 var(--space-1); border-radius: var(--radius-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.band-tooltip-layer { position: fixed; z-index: var(--z-menu); display: flex; flex-direction: column; gap: var(--space-1); max-width: 320px; padding: var(--space-2); border-radius: var(--radius-4); border: 1px solid var(--border); background: var(--bg-elevated); box-shadow: var(--shadow-raised); color: var(--text-primary); font-size: var(--text-11); pointer-events: none; }
+.band-tooltip-layer strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 最小档(35% = 49px):只留「色条 + 时长」。色条就是封面本身按 object-fit: cover 裁成一条竖带(R22-C 验收:
+   Codex 初版把封面整个藏掉只剩 --accent-tint 底,一排白条分不出哪条是哪条;剪映最小档也是保留缩略图裁切)。 */
+.workspace-shell .shot-band[data-zoom="0.35"] .band-segment:not(.slot) .band-tile-thumb { background: var(--accent-tint); }
+.workspace-shell .shot-band[data-zoom="0.35"] .band-segment:not(.slot) .band-tile-badges,
+.workspace-shell .shot-band[data-zoom="0.35"] .band-segment:not(.slot) .band-tile-name,
+.workspace-shell .shot-band[data-zoom="0.35"] .band-detail-badges,
+.workspace-shell .shot-band[data-zoom="0.35"] .band-segment-steps,
+.workspace-shell .shot-band[data-zoom="0.35"] .band-segment-grip { display: none; }
+.workspace-shell .shot-band[data-zoom="0.35"] .band-tile-time { left: var(--space-1); right: auto; padding: 0; font-size: var(--text-11); }
+.shot-band .band-grouped-gaps { display: flex; flex-direction: column; gap: var(--space-1); width: 100%; max-height: 100%; overflow-y: auto; font-size: var(--text-11); }
+.shot-band .band-grouped-gaps > strong { color: var(--warn); font-size: var(--text-11); }
+.shot-band .band-grouped-gap { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
+.shot-band .band-empty-guide { display: flex; align-items: center; justify-content: center; gap: var(--space-3); color: var(--text-secondary); padding: var(--space-3); }
+.shot-band .band-chapter-empty-title { color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) { .shot-band .band-trim.is-clamped { animation: none; } }
+
+/* 章头位于媒体深色井上，使用不透明的主题面板保证明暗主题都可读。 */
+.workspace-shell .shot-band[data-zoom] .band-chapter-head { background: var(--surface-raised); color: var(--text-primary); border-radius: var(--radius-4); }

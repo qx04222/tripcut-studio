@@ -9,6 +9,8 @@ use super::channel_memory::ClipMemoryAnnotation;
 use super::narrative::{self, NarrativeOverview, StoryTemplate};
 use super::settings::{self, LLM_ENABLED_KEY};
 
+pub mod band;
+
 const CHAPTER_GAP_MS: i64 = 45 * 60 * 1_000;
 const CHAPTER_DISTANCE_KM: f64 = 2.0;
 
@@ -100,6 +102,8 @@ struct ClipMoment {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct StorySnapshot {
+    #[serde(default)]
+    pub(crate) band_layout: band::BandLayout,
     pub(crate) chapters: Vec<ChapterSnapshot>,
     pub(crate) clip_chapters: Vec<ClipChapterSnapshot>,
     pub(crate) order: Vec<StoryOrderSnapshot>,
@@ -506,7 +510,7 @@ pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> R
             clip_count: row.get(4)?,
         })
     })?;
-    let chapters = chapter_rows
+    let mut chapters = chapter_rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(CoreError::from)?;
 
@@ -653,6 +657,7 @@ pub fn get_storyboard_for(connection: &Connection, episode_id: Option<i64>) -> R
     };
     let narration_job_status = narrative::latest_job_status(connection)?;
 
+    band::apply_layout(connection, episode_id, &mut chapters, &mut items)?;
     Ok(Storyboard {
         chapters,
         items,
@@ -752,6 +757,7 @@ pub fn merge_chapters(
          WHERE id = ?1 AND episode_id = ?2",
         params![source_chapter_id, episode_id],
     )?;
+    band::remap_chapter(&transaction, episode_id, source_chapter_id, target_chapter_id)?;
     transaction.commit()?;
     Ok(())
 }
@@ -805,6 +811,7 @@ pub fn delete_chapter(connection: &mut Connection, chapter_id: i64) -> Result<i6
          WHERE id = ?1 AND episode_id = ?2",
         params![chapter_id, episode_id],
     )?;
+    band::remap_chapter(&transaction, episode_id, chapter_id, target_id)?;
     transaction.commit()?;
     Ok(target_id)
 }
@@ -1077,6 +1084,7 @@ pub(crate) fn capture_snapshot(connection: &Connection, episode_id: i64) -> Resu
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(StorySnapshot {
+        band_layout: band::layout(connection, episode_id)?,
         chapters,
         clip_chapters,
         order,
@@ -1090,6 +1098,7 @@ fn restore_snapshot(
     episode_id: i64,
     snapshot: &StorySnapshot,
 ) -> Result<usize> {
+    band::save_layout(connection, episode_id, &snapshot.band_layout)?;
     connection.execute(
         "UPDATE chapters SET tombstone = 1
          WHERE episode_id = ?1
@@ -1205,7 +1214,7 @@ pub struct BandItemRef {
 pub(crate) fn ordered_band_items(connection: &Connection) -> Result<Vec<BandItemRef>> {
     let episode_id = active_episode_id(connection)?;
     let mut statement = connection.prepare(
-        "SELECT story.item_kind, story.clip_id, story.segment_id, chapter.id
+        "SELECT story.item_kind, story.clip_id, story.segment_id, chapter.id, story.position
          FROM story_order story
          JOIN clips c ON c.id = story.clip_id
          LEFT JOIN chapters chapter
@@ -1223,16 +1232,15 @@ pub(crate) fn ordered_band_items(connection: &Connection) -> Result<Vec<BandItem
         let item_kind: String = row.get(0)?;
         let clip_id: i64 = row.get(1)?;
         let segment_id: Option<i64> = row.get(2)?;
-        Ok(BandItemRef {
+        Ok((BandItemRef {
             key: story_key(&item_kind, clip_id, segment_id),
             item_kind,
             clip_id,
             segment_id,
             chapter_id: row.get(3)?,
-        })
+        }, row.get::<_, i64>(4)?))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CoreError::from)
+    band::ordered(connection, episode_id, rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 pub(crate) fn active_episode_id(connection: &Connection) -> Result<i64> {

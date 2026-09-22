@@ -27,24 +27,24 @@ export function chapterPitchCount(chapter: Pick<BandChapter, "segments">, folded
 }
 
 /** 一章的实宽:节距数 × 节距,减掉最后一格的 8px 间距(章与章之间由视口 gap 补)。 */
-export function chapterWidth(chapter: Pick<BandChapter, "segments">, folded = false): number {
+export function chapterWidth(chapter: Pick<BandChapter, "segments">, folded = false, zoom = 1): number {
   if (folded || chapter.segments.length === 0) return BAND_SEGMENT_PITCH - 8;
-  return chapter.segments.reduce((width, segment) => width + segmentWidth(segment) + 8, 0) - 8;
+  return chapter.segments.reduce((width, segment) => width + segmentWidth(segment, zoom) + 8, 0) - 8;
 }
 
-export function chapterOffsets(chapters: readonly BandChapter[], folded: ReadonlySet<string> = new Set()): number[] {
+export function chapterOffsets(chapters: readonly BandChapter[], folded: ReadonlySet<string> = new Set(), zoom = 1): number[] {
   const offsets: number[] = [];
   let left = 0;
   for (const chapter of chapters) {
     offsets.push(left);
-    left += BAND_CHAPTER_HEADER_WIDTH + chapterWidth(chapter, folded.has(foldKey(chapter))) + 8;
+    left += BAND_CHAPTER_HEADER_WIDTH + chapterWidth(chapter, folded.has(foldKey(chapter)), zoom) + 8;
   }
   return offsets;
 }
 
 /** 视频镜头带维持固定节距；照片由独立工作台承载。 */
-export function segmentWidth(_segment: Pick<BandSegment, "mediaKind" | "holdMs">): number {
-  return BAND_SEGMENT_PITCH - 8;
+export function segmentWidth(segment: Pick<BandSegment, "mediaKind" | "holdMs"> & Partial<Pick<BandSegment, "kind">>, zoom = 1): number {
+  return (BAND_SEGMENT_PITCH - 8) * (segment.kind === "slot" ? 1 : Math.max(0.35, Math.min(3, zoom)));
 }
 
 /** 音乐刻度沿用视频镜块的固定节距。 */

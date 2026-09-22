@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createTestApiMock } from '../testApiMock';
 vi.mock('../../api', async () => createTestApiMock());
 import { PlaythroughButton, PlaythroughStatus, PlaythroughOverlay } from './PlaythroughOverlay';
-import { publishPlaythrough, setPlaythroughSegments, requestPlaythrough, usePlaythroughCommands } from './store';
+import { publishPlaythrough, setPlaythroughSegments, requestPlaythrough, usePlaythroughCommands, usePlaythroughKey } from './store';
 import { useMonitorTransport } from '../useMonitorTransport';
 import { GUIDES } from '../guides';
 import { ShotMenu } from '../BandSegmentMenu';
@@ -81,4 +81,29 @@ it('命令面板显示镜头带连播,执行同一请求', async () => {
   fireEvent.keyDown(document, { key: 'k', metaKey: true });
   fireEvent.click(await screen.findByText('镜头带连播'));
   expect(c.start).toHaveBeenCalledWith(0);
+});
+it('走带 seek 带 band-trim 来源:不广播 manual-seek,改广播 trim-seek(0.11.3 接线)', async () => {
+  const send = vi.fn(async () => {}); const manual = vi.fn(); const trim = vi.fn();
+  window.addEventListener('tripcut:manual-seek', manual); window.addEventListener('tripcut:trim-seek', trim);
+  const { result } = renderHook(() => useMonitorTransport({
+    clip: { id: 1, fps_num: 25, fps_den: 1 } as ClipListItem,
+    status: { phase: 'ready', clip_id: 1, pos: 0, duration: 20, paused: false } as PlayerStatus,
+    send, inPoint: null, outPoint: null, bestStart: null, momentsLoaded: false, playthroughActive: true,
+  }));
+  await act(async () => { expect(await result.current.seekTo(2, { source: 'band-trim' })).toBe(true); });
+  expect(manual).not.toHaveBeenCalled(); expect(trim).toHaveBeenCalledTimes(1);
+  window.removeEventListener('tripcut:manual-seek', manual); window.removeEventListener('tripcut:trim-seek', trim);
+});
+it('镜头带只订阅「正在播哪一段」:进度每 80 ms 变一次不引起重渲染(F-R22C-16)', () => {
+  publishPlaythrough({ active: true, phase: 'playing', index: 0, total: 2, segment: { key: 'a', clipId: 1, inPoint: 0, outPoint: 4, fps: 25, chapter: '1' }, elapsed: 1, duration: 8, switchMs: 10 } as never);
+  let renders = 0;
+  const { result } = renderHook(() => { renders += 1; return usePlaythroughKey(); });
+  expect(result.current).toBe('a');
+  const at = renders;
+  act(() => publishPlaythrough({ active: true, phase: 'playing', index: 0, total: 2, segment: { key: 'a', clipId: 1, inPoint: 0, outPoint: 4, fps: 25, chapter: '1' }, elapsed: 2.5, duration: 8, switchMs: 10 } as never));
+  expect(renders).toBe(at);
+  act(() => publishPlaythrough({ active: true, phase: 'playing', index: 1, total: 2, segment: { key: 'b', clipId: 2, inPoint: 0, outPoint: 4, fps: 25, chapter: '1' }, elapsed: 4, duration: 8, switchMs: 10 } as never));
+  expect(result.current).toBe('b');
+  expect(renders).toBeGreaterThan(at);
+  publishPlaythrough(null);
 });

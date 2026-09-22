@@ -36,6 +36,7 @@ const apiMocks = vi.hoisted(() => ({
   getCurrentEpisode: vi.fn(),
   getSettings: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
+  setBandOrder: vi.fn().mockResolvedValue(undefined),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   rateClip: vi.fn().mockResolvedValue(undefined),
@@ -161,7 +162,7 @@ beforeEach(() => {
   apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
   apiMocks.getSettings.mockResolvedValue({});
   apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-  apiMocks.setStoryOrder.mockResolvedValue(undefined);
+  apiMocks.setBandOrder.mockResolvedValue(undefined);
   apiMocks.arrangeSelectedSegments.mockResolvedValue({ placed: 3, chapters: 2, batch_id: "arr-9" });
   apiMocks.undoArrange.mockResolvedValue(3);
   apiMocks.skipChapter.mockResolvedValue(undefined);
@@ -173,7 +174,7 @@ async function renderBand(): Promise<void> {
   await screen.findByRole("gridcell", { name: "镜头 1：A.MP4" });
 }
 
-const refs = () => (apiMocks.setStoryOrder.mock.lastCall![0] as { clip_id: number }[]).map((ref) => ref.clip_id);
+const refs = () => (apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map((ref) => ref.clip_id);
 
 describe("R16 §1:镜块菜单", () => {
   it("项目表顺序与 AX 名逐字;整条素材的「删除精选段」禁用;只读时改数据的项禁用、导出照常", () => {
@@ -206,15 +207,16 @@ describe("R16 §1:镜块菜单", () => {
     await act(async () => {
       fireEvent.click(within(menu).getByRole("menuitem", { name: "从镜头带移出" }));
     });
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
     expect(refs()).toEqual([2]);
     const toast = await screen.findByRole("status");
-    expect(toast.textContent).toContain("已从镜头带移出");
+    expect(toast.textContent).toContain("已移出 1 段");
     expect(canUndo()).toBe(true);
     await act(async () => {
       fireEvent.click(within(toast).getByRole("button", { name: "撤销" }));
     });
-    await waitFor(() => expect(apiMocks.undoStoryChange).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(2));
+    expect(refs()).toEqual([1, 2]);
     expect(canUndo()).toBe(false);
   });
 
@@ -226,7 +228,7 @@ describe("R16 §1:镜块菜单", () => {
     await act(async () => {
       fireEvent.click(within(menu).getByRole("menuitem", { name: "往后" }));
     });
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
     expect(refs()).toEqual([2, 1]);
 
     const second = screen.getByRole("gridcell", { name: "镜头 2：B.MP4" });

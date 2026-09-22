@@ -272,6 +272,14 @@ describe("Monitor", () => {
       window.dispatchEvent(new CustomEvent("tripcut:seek-ratio"));
     });
     expect(apiMocks.playerCommand).not.toHaveBeenCalled();
+    // 0.11.3 接线:detail.source 原样递给走带(镜头带拖边修剪的跟随 seek 不算人工 seek)。
+    const manual = vi.fn(); window.addEventListener("tripcut:manual-seek", manual);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("tripcut:seek-ratio", { detail: { ratio: 0.25, source: "band-trim" } }));
+    });
+    expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 15 }, expect.anything());
+    expect(manual).not.toHaveBeenCalled();
+    window.removeEventListener("tripcut:manual-seek", manual);
   });
 
   it("井底铺一层封面:原生视图被遮挡或还没画时不是整块黑(U-09)", async () => {

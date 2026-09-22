@@ -46,6 +46,7 @@ const apiMocks = vi.hoisted(() => ({
   undoArrange: vi.fn().mockResolvedValue(0),
   skipChapter: vi.fn().mockResolvedValue(undefined),
   playerStatus: vi.fn(),
+  trimBandSegment: vi.fn().mockResolvedValue(undefined),
   createSelectSegment: vi.fn(),
   deleteSelectSegment: vi.fn().mockResolvedValue(undefined),
   getJianyingAvailability: vi.fn(),
@@ -269,26 +270,21 @@ describe("§4 拖边裁入出点(只改我们自己的精选段)", () => {
     expect(within(screen.getByRole("gridcell", { name: "镜头 1：A.MP4" })).queryByRole("button", { name: "调整入点" })).toBeNull();
   });
 
-  it("入点把手按 → 挪 0.1 s:建新段(2, 0.6, 4.5) → 顺序表里原位换成新段 78 → 删旧段 77 → toast「已裁成 3.9 s」", async () => {
+  it("入点按 → 原位更新 77，保留段 ID，撤销回原始入出点", async () => {
     await renderBand();
     const second = screen.getByRole("gridcell", { name: "镜头 2：B.MP4" });
-    await act(async () => {
-      fireEvent.keyDown(within(second).getByRole("button", { name: "调整入点" }), { key: "ArrowRight" });
-    });
-    await waitFor(() => expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(2, 0.6, 4.5));
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
-    expect(apiMocks.setStoryOrder.mock.lastCall![0]).toEqual([
-      { item_kind: "whole", clip_id: 1, segment_id: null },
-      { item_kind: "segment", clip_id: 2, segment_id: 78 },
-      { item_kind: "whole", clip_id: 3, segment_id: null },
-    ]);
-    await waitFor(() => expect(apiMocks.deleteSelectSegment).toHaveBeenCalledWith(77));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已裁成 3.9 s"));
+    fireEvent.keyDown(within(second).getByRole("button", { name: "调整入点" }), { key: "ArrowRight" });
+    await waitFor(() => expect(apiMocks.trimBandSegment).toHaveBeenCalledWith(1, 77, [500, 4500], [600, 4500]));
+    expect(apiMocks.createSelectSegment).not.toHaveBeenCalled();
+    expect(apiMocks.deleteSelectSegment).not.toHaveBeenCalled();
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("已修剪 1 段");
+    fireEvent.click(within(toast).getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(apiMocks.trimBandSegment).toHaveBeenLastCalledWith(1, 77, [600, 4500], [500, 4500]));
   });
 
-  it("拖出点:按下 → 左移 1/4 瓦片宽(= 段长 4 s 的 1/4 = −1 s)→ 拖动中显示「3 s」→ 松手建新段(2, 0.5, 3.5);顺序写不进去就把新段删掉、不删旧段", async () => {
-    apiMocks.createSelectSegment.mockResolvedValue({ id: 79, clip_id: 2, in_ticks: 500, out_ticks: 3_500, tb_num: 1, tb_den: 1_000 });
-    apiMocks.setStoryOrder.mockRejectedValueOnce(new Error("没有进行中的 Episode"));
+  it("拖出点预览时码，提交失败保留原片段，不产生新段或删除", async () => {
+    apiMocks.trimBandSegment.mockRejectedValueOnce(new Error("没有进行中的 Episode"));
     await renderBand();
     const second = screen.getByRole("gridcell", { name: "镜头 2：B.MP4" });
     const handle = within(second).getByRole("button", { name: "调整出点" });
@@ -296,14 +292,12 @@ describe("§4 拖边裁入出点(只改我们自己的精选段)", () => {
       fireEvent.pointerDown(handle, { clientX: 300, pointerId: 1 });
       fireEvent.pointerMove(handle, { clientX: 300 - BAND_TILE_WIDTH / 4, pointerId: 1 });
     });
-    expect(within(second).getByRole("status").textContent).toBe("3 s");
-    await act(async () => {
-      fireEvent.pointerUp(handle, { clientX: 300 - BAND_TILE_WIDTH / 4, pointerId: 1 });
-    });
-    await waitFor(() => expect(apiMocks.createSelectSegment).toHaveBeenCalledWith(2, 0.5, 3.5));
-    await waitFor(() => expect(apiMocks.deleteSelectSegment).toHaveBeenCalledWith(79));
-    expect(apiMocks.deleteSelectSegment).not.toHaveBeenCalledWith(77);
-    await waitFor(() => expect(screen.getAllByRole("status").some((node) => node.textContent?.includes("裁剪没成功"))).toBe(true));
+    expect(within(second).getByRole("status").textContent).toBe("出 00:00:03.500 · 3 s");
+    fireEvent.pointerUp(handle, { clientX: 300 - BAND_TILE_WIDTH / 4, pointerId: 1 });
+    await waitFor(() => expect(apiMocks.trimBandSegment).toHaveBeenCalledWith(1, 77, [500, 4500], [500, 3500]));
+    expect(apiMocks.createSelectSegment).not.toHaveBeenCalled();
+    expect(apiMocks.deleteSelectSegment).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getAllByRole("status").some(node => node.textContent?.includes("裁剪没成功"))).toBe(true));
   });
 });
 

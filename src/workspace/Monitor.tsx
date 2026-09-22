@@ -209,10 +209,12 @@ export function Monitor(): JSX.Element {
   useEffect(() => {
     const toggle = () => latest.current.onPlayPause();
     const seekRatio = (event: Event) => {
-      const ratio = (event as CustomEvent<{ ratio?: unknown }>).detail?.ratio;
+      const detail = (event as CustomEvent<{ ratio?: unknown; source?: unknown }>).detail;
+      const ratio = detail?.ratio;
       const current = latest.current.status;
       if (typeof ratio !== "number" || !Number.isFinite(ratio) || !current || current.phase !== "ready") return;
-      latest.current.onSeek(Math.min(1, Math.max(0, ratio)) * current.duration);
+      // 0.11.3:镜头带拖边修剪的跟随 seek 带 source,走带按它区分人工 seek(连播停)与修剪跟随(连播挂起)。
+      void latest.current.onSeek(Math.min(1, Math.max(0, ratio)) * current.duration, detail?.source === "band-trim" ? { source: "band-trim" } : undefined);
     };
     window.addEventListener("tripcut:toggle-playback", toggle);
     window.addEventListener("tripcut:seek-ratio", seekRatio);

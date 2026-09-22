@@ -1,0 +1,48 @@
+{
+  "mode": "mock",
+  "band_segments": 39,
+  "actual_band_segments": 39,
+  "drag": {
+    "duration_ms": 5249.999999999999,
+    "frames": 600,
+    "cadence_ms": 8.300000000000182,
+    "dropped_frames": 31,
+    "dropped_ratio": 0.049206349206349205,
+    "moves": 269,
+    "over_targets": 7,
+    "ghost_seen": true,
+    "rendered_cards_during_drag": 20,
+    "pass": true,
+    "delta": {
+      "LayoutCount": 63,
+      "RecalcStyleCount": 785,
+      "ScriptDuration": 1.361344,
+      "TaskDuration": 1.981158
+    }
+  },
+  "zoom": {
+    "duration_ms": 1566.6000000000004,
+    "frames": 186,
+    "cadence_ms": 8.300000000001091,
+    "dropped_frames": 3,
+    "dropped_ratio": 0.015957446808510637,
+    "wheel_events": 20,
+    "zooms_seen": [
+      "1",
+      "1.5",
+      "2",
+      "3",
+      "0.75",
+      "0.5",
+      "0.35"
+    ],
+    "pass": true,
+    "delta": {
+      "LayoutCount": 24,
+      "RecalcStyleCount": 207,
+      "ScriptDuration": 0.27115599999999995,
+      "TaskDuration": 0.44220700000000024
+    }
+  },
+  "pass": true
+}

@@ -38,6 +38,7 @@ const apiMocks = vi.hoisted(() => ({
   getCurrentEpisode: vi.fn(),
   getSettings: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
+  setBandOrder: vi.fn().mockResolvedValue(undefined),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   rateClip: vi.fn().mockResolvedValue(undefined),
@@ -159,7 +160,7 @@ beforeEach(() => {
   apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
   apiMocks.getSettings.mockResolvedValue({});
   apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-  apiMocks.setStoryOrder.mockResolvedValue(undefined);
+  apiMocks.setBandOrder.mockResolvedValue(undefined);
   apiMocks.arrangeSelectedSegments.mockResolvedValue({ placed: 3, chapters: 2, batch_id: "arr-9" });
   apiMocks.undoArrange.mockResolvedValue(3);
   apiMocks.skipChapter.mockResolvedValue(undefined);
@@ -172,39 +173,35 @@ async function renderBand(): Promise<void> {
 }
 
 describe("§2 一键排入", () => {
-  it("工具条「一键排入」是 secondary(R19 V-01 起栏内没有 primary);点它 → arrangeSelectedSegments(append) → toast「已排入 3 段 · 覆盖 2 章」带「撤销」→ undoArrange(batch)", async () => {
+  it("手动补充排入收藏候选为 secondary，一次写入及一次撤销", async () => {
+    const next = { ...board, candidates: [item(3, 2, "C.MP4", null)] };
+    apiMocks.getStoryboard.mockResolvedValue(next);
     await renderBand();
     const button = screen.getByRole("button", { name: "一键排入" });
     expect(button.className).toContain("ui-button--secondary");
     expect(button.className).not.toContain("ui-button--primary");
-    await act(async () => {
-      fireEvent.click(button);
-    });
-    await waitFor(() => expect(apiMocks.arrangeSelectedSegments).toHaveBeenCalledWith("append"));
+    expect(button.textContent).toBe("补充排入");
+    fireEvent.click(button);
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map(ref => ref.clip_id)).toEqual([1, 2, 3]);
     const toast = await screen.findByRole("status");
-    expect(toast.textContent).toContain("已排入 3 段 · 覆盖 2 章");
-    await act(async () => {
-      fireEvent.click(within(toast).getByRole("button", { name: "撤销" }));
-    });
-    await waitFor(() => expect(apiMocks.undoArrange).toHaveBeenCalledWith("arr-9"));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已撤销这次排入"));
+    expect(toast.textContent).toContain("已排入 1 段");
+    fireEvent.click(within(toast).getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(2));
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map(ref => ref.clip_id)).toEqual([1, 2]);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已撤销 · 排入 1 段"));
   });
 
-  it("没有新段可排时 toast 说「都已经在镜头带上了」且没有「撤销」;失败时说清下一步", async () => {
-    apiMocks.arrangeSelectedSegments.mockResolvedValueOnce({ placed: 0, chapters: 0, batch_id: "arr-0" });
+  it("没有新候选时不写入，读取失败给出具体错误", async () => {
     await renderBand();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "一键排入" }));
-    });
+    fireEvent.click(screen.getByRole("button", { name: "一键排入" }));
     const toast = await screen.findByRole("status");
     expect(toast.textContent).toContain("挑好的片段都已经在镜头带上了");
     expect(within(toast).queryByRole("button", { name: "撤销" })).toBeNull();
-
-    apiMocks.arrangeSelectedSegments.mockRejectedValueOnce(new Error("没有进行中的 Episode"));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "一键排入" }));
-    });
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("排入没成功:没有进行中的 Episode。先挑几条片段"));
+    expect(apiMocks.setBandOrder).not.toHaveBeenCalled();
+    apiMocks.getStoryboard.mockRejectedValueOnce(new Error("没有进行中的 Episode"));
+    fireEvent.click(screen.getByRole("button", { name: "一键排入" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("排入没成功:没有进行中的 Episode"));
   });
 });
 
@@ -231,9 +228,9 @@ describe("§2 往前 / 往后按钮(不靠拖拽;X-03 由「上移 / 下移」�
     await act(async () => {
       fireEvent.click(within(first).getByRole("button", { name: "往后" }));
     });
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
-    expect((apiMocks.setStoryOrder.mock.lastCall![0] as { clip_id: number }[]).map((ref) => ref.clip_id)).toEqual([2, 1]);
-    expect((await screen.findByRole("status")).textContent).toContain("已调整顺序");
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map((ref) => ref.clip_id)).toEqual([2, 1]);
+    expect((await screen.findByRole("status")).textContent).toContain("已移动 1 段");
   });
 
   it("X-03:选中的镜块常显往前 / 往后 —— 选中态是 ui-card--selected(Card 写的),不是 .selected;露出规则必须钉在真存在的类上", async () => {

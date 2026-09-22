@@ -1,13 +1,6 @@
+import { useGapPoolSearch } from "./band/gaps";
 import { usePoolGridNavigation } from "./usePoolGridNavigation";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type JSX,
-  type UIEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type UIEvent } from "react";
 import { playerCommand, searchClips, searchTranscripts } from "../api";
 import { PoolEmpty, PoolFilteredEmpty } from "./emptyStates";
 import { useMediaPoolHotkeys } from "./MediaPoolHotkeys";
@@ -191,6 +184,7 @@ export function MediaPool(): JSX.Element {
       if (request === searchRequest.current) setSearching(false);
     }
   }, []);
+  useGapPoolSearch(runSearch, useCallback(() => setExtras(INITIAL_POOL_EXTRA_FILTERS), [])); // R22-C 缺口「从池里填」:重置筛选 + 按缺口类型搜索
   // U-15:搜索词被清空(输入框删光、Esc、⌘K)即自动复原,不必再按一次「搜索」。
   useEffect(() => {
     if (query === "") void runSearch("");

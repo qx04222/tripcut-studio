@@ -85,6 +85,7 @@ describe("首页在壳里", () => {
       screen.getByRole("button", { name: "继续上次" }).click();
     });
     expect(screen.queryByRole("region", { name: "首页" })).toBeNull();
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("status", { name: "新建确认" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "新建一集" })).toBeNull();
   });
 });

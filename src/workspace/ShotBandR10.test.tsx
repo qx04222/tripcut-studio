@@ -36,6 +36,7 @@ const apiMocks = vi.hoisted(() => ({
   listAssetSafety: vi.fn(),
   getCurrentEpisode: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
+  setBandOrder: vi.fn().mockResolvedValue(undefined),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   rateClip: vi.fn().mockResolvedValue(undefined),
@@ -170,7 +171,7 @@ beforeEach(() => {
   apiMocks.listAssetSafety.mockResolvedValue([]);
   apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
   apiMocks.generationAvailability.mockResolvedValue({ enabled: false, has_key: false, budget_remaining_usd: 0 });
-  apiMocks.setStoryOrder.mockResolvedValue(undefined);
+  apiMocks.setBandOrder.mockResolvedValue(undefined);
   apiMocks.rateClip.mockResolvedValue(undefined);
   apiMocks.dismissStoryGap.mockResolvedValue(undefined);
   apiMocks.reopenStoryGap.mockResolvedValue(undefined);
@@ -279,10 +280,10 @@ describe("U-18:「从挑好的片段里选」(R10 的「从媒体池选择…」
       fireEvent.click(within(dialog).getByRole("button", { name: "加入 B.MP4" }));
     });
     await waitFor(() =>
-      expect(apiMocks.setStoryOrder).toHaveBeenCalledWith([
-        { item_kind: "whole", clip_id: 1, segment_id: null },
-        { item_kind: "whole", clip_id: 2, segment_id: null },
-      ]),
+      expect(apiMocks.setBandOrder).toHaveBeenCalledWith(1, [
+        { item_kind: "whole", clip_id: 1, segment_id: null, chapter_id: 1 },
+        { item_kind: "whole", clip_id: 2, segment_id: null, chapter_id: 2 },
+      ], [1, 2]),
     );
     // 已收藏的不再收藏一次。
     expect(apiMocks.rateClip).not.toHaveBeenCalled();
@@ -300,10 +301,10 @@ describe("U-18:「从挑好的片段里选」(R10 的「从媒体池选择…」
     });
     await waitFor(() => expect(apiMocks.rateClip).toHaveBeenCalledWith(3, "binary", 1));
     await waitFor(() =>
-      expect(apiMocks.setStoryOrder).toHaveBeenCalledWith([
-        { item_kind: "whole", clip_id: 1, segment_id: null },
-        { item_kind: "whole", clip_id: 3, segment_id: null },
-      ]),
+      expect(apiMocks.setBandOrder).toHaveBeenCalledWith(1, [
+        { item_kind: "whole", clip_id: 1, segment_id: null, chapter_id: 1 },
+        { item_kind: "whole", clip_id: 3, segment_id: null, chapter_id: 1 },
+      ], [1, 2]),
     );
     expect(await screen.findByText("已加入第 1 章「出发」，并已自动收藏整条")).toBeTruthy();
   });

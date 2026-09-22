@@ -20,6 +20,7 @@ import { scrubberScenario } from "./scrubber-scenario.mjs";
 import { photoScenario } from "./photo-scenario.mjs";
 import { duelScenario } from "./duel-scenario.mjs";
 import { makeMockCovers } from "./make-mock-covers.mjs";
+import { bandR22Shots } from "../../src/workspace/band/previewScenarios.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright-core");
@@ -1369,7 +1370,10 @@ async function main() {
       page.setDefaultTimeout(STEP_TIMEOUT_MS);
 
       if (!KIT_ONLY) {
-        if (!process.argv.includes("--photo-only")) await workspaceScript(page, context, vite.url);
+        if (!process.argv.includes("--photo-only")) {
+          await workspaceScript(page, context, vite.url);
+          await bandR22Shots(context, withTheme(vite.url), shot);
+        }
         await photoScenario(context, vite.url, shot, failures, withTheme);
         await duelScenario(context, vite.url, shot, failures, withTheme);
       }

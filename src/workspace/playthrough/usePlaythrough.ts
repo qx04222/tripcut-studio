@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PlayerStatus } from '../../api';
 import { playthroughProgress, type PlaythroughSegment } from './model';
+import { PLAYTHROUGH_RELEASE_EVENT, PLAYTHROUGH_TRIM_SEEK_EVENT } from './store';
 
 export interface PlaythroughDeps {
   segments: readonly PlaythroughSegment[];
@@ -9,7 +10,7 @@ export interface PlaythroughDeps {
   enabled: boolean;
   selectClip(id: number): void;
   transport: {
-    seekTo(seconds: number, options?: { source: 'playthrough' }): Promise<boolean>;
+    seekTo(seconds: number, options?: { source: 'playthrough' | 'band-trim' }): Promise<boolean>;
     play(): Promise<void>;
     pause(): Promise<void>;
   };
@@ -44,11 +45,14 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     if (mounted.current) setState(session.current);
   }, []);
   const clearTimer = useCallback(() => { clearTimeout(timer.current); timer.current = undefined; }, []);
-  const stop = useCallback((error: string | null = null) => {
+  // 修剪挂起:拖边修剪的跟随 seek 到来时连播转 paused,修剪落地(段列表变)后自动继续;取消修剪就停在 paused,由用户再按播放。
+  const heldByTrim = useRef(false);
+  const stop = useCallback((error: string | null = null, keepPlaying = false) => {
     const wasActive = active(session.current);
+    heldByTrim.current = false;
     publish({ phase: 'idle', stage: 'finished', token: session.current.token + 1, error });
     clearTimer();
-    if (wasActive) void latest.current.transport.pause().catch(() => undefined);
+    if (wasActive && !keepPlaying) void latest.current.transport.pause().catch(() => undefined);
   }, [publish, clearTimer]);
   const valid = useCallback((token: number) => mounted.current && session.current.token === token && active(session.current), []);
   const fail = useCallback((token: number, error: unknown) => {
@@ -125,9 +129,39 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     if (s.phase !== 'idle' && (!deps.enabled || deps.selectedClipId !== s.segments[s.index]?.clipId)) stop();
     // Only selection changes trigger this guard; enter itself doesn't count as manual selection.
   }, [deps.selectedClipId, deps.enabled, stop]);
+  // 段列表变了(拖边修剪落地 / 移出 / 重排):按 key 换成新的入出点,当前段没了就停;修剪挂起中则继续。
+  useEffect(() => {
+    const s = session.current;
+    if (!active(s) || s.segments === deps.segments) return;
+    // 空列表是刷新途中的一瞬(refreshClipsFeed 期间故事板短暂为空),不是「段被移出」——
+    // 照它停会让任何一次修剪 / 排入的刷新都掐掉连播(真机 R22-C 撞到)。
+    if (deps.segments.length === 0) return;
+    const key = s.segments[s.index]?.key;
+    const index = deps.segments.findIndex(segment => segment.key === key);
+    if (index < 0) { stop(); return; }
+    publish({ segments: deps.segments, index });
+    if (heldByTrim.current && s.phase === 'paused') {
+      heldByTrim.current = false;
+      const token = s.token;
+      publish({ phase: 'playing' });
+      if (s.stage === 'running') void latest.current.transport.play().catch(error => fail(token, error));
+    }
+  }, [deps.segments, publish, stop, fail]);
+
   useEffect(() => {
     const interrupt = () => stop();
+    const release = () => stop(null, true);
+    const hold = () => {
+      const s = session.current;
+      if (s.phase !== 'playing') return;
+      heldByTrim.current = true;
+      const token = s.token;
+      publish({ phase: 'paused' });
+      void latest.current.transport.pause().catch(error => fail(token, error));
+    };
     window.addEventListener('tripcut:manual-seek', interrupt);
+    window.addEventListener(PLAYTHROUGH_RELEASE_EVENT, release);
+    window.addEventListener(PLAYTHROUGH_TRIM_SEEK_EVENT, hold);
     window.addEventListener('pagehide', interrupt);
     mounted.current = true;
     return () => {
@@ -135,9 +169,11 @@ export function usePlaythrough(deps: PlaythroughDeps) {
       clearTimer();
       session.current = { ...session.current, token: session.current.token + 1, phase: 'idle' };
       window.removeEventListener('tripcut:manual-seek', interrupt);
+      window.removeEventListener(PLAYTHROUGH_RELEASE_EVENT, release);
+      window.removeEventListener(PLAYTHROUGH_TRIM_SEEK_EVENT, hold);
       window.removeEventListener('pagehide', interrupt);
     };
-  }, [stop, clearTimer]);
+  }, [stop, clearTimer, publish, fail]);
   const pause = useCallback(() => {
     if (!active(session.current)) return;
     const token = session.current.token;

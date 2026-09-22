@@ -2719,3 +2719,89 @@ HANDLERS.get_clip_artifacts = args => ({
   waveform: `data:application/json,${encodeURIComponent(JSON.stringify({ version: 1, bins: 2000,
     peaks: Array.from({ length: 2000 }, (_, i) => { const p = 0.15 + 0.7 * Math.abs(Math.sin(i * 0.13) * Math.cos(i * 0.037)); return [-p, p]; }) }))}`,
 });
+
+// R22: the scaled fixture must materialize story_order, not just select_segments.
+// Sixty source covers are deliberately reused by distinct segment keys.
+let scaledSegmentsR22: SelectSegment[] | null = null;
+const getStoryboardBeforeR22 = HANDLERS.get_storyboard;
+export function scaleMockBand(count = bandSegmentScale()): void {
+  if (count > 0 && scaledSegmentsR22 !== state.segments) {
+    if (state.segments.length !== count) state.segments = buildScaledSegments(count, state.clips.length);
+    scaledSegmentsR22 = state.segments;
+    for (const segment of state.segments) {
+      const clip = clipById(segment.clip_id);
+      const duration = (clip.duration_ticks ?? 0) * (clip.tb_num ?? 1) / (clip.tb_den ?? 1000);
+      const end = Math.max(1, Math.floor(duration * segment.tb_den / segment.tb_num));
+      segment.out_ticks = Math.min(segment.out_ticks, end);
+      segment.in_ticks = Math.min(segment.in_ticks, segment.out_ticks - 1);
+    }
+    arrangeMockSegments("replace");
+    for (const clip of state.clips) clip.select_count = state.segments.filter(segment => segment.clip_id === clip.id).length;
+  }
+}
+// 与原生 get_storyboard 对齐(story.rs `selected_items`):有精选段的素材以「段」作候选(item_kind=segment、
+// 一段一条),整条素材只在**没有**精选段时才以「whole」作候选。此前 mock 的候选只有整条,前端
+// 「一键排入 / 补充排入」改成追加候选后,mock 里排完一个精选段镜块都没有(preview 22 / 26 场景红)。
+function segmentCandidates(): StoryItem[] {
+  const onBand = new Set(storyboard.items.map((item) => item.key));
+  return state.segments
+    .filter((segment) => !onBand.has(`segment:${segment.id}`) && clipById(segment.clip_id).kind !== "photo")
+    .map((segment) => {
+      const clip = clipById(segment.clip_id);
+      return {
+        key: `segment:${segment.id}`,
+        item_kind: "segment" as const,
+        clip_id: clip.id as number,
+        segment_id: segment.id,
+        chapter_id: chapterOfClip(clip),
+        file_name: clip.file_name,
+        in_ticks: segment.in_ticks,
+        out_ticks: segment.out_ticks,
+        tb_num: segment.tb_num,
+        tb_den: segment.tb_den,
+        position: null,
+        long_term_memory: EMPTY_MEMORY,
+      };
+    });
+}
+function bandCandidates(): StoryItem[] {
+  const withSegments = new Set(state.segments.map((segment) => segment.clip_id));
+  // 段候选每次按 state.segments 重算(set_band_order 会把移出的段写回 storyboard.candidates,这里只取整条以免重复)。
+  return [...storyboard.candidates.filter((item) => item.item_kind === "whole" && !withSegments.has(item.clip_id)), ...segmentCandidates()];
+}
+HANDLERS.get_storyboard = (args) => {
+  scaleMockBand();
+  const board = getStoryboardBeforeR22(args) as Storyboard;
+  return { ...board, candidates: bandCandidates() };
+};
+
+HANDLERS.set_band_order = ({ episodeId, order, chapterOrder }) => {
+  if (episodeId !== EPISODE_ID) throw new Error("当前集已切换");
+  const refs = order as Array<{ item_kind: string; clip_id: number; segment_id: number | null; chapter_id: number | null }>;
+  const pool = [...storyboard.items, ...bandCandidates()];
+  const next = refs.map((ref, position) => {
+    const item = pool.find(item => item.item_kind === ref.item_kind && item.clip_id === ref.clip_id && item.segment_id === ref.segment_id);
+    if (!item || clipById(item.clip_id).kind !== "video") throw new Error("片段已不可用");
+    return { ...item, chapter_id: ref.chapter_id, position };
+  });
+  if (new Set(next.map(item => item.key)).size !== next.length) throw new Error("镜头顺序重复");
+  storyboard.items = next;
+  const keys = new Set(next.map(item => item.key));
+  storyboard.candidates = pool.filter(item => !keys.has(item.key)).map(item => ({ ...item, position: null }));
+  storyboard.chapters = [...storyboard.chapters].sort((a, b) => (chapterOrder as number[]).indexOf(a.id) - (chapterOrder as number[]).indexOf(b.id));
+  bump(state);
+};
+HANDLERS.trim_band_segment = ({ episodeId, segmentId, expected, bounds }) => {
+  if (episodeId !== EPISODE_ID) throw new Error("当前集已切换");
+  const segment = state.segments.find(segment => segment.id === segmentId);
+  if (!segment || segment.in_ticks !== (expected as number[])[0] || segment.out_ticks !== (expected as number[])[1]) throw new Error("片段已改变");
+  const [start, end] = bounds as number[];
+  const clip = clipById(segment.clip_id);
+  if (start! < 0 || end! <= start! || end! > (clip.duration_ticks ?? 0)) throw new Error("入出点超出素材边界");
+  segment.in_ticks = start!; segment.out_ticks = end!;
+  for (const item of [...storyboard.items, ...storyboard.candidates]) {
+    if (item.segment_id === segmentId) { item.in_ticks = start!; item.out_ticks = end!; }
+  }
+  bump(state);
+};
+(MOCK_COMMANDS as string[]).push("set_band_order", "trim_band_segment");

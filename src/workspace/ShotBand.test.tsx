@@ -62,9 +62,11 @@ const apiMocks = vi.hoisted(() => ({
   listAssetSafety: vi.fn(),
   getCurrentEpisode: vi.fn(),
   setSetting: vi.fn().mockResolvedValue(undefined),
+  setBandOrder: vi.fn().mockResolvedValue(undefined),
   setStoryOrder: vi.fn().mockResolvedValue(undefined),
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   setShotStackUserState: vi.fn().mockResolvedValue(undefined),
+  rateClips: vi.fn().mockResolvedValue([]),
   rateClip: vi.fn().mockResolvedValue(undefined),
   generationAvailability: vi.fn(),
   previewGeneration: vi.fn(),
@@ -233,6 +235,7 @@ beforeEach(() => {
   apiMocks.listStoryGaps.mockResolvedValue([]);
   apiMocks.listClipDimensions.mockResolvedValue([]);
   apiMocks.listAssetSafety.mockResolvedValue([]);
+  apiMocks.rateClips.mockResolvedValue([]);
   apiMocks.getCurrentEpisode.mockResolvedValue({ id: 1, title: "EP01" });
   apiMocks.generationAvailability.mockResolvedValue({
     enabled: true,
@@ -250,7 +253,7 @@ beforeEach(() => {
     estimated_cost_usd: 0.4,
     notes: [],
   });
-  apiMocks.setStoryOrder.mockResolvedValue(undefined);
+  apiMocks.setBandOrder.mockResolvedValue(undefined);
   apiMocks.undoStoryChange.mockResolvedValue(undefined);
   apiMocks.setShotStackUserState.mockResolvedValue(undefined);
   apiMocks.retryGeneration.mockResolvedValue({ id: 1, status: "queued", error: null, estimated_cost_usd: 0.4, actual_cost_usd: null, result_clip_id: null });
@@ -333,7 +336,7 @@ describe("镜头带", () => {
     expect(parseInt(first.style.width, 10)).toBeGreaterThanOrEqual(BAND_TILE_WIDTH);
     expect(parseInt(second.style.width, 10)).toBeGreaterThanOrEqual(BAND_TILE_WIDTH);
     for (const section of [first, second]) {
-      const placeholder = within(section).getByText("本章还没有镜头");
+      const placeholder = within(section).getByText("拖段进来或删除");
       expect(placeholder).toBeTruthy();
       // R10 U-17:占位上是可点的入口;R12 §2:一个主动作 + 「这章够了」,云端补镜不在空章上出现。
       // 这份夹具里没有收藏 / 评星的素材 → 主动作是「回到第 2 步挑几条」(有候选时才是「从挑好的片段里选」)。
@@ -342,7 +345,7 @@ describe("镜头带", () => {
       expect(within(section).queryByRole("button", { name: "生成候选" })).toBeNull();
       expect(within(section).queryByText(/个镜头/)).toBeNull();
     }
-    expect(screen.getAllByText("本章还没有镜头")).toHaveLength(2);
+    expect(screen.getAllByText("拖段进来或删除")).toHaveLength(2);
     // 占位瓦片有真实尺寸(R19 V-06:140×112,与 BAND_TILE_WIDTH / BAND_TILE_HEIGHT 同源),不是一条竖排文字。
     expect(WORKSPACE_CSS).toMatch(new RegExp(`\\.band-chapter-empty\\s*\\{[^}]*width:\\s*${BAND_TILE_WIDTH}px`));
     expect(WORKSPACE_CSS).toMatch(new RegExp(`\\.band-chapter-empty\\s*\\{[^}]*height:\\s*${BAND_TILE_HEIGHT}px`));
@@ -351,25 +354,27 @@ describe("镜头带", () => {
   it("拖排调 setStoryOrder 一次,顺序按 storyOrderRefs 生成", async () => {
     await renderBand();
     await dragSegment("镜头 2：B.MP4", "镜头 4：D.MP4");
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
     expect(
-      (apiMocks.setStoryOrder.mock.lastCall![0] as { clip_id: number }[]).map((ref) => ref.clip_id),
+      (apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map((ref) => ref.clip_id),
     ).toEqual([1, 3, 4, 2, 5, 6]);
   });
 
-  it("松手后 toast「已调整顺序 · 撤销」,点撤销调 undoStoryChange", async () => {
+  it("松手后 toast「已移动 1 段 · 撤销」,点撤销调 undoStoryChange", async () => {
     await renderBand();
     await dragSegment("镜头 2：B.MP4", "镜头 4：D.MP4");
-    expect(await screen.findByText("已调整顺序")).toBeTruthy();
+    expect(await screen.findByText("已移动 1 段")).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "撤销" }));
-    await waitFor(() => expect(apiMocks.undoStoryChange).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(2));
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map(ref => ref.clip_id)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
-  it("跨章节拖动不改章节归属,给出既有中文提示(set_story_order 不写章节)", async () => {
+  it("跨章节拖动保存该段的新归属", async () => {
     await renderBand();
     await dragSegment("镜头 2：B.MP4", "镜头 6：F.MP4");
-    expect(await screen.findByText("镜头仍归属原章节；请先合并章节再跨章排序")).toBeTruthy();
-    expect(apiMocks.setStoryOrder).not.toHaveBeenCalled();
+    expect(await screen.findByText("已移动 1 段")).toBeTruthy();
+    expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1);
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number; chapter_id: number }[]).find(ref => ref.clip_id === 2)?.chapter_id).toBe(2);
   });
 
   it("抓手上的 ←→ 是章内前后移一格,同样只写一次顺序", async () => {
@@ -377,9 +382,9 @@ describe("镜头带", () => {
     const grip = screen.getByRole("button", { name: "拖动 镜头 1：A.MP4" });
     grip.focus();
     fireEvent.keyDown(grip, { key: "ArrowRight", code: "ArrowRight" });
-    await waitFor(() => expect(apiMocks.setStoryOrder).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1));
     expect(
-      (apiMocks.setStoryOrder.mock.lastCall![0] as { clip_id: number }[]).map((ref) => ref.clip_id),
+      (apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number }[]).map((ref) => ref.clip_id),
     ).toEqual([2, 1, 3, 4, 5, 6]);
   });
 
@@ -448,7 +453,7 @@ describe("镜头带", () => {
     await act(async () => {
       press("f", "KeyF");
     });
-    await waitFor(() => expect(apiMocks.rateClip).toHaveBeenCalledWith(1, "binary", 1));
+    await waitFor(() => expect(apiMocks.rateClips).toHaveBeenCalledWith([{ clip_id: 1, rating_type: "binary", value: 1 }]));
   });
 });
 
@@ -647,12 +652,12 @@ describe("镜头带提示与热键边界", () => {
     try {
       await renderBand();
       await dragSegment("镜头 2：B.MP4", "镜头 4：D.MP4");
-      expect(await screen.findByText("已调整顺序")).toBeTruthy();
+      expect(await screen.findByText("已移动 1 段")).toBeTruthy();
       await act(async () => {
         // R12:带「撤销」的提示停 5 秒(GAP_UNDO_MS),不带的 4 秒。
         vi.advanceTimersByTime(5_000);
       });
-      await waitFor(() => expect(screen.queryByText("已调整顺序")).toBeNull());
+      await waitFor(() => expect(screen.queryByText("已移动 1 段")).toBeNull());
     } finally {
       vi.useRealTimers();
     }
@@ -662,25 +667,26 @@ describe("镜头带提示与热键边界", () => {
     await renderBand();
     await dragSegment("镜头 2：B.MP4", "镜头 4：D.MP4");
     const toast = await screen.findByRole("status");
-    expect(toast.textContent).toContain("已调整顺序");
+    expect(toast.textContent).toContain("已移动 1 段");
     await act(async () => {
       fireEvent.click(within(toast).getByRole("button", { name: "关闭提示" }));
     });
-    expect(screen.queryByText("已调整顺序")).toBeNull();
+    expect(screen.queryByText("已移动 1 段")).toBeNull();
   });
 
-  it("落到空槽位上的拖动被拒,给与跨章同一条提示", async () => {
+  it("落到缺口上追加到其所在章节，不给缺口编造时间", async () => {
     apiMocks.listStoryGaps.mockResolvedValue([gap(10, 1, "REAL/ESTABLISHING", "建立镜头")]);
     render(<><ShotBand /><ToastHost /></>);
     await screen.findByRole("gridcell", { name: "镜头 6：缺口 建立镜头" });
     await dragSegment("镜头 2：B.MP4", "镜头 6：缺口 建立镜头");
-    expect(await screen.findByText("镜头仍归属原章节；请先合并章节再跨章排序")).toBeTruthy();
-    expect(apiMocks.setStoryOrder).not.toHaveBeenCalled();
+    expect(await screen.findByText("已移动 1 段")).toBeTruthy();
+    expect(apiMocks.setBandOrder).toHaveBeenCalledTimes(1);
+    expect((apiMocks.setBandOrder.mock.lastCall![1] as { clip_id: number; chapter_id: number }[]).find(ref => ref.clip_id === 2)?.chapter_id).toBe(1);
   });
 
   it("评级先打乐观补丁,不等 rateClip 回来", async () => {
     // rateClip 永不 resolve —— 界面上的新评级只可能来自 patchClipInFeed。
-    apiMocks.rateClip.mockReturnValue(new Promise(() => undefined));
+    apiMocks.rateClips.mockReturnValue(new Promise(() => undefined));
     await renderBand();
     clickSegment("镜头 1：A.MP4");
     await act(async () => {
