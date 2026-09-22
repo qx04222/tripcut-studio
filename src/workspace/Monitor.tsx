@@ -1,3 +1,7 @@
+import type { PlaythroughRange } from "./playthrough/model";
+import { PlaythroughOverlay } from "./playthrough/PlaythroughOverlay";
+import { useMonitorPlaythrough } from "./playthrough/useMonitorPlaythrough";
+import { usePlaythroughView } from "./playthrough/store";
 import { PhotoMonitor } from "./PhotoMonitor";
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 
@@ -44,6 +48,7 @@ export function Monitor(): JSX.Element {
   const selection = useWorkspace((state) => state.selection);
   const immersive = useWorkspace((state) => state.immersive);
   const workspaceMode = useWorkspace((state) => state.workspaceMode);
+  const playthroughView = usePlaythroughView();
   const feed = useClipsFeed();
 
   const [clips, setClips] = useState<readonly ClipListItem[]>([]);
@@ -99,7 +104,7 @@ export function Monitor(): JSX.Element {
 
   // 井同时装进舞台的宽和高,舞台一变就重提交区域矩形(R9 D5)。舞台只在嵌入
   // 播放分支里存在,所以 effect 只跟着「这条分支是否在渲染」重跑。
-  const stageRef = useStageFit(MONITOR_EMBEDDED_PLAYBACK && !immersive && clip !== null && clip.kind !== "photo" && selectedSlot === null);
+  const stageRef = useStageFit(MONITOR_EMBEDDED_PLAYBACK && !immersive && clip !== null && clip.kind !== "photo" && selectedSlot === null, playthroughView?.active);
 
   // 换素材就把上一条的打点丢掉 —— 让 I/O 跨素材存活会把 A 的入点配上 B 的出点。
   useEffect(() => {
@@ -154,18 +159,29 @@ export function Monitor(): JSX.Element {
     outPoint,
     bestStart: suggestions.bestStart,
     momentsLoaded: suggestions.momentsLoaded,
+    playthroughActive: playthroughView !== null && playthroughView.phase !== "idle",
   });
+  const playthrough = useMonitorPlaythrough(transport, status, selectedClipId, workspaceMode === "video" && !immersive && MONITOR_EMBEDDED_PLAYBACK);
+  // 仅预留 props;MonitorControls → MonitorSeekBar 的内部透传由 scrubber 车道接续。
+  const playthroughProps: { playthrough?: PlaythroughRange } = playthrough.active && playthrough.segment ? { playthrough: {
+    inPoint: playthrough.segment.inPoint, outPoint: playthrough.segment.outPoint, index: playthrough.index, total: playthrough.total,
+  } } : {};
   const onNudge = transport.nudge;
   const onSeek = transport.seekTo;
   // Y-10:J 倒退中 mpv 是暂停的,单看 status 会把空格 / 走带按钮当成「播放」—— 倒退中一律等于 K(停下)。
   const { rewinding, shuttle } = transport;
   const togglePlayback = useCallback(() => {
+    if (playthrough.active) {
+      if (playthrough.phase === "paused") playthrough.resume(); else playthrough.pause();
+      return;
+    }
+    if (playthrough.phase === "done") playthrough.stop();
     if (rewinding) {
       shuttle("k");
       return;
     }
     onPlayPause();
-  }, [rewinding, shuttle, onPlayPause]);
+  }, [rewinding, shuttle, onPlayPause, playthrough]);
 
   // 当前建议一变(载入 / N / ⇧N)就把入出点填成它 —— I / O 微调、S 或 Enter 保存,都是同一条路。
   const { current: currentSuggestion, index: suggestionIndex } = suggestions;
@@ -254,7 +270,10 @@ export function Monitor(): JSX.Element {
     disabled: clip?.kind === "photo",
     onMark: markAt,
     onNudge,
-    onShuttle: transport.shuttle,
+    onShuttle: (key) => {
+      if (playthrough.active && key !== "j") { if (key === "k") playthrough.pause(); else playthrough.resume(); }
+      else { if (key === "j") playthrough.stop(); transport.shuttle(key); }
+    },
     onTogglePlayback: togglePlayback,
     onAdoptSuggestion: suggestionIndex >= 0 ? () => void onSaveSegment() : undefined,
     onStepSuggestion,
@@ -320,7 +339,8 @@ export function Monitor(): JSX.Element {
 
   return (
     <MonitorFrame meta={clip.file_name} rootRef={rootRef}>
-      <div className="monitor-stage" ref={stageRef}>
+      <div className={`monitor-stage${playthrough.active ? " playthrough-stage" : ""}`} ref={stageRef}>
+        {playthrough.active ? <PlaythroughOverlay controller={playthrough} /> : null}
         <div className="monitor-well monitor-well--video">
           {/* 井底铺封面(U-09):原生 mpv 视图压在 WKWebView 之上,画面在时它盖住这层;
               被覆盖层遮挡(player_set_occluded)或链路还没建好时,露出来的是封面而不是整块黑。 */}
@@ -338,7 +358,12 @@ export function Monitor(): JSX.Element {
         </div>
       </div>
       <MonitorControls
+        {...playthroughProps}
         clip={clip}
+        onPause={() => send([{ type: "pause" }])}
+        onResume={() => send([{ type: "play" }])}
+        onTrim={(edge, seconds) => { if (edge === "in") setInPoint(seconds); else setOutPoint(seconds); }}
+        onShuttle={transport.shuttle}
         status={status}
         inPoint={inPoint}
         outPoint={outPoint}
@@ -352,8 +377,8 @@ export function Monitor(): JSX.Element {
         onPlayPause={togglePlayback}
         onNudge={onNudge}
         onToggleMute={transport.toggleMute}
-        onCycleSpeed={() => transport.shuttle("l")}
-        onSelectSpeed={transport.setRate}
+        onCycleSpeed={() => { if (!playthrough.switching) { if (playthrough.phase === "done") playthrough.stop(); playthrough.resume(); transport.shuttle("l"); } }}
+        onSelectSpeed={(rate) => { if (!playthrough.switching) { if (playthrough.phase === "done") playthrough.stop(); playthrough.resume(); transport.setRate(rate); } }}
         onMarkIn={() => markAt("in")}
         onMarkOut={() => markAt("out")}
         onSaveSegment={() => void onSaveSegment()}

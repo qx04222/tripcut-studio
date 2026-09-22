@@ -215,7 +215,7 @@ async function letAPlayTo(seconds: number, paused: boolean): Promise<void> {
     await flush();
     await waitFor(() => expect(live.paused).toBe(true));
   }
-  await waitFor(() => expect(screen.getByRole("slider", { name: "播放位置" }).getAttribute("value")).toBe(String(seconds)));
+  await waitFor(() => expect(screen.getByRole("slider", { name: "播放位置" }).getAttribute("aria-valuenow")).toBe(String(seconds)));
 }
 
 async function selectB(): Promise<void> {
@@ -242,7 +242,7 @@ describe("R17 playfix:换素材从头开始", () => {
     expect(seeks).toEqual([]);
     expect(live.clip_id).toBe(10);
     expect(live.pos).toBe(0);
-    expect(screen.getByRole("slider", { name: "播放位置" }).getAttribute("value")).toBe("0");
+    expect(screen.getByRole("slider", { name: "播放位置" }).getAttribute("aria-valuenow")).toBe("0");
   });
 
   it("关掉「从最精彩处」:A 正在播(12.3 s 未暂停)时切 B → 同样没有 seek_abs", async () => {

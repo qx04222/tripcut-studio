@@ -1,3 +1,4 @@
+import { PlaythroughStatus } from "./playthrough/PlaythroughOverlay";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
 import {
   IMPORT_PROBE_DONE_EVENT,
@@ -470,6 +471,7 @@ export function StatusStrip({ composing }: { composing?: boolean } = {}): JSX.El
         </>
       ) : null}
       <span className="workspace-status-phrases">
+        <PlaythroughStatus />
         {phrases
           .filter((phrase) => !phrase.startsWith("缺失素材"))
           .map((phrase) => {

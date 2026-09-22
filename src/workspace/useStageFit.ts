@@ -16,13 +16,22 @@ import { PLAYER_VIEWPORT_REFRESH_EVENT } from "./usePlayerOcclusion";
  * 一次区域矩形重提交(没 deps 的版本每 80ms 状态轮询都重建观察者、重发广播,
  * 把 PlayerOverlay 的防抖饿死——真机 P0-A/P0-B)。
  */
-export function useStageFit(active: boolean): RefObject<HTMLDivElement | null> {
+export function useStageFit(active: boolean, layoutKey?: boolean): RefObject<HTMLDivElement | null> {
   const stageRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     const stage = stageRef.current;
     const pane = stage?.parentElement;
     if (!active || !stage || !pane || typeof ResizeObserver === "undefined") return;
     let last = { width: -1, height: -1 };
+    // R22 F-R22-03:传输条长高后井常常被栏高钉死,检查器滑出 / 收起时井只**平移**不变大;
+    // 原生 GL 视图跟的是井的屏幕矩形,位置变了也要广播,不然画面停在旧位置、右边露出封面底图。
+    let lastRect = { left: NaN, top: NaN, width: NaN, height: NaN };
+    const broadcastIfMoved = (well: HTMLElement) => {
+      const rect = well.getBoundingClientRect();
+      if (rect.left === lastRect.left && rect.top === lastRect.top && rect.width === lastRect.width && rect.height === lastRect.height) return;
+      lastRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      window.dispatchEvent(new Event(PLAYER_VIEWPORT_REFRESH_EVENT));
+    };
     const apply = () => {
       const well = stage.querySelector<HTMLElement>(":scope > .monitor-well");
       if (!well) return;
@@ -35,16 +44,23 @@ export function useStageFit(active: boolean): RefObject<HTMLDivElement | null> {
       const height =
         pane.clientHeight - siblings - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
       const fit = fitWell(width, height);
-      if (fit.width <= 0 || (fit.width === last.width && fit.height === last.height)) return;
+      if (fit.width <= 0 || (fit.width === last.width && fit.height === last.height)) {
+        broadcastIfMoved(well);
+        return;
+      }
       last = fit;
       well.style.width = `${fit.width}px`;
       well.style.height = `${fit.height}px`;
+      const rect = well.getBoundingClientRect();
+      lastRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
       window.dispatchEvent(new Event(PLAYER_VIEWPORT_REFRESH_EVENT));
     };
     apply();
     const observer = new ResizeObserver(apply);
     observer.observe(pane);
+    // 舞台自己的宽也要看:检查器是栏内的滑出层,它开合只改舞台宽、不改栏根。
+    observer.observe(stage);
     return () => observer.disconnect();
-  }, [active]);
+  }, [active, layoutKey]);
   return stageRef;
 }

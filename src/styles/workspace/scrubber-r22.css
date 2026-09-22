@@ -1,0 +1,34 @@
+/* R22: all controls stay within monitor; preview portal uses its own prefix. */
+/* 框住的走带条本来是定高 36px 的一行(kit/toolbar.css);轨道占满一整行后要放开高度,
+   否则 56px 的轨道下半截压在监视器底边之外、被「调整监视器高度」把手盖住,拖不到。 */
+.monitor .monitor-transport:has(.scrubber-r22) { flex-wrap: wrap; height: auto; padding-block: var(--space-1); }
+.monitor .monitor-transport:has(.scrubber-r22) .ui-toolbar-divider { height: var(--control-md); }
+.workspace-shell .monitor .monitor-transport .monitor-seek:has(.scrubber-r22) { flex: 1 0 100%; order: -1; height: auto; min-width: 0; padding: var(--space-2) 0; }
+.monitor .scrubber-r22 { display: flex; flex: 1; align-items: center; gap: var(--space-2); min-width: 0; }
+.monitor .scrubber-r22-track-wrap { position: relative; flex: 1; min-width: 0; }
+.monitor .scrubber-r22-track { position: relative; height: 56px; touch-action: none; user-select: none; cursor: crosshair; border-bottom: 1px solid var(--border-hair); border-radius: var(--radius-4); background: var(--surface-chrome-2); }
+.monitor .scrubber-r22-track[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+.monitor .scrubber-r22-ticks { position: absolute; inset: 0 0 auto; height: 20px; overflow: hidden; color: var(--text-muted); font: var(--text-11) var(--font-mono); pointer-events: none; }
+.monitor .scrubber-r22-ticks > span { position: absolute; top: 0; height: 20px; border-left: 1px solid var(--border-hair); padding-left: var(--space-1); white-space: nowrap; }
+.monitor .scrubber-r22-ticks > .minor { top: 16px; height: 4px; }
+.monitor .scrubber-r22-media { position: absolute; inset: 22px 0 0; overflow: hidden; pointer-events: none; }
+.monitor .scrubber-r22-source { position: absolute; top: 0; bottom: 0; }
+.monitor .scrubber-r22-wave { width: 100%; height: 30px; fill: var(--text-muted); opacity: 0.35; }
+.monitor .scrubber-r22 .monitor-heat { position: absolute; bottom: 0; left: 0; width: 100%; height: 6px; opacity: 0.6; }
+.monitor .scrubber-r22-fill { position: absolute; top: 22px; bottom: 0; left: 0; background: var(--accent-tint); pointer-events: none; }
+.monitor .scrubber-r22-range { position: absolute; top: 22px; bottom: 0; height: auto; border-block: 1px solid var(--accent); background: var(--accent-tint); pointer-events: none; }
+.monitor .scrubber-r22-outside { position: absolute; top: 22px; bottom: 0; background: color-mix(in srgb, var(--surface-chrome-2) 70%, transparent); pointer-events: none; }
+/* R22-B 镜头带连播:当前段 in→out 在轨道上的高亮条(压在已播填充之上、播放头之下),右侧「第 n/m 段」。 */
+.monitor .scrubber-r22-playthrough { position: absolute; top: 22px; bottom: 0; border-block: 2px solid var(--playhead); background: color-mix(in srgb, var(--playhead) 18%, transparent); pointer-events: none; }
+.monitor .scrubber-r22-playthrough-label { color: var(--text-secondary); font: var(--text-11) var(--font-mono); white-space: nowrap; }
+.monitor .scrubber-r22-head { position: absolute; top: 16px; bottom: 0; width: 2px; transform: translateX(-1px); background: var(--playhead); pointer-events: none; }
+.monitor .scrubber-r22-head::before { content: ""; position: absolute; top: -4px; left: -4px; width: 10px; height: 8px; border-radius: var(--radius-2); background: var(--playhead); }
+.monitor .scrubber-r22-handle { position: absolute; top: 22px; width: 12px; height: 34px; display: grid; place-items: center; border-radius: var(--radius-2); background: var(--accent); color: var(--accent-ink); font: var(--text-11) var(--font-mono); cursor: ew-resize; touch-action: none; user-select: none; }
+.monitor .scrubber-r22-handle--in { transform: translateX(-100%); }
+.monitor .scrubber-r22-time, .monitor .scrubber-r22-scope { border: 0; border-radius: var(--radius-4); background: transparent; color: var(--text-secondary); font: var(--text-11) var(--font-mono); padding: var(--space-1); white-space: nowrap; cursor: pointer; }
+.monitor .scrubber-r22-time:hover, .monitor .scrubber-r22-scope:hover { background: var(--accent-tint); color: var(--accent-text); }
+.monitor .scrubber-r22-time-input { width: 9ch; background: var(--surface-card); color: var(--text-primary); border: 1px solid var(--accent); border-radius: var(--radius-4); font: var(--text-11) var(--font-mono); }
+.monitor .scrubber-r22-time-input[aria-invalid="true"] { border-color: var(--danger); }
+.scrubber-r22-preview { position: fixed; z-index: var(--z-menu); transform: translateX(-50%); display: grid; gap: var(--space-1); padding: var(--space-1); background: var(--surface-raised); color: var(--text-primary); border: 1px solid var(--border-hair); border-radius: var(--radius-6); box-shadow: var(--shadow-raised); font: var(--text-11) var(--font-mono); text-align: center; pointer-events: none; }
+.scrubber-r22-preview img { object-fit: contain; background: var(--well-bg); border-radius: var(--radius-4); }
+.scrubber-r22-no-frame { display: grid; place-items: center; width: 160px; height: 90px; color: var(--text-muted); }

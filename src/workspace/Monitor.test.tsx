@@ -184,7 +184,7 @@ describe("Monitor", () => {
     render(<Monitor />);
     await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
     await flush();
-    expect(screen.getByLabelText("当前时间码").textContent).toBe("00:12.5");
+    expect(screen.getByLabelText("当前时间码").textContent).toBe("00:12.15");
     expect(screen.getByLabelText("当前时间码").getAttribute("title")).toBe("00:00:12.500");
   });
 
@@ -212,8 +212,10 @@ describe("Monitor", () => {
     render(<Monitor />);
     await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalled());
     await flush();
+    fireEvent.click(screen.getByRole("button", { name: "当前时间码" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "输入时间码" }), { target: { value: "30.00" } });
     await act(async () => {
-      fireEvent.change(screen.getByRole("slider", { name: "播放位置" }), { target: { value: "30" } });
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "输入时间码" }), { key: "Enter" });
     });
     expect(apiMocks.playerCommand).toHaveBeenCalledWith({ type: "seek_abs", seconds: 30 }, expect.anything());
     expect(apiMocks.playerOpen).toHaveBeenCalledTimes(1);

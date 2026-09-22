@@ -1,0 +1,23 @@
+{
+  "scope": "decoder-only surrogate; not Tauri/render/drag acceptance",
+  "source": "synthetic HEVC 1080p30, 10 bit, GOP 120",
+  "samples_ms": [
+    26.957,
+    28.728,
+    109.087,
+    52.057,
+    95.247,
+    83.446,
+    110.675,
+    37.05,
+    55.099,
+    61.888
+  ],
+  "hwdec_current": {
+    "request_id": 2,
+    "error": "property unavailable"
+  },
+  "p50_ms": 58.493,
+  "p95_ms": 110.675,
+  "completed": true
+}

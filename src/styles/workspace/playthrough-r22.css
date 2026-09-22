@@ -1,0 +1,11 @@
+/* Reserve a rail above the native viewport: NSView sits above web content. */
+.monitor .playthrough-stage { position: relative; padding-top: var(--space-6); }
+.monitor .playthrough-overlay {
+  position: absolute; top: 0; left: var(--space-2); right: var(--space-2);
+  z-index: var(--z-overlay); color: var(--text-primary); background: var(--surface-panel);
+  font-size: var(--text-11); line-height: var(--lh-11);
+}
+.monitor .playthrough-row { display: flex; align-items: center; gap: var(--space-1); }
+.monitor .playthrough-row > span { margin-right: auto; }
+.monitor .playthrough-progress { height: 2px; background: var(--border-hair); }
+.monitor .playthrough-progress > span { display: block; height: 100%; background: var(--accent); }

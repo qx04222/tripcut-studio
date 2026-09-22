@@ -1,3 +1,4 @@
+import { requestPlaythrough } from "./workspace/playthrough/store";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Command } from "cmdk";
 
@@ -200,6 +201,7 @@ export function CommandPalette({ onNavigate, onSelectClip, workspaceMode = "vide
             <Command.Item onSelect={() => go("open-settings")}>打开设置</Command.Item>
             <Command.Item onSelect={() => go("open-help")}>打开帮助</Command.Item>
             <Command.Item onSelect={() => { setOpen(false); requestDuel({ workspaceMode }); }}>擂台</Command.Item>
+            {workspaceMode === "video" ? <Command.Item onSelect={() => { setOpen(false); requestPlaythrough(); }}>镜头带连播</Command.Item> : null}
           </Command.Group>
           <Command.Group heading="附属带">
             <Command.Item onSelect={() => go("band-story")}>切到故事附属带</Command.Item>

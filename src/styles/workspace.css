@@ -1,3 +1,5 @@
+@import "./workspace/scrubber-r22.css";
+@import "./workspace/playthrough-r22.css";
 /*
  * R8 导演台工作区的样式。本轮所有新壳样式都往这里加 —— styles.css 有 8000 多行,
  * 不重写它。颜色一律用 styles.css 顶部已有的 token,这里不新增任何颜色字面量。

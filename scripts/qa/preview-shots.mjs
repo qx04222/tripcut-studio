@@ -16,6 +16,7 @@ import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
+import { scrubberScenario } from "./scrubber-scenario.mjs";
 import { photoScenario } from "./photo-scenario.mjs";
 import { duelScenario } from "./duel-scenario.mjs";
 import { makeMockCovers } from "./make-mock-covers.mjs";
@@ -450,6 +451,7 @@ async function workspaceScript(page, context, viteUrl) {
     settle: 600,
   });
   await page.setViewportSize(NARROW);
+  await scrubberScenario(page, shot);
   // R19 V-04(取代 R10 U-04 的折叠走查):检查器是监视器栏内的滑出层。1280 下:选中 → 300ms 内展开;
   // Esc → 收起;中栏(.workspace-center)clientWidth 开合前后相等;📌 钉住 → 常驻、Esc 不收;1512 截一张钉住态。
   {
@@ -535,7 +537,7 @@ async function workspaceScript(page, context, viteUrl) {
       await monitor.getByText(/^建议 1\/\d$/).waitFor({ timeout: STEP_TIMEOUT_MS });
       const suggestionTitle = await monitor.locator(".monitor-suggestion").getAttribute("title");
       if (!suggestionTitle || !suggestionTitle.includes("按 Enter 采用这段")) failures.push(`16-heat-strip: 建议 tooltip 缺「按 Enter 采用这段」: ${suggestionTitle}`);
-      if ((await monitor.locator(".monitor-seek-track .monitor-heat").count()) !== 1) failures.push("16-heat-strip: 热力条没有画在 seek 轨道里");
+      if ((await monitor.locator(".scrubber-r22-track .monitor-heat").count()) !== 1) failures.push("16-heat-strip: 热力条没有画在 seek 轨道里");
       if ((await monitor.locator(".monitor-heat-row").count()) !== 0) failures.push("16-heat-strip: 假时码热力行还在");
       if ((await monitor.locator(".monitor-well-chips").count()) !== 0) failures.push("16-heat-strip: 井内 chip 还在");
       const controlsChildren = await monitor.locator(".monitor-controls").evaluate((node) => node.children.length);
@@ -547,10 +549,24 @@ async function workspaceScript(page, context, viteUrl) {
       const bolts = await p.getByRole("region", { name: "媒体池" }).locator(".pool-card-bolt").count();
       if (bolts === 0) failures.push("16-heat-strip: no 有建议段 bolt badge in the pool");
       await p.getByRole("region", { name: "镜头带" }).getByRole("button", { name: "自动挑选精选段" }).waitFor({ timeout: STEP_TIMEOUT_MS });
-      // 热力条与 seek 轨道左缘对齐(容差 6px)。
+      // 热力条与 seek 轨道左缘对齐(容差 6px)。R22 起轨道默认放大到精选段,热力层按全片时间
+      // 铺在轨道底下会被左移 —— 先切到「全片」再量,量完切回。
+      const scope = monitor.getByRole("button", { name: "切换进度条范围" });
+      const zoomed = (await scope.textContent()) === "片段";
+      if (zoomed) {
+        // 点卡片会让检查器滑出(300 ms),按钮在动画里平移,真鼠标的 pointerdown 与 mouseup 会落在两处 ——
+        // 这里只想切状态,直接派发 click 事件(React 的 onClick 就挂在它上)。
+        await scope.dispatchEvent("click");
+        // 用同一个 locator 轮询(document.querySelector 可能抓到别的监视器实例);切不回去就记失败,别卡在这一步。
+        let flipped = false;
+        for (let n = 0; n < 30 && !flipped; n++) { await p.waitForTimeout(100); flipped = (await scope.textContent()) === "全片"; }
+        if (!flipped) failures.push("16-heat-strip: 「切换进度条范围」点了没切到「全片」");
+      }
       const heat = await monitor.locator(".monitor-heat").boundingBox();
-      const track = await monitor.locator(".monitor-seek-track").boundingBox();
+      const track = await monitor.locator(".scrubber-r22-track").boundingBox();
       if (heat && track && Math.abs(heat.x - track.x) > 6) failures.push(`16-heat-strip: heat strip x=${heat.x} vs seek track x=${track.x}`);
+      if (heat && track && Math.abs(heat.width - track.width) > 6) failures.push(`16-heat-strip: heat strip width=${heat.width} vs seek track width=${track.width}`);
+      if (zoomed) await scope.dispatchEvent("click");
     },
     settle: 700,
   });
@@ -1043,7 +1059,7 @@ async function workspaceScript(page, context, viteUrl) {
         const shotMenu = p.getByRole("menu", { name: "镜块操作" });
         await shotMenu.waitFor({ timeout: STEP_TIMEOUT_MS });
         const items = await shotMenu.getByRole("menuitem").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
-        if (items.join("|") !== "往前|往后|从镜头带移出|删除精选段|导出这一段|擂台") failures.push(`29-entity-menus: 镜块菜单 ${items.join("|")}`);
+        if (items.join("|") !== "往前|往后|从镜头带移出|删除精选段|导出这一段|从这段开始连播|擂台") failures.push(`29-entity-menus: 镜块菜单 ${items.join("|")}`);
         await p.keyboard.press("Escape");
         await shotMenu.waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
       }
@@ -1266,6 +1282,25 @@ async function workspaceScript(page, context, viteUrl) {
         if ((await results.getByRole("textbox", { name: "一句话挑片" }).count()) !== 1) failures.push("36-prompt-select: 结果面板顶部缺「再挑一次」的输入框");
       },
       settle: 600,
+    });
+    await fresh.close();
+  }
+
+  // R22-B:连播中。独立页,实际入口触发,不伪造 UI 状态。
+  {
+    const fresh = await context.newPage();
+    fresh.setDefaultTimeout(STEP_TIMEOUT_MS);
+    await fresh.goto(withTheme(viteUrl), { waitUntil: "domcontentloaded" });
+    await shot(fresh, "playthrough-playing", {
+      locate: p => p.getByRole("button", { name: "镜头带连播", exact: true }),
+      act: async (button, p) => {
+        await button.click();
+        await p.getByRole("group", { name: "镜头带连播预览" }).waitFor();
+        await p.waitForFunction(() => Number(document.querySelector(".playthrough-overlay")?.getAttribute("data-switch-ms")) > 0);
+        await p.getByRole("button", { name: "下一段", exact: true }).click();
+        await p.getByText(/连播 · 第 2\//).waitFor();
+      },
+      settle: 500,
     });
     await fresh.close();
   }

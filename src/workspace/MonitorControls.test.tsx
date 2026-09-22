@@ -3,11 +3,11 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ClipListItem, PlayerStatus } from "../api";
 import { MonitorControls, formatShortTimecode } from "./MonitorControls";
-import { SEEK_THROTTLE_MS, isAtEnd } from "./MonitorSeekBar";
+import { isAtEnd } from "./MonitorSeekBar";
 
 const clip = {
   id: 9,
@@ -60,7 +60,10 @@ function renderControls(overrides: Partial<Parameters<typeof MonitorControls>[0]
   return handlers;
 }
 
+beforeEach(() => { vi.stubGlobal("PointerEvent", MouseEvent); localStorage.clear(); });
+
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
   vi.useRealTimers();
 });
@@ -76,54 +79,55 @@ describe("formatShortTimecode(U-10)", () => {
 });
 
 describe("MonitorControls · seek bar(U-09)", () => {
-  it("有一根 range 滑杆,AX 名「播放位置」,范围 0..总时长,值跟随状态", () => {
+  it("有一根自绘滑杆,AX 名「播放位置」,范围 0..总时长,值跟随状态", () => {
     renderControls();
-    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLInputElement;
-    expect(slider.tagName).toBe("INPUT");
-    expect(slider.type).toBe("range");
-    expect(slider.min).toBe("0");
-    expect(slider.max).toBe("36");
-    expect(Number(slider.value)).toBeCloseTo(35.9, 3);
-    expect(slider.disabled).toBe(false);
+    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLElement;
+    expect(slider.tagName).toBe("DIV");
+    expect(slider.getAttribute("role")).toBe("slider");
+    expect(slider.getAttribute("aria-valuemin")).toBe("0");
+    expect(slider.getAttribute("aria-valuemax")).toBe("36");
+    expect(Number(slider.getAttribute("aria-valuenow"))).toBeCloseTo(35.9, 3);
+    expect(slider.getAttribute("aria-disabled")).toBe("false");
   });
 
   it("未 ready 时滑杆禁用,不发 seek", () => {
     const handlers = renderControls({ status: null });
-    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLInputElement;
-    expect(slider.disabled).toBe(true);
-    fireEvent.change(slider, { target: { value: "3" } });
+    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLElement;
+    expect(slider.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
     expect(handlers.onSeek).not.toHaveBeenCalled();
   });
 
-  it("拖动中 seek 按 120ms 节流,松手立刻定位到最终值;拖动中显示本地值不被状态拉回", () => {
+  it("拖动中 seek 按 rAF 合并,松手立刻定位到最终值;拖动中显示本地值不被状态拉回", () => {
     vi.useFakeTimers();
     const handlers = renderControls();
-    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLInputElement;
-    fireEvent.pointerDown(slider);
-    fireEvent.input(slider, { target: { value: "5" } });
-    // 首次立刻发一次(拖起来就有反馈),之后 120ms 内的都合并成最后一次。
+    const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLElement;
+    vi.spyOn(slider, "getBoundingClientRect").mockReturnValue({ left: 0, width: 360 } as DOMRect);
+    fireEvent.pointerDown(slider, { clientX: 50 });
+    // 首次立刻发一次,之后一帧内的移动合并为最新位置。
     expect(handlers.onSeek).toHaveBeenCalledTimes(1);
     expect(handlers.onSeek).toHaveBeenLastCalledWith(5);
-    fireEvent.input(slider, { target: { value: "6" } });
-    fireEvent.input(slider, { target: { value: "7" } });
+    fireEvent.pointerMove(slider, { clientX: 60 });
+    fireEvent.pointerMove(slider, { clientX: 70 });
     expect(handlers.onSeek).toHaveBeenCalledTimes(1);
-    expect(slider.value).toBe("7");
+    // rAF 同时刷新本地播放头与 seek,旧状态不会拉回它。
     act(() => {
-      vi.advanceTimersByTime(SEEK_THROTTLE_MS);
+      vi.advanceTimersByTime(20);
     });
     expect(handlers.onSeek).toHaveBeenCalledTimes(2);
+    expect(slider.getAttribute("aria-valuenow")).toBe("7");
     expect(handlers.onSeek).toHaveBeenLastCalledWith(7);
-    fireEvent.input(slider, { target: { value: "9" } });
-    fireEvent.pointerUp(slider);
+    fireEvent.pointerMove(slider, { clientX: 90 });
+    fireEvent.pointerUp(slider, { clientX: 90 });
     expect(handlers.onSeek).toHaveBeenLastCalledWith(9);
     expect(handlers.onSeek).toHaveBeenCalledTimes(3);
   });
 
-  it("键盘左右(change 事件)直接定位一次", () => {
+  it("键盘左右直接逐帧定位一次", () => {
     const handlers = renderControls();
     const slider = screen.getByRole("slider", { name: "播放位置" });
-    fireEvent.change(slider, { target: { value: "10" } });
-    expect(handlers.onSeek).toHaveBeenCalledWith(10);
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    expect(handlers.onSeek).toHaveBeenCalledWith(35.9 - 1 / 30);
   });
 
   it("isAtEnd:距尾 ≤ 0.2 秒算播完;未 ready 或零时长不算", () => {
@@ -140,7 +144,7 @@ describe("MonitorControls · 最小宽度(U-10)", () => {
   it("时间码用短格式,精确值留在 title;AX 名不变", () => {
     renderControls();
     const current = screen.getByLabelText("当前时间码");
-    expect(current.textContent).toBe("00:35.9");
+    expect(current.textContent).toBe("00:35.27");
     expect(current.getAttribute("title")).toBe("00:00:35.900");
     const total = screen.getByLabelText("素材总时长");
     // R19 V-05:总时长站在 seek 右端,不再带「/」前缀。
@@ -161,7 +165,7 @@ describe("MonitorControls · 最小宽度(U-10)", () => {
     const seekRow = toolbar.querySelector(".monitor-seek")!;
     expect(seekRow).not.toBeNull();
     expect(seekRow.querySelector(".monitor-timecode")).not.toBeNull();
-    expect(seekRow.querySelector("input[type=range]")).not.toBeNull();
+    expect(seekRow.querySelector('[role="slider"]')).not.toBeNull();
     const last = toolbar.lastElementChild as HTMLElement;
     expect(last.getAttribute("aria-label")).toBe("全屏沉浸");
     expect(last.textContent).toContain("全屏");
@@ -217,7 +221,7 @@ describe("R19 shell · V-05 单检视器:传输条并成一行,热力画进 seek
     const root = document.querySelector(".monitor-controls")!;
     expect(root.children.length).toBeLessThanOrEqual(2);
     const toolbar = screen.getByRole("toolbar", { name: "走带与打点" });
-    expect(toolbar.querySelector(".monitor-seek input[type=range]")).not.toBeNull();
+    expect(toolbar.querySelector('.monitor-seek [role="slider"]')).not.toBeNull();
     expect(toolbar.querySelector(".monitor-timecode")).not.toBeNull();
     for (const name of ["播放位置", "入点", "出点", "保存片段", "全屏沉浸"]) {
       expect(toolbar.querySelector(`[aria-label="${name}"]`), name).not.toBeNull();
@@ -229,7 +233,7 @@ describe("R19 shell · V-05 单检视器:传输条并成一行,热力画进 seek
     expect(document.querySelector(".monitor-heat-row")).toBeNull();
     expect(document.querySelector(".monitor-heat-spacer")).toBeNull();
     const heat = screen.getByRole("img", { name: "时刻热力" });
-    expect(heat.closest(".monitor-seek-track")).not.toBeNull();
+    expect(heat.closest(".scrubber-r22-track")).not.toBeNull();
     expect(screen.queryByText("按 Enter 采用这段")).toBeNull();
     const suggestion = screen.getByTestId("monitor-suggestion");
     expect(suggestion.textContent).toContain("建议 1/2");

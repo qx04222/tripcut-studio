@@ -74,6 +74,7 @@ export function SelectSegmentsSection({
 
   const replay = useCallback(
     async (segment: SelectSegment) => {
+      window.dispatchEvent(new Event("tripcut:manual-seek"));
       const inSeconds = segmentSeconds(segment.in_ticks, segment.tb_num, segment.tb_den);
       try {
         await playerCommand({ type: "seek_abs", seconds: inSeconds }, clipId);

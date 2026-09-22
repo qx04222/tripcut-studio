@@ -2704,3 +2704,18 @@ Object.assign(HANDLERS, duelHandlers(state));
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("photos")) {
   state.similarGroups.push({ id: 9021, min_similarity: 0.96, members: PHOTO_CLIPS_R21.map((c, i) => ({ clip_id: c.id!, is_primary: i === 0 })) });
 }
+
+// R22 scrubber: explicitly synthetic preview/waveform for browser interaction QA.
+HANDLERS.frame_at = ({ clipId }) => {
+  const cover = clipById(clipId).cover_url;
+  // ?slowframe=1:模拟真机 ffmpeg 抽帧的耗时(浏览器交互 QA 用),否则立即返回。
+  if (typeof location !== "undefined" && new URLSearchParams(location.search).has("slowframe")) return new Promise(resolve => setTimeout(() => resolve(cover), 700));
+  return cover;
+};
+(MOCK_COMMANDS as string[]).push("frame_at");
+const artifactsBeforeR22 = HANDLERS.get_clip_artifacts;
+HANDLERS.get_clip_artifacts = args => ({
+  ...(artifactsBeforeR22(args) as ClipArtifacts),
+  waveform: `data:application/json,${encodeURIComponent(JSON.stringify({ version: 1, bins: 2000,
+    peaks: Array.from({ length: 2000 }, (_, i) => { const p = 0.15 + 0.7 * Math.abs(Math.sin(i * 0.13) * Math.cos(i * 0.037)); return [-p, p]; }) }))}`,
+});

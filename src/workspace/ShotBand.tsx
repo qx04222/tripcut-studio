@@ -1,3 +1,5 @@
+import { PlaythroughButton } from "./playthrough/PlaythroughOverlay";
+import { useBandPlaythrough } from "./playthrough/useBandPlaythrough";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
 import { BandJianyingButton } from "./BandJianyingButton";
 import { BandTimelineStage } from "./BandTimeRuler";
@@ -134,6 +136,7 @@ export function ShotBand(): JSX.Element {
   // R13 §4:时间线化 —— 折叠 / 刻度 / 播放头 / 点击定位 / 拖边裁剪(状态在 useBandTimeline,换算在 bandTimeline)。
   const selectedClipId = selection?.kind === "clip" ? selection.clipId : null;
   const timeline = useBandTimeline({ chapters, board: effectiveBoard, clipsById: feed.clipsById, selectedClipId, selectClip });
+  const playthroughKey = useBandPlaythrough(allChapters, feed.clipsById, viewportRef, timeline, setView);
   const { offsets, folded, trim, seekInSegment } = timeline;
   const activeChapterIndex = useMemo(() => {
     if (scrollLeft !== null) {
@@ -203,12 +206,9 @@ export function ShotBand(): JSX.Element {
         selectSlot(segment.chapterId, segment.slot);
       } else if (segment.clipId !== null) {
         selectClip(segment.clipId);
-        // R13 §4:点在镜块几分之几处就定位到本段的那一刻(整条素材 = 素材的那一刻)。
         if (ratio !== undefined) seekInSegment(segment, ratio);
       }
       takesRef.current?.resetTakes();
-      // 单键评级只认「事件目标就是容器本身」(useRatingHotkeys 的既有语义) ——
-      // 点完分段把焦点交回带本身,否则点一下之后 F/X/1–5 就全哑了。
       viewportRef.current?.focus();
     },
     [selectClip, selectSlot, seekInSegment],
@@ -217,7 +217,6 @@ export function ShotBand(): JSX.Element {
   const takes = useBandTakes({ selection, selectedClip, selectedStack, clipsById: feed.clipsById, segments, selectedIndex, selectSegment });
   takesRef.current = takes;
 
-  // R12 §3:拖排 / 加入镜头带的提示改走全局 Toast(带「撤销」时给 5 秒),镜头带底部那行小字退役。
   const { notice, undoable, undo: undoDrag, dismissNotice } = drag;
   useEffect(() => {
     if (notice === null) return;
@@ -250,7 +249,6 @@ export function ShotBand(): JSX.Element {
   }, []);
 
   const closePicker = useCallback(() => setPicker(null), []);
-  // 候选一直算着(不只在弹层打开时):缺口卡 / 空章卡按它决定主动作是「从挑好的片段里选」还是「回到第 2 步挑几条」。
   const pickerCandidates = useMemo(() => bandPickerCandidates(feed.clips, board), [feed.clips, board]);
   const hasCandidates = pickerCandidates.length > 0;
   const { insert } = drag;
@@ -275,6 +273,7 @@ export function ShotBand(): JSX.Element {
             此前三组控件 + 五个标签页平铺在 32px 里,没有主次也没有节奏。 */}
         <BandViewToggle value={view} onChange={setView} />
         <div className="band-toolbar-actions">
+          <PlaythroughButton />
           <BandAutoSelect disabled={readOnly} onOutcome={onAutoSelected} onError={(text) => showToast(text, { tone: "danger" })} />
           {/* R12 §2:镜头带唯一的主动作 —— 把挑好的片段按章排进带上。带还是空的时候这个入口
               由空态卡(BandEmpty,第 ③ 步文案)承担,工具条不重复出第二个同名主按钮。
@@ -327,7 +326,7 @@ export function ShotBand(): JSX.Element {
                 key={chapter.chapterId ?? `unchaptered-${index}`}
                 chapter={chapter}
                 folded={index < range.from || index > range.to}
-                selectedKey={activeSegment?.key}
+                selectedKey={playthroughKey ?? activeSegment?.key}
                 draggingKey={draggingKey}
                 overKey={drag.overKey}
                 indexOf={indexOf}

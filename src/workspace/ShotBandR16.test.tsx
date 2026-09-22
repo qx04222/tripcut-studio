@@ -202,7 +202,7 @@ describe("R16 §1:镜块菜单", () => {
       fireEvent.click(within(first).getByRole("button", { name: "更多" }));
     });
     const menu = await screen.findByRole("menu", { name: "镜块操作" });
-    expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.textContent)).toEqual([...Object.values(SHOT_MENU), "擂台"]);
+    expect(Array.from(menu.querySelectorAll("[role='menuitem']")).map((node) => node.textContent)).toEqual([...Object.values(SHOT_MENU), "从这段开始连播", "擂台"]);
     await act(async () => {
       fireEvent.click(within(menu).getByRole("menuitem", { name: "从镜头带移出" }));
     });

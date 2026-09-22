@@ -3,11 +3,14 @@ import { useRef, useState, type JSX } from "react";
 import { formatTimecode } from "../PlayerOverlay";
 import type { ClipListItem, PlayerStatus } from "../api";
 import { MonitorHeatStrip } from "./MonitorHeatStrip";
+import { EditableTimecode } from "./scrubber/EditableTimecode";
+import { clipFps } from "./useMonitorTransport";
 import { MonitorSeekBar } from "./MonitorSeekBar";
 import { ActionKbd, useActionKey } from "./KeymapKbd";
 import { Button, Menu, Toggle, Toolbar } from "./ui";
 import { PLAYBACK_RATES, type PlaybackRate } from "./useMonitorTransport";
 import type { ClipSuggestionsState } from "./useClipSuggestions";
+import type { PlaythroughRange } from "./playthrough/model";
 
 export interface MonitorControlsProps {
   clip: ClipListItem;
@@ -35,7 +38,13 @@ export interface MonitorControlsProps {
   onSaveSegment(): void;
   onStepSuggestion?(direction: 1 | -1): void;
   onRequestImmersive(): void;
-  onSeek(seconds: number): void;
+  onSeek(seconds: number): void | Promise<unknown>;
+  /** R22-B 镜头带连播的当前段(原样透传给进度条);不传 = 不连播。 */
+  playthrough?: PlaythroughRange;
+  onPause?(): void | Promise<void>;
+  onResume?(): void | Promise<void>;
+  onTrim?(edge: "in" | "out", seconds: number): void;
+  onShuttle?(key: "j" | "k" | "l"): void;
   /** R12 §5:「连播」(播完自动下一条)的显式开关;不传 = 不画(旧调用点不变)。 */
   autoAdvance?: boolean;
   onToggleAutoAdvance?(): void;
@@ -55,11 +64,6 @@ export function formatShortTimecode(seconds: number): string {
   const secs = whole % 60;
   const tail = `${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}.${tenths % 10}`;
   return hours > 0 ? `${hours}:${tail}` : tail;
-}
-
-function clipFps(clip: ClipListItem): number {
-  if (clip.fps_num === null || clip.fps_den === null || clip.fps_den <= 0) return 30;
-  return clip.fps_num / clip.fps_den;
 }
 
 /**
@@ -92,7 +96,7 @@ export function MonitorControls({
   onSaveSegment,
   onStepSuggestion,
   onRequestImmersive,
-  onSeek,
+  onSeek, onPause, onResume, onTrim, onShuttle, playthrough,
   autoAdvance,
   onToggleAutoAdvance,
 }: MonitorControlsProps): JSX.Element {
@@ -195,11 +199,10 @@ export function MonitorControls({
 
         <span className="monitor-seek">
           <span className="monitor-timecode">
-            <span aria-label="当前时间码" title={formatTimecode(status?.pos ?? 0, fps)}>
-              {formatShortTimecode(status?.pos ?? 0)}
-            </span>
+            <EditableTimecode seconds={status?.pos ?? 0} fps={fps} duration={status?.duration ?? 0} disabled={!ready} onSeek={onSeek} />
           </span>
-          <MonitorSeekBar status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} />
+          <MonitorSeekBar key={clip.id} fps={fps} onPause={onPause} onResume={onResume} onTrim={onTrim} onShuttle={onShuttle}
+            onMark={edge => edge === "in" ? onMarkIn() : onMarkOut()} status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} playthrough={playthrough} />
           <span className="monitor-timecode">
             <span className="monitor-duration" aria-label="素材总时长" title={formatTimecode(status?.duration ?? 0, fps)}>
               {formatShortTimecode(status?.duration ?? 0)}

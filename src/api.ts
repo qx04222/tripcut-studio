@@ -2657,3 +2657,8 @@ export function startDuel(members: DuelMember[], source: DuelSource): Promise<Du
 export function duelAction(sessionId: number, action: "get" | "decide" | "undo_last" | "finish" | "undo_session", winner: string | null = null): Promise<DuelSession> {
   return invoke<DuelSession>("duel_action", { sessionId, action, winner });
 }
+
+/** R22: on-demand 160×90 preview; cache is bounded by the native command. */
+export function frameAt(clipId: number, seconds: number): Promise<string> {
+  return invoke<string>("frame_at", { clipId, seconds });
+}

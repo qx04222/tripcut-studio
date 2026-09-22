@@ -3071,6 +3071,8 @@ async fn player_command(
     player: tauri::State<'_, PlayerManager>,
 ) -> std::result::Result<(), String> {
     let player = player.inner().clone();
+    // R22 真机诊断:TRIPCUT_LOG=debug 下逐条记播放器命令(拖动手感排障要看命令序列);INFO 级别一行不出。
+    tracing::debug!(command = ?cmd, clip_id, "player command");
     // R17 playfix:前端把命令归属的素材一起带来,换源窗口里排队的旧素材命令在这里被拒。
     tauri::async_runtime::spawn_blocking(move || player.command_for(cmd, clip_id))
         .await
@@ -3094,7 +3096,25 @@ async fn player_set_speed(
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn player_status(player: tauri::State<'_, PlayerManager>) -> PlayerStatus {
-    player.status()
+    let status = player.status();
+    // R22 真机诊断:每一次落地的 seek(player 线程自己量的 命令→PlaybackRestart)在
+    // `TRIPCUT_LOG=debug` 下记一行,拖动手感可以从日志里逐次读延迟,不用改 player/。
+    // 只在 80ms 轮询看到样本数变化时写,INFO 级别下一行都不出。
+    static SEEN_SEEK_SAMPLES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let previous = SEEN_SEEK_SAMPLES.swap(status.seek_samples, std::sync::atomic::Ordering::Relaxed);
+    if previous != status.seek_samples {
+        if let Some(seek_ms) = status.last_seek_ms {
+            tracing::debug!(
+                seek_ms,
+                pos = status.pos,
+                samples = status.seek_samples,
+                p50_ms = ?status.seek_p50_ms,
+                p95_ms = ?status.seek_p95_ms,
+                "seek landed"
+            );
+        }
+    }
+    status
 }
 
 fn development_root() -> Result<PathBuf> {
@@ -4057,6 +4077,7 @@ pub fn run() {
             delete_chapter,
             undo_story_change,
             get_clip_artifacts,
+            frame_at,
             start_export,
             quick_export,
             plan_quick_export,
@@ -4294,4 +4315,17 @@ fn duel_action(
         _ => Err(core::error::CoreError::Rating("未知擂台操作".into())),
     }
     .map_err(|e| e.to_string())
+}
+
+// R22: expensive extraction stays off the UI thread and outside player/.
+#[tauri::command]
+async fn frame_at(clip_id: i64, seconds: f64, state: tauri::State<'_, RuntimeState>) -> std::result::Result<String, String> {
+    if state.read_only { return Err("只读项目无法生成预览缓存".into()); }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = core::db::open_project(&state.db_path).map_err(|e| e.to_string())?;
+        let path = core::scrubber_frames::frame_at(&connection, &state.cache_root, clip_id, seconds).map_err(|e| e.to_string())?;
+        let name = path.file_name().and_then(|s| s.to_str()).ok_or("预览文件名无效")?;
+        core::media_server::signed_cache_url(state.media_server.port, &state.media_server.token, clip_id, name).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }

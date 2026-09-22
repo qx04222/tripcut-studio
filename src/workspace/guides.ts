@@ -134,7 +134,7 @@ export const GUIDES: Readonly<Record<GuideId, GuideSpec>> = {
     when: (s) => s.exportDrawerOpen && s.photoWorkspace !== true,
   },
   autoplay: {
-    text: "播完了。打开「连播」,播完会自动接着放下一条,像看片一样把素材过一遍。",
+    text: "素材连播：监视器的「连播」会播完整条素材再接下一条。镜头带连播：点镜头带标题栏「连播」，按故事顺序只播放各段入点到出点，预览粗剪。",
     anchor: '[data-guide="autoplay"], .monitor-auto-advance',
     side: "top",
     when: (s) => videoWorkspace(s) && s.playbackEnded,

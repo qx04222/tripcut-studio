@@ -1,3 +1,4 @@
+import { requestPlaythrough } from "./playthrough/store";
 import { useEffect, type JSX } from "react";
 
 import type { Storyboard } from "../api";
@@ -88,10 +89,11 @@ export function ShotMenu({
       x={anchor.x}
       y={anchor.y}
       ariaLabel={SHOT_MENU_LABEL}
-      items={[...shotMenuItems(segment, { canStepBack, canStepForward, readOnly }), duelMenuItem(readOnly)]}
+      items={[...shotMenuItems(segment, { canStepBack, canStepForward, readOnly }), { id: "playthrough", label: "从这段开始连播", ariaLabel: "从这段开始连播" }, duelMenuItem(readOnly)]}
       onClose={onClose}
       onSelect={(id) => {
-        if (id === "duel") requestDuel({ clipIds: segment.clipId === null ? [] : [segment.clipId], segmentId: segment.segmentId ?? undefined });
+        if (id === "playthrough") requestPlaythrough(segment.key);
+        else if (id === "duel") requestDuel({ clipIds: segment.clipId === null ? [] : [segment.clipId], segmentId: segment.segmentId ?? undefined });
         else if (id === "stepBack") onStep(-1);
         else if (id === "stepForward") onStep(1);
         else dispatchBandSegmentAction({ segment, action: id as ShotMenuId });

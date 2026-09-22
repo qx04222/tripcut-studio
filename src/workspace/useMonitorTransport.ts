@@ -42,6 +42,7 @@ export interface MonitorTransportDeps {
   bestStart: number | null;
   /** 时刻分已经拉完(成功或失败)—— 没到齐之前不决定从哪开播。 */
   momentsLoaded: boolean;
+  playthroughActive?: boolean;
 }
 
 export interface MonitorTransport {
@@ -54,7 +55,9 @@ export interface MonitorTransport {
   frame(direction: 1 | -1): void;
   nudge(seconds: number): void;
   /** 绝对定位;监视器的所有 seek 都从这里走,位置锚点才跟得上(V-04)。 */
-  seekTo(seconds: number): void;
+  seekTo(seconds: number, options?: { source: "playthrough" }): Promise<boolean>;
+  play(): Promise<void>;
+  pause(): Promise<void>;
   /**
    * 「现在在哪」:暂停态下刚发出的 seek 还没落地时,状态里的 pos 是旧的 —— 以最后一次
    * 要去的位置为准(打入出点、逐帧都按它算);播放中或 seek 已落地就是状态里的 pos。
@@ -81,7 +84,7 @@ export interface MonitorTransport {
  * - 静音记忆 = `ui.player.muted`,素材就绪时补发一次 set_mute;
  * - 点卡片 = 预览(R12 §5):素材就绪先暂停,时刻分到齐后停在最高分时刻(每条素材只做一次)。
  */
-export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded }: MonitorTransportDeps): MonitorTransport {
+export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded, playthroughActive = false }: MonitorTransportDeps): MonitorTransport {
   const prefs = usePlayerPrefs();
   const [rate, setRateState] = useState<PlaybackRate>(1);
   const [rewinding, setRewinding] = useState(false);
@@ -120,19 +123,29 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 期间又发了新 seek 的话锚点已换成新目标,不动它。
   const sendAnchored = useCallback((commands: PlayerCommand[], target: number) => {
     anchor.current = target;
-    void latest.current.send(commands).finally(() => {
+    return latest.current.send(commands).finally(() => {
       if (anchor.current === target) anchor.current = null;
     });
   }, []);
   const seekTo = useCallback(
-    (seconds: number) => {
+    async (seconds: number, options?: { source: "playthrough" }) => {
+      if (options?.source !== "playthrough") window.dispatchEvent(new Event("tripcut:manual-seek"));
       const current = readyStatus();
-      if (!current) return;
+      if (!current) return false;
       const target = Math.min(current.duration, Math.max(0, seconds));
-      sendAnchored([{ type: "seek_abs", seconds: target }], target);
+      await sendAnchored([{ type: "seek_abs", seconds: target }], target);
+      return true;
     },
     [sendAnchored, readyStatus],
   );
+
+  const play = useCallback(async () => {
+    if (readyStatus()) await latest.current.send([{ type: "play" }]);
+  }, [readyStatus]);
+  const pause = useCallback(async () => {
+    setRewinding(false);
+    if (readyStatus()) await latest.current.send([{ type: "pause" }]);
+  }, [readyStatus]);
 
   // 换素材:速度标签、倒退、循环、位置锚点归零(入出点由监视器自己清);mpv 侧的 speed 在就绪时补发。
   useEffect(() => {
@@ -202,6 +215,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 逐帧走原生 frame-step / frame-back-step:mpv 自己暂停、自己算下一帧的位置,不再按
   // pos ± 1/fps 发 seek(V-04 的算错位置从根上没了);读数由通道等到位置变了再交出去。
   const frame = useCallback((direction: 1 | -1) => {
+    window.dispatchEvent(new Event("tripcut:manual-seek"));
     if (!readyStatus()) return;
     setRewinding(false);
     anchor.current = null;
@@ -232,14 +246,15 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     [],
   );
   useEffect(() => {
-    if (!looping || !ready || status.paused || inPoint === null || outPoint === null || outPoint <= inPoint) return;
+    if (playthroughActive || !looping || !ready || status.paused || inPoint === null || outPoint === null || outPoint <= inPoint) return;
     if (status.pos >= outPoint || status.pos < inPoint - 0.5) wrapToIn(inPoint);
-  }, [looping, ready, status, inPoint, outPoint, wrapToIn]);
+  }, [looping, ready, status, inPoint, outPoint, wrapToIn, playthroughActive]);
 
   const toggleLoop = useCallback(() => {
     const { inPoint: currentIn, outPoint: currentOut, looping: on } = latest.current;
     if (currentIn === null || currentOut === null || currentOut <= currentIn || !readyStatus()) return;
     if (!on) {
+      window.dispatchEvent(new Event("tripcut:manual-seek"));
       setRewinding(false);
       wrapToIn(currentIn);
     }
@@ -274,7 +289,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       seenMidClipFor.current = clipId;
       return;
     }
-    if (looping || !prefs.autoAdvance || seenMidClipFor.current !== clipId) return;
+    if (playthroughActive || looping || !prefs.autoAdvance || seenMidClipFor.current !== clipId) return;
     if (Date.now() - manualSelectionAt.current < AUTO_ADVANCE_SUPPRESS_MS) return;
     if (advancedFor.current === clipId) return;
     advancedFor.current = clipId;
@@ -282,7 +297,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     if (next === null) return;
     advancingTo.current = next;
     dispatchWorkspace({ type: "select-clip", clipId: next });
-  }, [ready, clipId, status, looping, prefs.autoAdvance]);
+  }, [ready, clipId, status, looping, prefs.autoAdvance, playthroughActive]);
 
   // R12 §5:点卡片 = 预览。mpv 载入即播(player_open 把 pause 翻成 false),素材一就绪
   // 先把它停住 —— 不等时刻分,等一拍画面就跑起来了;静音记忆也在这一拍补发。
@@ -312,11 +327,12 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 拉失败的素材 bestStart 是 null,停在首帧。开播仍由用户按空格 / 点播放。
   useEffect(() => {
     if (!ready || clipId === null || preparedFor.current === clipId) return;
+    if (playthroughActive) { preparedFor.current = clipId; return; }
     if (!prefs.startAtBest) return;
     if (!momentsLoaded) return;
     preparedFor.current = clipId;
     if (bestStart !== null && bestStart > 0) void send([{ type: "seek_abs", seconds: bestStart }]);
-  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send]);
+  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send, playthroughActive]);
 
   const toggleAutoAdvance = useCallback(() => {
     void writePlayerPref("ui.player.auto_advance", !prefs.autoAdvance);
@@ -337,6 +353,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     frame,
     nudge,
     seekTo,
+    play,
+    pause,
     position,
     looping,
     toggleLoop,

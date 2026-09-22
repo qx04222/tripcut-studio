@@ -76,6 +76,7 @@ export function useBandPlayhead(spans: readonly TimelineSpan[], selectedClipId: 
   }, [onBand, selectedClipId]);
 
   const requestSeek = useCallback((clipId: number, ratio: number) => {
+    window.dispatchEvent(new Event("tripcut:manual-seek"));
     const current = latest.current;
     if (current && current.phase === "ready" && current.clip_id === clipId) {
       pending.current = null;

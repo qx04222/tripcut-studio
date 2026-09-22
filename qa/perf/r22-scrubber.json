@@ -1,0 +1,31 @@
+{
+  "mode": "mock",
+  "duration_ms": 5050,
+  "moves": 293,
+  "frames": 606,
+  "cadence_ms": 8.300000000000182,
+  "playhead_before": 14.5,
+  "playhead_samples": [
+    17.9,
+    12.133333333333333,
+    17.833333333333332,
+    12.266666666666667,
+    17.7
+  ],
+  "playhead_after": 12.033333333333333,
+  "dropped_frames": 1,
+  "dropped_ratio": 0.0016501650165016502,
+  "pass": true,
+  "delta": {
+    "LayoutCount": 311,
+    "RecalcStyleCount": 591,
+    "ScriptDuration": 1.015697,
+    "TaskDuration": 1.5776130000000002
+  },
+  "trace_events": {
+    "Commit": 607,
+    "Layout": 309,
+    "FunctionCall": 5711,
+    "Paint": 2231
+  }
+}
