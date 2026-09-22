@@ -43,6 +43,7 @@ export interface MonitorTransportDeps {
   /** 时刻分已经拉完(成功或失败)—— 没到齐之前不决定从哪开播。 */
   momentsLoaded: boolean;
   playthroughActive?: boolean;
+  openAt?: number | null;
 }
 
 export interface MonitorTransport {
@@ -57,6 +58,10 @@ export interface MonitorTransport {
   /** 绝对定位;监视器的所有 seek 都从这里走,位置锚点才跟得上(V-04)。 */
   seekTo(seconds: number, options?: { source: "playthrough" | "band-trim" }): Promise<boolean>;
   play(): Promise<void>;
+  gesturePause(): Promise<void>;
+  gestureResume(): Promise<void>;
+  /** 显式开播:解除手势等待并撤围栏,供播放按钮拼接回头 seek。 */
+  userPlayCommands(): PlayerCommand[];
   pause(): Promise<void>;
   /**
    * R23 出点围栏:把 mpv 的 `end` 设到活动选段的出点,播到那儿播放器自己停。
@@ -98,7 +103,7 @@ export interface MonitorTransport {
  * - 静音记忆 = `ui.player.muted`,素材就绪时补发一次 set_mute;
  * - 点卡片 = 预览(R12 §5):素材就绪先暂停,时刻分到齐后停在最高分时刻(每条素材只做一次)。
  */
-export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded, playthroughActive = false }: MonitorTransportDeps): MonitorTransport {
+export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded, playthroughActive = false, openAt = null }: MonitorTransportDeps): MonitorTransport {
   const prefs = usePlayerPrefs();
   const [rate, setRateState] = useState<PlaybackRate>(1);
   const [rewinding, setRewinding] = useState(false);
@@ -120,6 +125,8 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   const mpvRate = useRef<PlaybackRate>(1);
   // R23 出点围栏此刻设到了哪(null = 没挂)。换素材是新实例,围栏跟着旧实例一起没了。
   const fence = useRef<number | null>(null);
+  // 人工 seek 撤围栏后仍要等用户开播;手势自己的 resume 不拥有这个权限。
+  const awaitingUserPlay = useRef(false);
 
   // V-04:暂停态 seek 的位置锚点。mpv 的 seek 异步落地,命令回来时 status.pos 多半还是旧值;
   // 连按 . 或 ⌥→ 再按 I 都不能拿旧值算,所以记住「最后要去的位置」,状态追上(半帧内)或
@@ -162,6 +169,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       // 真机实测它会把播放头甩进别的镜头范围再自由播到片尾 59.96 —— 报告 §9 不许出现的未选帧。
       // 释放之后任何一次 seek 都不自动开播,要用户自己按播放。
       const armed = fence.current !== null;
+      if (armed && options?.source !== "playthrough") awaitingUserPlay.current = true;
       const commands: PlayerCommand[] = options?.source === "playthrough"
         ? [{ type: "seek_abs", seconds: target }]
         : [...fenceCommands(), { type: "seek_abs", seconds: target }, ...(armed ? [{ type: "pause" as const }] : [])];
@@ -171,8 +179,14 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     [sendAnchored, readyStatus, fenceCommands],
   );
 
+  const userPlayCommands = useCallback(() => {
+    awaitingUserPlay.current = false;
+    return fenceCommands();
+  }, [fenceCommands]);
   const play = useCallback(async () => {
-    if (readyStatus()) await latest.current.send([{ type: "play" }]);
+    if (!readyStatus()) return;
+    awaitingUserPlay.current = false;
+    await latest.current.send([{ type: "play" }]);
   }, [readyStatus]);
   const pause = useCallback(async () => {
     setRewinding(false);
@@ -184,6 +198,9 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     if (!current || current.phase === "closed" || current.phase === "error") return;
     await latest.current.send([{ type: "pause" }]);
   }, []);
+  const gestureResume = useCallback(async () => {
+    if (!awaitingUserPlay.current && readyStatus()) await latest.current.send([{ type: "play" }]);
+  }, [readyStatus]);
   const setEnd = useCallback(async (seconds: number | null) => {
     fence.current = seconds;
     const current = latest.current.status;
@@ -198,6 +215,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     setLooping(false);
     anchor.current = null;
     fence.current = null;
+    awaitingUserPlay.current = false;
   }, [clipId]);
 
   // 「倒退」:按 8 fps 发原生 step_back;退到头(不足一帧)自动停。
@@ -223,13 +241,13 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     setRateState(next);
     mpvRate.current = next;
     // L / 速度菜单 = 人工开播:撤掉连播释放时留下的出点围栏,从这里起自由播。
-    const commands: PlayerCommand[] = [...fenceCommands(), { type: "set_speed", speed: next }];
+    const commands: PlayerCommand[] = [...userPlayCommands(), { type: "set_speed", speed: next }];
     if (current.paused) {
       if (isAtEnd(current)) commands.push({ type: "seek_abs", seconds: 0 });
       commands.push({ type: "play" });
     }
     void latest.current.send(commands);
-  }, [readyStatus, fenceCommands]);
+  }, [readyStatus, userPlayCommands]);
 
   const shuttle = useCallback(
     (key: "j" | "k" | "l") => {
@@ -283,6 +301,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     (inSeconds: number) => {
       if (wrapping.current) return;
       wrapping.current = true;
+      awaitingUserPlay.current = false;
       void latest.current
         .send([{ type: "seek_abs", seconds: inSeconds }, { type: "play" }])
         .finally(() => {
@@ -373,12 +392,12 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 拉失败的素材 bestStart 是 null,停在首帧。开播仍由用户按空格 / 点播放。
   useEffect(() => {
     if (!ready || clipId === null || preparedFor.current === clipId) return;
-    if (playthroughActive) { preparedFor.current = clipId; return; }
+    if (playthroughActive || openAt !== null) { preparedFor.current = clipId; return; }
     if (!prefs.startAtBest) return;
     if (!momentsLoaded) return;
     preparedFor.current = clipId;
     if (bestStart !== null && bestStart > 0) void send([{ type: "seek_abs", seconds: bestStart }]);
-  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send, playthroughActive]);
+  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send, playthroughActive, openAt]);
 
   const toggleAutoAdvance = useCallback(() => {
     void writePlayerPref("ui.player.auto_advance", !prefs.autoAdvance);
@@ -403,6 +422,9 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     pause,
     setEnd,
     fenceCommands,
+    userPlayCommands,
+    gesturePause: pause,
+    gestureResume,
     position,
     looping,
     toggleLoop,

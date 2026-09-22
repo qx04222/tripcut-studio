@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
-import { listSelectSegments, playerCommand, type SelectSegment } from "../api";
+import { listSelectSegments, playerCommand, playerStatus, type SelectSegment } from "../api";
 import { PLAYER_STATUS_REFRESH_EVENT } from "../PlayerOverlay";
+import { requestOpenAt, cancelOpenAt, type OpenAtRequest } from "./playthrough/store";
 import { ExportSelectedButton } from "./deliver/QuickExportEntry";
 import { deleteSegmentWithUndo } from "./segmentDeletion";
 import { Button, Icon } from "./ui";
@@ -45,6 +46,9 @@ export function SelectSegmentsSection({
   const [busyId, setBusyId] = useState<number | null>(null);
   const mounted = useRef(true);
   const latest = useRef(0);
+  const currentClipId = useRef(clipId); currentClipId.current = clipId;
+  const replayRequest = useRef<OpenAtRequest | null>(null);
+  useEffect(() => () => cancelOpenAt(replayRequest.current), [clipId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -77,6 +81,13 @@ export function SelectSegmentsSection({
       window.dispatchEvent(new Event("tripcut:manual-seek"));
       const inSeconds = segmentSeconds(segment.in_ticks, segment.tb_num, segment.tb_den);
       try {
+        const status = await playerStatus();
+        if (!mounted.current || currentClipId.current !== clipId || segment.clip_id !== clipId) return;
+        if (status.phase !== "ready" || status.clip_id !== clipId) {
+          replayRequest.current = requestOpenAt(clipId, inSeconds, true);
+          setNotice(null);
+          return;
+        }
         await playerCommand({ type: "seek_abs", seconds: inSeconds }, clipId);
         await playerCommand({ type: "play" }, clipId);
         // 监视器暂停时停表,不广播它就不知道已经在放(时间码 / 播放键停在旧值,气泡也不让位)。

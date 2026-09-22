@@ -43,6 +43,7 @@ const apiMocks = vi.hoisted(() => ({
   undoStoryChange: vi.fn().mockResolvedValue(undefined),
   listSelectSegments: vi.fn(),
   deleteSelectSegment: vi.fn().mockResolvedValue(undefined),
+  playerStatus: vi.fn().mockResolvedValue({ phase: "ready", clip_id: 1 }),
   playerCommand: vi.fn().mockResolvedValue(undefined),
   pickLutFile: vi.fn().mockResolvedValue(null),
   importLut: vi.fn().mockResolvedValue([]),

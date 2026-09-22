@@ -7,7 +7,7 @@ import {
   type MouseEvent,
 } from "react";
 
-import { isPlaythroughActive } from "./workspace/playthrough/store";
+import { isPlaythroughActive, takeOpenAt, PLAYER_OPEN_AT_EVENT, type OpenAtRequest } from "./workspace/playthrough/store";
 import {
   createSelectSegment,
   listSelectSegments,
@@ -78,6 +78,8 @@ export const VIEWPORT_DEBOUNCE_MS = 120;
 
 /** 嵌入模式交给宿主(监视器)的通道:同一个 mpv 实例,命令与刷新都走这里。 */
 export interface EmbeddedPlayerControls {
+  /** 该实例已按用户指定源时间打开,监视器不能再跳到 AI 建议位置。 */
+  readonly openAt?: number | null;
   send(commands: PlayerCommand[]): Promise<void>;
   refresh(): Promise<void>;
 }
@@ -224,6 +226,16 @@ export function PlayerOverlay({
   // PlayerManager::open 的 operation 锁后面,换素材期间发出的命令会等 B 的新实例起来再落到
   // B 上 —— A 的 seek_abs 就这样变成 B 的起播位置。这里记「哪条素材已打开」,批次里逐条核对。
   const openedClipId = useRef<number | null>(null);
+  const [openRevision, setOpenRevision] = useState(0);
+  const replayOpen = useRef<OpenAtRequest | null>(null);
+  const openedAt = useRef<number | null>(null);
+  useEffect(() => {
+    const reopen = (event: Event) => {
+      if ((event as CustomEvent<OpenAtRequest>).detail.clipId === clip.id) setOpenRevision(n => n + 1);
+    };
+    window.addEventListener(PLAYER_OPEN_AT_EVENT, reopen);
+    return () => window.removeEventListener(PLAYER_OPEN_AT_EVENT, reopen);
+  }, [clip.id]);
 
   // 卸载与「换素材」要分开:换素材只 playerOpen,绝不 playerClose 重建实例。
   // 这条 effect 声明在开流 effect 之前,卸载时它的清理先跑,旗子才来得及立。
@@ -262,8 +274,26 @@ export function PlayerOverlay({
   }, []);
 
   useEffect(() => {
+    const request = replayOpen.current;
+    if (!request?.resume || status?.phase !== "ready" || status.clip_id !== request.clipId ||
+      !seekSettled(status.pos, request.seconds, fps)) return;
+    let active = true;
+    // 等本次 ready 的 effects 完成(监视器会先执行「点卡片 = 暂停预览」),再兑现复播。
+    void Promise.resolve().then(async () => {
+      if (!active || replayOpen.current !== request) return;
+      replayOpen.current = null;
+      await playerCommand({ type: "play" }, request.clipId);
+      const next = await playerStatus();
+      if (active) setStatus(next);
+    }).catch(reason => { if (active) void reportFailure(reason); });
+    return () => { active = false; };
+  }, [status, fps, reportFailure]);
+
+  useEffect(() => {
     let active = true;
     let timer: number | undefined;
+    replayOpen.current = null;
+    setOpening(true);
     const start = async () => {
       try {
         if (!embedded) overlayRef.current?.focus();
@@ -272,12 +302,16 @@ export function PlayerOverlay({
         if (!surface || !active) return;
         const viewport = rectToPlayerViewport(visibleSurfaceRect(surface));
         if (viewport) await playerSetViewport(viewport);
-        // R23 ISSUE-A:连播中换素材必须停在首帧开。新实例默认载入即播,从 0 跑起来,
-        // seek 到入点之前那一段放的是用户没选的原片(跨素材复现:pos 0.08 s、paused=false)。
-        // 不连播时按老签名单参数调 —— 这条路上的契约一个字没变。
-        const initial = isPlaythroughActive()
-          ? await playerOpen(clip.id as number, true)
-          : await playerOpen(clip.id as number);
+        if (!active) return;
+        // R24:优先消费这条素材的源时间入点,新实例直接停在指定帧。
+        // 没有位置请求时保留原来的连播暂停打开 / 普通打开签名。
+        const openAt = takeOpenAt(clip.id as number);
+        replayOpen.current = openAt;
+        openedAt.current = openAt?.seconds ?? null;
+        const initial = openAt
+          ? await playerOpen(clip.id as number, true, openAt.seconds)
+          : isPlaythroughActive() ? await playerOpen(clip.id as number, true)
+            : await playerOpen(clip.id as number);
         if (!active) return;
         openedClipId.current = clip.id as number;
         setStatus(initial);
@@ -309,12 +343,14 @@ export function PlayerOverlay({
     return () => {
       active = false;
       openedClipId.current = null;
+      openedAt.current = null;
+      replayOpen.current = null;
       if (timer !== undefined) window.clearInterval(timer);
       // 嵌入模式换素材时这条 effect 也会重跑,但那是「同一个实例换源」,
       // 只有真的卸载才关播放器 —— 否则每换一条素材就重建一次 mpv。
       if (!embedded || unmountingRef.current) void playerClose();
     };
-  }, [clip.id, embedded, reportFailure]);
+  }, [clip.id, embedded, reportFailure, openRevision]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -475,7 +511,7 @@ export function PlayerOverlay({
 
   useEffect(() => {
     if (!controlsRef) return;
-    controlsRef.current = { send: sendCommands, refresh: refreshStatus };
+    controlsRef.current = { send: sendCommands, refresh: refreshStatus, get openAt() { return openedAt.current; } };
     return () => {
       controlsRef.current = null;
     };

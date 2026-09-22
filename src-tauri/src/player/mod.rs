@@ -425,6 +425,7 @@ impl PlayerManager {
         clip_id: i64,
         time_mapper: Option<crate::core::canonical_time::ProxyTimeMapper>,
         start_paused: bool,
+        start_at: Option<f64>,
     ) -> Result<PlayerStatus, String> {
         let _operation = lock(&self.operation);
         reap_orphans(&mut lock(&self.orphans));
@@ -448,6 +449,7 @@ impl PlayerManager {
                     viewport,
                     occluded,
                     start_paused,
+                    start_at,
                     path,
                     time_mapper,
                     worker_status,
@@ -935,6 +937,7 @@ fn worker_entry(
     viewport: PlayerViewport,
     occluded: bool,
     start_paused: bool,
+    start_at: Option<f64>,
     path: PathBuf,
     time_mapper: Option<crate::core::canonical_time::ProxyTimeMapper>,
     status: Arc<Mutex<PlayerStatus>>,
@@ -971,6 +974,7 @@ fn worker_entry(
             &surface,
             occluded,
             start_paused,
+            start_at,
             &path,
             time_mapper.as_ref(),
             &status,
@@ -1001,12 +1005,29 @@ fn worker_entry(
     }
 }
 
+/// mpv 0.41 的第四个参数是每文件选项;路径保持独立参数,逗号/冒号不参与解析。
+fn loadfile_args(
+    path: &str,
+    start_at: Option<f64>,
+    time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
+) -> Vec<String> {
+    let mut args = vec![path.to_owned(), "replace".to_owned()];
+    if let Some(seconds) = start_at.filter(|seconds| seconds.is_finite() && *seconds >= 0.0) {
+        let proxy_seconds = time_mapper
+            .map(|mapper| mapper.proxy_seconds_for_source_seconds(seconds))
+            .unwrap_or(seconds);
+        args.extend(["-1".to_owned(), format!("start={proxy_seconds},pause=yes")]);
+    }
+    args
+}
+
 #[allow(clippy::too_many_arguments)] // 渲染线程装配参数,拆结构属重构,留待专卡
 fn run_worker(
     window: &WebviewWindow,
     surface: &RenderSurface,
     occluded: bool,
     start_paused: bool,
+    start_at: Option<f64>,
     path: &Path,
     time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
     status: &Arc<Mutex<PlayerStatus>>,
@@ -1075,11 +1096,14 @@ fn run_worker(
     });
 
     let path_text = path.to_string_lossy();
-    mpv.command("loadfile", &[&path_text, "replace"])
+    let start_at = start_at.filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
+    let load_args = loadfile_args(&path_text, start_at, time_mapper);
+    let load_refs: Vec<&str> = load_args.iter().map(String::as_str).collect();
+    mpv.command("loadfile", &load_refs)
         .map_err(|error| format!("素材载入失败：{error}"))?;
-    mpv.set_property("pause", start_paused)
+    mpv.set_property("pause", start_paused || start_at.is_some())
         .map_err(|error| format!("素材自动播放失败：{error}"))?;
-    lock(status).paused = start_paused;
+    lock(status).paused = start_paused || start_at.is_some();
     let _ = started.send(Ok(()));
 
     // Exact-seek latency is closed by mpv's PlaybackRestart event. No render
@@ -1275,6 +1299,12 @@ fn drain_events(
                     .unwrap_or_else(|| mpv.get_property("duration").unwrap_or(snapshot.duration));
                 snapshot.paused = mpv.get_property("pause").unwrap_or(true);
                 snapshot.frame = mpv.get_property("estimated-frame-number").ok();
+                // FileLoaded 可能早于 time-pos 的观察通知:首份 ready 必须读真实入点。
+                if let Ok(position) = mpv.get_property::<f64>("time-pos") {
+                    snapshot.pos = time_mapper
+                        .map(|mapper| mapper.source_seconds_for_proxy_seconds(position))
+                        .unwrap_or(position).max(0.0);
+                }
                 snapshot.mark_ready();
             }
             Some(Ok(Event::PlaybackRestart)) => {
@@ -1352,6 +1382,41 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn loadfile_none_preserves_legacy_arguments() {
+        assert_eq!(loadfile_args("/a.mov", None, None), ["/a.mov", "replace"]);
+    }
+
+    #[test]
+    fn loadfile_start_is_a_paused_per_file_option() {
+        assert_eq!(loadfile_args("/a.mov", Some(7.4), None),
+            ["/a.mov", "replace", "-1", "start=7.4,pause=yes"]);
+        assert_eq!(loadfile_args("/a.mov", Some(0.0), None)[3], "start=0,pause=yes");
+    }
+
+    #[test]
+    fn loadfile_start_maps_source_seconds_to_proxy_seconds() {
+        use crate::core::canonical_time::{ProxyTimeMapper, ProxyTimePoint};
+        let mapper = ProxyTimeMapper::from_points(1, 1000, vec![
+            ProxyTimePoint { proxy_ts_ms: 0, source_ticks: 0 },
+            ProxyTimePoint { proxy_ts_ms: 5000, source_ticks: 10000 },
+        ]).unwrap();
+        assert_eq!(loadfile_args("/a.mov", Some(7.4), Some(&mapper))[3], "start=3.7,pause=yes");
+    }
+
+    #[test]
+    fn loadfile_invalid_start_falls_back_to_legacy() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
+            assert_eq!(loadfile_args("/a.mov", Some(invalid), None), ["/a.mov", "replace"]);
+        }
+    }
+
+    #[test]
+    fn loadfile_path_punctuation_never_enters_options() {
+        assert_eq!(loadfile_args("/素材,a:b.mov", Some(7.4), None),
+            ["/素材,a:b.mov", "replace", "-1", "start=7.4,pause=yes"]);
+    }
 
     fn fake_session(worker: JoinHandle<()>) -> PlayerSession {
         PlayerSession {

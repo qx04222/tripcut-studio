@@ -2879,13 +2879,16 @@ fn open_app(bundle_id: String) -> std::result::Result<(), String> {
 #[tauri::command]
 async fn generate_jianying_draft(
     force: Option<bool>,
+    subtitles_on_timeline: Option<bool>,
     state: tauri::State<'_, RuntimeState>,
 ) -> std::result::Result<JianyingDraftResult, String> {
     let db_path = state.db_path.clone();
     let force = force.unwrap_or(false);
+    // R24 D-1:导出抽屉「字幕写进时间线(试验)」,缺省 = 关(与 0.11.4 产物逐字节一致)。
+    let subtitles_on_timeline = subtitles_on_timeline.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = core::db::open_project(&db_path)?;
-        core::jianying::generate_native_draft(&mut connection, force)
+        core::jianying::generate_native_draft(&mut connection, force, subtitles_on_timeline)
     })
     .await
     .map_err(|error| format!("剪映草稿任务异常结束：{error}"))?
@@ -3006,6 +3009,8 @@ async fn player_open(
     // R23:镜头带连播换素材时传 true —— 新实例停在首帧,由连播 seek 到入点、等首帧再开播。
     // 不传(老调用方)保持原样:载入即播。
     start_paused: Option<bool>,
+    // R24:源时间入点;有效值意味着按位置暂停打开,而不是先显示首帧再 seek。
+    start_seconds: Option<f64>,
     runtime: tauri::State<'_, RuntimeState>,
     player: tauri::State<'_, PlayerManager>,
 ) -> std::result::Result<PlayerStatus, String> {
@@ -3019,7 +3024,7 @@ async fn player_open(
         if time_mapper.is_some() {
             core::artifacts::touch_proxy_played(&connection, &cache_root, clip_id);
         }
-        let status = player.open(path, clip_id, time_mapper, start_paused.unwrap_or(false))?;
+        let status = player.open(path, clip_id, time_mapper, start_paused.unwrap_or(false), start_seconds)?;
         apply_stored_display_prefs(&connection, clip_id, &player);
         Ok::<PlayerStatus, String>(status)
     })

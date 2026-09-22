@@ -67,3 +67,24 @@ export function usePlaythroughCommands(controller: PlaythroughController, enable
     return () => { window.removeEventListener(EVENT, request); document.removeEventListener('keydown', keydown); };
   }, []);
 }
+
+/** 一次性的源时间打开请求;不同素材的 Overlay 不能抢走它。 */
+export const PLAYER_OPEN_AT_EVENT = 'tripcut:player-open-at';
+export interface OpenAtRequest { clipId: number; seconds: number; resume: boolean }
+let pendingOpenAt: OpenAtRequest | null = null;
+export function requestOpenAt(clipId: number, seconds: number, resume = false) {
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  const request = { clipId, seconds, resume };
+  pendingOpenAt = request;
+  window.dispatchEvent(new CustomEvent(PLAYER_OPEN_AT_EVENT, { detail: request }));
+  return request;
+}
+export function takeOpenAt(clipId: number): OpenAtRequest | null {
+  if (pendingOpenAt?.clipId !== clipId) return null;
+  const request = pendingOpenAt;
+  pendingOpenAt = null;
+  return request;
+}
+export function cancelOpenAt(request: OpenAtRequest | null) {
+  if (pendingOpenAt === request) pendingOpenAt = null;
+}

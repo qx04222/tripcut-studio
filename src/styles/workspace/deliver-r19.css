@@ -64,3 +64,10 @@
 .deliver-cards-more:focus-visible {
   color: var(--accent-text);
 }
+
+.deliver-subtitles-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}

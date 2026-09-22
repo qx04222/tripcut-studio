@@ -183,6 +183,10 @@ pub struct JianyingDraftResult {
     pub experimental: bool,
     /// 与 `output_path` 同值;试验卡按这个名字读。
     pub draft_path: String,
+    /// R24 D-1:这次是否打开了「字幕写进时间线(试验)」。
+    pub subtitles_on_timeline: bool,
+    /// R24 D-1:写进剪映文字轨的字幕条数(= `TripCut字幕/时间线字幕.srt` 的条数);开关关时恒为 0。
+    pub timeline_subtitle_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +325,9 @@ struct DraftSegment {
     enable_color_match_adjust: bool,
     enable_color_wheels: bool,
     enable_lut: bool,
+    /// R24 D-1:只有文字段写(pyJianYingDraft 0.3.0 `segment.py:64`);视频/配乐段不写这个键,保持 0.11.4 形状。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enable_smart_color_adjust: Option<bool>,
     extra_material_refs: Vec<String>,
     id: String,
     is_tone_modify: bool,
@@ -329,7 +336,9 @@ struct DraftSegment {
     material_id: String,
     render_index: i64,
     reverse: bool,
-    source_timerange: DraftTimerange,
+    /// 视频/配乐段必有;R24 D-1 文字段是 `null`(pyJianYingDraft 0.3.0 `segment.py:211`,
+    /// `TextSegment` 构造时 source_timerange=None,`text_segment.py:296`)。`Some` 序列化与旧版逐字节相同。
+    source_timerange: Option<DraftTimerange>,
     speed: f64,
     target_timerange: DraftTimerange,
     track_attribute: i64,
@@ -428,10 +437,15 @@ pub fn set_human_check(connection: &Connection, version: &str, verdict: HumanChe
 }
 
 /// `force = true` 只对「待验证」版本放行(未知版本仍拒绝);草稿一律新名字,永不覆盖。
-pub fn generate_native_draft(connection: &mut Connection, force: bool) -> Result<JianyingDraftResult> {
+/// R24 D-1:`subtitles_on_timeline` = 导出抽屉「字幕写进时间线(试验)」开关,默认关;关时产物与 0.11.4 逐字节一致。
+pub fn generate_native_draft(
+    connection: &mut Connection,
+    force: bool,
+    subtitles_on_timeline: bool,
+) -> Result<JianyingDraftResult> {
     let status = availability(connection);
     let root = default_draft_root()?;
-    generate_with_availability(connection, &status, &root, force)
+    generate_with_availability(connection, &status, &root, force, subtitles_on_timeline)
 }
 
 fn generate_with_availability(
@@ -439,6 +453,7 @@ fn generate_with_availability(
     status: &JianyingAvailability,
     root: &Path,
     force: bool,
+    subtitles_on_timeline: bool,
 ) -> Result<JianyingDraftResult> {
     let experimental = !status.usable;
     if experimental && !(force && status.force_allowed) {
@@ -486,19 +501,19 @@ fn generate_with_availability(
     let short_id = draft_id.chars().filter(|ch| *ch != '-').take(8).collect::<String>();
     let draft_name = draft_folder_name(&episode_title, experimental, now, &short_id);
     let final_path = root.join(&draft_name);
-    let draft = build_draft_with_music(
+    let (draft, cues) = assemble_draft(
         &draft_name,
         &draft_id,
         &inputs,
         now,
-        canvas_width,
-        canvas_height,
+        (canvas_width, canvas_height),
         music.as_ref(),
+        subtitles_on_timeline,
     )?;
     let meta = build_meta(&draft, &final_path, now)?;
-    let subtitle_count = write_draft_atomically(root, &final_path, &draft, &meta, &inputs)?;
+    let subtitle_count = write_draft_atomically(root, &final_path, &draft, &meta, &inputs, &cues)?;
 
-    let manifest = json!({
+    let mut manifest = json!({
         "schema": {"new_version": draft.new_version.clone(), "version": draft.version},
         "jianying_version": version.clone(),
         "self_check": "passed",
@@ -511,6 +526,10 @@ fn generate_with_availability(
         "output_path": final_path.to_string_lossy().into_owned(),
         "source_paths": inputs.iter().map(|input| input.source_path.to_string_lossy().into_owned()).collect::<Vec<_>>()
     });
+    if subtitles_on_timeline {
+        manifest["subtitles_on_timeline"] = json!(true);
+        manifest["timeline_subtitle_count"] = json!(cues.len());
+    }
     if let Err(error) = connection.execute(
         "INSERT INTO exports(tier, manifest, created_at, output_path, episode_id)
          VALUES ('native_draft', ?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?2, ?3)",
@@ -543,6 +562,8 @@ fn generate_with_availability(
             "草稿已生成；请回到剪映首页，在“本地草稿”中打开并核对素材顺序与入出点".to_owned()
         },
         experimental,
+        subtitles_on_timeline,
+        timeline_subtitle_count: cues.len() as u64,
     })
 }
 
@@ -987,6 +1008,7 @@ fn build_draft_with_music(
             enable_color_match_adjust: false,
             enable_color_wheels: true,
             enable_lut: true,
+            enable_smart_color_adjust: None,
             extra_material_refs: vec![speed_id],
             id: segment_id,
             is_tone_modify: false,
@@ -995,10 +1017,10 @@ fn build_draft_with_music(
             material_id,
             render_index: 0,
             reverse: false,
-            source_timerange: DraftTimerange {
+            source_timerange: Some(DraftTimerange {
                 duration,
                 start: source_start,
-            },
+            }),
             speed: 1.0,
             target_timerange: DraftTimerange {
                 duration,
@@ -1030,6 +1052,29 @@ fn build_draft_with_music(
     }
     validate_draft(&draft, inputs.len())?;
     Ok(draft)
+}
+
+/// 生产路径的草稿组装:`build_draft_with_music`,开关开时再加文字轨(R24 D-1)。
+/// 开关关、或开了但没有一条落在精选段里的字幕 → 草稿与 0.11.4 完全相同,返回空字幕表。
+fn assemble_draft(
+    name: &str,
+    draft_id: &str,
+    inputs: &[DraftInput],
+    now: i64,
+    (canvas_width, canvas_height): (i64, i64),
+    music: Option<&DraftMusic>,
+    subtitles_on_timeline: bool,
+) -> Result<(DraftInfo, Vec<text::TimelineCue>)> {
+    let mut draft = build_draft_with_music(name, draft_id, inputs, now, canvas_width, canvas_height, music)?;
+    if !subtitles_on_timeline {
+        return Ok((draft, Vec::new()));
+    }
+    let cues = text::timeline_cues(inputs, &draft)?;
+    if !cues.is_empty() {
+        text::insert_subtitle_track(&mut draft, &cues)?;
+        validate_draft(&draft, inputs.len())?;
+    }
+    Ok((draft, cues))
 }
 
 fn append_music_track(draft: &mut DraftInfo, music: &DraftMusic) -> Result<()> {
@@ -1073,6 +1118,7 @@ fn append_music_track(draft: &mut DraftInfo, music: &DraftMusic) -> Result<()> {
             enable_color_match_adjust: false,
             enable_color_wheels: true,
             enable_lut: false,
+            enable_smart_color_adjust: None,
             extra_material_refs: Vec::new(),
             id: Uuid::new_v4().simple().to_string(),
             is_tone_modify: false,
@@ -1081,7 +1127,7 @@ fn append_music_track(draft: &mut DraftInfo, music: &DraftMusic) -> Result<()> {
             material_id,
             render_index: 0,
             reverse: false,
-            source_timerange: DraftTimerange { duration, start: 0 },
+            source_timerange: Some(DraftTimerange { duration, start: 0 }),
             speed: 1.0,
             target_timerange: DraftTimerange { duration, start: 0 },
             track_attribute: 0,
@@ -1127,8 +1173,14 @@ fn validate_draft(draft: &DraftInfo, expected_segments: usize) -> Result<()> {
             "草稿 schema 键集合与 11.3.0 金样不一致".to_owned(),
         ));
     }
-    if draft.tracks.is_empty() || draft.tracks.len() > 2 || draft.tracks[0].track_type != "video" {
-        return Err(CoreError::Jianying("草稿必须以一条视频轨开头,至多再带一条配乐轨".to_owned()));
+    // R24 D-1:视频轨之后可选一条文字轨(pyJianYingDraft `import_srt` 把文字轨插在最后一条视频轨之后,
+    // `_script_file_segments.py:209-219`),再可选一条配乐轨。
+    let trailing = draft.tracks.iter().skip(1).map(|track| track.track_type.as_str()).collect::<Vec<_>>();
+    if draft.tracks.is_empty()
+        || draft.tracks[0].track_type != "video"
+        || !matches!(trailing.as_slice(), [] | ["audio"] | ["text"] | ["text", "audio"])
+    {
+        return Err(CoreError::Jianying("草稿必须以一条视频轨开头,至多再带一条字幕轨与一条配乐轨".to_owned()));
     }
     let segments = &draft.tracks[0].segments;
     if segments.len() != expected_segments || draft.materials.videos.len() != expected_segments {
@@ -1142,10 +1194,13 @@ fn validate_draft(draft: &DraftInfo, expected_segments: usize) -> Result<()> {
         .collect::<HashSet<_>>();
     let mut expected_start = 0_i64;
     for segment in segments {
+        let Some(source) = segment.source_timerange.as_ref() else {
+            return Err(CoreError::Jianying("视频片段缺少 source_timerange".to_owned()));
+        };
         if segment.target_timerange.start != expected_start
             || segment.target_timerange.duration <= 0
-            || segment.source_timerange.start < 0
-            || segment.source_timerange.duration != segment.target_timerange.duration
+            || source.start < 0
+            || source.duration != segment.target_timerange.duration
             || !material_ids.contains(segment.material_id.as_str())
         {
             return Err(CoreError::Jianying(
@@ -1164,30 +1219,34 @@ fn validate_draft(draft: &DraftInfo, expected_segments: usize) -> Result<()> {
             return Err(CoreError::Jianying("草稿含非绝对原片路径".to_owned()));
         }
     }
-    validate_music_track(draft)
+    validate_music_track(draft)?;
+    text::validate_subtitle_track(draft)
 }
 
 /// R14 C-3:配乐轨(若有)必须是 `tracks[1]`、`audio` 类型、恰一段,入点 0,时长在
 /// (0, 视频轨总时长] 内,且引用 `materials.audios` 里的一条绝对路径素材;audios 与
 /// 配乐轨一一对应(没有轨就不能有孤儿音频素材)。
 fn validate_music_track(draft: &DraftInfo) -> Result<()> {
-    let audio_tracks = draft.tracks.len() - 1;
-    if draft.materials.audios.len() != audio_tracks {
+    let audio_track = draft.tracks.iter().skip(1).find(|track| track.track_type == "audio");
+    if draft.materials.audios.len() != usize::from(audio_track.is_some()) {
         return Err(CoreError::Jianying("草稿音频素材与配乐轨数量不一致".to_owned()));
     }
-    let Some(track) = draft.tracks.get(1) else {
+    let Some(track) = audio_track else {
         return Ok(());
     };
-    if track.track_type != "audio" || track.segments.len() != 1 {
+    if track.segments.len() != 1 {
         return Err(CoreError::Jianying("配乐轨必须是 audio 类型且只含一段".to_owned()));
     }
     let segment = &track.segments[0];
     let material = &draft.materials.audios[0];
+    let Some(source) = segment.source_timerange.as_ref() else {
+        return Err(CoreError::Jianying("配乐片段缺少 source_timerange".to_owned()));
+    };
     if segment.material_id != material.id
         || segment.target_timerange.start != 0
-        || segment.source_timerange.start != 0
+        || source.start != 0
         || segment.target_timerange.duration <= 0
-        || segment.target_timerange.duration != segment.source_timerange.duration
+        || segment.target_timerange.duration != source.duration
         || segment.target_timerange.duration > draft.duration
         || segment.target_timerange.duration > material.duration
         || !Path::new(&material.path).is_absolute()
@@ -1220,6 +1279,7 @@ fn write_draft_atomically(
     draft: &DraftInfo,
     meta: &DraftMetaInfo,
     inputs: &[DraftInput],
+    timeline_cues: &[text::TimelineCue],
 ) -> Result<u64> {
     let root = root.canonicalize().map_err(|error| {
         CoreError::Jianying(format!("无法打开剪映草稿根 {}：{error}", root.display()))
@@ -1250,7 +1310,14 @@ fn write_draft_atomically(
     write_json_synced(&staging_path.join(DRAFT_META_FILE), meta)?;
 
     let subtitle_count = copy_subtitles(&staging_path, inputs)?;
-    let instructions = delivery_instructions(inputs.len(), subtitle_count);
+    if !timeline_cues.is_empty() {
+        // R24 D-1:与文字轨逐条一致的时间线 SRT;字幕目录此时必已由 copy_subtitles 建好(有字幕才有 cue)。
+        write_synced(
+            &staging_path.join(SUBTITLE_DIRECTORY).join(text::TIMELINE_SRT_FILE),
+            text::timeline_srt(timeline_cues).as_bytes(),
+        )?;
+    }
+    let instructions = delivery_instructions(inputs.len(), subtitle_count, timeline_cues.len());
     write_synced(
         &staging_path.join(DELIVERY_README_FILE),
         instructions.as_bytes(),
@@ -1285,9 +1352,15 @@ fn copy_subtitles(staging_path: &Path, inputs: &[DraftInput]) -> Result<u64> {
     Ok(sources.len() as u64)
 }
 
-fn delivery_instructions(selected_count: usize, subtitle_count: u64) -> String {
+fn delivery_instructions(selected_count: usize, subtitle_count: u64, timeline_count: usize) -> String {
     let subtitle_note = if subtitle_count == 0 {
         "本次没有可用转写，因此未创建字幕目录。".to_owned()
+    } else if timeline_count > 0 {
+        format!(
+            "字幕已按精选段入点对到时间线，写成剪映文字轨「{}」（试验，共 {timeline_count} 条），与 {SUBTITLE_DIRECTORY}/{} 逐条一致；{SUBTITLE_DIRECTORY}/ 里另有 {subtitle_count} 份保留原片时间码的标准 SRT。请在剪映里核对字幕位置与断句。",
+            text::SUBTITLE_TRACK_NAME,
+            text::TIMELINE_SRT_FILE
+        )
     } else {
         format!(
             "{SUBTITLE_DIRECTORY}/ 内有 {subtitle_count} 份标准 SRT；字幕没有写入时间线，请在剪映内手动导入并核对。精选段的 SRT 保留原片时间码，必要时需按入点手动校准。"
@@ -1365,7 +1438,7 @@ mod tests {
         assert_eq!(draft.materials.audios.len(), 1);
         let segment = &draft.tracks[1].segments[0];
         assert_eq!(segment.target_timerange, DraftTimerange { start: 0, duration: 3_000_000 });
-        assert_eq!(segment.source_timerange, DraftTimerange { start: 0, duration: 3_000_000 });
+        assert_eq!(segment.source_timerange, Some(DraftTimerange { start: 0, duration: 3_000_000 }));
         assert_eq!(segment.material_id, draft.materials.audios[0].id);
         assert_eq!(draft.materials.audios[0].duration, 10_000_000);
         assert_eq!(draft.materials.audios[0].path, "/Volumes/CARD/bgm.mp3");
@@ -1400,7 +1473,7 @@ mod tests {
     fn readback_rejects_music_track_longer_than_video() {
         let mut draft = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
         draft.tracks[1].segments[0].target_timerange.duration = 2_000_000;
-        draft.tracks[1].segments[0].source_timerange.duration = 2_000_000;
+        draft.tracks[1].segments[0].source_timerange.as_mut().unwrap().duration = 2_000_000;
         assert!(validate_draft(&draft, 1).is_err());
         let mut orphan = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
         orphan.tracks.pop();
@@ -1414,7 +1487,7 @@ mod tests {
         let final_path = root.join("music-draft");
         let draft = build_with_music(&[input("a.mov", 0, 1_000)], Some(&music(5_000_000)));
         let meta = build_meta(&draft, &final_path, 10).unwrap();
-        write_draft_atomically(&root, &final_path, &draft, &meta, &[input("a.mov", 0, 1_000)]).unwrap();
+        write_draft_atomically(&root, &final_path, &draft, &meta, &[input("a.mov", 0, 1_000)], &[]).unwrap();
         let written: DraftInfo =
             serde_json::from_slice(&std::fs::read(final_path.join(DRAFT_INFO_FILE)).unwrap()).unwrap();
         assert_eq!(written.tracks.len(), 2);
@@ -1641,6 +1714,7 @@ mod tests {
             &status,
             directory.path(),
             false,
+            false,
         ).unwrap_err().to_string();
         assert!(error.contains("当前没有精选段或收藏素材"), "{error}");
         assert!(!error.contains("photo_not_supported"), "{error}");
@@ -1783,7 +1857,7 @@ mod tests {
         )
         .unwrap();
         let segments = &draft.tracks[0].segments;
-        assert_eq!(segments[0].source_timerange, DraftTimerange { start: 500_000, duration: 1_000_000 });
+        assert_eq!(segments[0].source_timerange, Some(DraftTimerange { start: 500_000, duration: 1_000_000 }));
         assert_eq!(segments[0].target_timerange.start, 0);
         assert_eq!(segments[1].target_timerange.start, 1_000_000);
         assert_eq!(draft.duration, 3_500_000);
@@ -1820,6 +1894,7 @@ mod tests {
             &draft,
             &meta,
             &[input("one.mov", 0, 1_000)],
+            &[],
         )
         .is_err());
         assert!(!final_path.exists());
@@ -1849,7 +1924,7 @@ mod tests {
         let final_path = root.join("new-draft");
         let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         let meta = build_meta(&draft, &final_path, 10).unwrap();
-        write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)]).unwrap();
+        write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)], &[]).unwrap();
         assert!(final_path.join(DRAFT_INFO_FILE).is_file());
         assert!(final_path.join(DRAFT_META_FILE).is_file());
         assert!(!std::fs::read_dir(&root)
@@ -1868,7 +1943,7 @@ mod tests {
         std::fs::write(&marker, b"keep").unwrap();
         let draft = build_draft("旅剪", "DRAFT-ID", &[input("one.mov", 0, 1_000)], 10, 1920, 1080).unwrap();
         let meta = build_meta(&draft, &final_path, 10).unwrap();
-        assert!(write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)]).is_err());
+        assert!(write_draft_atomically(&root, &final_path, &draft, &meta, &[input("one.mov", 0, 1_000)], &[]).is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1977,8 +2052,8 @@ mod r14_force_tests {
         std::fs::create_dir(&root).unwrap();
         let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::None);
 
-        assert!(generate_with_availability(&mut connection, &status, &root, false).is_err());
-        let result = generate_with_availability(&mut connection, &status, &root, true).unwrap();
+        assert!(generate_with_availability(&mut connection, &status, &root, false, false).is_err());
+        let result = generate_with_availability(&mut connection, &status, &root, true, false).unwrap();
 
         assert!(result.experimental);
         assert_eq!(result.draft_path, result.output_path);
@@ -1992,9 +2067,18 @@ mod r14_force_tests {
         assert_eq!(top, golden_top);
         assert_eq!(materials, golden_materials);
         // 第二次 force 也是新目录,不覆盖第一次。
-        let second = generate_with_availability(&mut connection, &status, &root, true).unwrap();
+        let second = generate_with_availability(&mut connection, &status, &root, true, false).unwrap();
         assert_ne!(second.draft_path, result.draft_path);
         assert!(Path::new(&result.draft_path).is_dir());
+        assert!(!result.subtitles_on_timeline);
+        assert_eq!(result.timeline_subtitle_count, 0);
+        // R24 D-1:试验草稿也能开「字幕写进时间线」;这条素材没有转写 → 不建文字轨、条数 0,结果如实回报开关。
+        let with_subtitles = generate_with_availability(&mut connection, &status, &root, true, true).unwrap();
+        assert!(with_subtitles.subtitles_on_timeline);
+        assert_eq!(with_subtitles.timeline_subtitle_count, 0);
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(Path::new(&with_subtitles.draft_path).join(DRAFT_INFO_FILE)).unwrap()).unwrap();
+        assert_eq!(written["tracks"].as_array().unwrap().len(), 1);
     }
 
     /// V14-01:原生草稿的 videos 顺序 = 镜头带「按章节」顺序(早章在前、章内按 position),
@@ -2057,7 +2141,7 @@ mod r14_force_tests {
         std::fs::create_dir(&root).unwrap();
         let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
 
-        let result = generate_with_availability(&mut connection, &status, &root, false).unwrap();
+        let result = generate_with_availability(&mut connection, &status, &root, false, false).unwrap();
 
         let written: Value = serde_json::from_slice(&std::fs::read(Path::new(&result.draft_path).join(DRAFT_INFO_FILE)).unwrap()).unwrap();
         let names = written["materials"]["videos"]
@@ -2079,7 +2163,7 @@ mod r14_force_tests {
         let root = directory.path().join("draft-root");
         std::fs::create_dir(&root).unwrap();
         let status = availability_from(Ok("12.0.0".to_owned()), true, HumanCheck::None);
-        let error = generate_with_availability(&mut connection, &status, &root, true).unwrap_err();
+        let error = generate_with_availability(&mut connection, &status, &root, true, false).unwrap_err();
         assert!(error.to_string().contains("12.0.0"));
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());
     }
@@ -2091,8 +2175,15 @@ mod r14_force_tests {
         let root = directory.path().join("draft-root");
         std::fs::create_dir(&root).unwrap();
         let status = availability_from(Ok("11.3.0".to_owned()), true, HumanCheck::None);
-        let result = generate_with_availability(&mut connection, &status, &root, false).unwrap();
+        let result = generate_with_availability(&mut connection, &status, &root, false, false).unwrap();
         assert!(!result.experimental);
         assert!(!result.draft_name.contains("试验"));
     }
 }
+
+#[path = "jianying_text.rs"]
+mod text;
+
+#[cfg(test)]
+#[path = "jianying_baseline_tests.rs"]
+mod baseline_tests;

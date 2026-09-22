@@ -152,9 +152,9 @@ fn force_smoke_for_pending_version(installed_version: &str) {
         std::env::set_var("TRIPCUT_JIANYING_DRAFT_ROOT", &draft_root);
     }
     let availability = jianying::availability(&connection);
-    let refused = jianying::generate_native_draft(&mut connection, false);
-    let first = jianying::generate_native_draft(&mut connection, true);
-    let second = jianying::generate_native_draft(&mut connection, true);
+    let refused = jianying::generate_native_draft(&mut connection, false, false);
+    let first = jianying::generate_native_draft(&mut connection, true, false);
+    let second = jianying::generate_native_draft(&mut connection, true, false);
     unsafe {
         std::env::remove_var("TRIPCUT_JIANYING_DRAFT_ROOT");
     }
@@ -275,7 +275,7 @@ fn jianying_canary_against_live_environment() {
     unsafe {
         std::env::set_var("TRIPCUT_JIANYING_DRAFT_ROOT", &draft_root);
     }
-    let result = jianying::generate_native_draft(&mut connection, false);
+    let result = jianying::generate_native_draft(&mut connection, false, false);
     unsafe {
         std::env::remove_var("TRIPCUT_JIANYING_DRAFT_ROOT");
     }

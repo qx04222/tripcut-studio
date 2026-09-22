@@ -148,7 +148,7 @@ export function Monitor(): JSX.Element {
     // 播完再按播放 = 从头放。
     // R23:按播放 = 人工开播,先撤出点围栏 —— 连播释放后素材停在 activeSegment.out,
     // 围栏还留着,不撤的话按播放会当场又被挡在 out 上。
-    const fence = transportRef.current?.fenceCommands() ?? [];
+    const fence = transportRef.current?.userPlayCommands() ?? [];
     void send(isAtEnd(status)
       ? [...fence, { type: "seek_abs", seconds: 0 }, { type: "play" }]
       : [...fence, { type: "play" }]);
@@ -166,6 +166,7 @@ export function Monitor(): JSX.Element {
     outPoint,
     bestStart: suggestions.bestStart,
     momentsLoaded: suggestions.momentsLoaded,
+    openAt: controlsRef.current?.openAt,
     playthroughActive: playthroughView !== null && playthroughView.phase !== "idle",
   });
   transportRef.current = transport;
@@ -175,7 +176,7 @@ export function Monitor(): JSX.Element {
   // 停在新段入点,而不是画一个还属于上一段的位置。
   const playthroughProps: { playthrough?: PlaythroughRange } = playthrough.active && playthrough.segment ? { playthrough: {
     inPoint: playthrough.segment.inPoint, outPoint: playthrough.segment.outPoint, index: playthrough.index, total: playthrough.total,
-    switching: playthrough.switching,
+    switching: playthrough.switching, stage: playthrough.stage,
   } } : {};
   const onNudge = transport.nudge;
   const onSeek = transport.seekTo;
@@ -378,8 +379,8 @@ export function Monitor(): JSX.Element {
       <MonitorControls
         {...playthroughProps}
         clip={clip}
-        onPause={() => send([{ type: "pause" }])}
-        onResume={() => send([{ type: "play" }])}
+        onPause={transport.gesturePause}
+        onResume={transport.gestureResume}
         onTrim={(edge, seconds) => { if (edge === "in") setInPoint(seconds); else setOutPoint(seconds); }}
         onShuttle={transport.shuttle}
         status={status}

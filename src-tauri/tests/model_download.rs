@@ -61,7 +61,7 @@ fn serve(routes: Vec<(String, Vec<u8>)>, chunk_delay: Duration) -> Fixture {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
-    format!("{:x}", sha2::Sha256::digest(bytes))
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn leak(value: String) -> &'static str {

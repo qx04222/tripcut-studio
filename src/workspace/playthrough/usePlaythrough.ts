@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PlayerStatus } from '../../api';
 import { playthroughProgress, type PlaythroughSegment } from './model';
-import { PLAYTHROUGH_RELEASE_EVENT, PLAYTHROUGH_TRIM_SEEK_EVENT } from './store';
+import { PLAYTHROUGH_RELEASE_EVENT, PLAYTHROUGH_TRIM_SEEK_EVENT, requestOpenAt, cancelOpenAt, type OpenAtRequest } from './store';
 
 export interface PlaythroughDeps {
   segments: readonly PlaythroughSegment[];
@@ -49,8 +49,10 @@ export function usePlaythrough(deps: PlaythroughDeps) {
   const clearTimer = useCallback(() => { clearTimeout(timer.current); timer.current = undefined; }, []);
   // 修剪挂起:拖边修剪的跟随 seek 到来时连播转 paused,修剪落地(段列表变)后自动继续;取消修剪就停在 paused,由用户再按播放。
   const heldByTrim = useRef(false);
+  const openRequest = useRef<OpenAtRequest | null>(null);
   const stop = useCallback((error: string | null = null, keepPlaying = false) => {
     const wasActive = active(session.current);
+    cancelOpenAt(openRequest.current);
     heldByTrim.current = false;
     publish({ phase: 'idle', stage: 'finished', token: session.current.token + 1, error });
     clearTimer();
@@ -77,6 +79,7 @@ export function usePlaythrough(deps: PlaythroughDeps) {
   const enter = useCallback((index: number, list = session.current.segments, phase: PlaythroughPhase = session.current.phase) => {
     if (!latest.current.enabled || !list[index]) return;
     clearTimer();
+    cancelOpenAt(openRequest.current);
     const token = session.current.token + 1;
     // R23 §7.2:`{index, clipId, in, out}` 是一次不可拆分的提交。以前段号先换、素材与
     // 边界后换,中间那几拍「活动选段已经是下一段、播放器还在上一段的位置上播」——
@@ -88,7 +91,11 @@ export function usePlaythrough(deps: PlaythroughDeps) {
       if (!valid(token)) return;
       // 先暂停旧源,再一次性提交段并改变 selection;loading 只接受目标素材的 ready。
       publish({ index, segments: list, stage: 'loading' });
-      latest.current.selectClip(list[index]!.clipId);
+      const target = list[index]!;
+      if (target.clipId !== latest.current.selectedClipId) {
+        openRequest.current = requestOpenAt(target.clipId, target.inPoint);
+      }
+      latest.current.selectClip(target.clipId);
     }).catch(error => fail(token, error));
   }, [clearTimer, publish, fail, valid]);
   const start = useCallback((index = 0) => enter(index, latest.current.segments, 'playing'), [enter]);
@@ -141,8 +148,12 @@ export function usePlaythrough(deps: PlaythroughDeps) {
       return;
     }
     if (s.stage !== 'running' || s.phase !== 'playing') return;
-    const atOut = status.pos >= segment.outPoint - 1 / segment.fps;
-    const atClipEnd = status.duration > 0 && status.pos >= status.duration - 1 / segment.fps;
+    // R24 真机:出点落在帧边界上时(I / O 打点保存的段都是),mpv 的 `end` 围栏停在上一帧,
+    // 位置正好是 out − 1 帧 —— 浮点里 12.44 < 12.48 − 0.04 = 12.440000000000001,以前就卡在
+    // 第一段末帧再也不接下一段(0.11.4 同样)。按半帧容差判到点;播放器已被围栏停住也算到点。
+    const frame = 1 / segment.fps;
+    const atOut = status.pos >= segment.outPoint - 1.5 * frame || (status.paused && status.pos >= segment.outPoint - 2 * frame);
+    const atClipEnd = status.duration > 0 && status.pos >= status.duration - 1.5 * frame;
     if (!atOut && !atClipEnd) return;
     if (s.index + 1 < s.segments.length) { enter(s.index + 1); return; }
     if (loopRef.current) { enter(0); return; }
@@ -198,6 +209,7 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      cancelOpenAt(openRequest.current);
       clearTimer();
       session.current = { ...session.current, token: session.current.token + 1, phase: 'idle' };
       window.removeEventListener('tripcut:manual-seek', interrupt);
@@ -222,7 +234,7 @@ export function usePlaythrough(deps: PlaythroughDeps) {
   const progress = playthroughProgress(state.segments, state.index, state.phase === 'done' ? segment?.outPoint ?? 0 :
     state.stage === 'running' && deps.status?.clip_id === segment?.clipId ? deps.status?.pos ?? 0 : segment?.inPoint ?? 0);
   return {
-    phase: state.phase, index: state.index, segment, total: state.segments.length, active: active(state),
+    phase: state.phase, stage: state.stage, index: state.index, segment, total: state.segments.length, active: active(state),
     switching: active(state) && state.stage !== 'running', loop, switchMs: state.switchMs, error: state.error, ...progress,
     start, stop, pause, resume,
     next: () => { if (active(session.current)) enter(Math.min(session.current.segments.length - 1, session.current.index + 1)); },

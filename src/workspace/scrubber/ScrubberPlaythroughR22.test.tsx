@@ -51,3 +51,17 @@ it("MonitorControls passes the playthrough range through to the scrubber", () =>
   expect(screen.getByText("第 5/5 段")).toBeTruthy();
   expect(document.querySelector(".scrubber-r22-track [data-playing]")).toBeTruthy();
 });
+
+it("P-2 stopping keeps old segment position; loading commits the new AX pair; free playback text is unchanged", () => {
+  const view = render(<Scrubber status={{ ...status, pos: 12.4 }} fps={25} inPoint={null} outPoint={null} onSeek={vi.fn()}
+    playthrough={{ inPoint: 4.5, outPoint: 12.5, index: 0, total: 2, stage: 'stopping', switching: true }} />);
+  const slider = screen.getByRole('slider', { name: '播放位置' });
+  expect(slider.getAttribute('aria-valuenow')).toBe('12.4');
+  expect(slider.getAttribute('aria-valuetext')).toBe('00:00:12.10 · 第 1/2 段');
+  view.rerender(<Scrubber status={{ ...status, pos: 12.4 }} fps={25} inPoint={null} outPoint={null} onSeek={vi.fn()}
+    playthrough={{ inPoint: 46.5, outPoint: 54.5, index: 1, total: 2, stage: 'loading', switching: true }} />);
+  expect(slider.getAttribute('aria-valuenow')).toBe('46.5');
+  expect(slider.getAttribute('aria-valuetext')).toBe('00:00:46.12 · 第 2/2 段');
+  view.rerender(<Scrubber status={{ ...status, pos: 12.4 }} fps={25} inPoint={null} outPoint={null} onSeek={vi.fn()} />);
+  expect(slider.getAttribute('aria-valuetext')).toBe('00:00:12.10');
+});

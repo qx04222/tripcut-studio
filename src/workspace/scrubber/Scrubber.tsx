@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { PlayerStatus } from "../../api";
-import type { PlaythroughRange } from "../playthrough/model";
+import { playthroughReadout, type PlaythroughRange } from "../playthrough/model";
 import { clamp, ratioAt, timecode, visibleRange } from "./model";
 import { useScrubGesture, type Edge } from "./useScrubGesture";
 import { ScrubberLayers } from "./ScrubberLayers";
@@ -41,11 +41,11 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   }, [gesture.track]);
   useEffect(() => { setHover(null); }, [clipId]);
   const pct = (n: number) => `${ratioAt(n, shownRange) * 100}%`;
-  // R23 §7.6:指针只从 activeSegment + 真实 currentTime 派生。切段中读数还属于上一段,
-  // 与其画一个假位置,不如停在新段入点 —— 「seek 后指针立即刷新到目标位置」。
-  const value = gesture.local !== null ? gesture.local
-    : playthrough?.switching ? playthrough.inPoint
-      : clamp(status?.pos ?? 0, 0, duration);
+  // R24:段号、指针与 AXValueDescription 共用一次快照;stopping 保留旧段真位置。
+  // 用户正在拖 / 点时以手势落点为准(与 R23 相同的优先级);真位置照旧夹进素材范围。
+  const readout = playthrough ? playthroughReadout(playthrough, clamp(status?.pos ?? 0, 0, duration)) : null;
+  const value = gesture.local ?? readout?.position ?? clamp(status?.pos ?? 0, 0, duration);
+  const segmentLabel = readout ? `第 ${readout.index + 1}/${readout.total} 段` : null;
   const marked = inPoint !== null && outPoint !== null && outPoint > inPoint;
   // R23 §8C:`ratioAt` 会把越界的位置 clamp 到 0%/100%,看起来只是「指针不动」。
   // 连播中一旦真位置落在活动选段外就挂旗,验收测试盯它 —— clamp 不许把越界播放遮过去。
@@ -83,7 +83,7 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   return <span className="scrubber-r22">
     <span className="scrubber-r22-track-wrap">
       <div ref={gesture.track} role="slider" tabIndex={ready ? 0 : -1} aria-label="播放位置" aria-valuemin={0} aria-valuemax={duration}
-        aria-valuenow={value} aria-valuetext={timecode(value, fps)} aria-disabled={!ready} className="scrubber-r22-track"
+        aria-valuenow={value} aria-valuetext={segmentLabel ? `${timecode(value, fps)} · ${segmentLabel}` : timecode(value, fps)} aria-disabled={!ready} className="scrubber-r22-track"
         data-out-of-range={outOfSegment ? "" : undefined}
         onKeyDown={e => keyboard(e, "play")}
         onPointerDown={e => { gesture.start(e, "play"); enter(e.clientX); }}
@@ -112,7 +112,7 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
           onPointerLeave={leave}>{edge === "in" ? "I" : "O"}</div> : null;
       })}
     </span>
-    {playthrough && <span className="scrubber-r22-playthrough-label" title="镜头带连播:当前段">第 {playthrough.index + 1}/{playthrough.total} 段</span>}
+    {playthrough && <span className="scrubber-r22-playthrough-label" title="镜头带连播:当前段">{segmentLabel}</span>}
     {/* R23:连播中刻度固定等于活动选段,这个开关此刻说了不算 —— 按下去什么都不会变,
         就别让它看起来还能按(禁用 + 显示「片段」,与实际刻度一致)。 */}
     <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={playthrough ? true : zoom && marked}

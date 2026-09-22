@@ -44,6 +44,9 @@ export interface DeliverForm {
   /** R12:集 / 预设 / 记住的选择已经读回来(此前的默认值会被覆盖一次,想在之后改值的人等这个)。 */
   loaded: boolean;
   setUseJianyingDraft(v: boolean): void;
+  /** 本次抽屉内的试验选择,默认关闭且不持久化。 */
+  subtitlesOnTimeline: boolean;
+  setSubtitlesOnTimeline(v: boolean): void;
   /** 本集平台的预设(画布尺寸等);读不到为 null。 */
   preset: PlatformPreset | null;
   /** R10 U-05:后端按 平台 / 手动方向 现算的「将要用的画布」;读不到为 null。 */
@@ -95,6 +98,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
   const [overridePlatform, setOverridePlatformState] = useState<TargetPlatform>("general");
   const [includeContactSheet, setIncludeContactSheetState] = useState(true);
   const [useJianyingDraft, setUseJianyingDraftState] = useState(false);
+  const [subtitlesOnTimeline, setSubtitlesOnTimeline] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [targetSeconds, setTargetSecondsState] = useState<TargetSecondsOption>(null);
   const [preset, setPreset] = useState<PlatformPreset | null>(null);
@@ -226,7 +230,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     setNativeNotice(null);
     setFormError(null);
     try {
-      const result = await generateJianyingDraft();
+      const result = await (subtitlesOnTimeline ? generateJianyingDraft({ subtitlesOnTimeline: true }) : generateJianyingDraft());
       setNativeResult(result);
     } catch (nativeError) {
       const reason = String(nativeError);
@@ -245,7 +249,7 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     } finally {
       setNativeBusy(false);
     }
-  }, [startStablePackage]);
+  }, [startStablePackage, subtitlesOnTimeline]);
 
   const generateExperimental = useCallback(async () => {
     if (nativeBusy || active) return;
@@ -254,13 +258,13 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     setNativeNotice(null);
     setFormError(null);
     try {
-      setNativeResult(await generateJianyingDraftForced());
+      setNativeResult(await (subtitlesOnTimeline ? generateJianyingDraftForced({ subtitlesOnTimeline: true }) : generateJianyingDraftForced()));
     } catch (error) {
       setFormError(`试验草稿没写出来:${String(error)}`);
     } finally {
       setNativeBusy(false);
     }
-  }, [active, nativeBusy]);
+  }, [active, nativeBusy, subtitlesOnTimeline]);
 
   const cancel = useCallback(async () => {
     if (status.job_id === null) return;
@@ -311,6 +315,8 @@ export function useDeliverForm(progress: ExportProgress): DeliverForm {
     useJianyingDraft,
     loaded,
     setUseJianyingDraft,
+    subtitlesOnTimeline,
+    setSubtitlesOnTimeline,
     preset,
     canvas,
     overrideOrientation,

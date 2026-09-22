@@ -1,7 +1,7 @@
-/// <reference types="vitest/config" />
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { join, normalize, resolve } from "node:path";
 import { defineConfig, type Plugin, type PluginOption } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 /**
@@ -68,6 +68,7 @@ export default defineConfig(({ mode }) => {
     plugins,
     resolve: mock ? { alias: mockAliases(ROOT) } : undefined,
     test: {
+      exclude: [...configDefaults.exclude, "src-tauri/target/**"],
       setupFiles: ["./src/test-setup.ts"],
     },
     clearScreen: false,

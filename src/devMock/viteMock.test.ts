@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import viteConfig, { MOCK_ALIAS_TARGETS, mockAliases } from "../../vite.config";
 
 type ConfigFn = (env: { mode: string; command: "build" | "serve"; isSsrBuild?: boolean; isPreview?: boolean }) => {
+  test?: { exclude?: string[] };
   resolve?: { alias?: unknown };
   plugins?: unknown[];
 };
@@ -49,4 +50,8 @@ describe("vite mock mode", () => {
     expect(core.test.test("/x/src/workspace/Drawer.tsx")).toBe(false);
     expect(core.test.test("/x/src/workspace/modalStack.ts")).toBe(true);
   });
+});
+
+it('P-5 excludes Rust target copies from Vitest discovery (baseline red)', () => {
+  expect(resolveConfig({ mode: 'test', command: 'serve' }).test?.exclude).toContain('src-tauri/target/**');
 });

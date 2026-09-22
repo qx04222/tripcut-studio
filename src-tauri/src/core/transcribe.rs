@@ -89,11 +89,11 @@ struct ClipSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedSrtSegment {
-    seg_index: i64,
-    start_millis: i64,
-    end_millis: i64,
-    text: String,
+pub(crate) struct ParsedSrtSegment {
+    pub(crate) seg_index: i64,
+    pub(crate) start_millis: i64,
+    pub(crate) end_millis: i64,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -641,7 +641,8 @@ fn persist_transcript(
     Ok(())
 }
 
-fn parse_srt(input: &str) -> Result<Vec<ParsedSrtSegment>> {
+/// R24 D-1:剪映草稿「字幕写进时间线」也用这一份解析器,和转写入库同一套规则。
+pub(crate) fn parse_srt(input: &str) -> Result<Vec<ParsedSrtSegment>> {
     let normalized = input.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let mut parsed = Vec::new();
     for block in normalized.split("\n\n") {

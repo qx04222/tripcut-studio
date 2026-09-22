@@ -172,7 +172,7 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "sha2",
-    "version": "=0.10.9",
+    "version": "0.11",
     "license": "MIT OR Apache-2.0",
     "ecosystem": "Cargo",
     "scope": "runtime"
@@ -459,14 +459,14 @@ export const GENERATED_LICENSES: readonly GeneratedLicense[] = [
   },
   {
     "name": "vite",
-    "version": "8.2.2",
+    "version": "8.3.0",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"
   },
   {
     "name": "vitest",
-    "version": "5.0.0",
+    "version": "5.0.1",
     "license": "MIT",
     "ecosystem": "npm",
     "scope": "development"

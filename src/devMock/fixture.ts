@@ -1070,13 +1070,13 @@ function startPlayerClock(): void {
   }, 80);
 }
 
-function playerOpen(clipId: number): PlayerStatus {
+function playerOpen(clipId: number, startSeconds?: number): PlayerStatus {
   const clip = clipById(clipId);
   const duration = (clip.duration_ticks ?? 0) / 1000;
   state.player = {
     phase: "ready",
     clip_id: clipId,
-    pos: 0,
+    pos: startSeconds !== undefined && Number.isFinite(startSeconds) && startSeconds >= 0 ? startSeconds : 0,
     duration,
     paused: true,
     frame: 0,
@@ -1479,7 +1479,7 @@ const HANDLERS: Record<string, Handler> = {
   // --- 播放器 ---
   player_set_viewport: noop,
   player_set_occluded: noop,
-  player_open: ({ clipId }) => playerOpen(num(clipId, "clipId")),
+  player_open: ({ clipId, startSeconds }) => playerOpen(num(clipId, "clipId"), typeof startSeconds === "number" ? startSeconds : undefined),
   player_close: () => {
     state.player = { ...state.player, phase: "closed", clip_id: null, paused: true };
   },
@@ -2805,3 +2805,11 @@ HANDLERS.trim_band_segment = ({ episodeId, segmentId, expected, bounds }) => {
   bump(state);
 };
 (MOCK_COMMANDS as string[]).push("set_band_order", "trim_band_segment");
+
+// R24:追加包装最终生效的草稿 handler(覆盖前部占位实现),保留版本校验与 force 行为。
+const generateDraftBeforeTimelineSubtitles = HANDLERS.generate_jianying_draft;
+HANDLERS.generate_jianying_draft = (args) => {
+  const result = generateDraftBeforeTimelineSubtitles(args) as JianyingDraftResult;
+  const enabled = args.subtitlesOnTimeline === true;
+  return { ...result, subtitles_on_timeline: enabled, timeline_subtitle_count: enabled ? 7 : 0 } satisfies JianyingDraftResult;
+};

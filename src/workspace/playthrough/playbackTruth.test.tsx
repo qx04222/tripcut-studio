@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { useEffect, useState } from 'react';
 import { createTestApiMock } from '../testApiMock';
@@ -9,7 +9,7 @@ import { useMonitorTransport } from '../useMonitorTransport';
 import { Scrubber } from '../scrubber/Scrubber';
 import { FakePlayer } from './fakePlayer';
 import { usePlaythrough } from './usePlaythrough';
-import { isPlaythroughActive, publishPlaythrough, PLAYTHROUGH_RELEASE_EVENT } from './store';
+import { isPlaythroughActive, publishPlaythrough, takeOpenAt, releasePlaythrough } from './store';
 import type { PlaythroughSegment } from './model';
 
 /**
@@ -28,7 +28,7 @@ const seg = (key: string, clipId: number, inPoint: number, outPoint: number): Pl
   ({ key, clipId, inPoint, outPoint, fps: 25, chapter: '2' });
 
 interface Sample {
-  t: number; clipId: number;
+  t: number; clipId: number; axValue: number; axText: string | null;
   /** 界面看到的(80 ms 轮询回来的状态)。 */
   pos: number; paused: boolean;
   /** 播放器此刻的真身 —— 「放没放用户没选的画面」只能按它判,轮询读数会滞后一拍。 */
@@ -67,12 +67,12 @@ function harness(segments: readonly PlaythroughSegment[], options: {
     const c = usePlaythrough({
       segments, selectedClipId, status, enabled: true, transport,
       // PlayerOverlay 的真实接线:换素材时按连播在不在跑决定开原片停不停在首帧。
-      selectClip: (id: number) => { if (id !== player.clipId) player.open(id, isPlaythroughActive()); setSelectedClipId(id); },
+      selectClip: (id: number) => { if (id !== player.clipId) player.open(id, isPlaythroughActive(), takeOpenAt(id)?.seconds); setSelectedClipId(id); },
     });
     controller = c;
     publishPlaythrough(c);
     const range = c.active && c.segment
-      ? { inPoint: c.segment.inPoint, outPoint: c.segment.outPoint, index: c.index, total: c.total, switching: c.switching }
+      ? { inPoint: c.segment.inPoint, outPoint: c.segment.outPoint, index: c.index, total: c.total, switching: c.switching, stage: c.stage }
       : undefined;
     useEffect(() => {
       if (!status || status.phase !== 'ready') return;
@@ -80,6 +80,7 @@ function harness(segments: readonly PlaythroughSegment[], options: {
       const head = document.querySelector<HTMLElement>('.scrubber-r22-head');
       const band = document.querySelector<HTMLElement>('.scrubber-r22-playthrough');
       samples.push({
+        axValue: Number(track?.getAttribute("aria-valuenow")), axText: track?.getAttribute("aria-valuetext") ?? null,
         t: player.elapsed, clipId: status.clip_id ?? -1, pos: status.pos, paused: status.paused,
         truePos: player.pos, truePaused: player.paused,
         index: c.index, segIn: c.segment?.inPoint ?? -1, segOut: c.segment?.outPoint ?? -1,
@@ -88,7 +89,8 @@ function harness(segments: readonly PlaythroughSegment[], options: {
         bandLeft: band ? band.style.left : null,
       });
     });
-    return <Scrubber status={status} inPoint={inPoint} outPoint={outPoint} fps={25} onSeek={() => {}} playthrough={range} />;
+    return <Scrubber status={status} inPoint={inPoint} outPoint={outPoint} fps={25} onSeek={transport.seekTo}
+      onPause={transport.gesturePause} onResume={transport.gestureResume} playthrough={range} />;
   }
   render(<Host />);
   const run = async (ticks: number) => {
@@ -139,7 +141,7 @@ it('§8A 出点围栏由播放器自己守:每段开播前设 end,连播停时�
   expect(fences.at(-1)).toBeNull();
 });
 
-it('§8B 跨素材:先换素材并停在首帧,就绪后才 seek 到入点,不留旧位置、不跳不重复', async () => {
+it('§8B 跨素材:新实例首份就绪状态即入点,不留旧位置、不跳不重复', async () => {
   const segments = [seg('s1', 7, 26.4, 34.2), seg('s2', 9, 3, 8)];
   const h = harness(segments, { durations: new Map([[7, 121], [9, 90]]), suggestion: [5, 13], openTicks: 3 });
   await h.start();
@@ -149,7 +151,11 @@ it('§8B 跨素材:先换素材并停在首帧,就绪后才 seek 到入点,不�
   expect(h.samples.filter(s => s.clipId === 9 && !s.truePaused && s.truePos < 3 - TOL)).toEqual([]);
   // 不跳段、不重复 advance。
   expect(h.samples.map(s => s.index).filter((v, i, a) => v !== a[i - 1])).toEqual([0, 1]);
-  expect(h.seeks().filter(v => v === 3)).toHaveLength(1);
+  expect(h.seeks().filter(v => v === 3).length).toBeLessThanOrEqual(1);
+  const firstReady = h.player.samples.find(s => s.clipId === 9 && s.phase === 'ready');
+  expect(firstReady?.pos).toBeCloseTo(3, 5);
+  expect(firstReady?.paused).toBe(true);
+  expect(h.player.samples.filter(s => s.clipId === 9 && s.pos < 3 - 0.5 / 25)).toEqual([]);
 });
 
 it('§8C 刻度与指针:monitorRange == activeSegment,指针连续推进,越界不靠 clamp 遮', async () => {
@@ -229,13 +235,15 @@ it('§9 连播释放(镜头带开始编辑)不撤围栏:素材播到 out 就停,
   await h.run(30);
   expect(h.player.paused).toBe(false);
   // 镜头带一开始编辑 → releasePlaythrough():连播停,素材继续播(0.11.3 语义)。
-  await h.call(() => window.dispatchEvent(new Event(PLAYTHROUGH_RELEASE_EVENT)));
+  await h.call(() => releasePlaythrough());
   expect(h.controller.phase).toBe('idle');
   expect(h.player.paused).toBe(false);
   // 一路放下去,必须停在 activeSegment.out,绝不溜进 (34.2, 39.4)。
   await h.run(200);
   expect(h.player.paused).toBe(true);
-  expect(h.player.pos).toBeCloseTo(34.2, 2);
+  // R24:真 mpv 停在 end 之前的最后一帧(34.16 @25fps),不是 end 本身;fakePlayer 已按真机改。
+  expect(h.player.pos).toBeGreaterThanOrEqual(34.2 - 1 / 25 - 1e-9);
+  expect(h.player.pos).toBeLessThanOrEqual(34.2);
   expect(h.player.samples.filter(s => !s.paused && s.pos > 34.2 + TOL)).toEqual([]);
   // 按播放 = 人工开播:围栏撤掉,从这里起自由播,可以越过 out。
   await act(async () => { await h.transport.seekTo(34.2); });
@@ -250,7 +258,7 @@ it('§9 R23-N4(真机):释放时那一下点击自带的跟随 seek 不许把素
   await h.run(20);
   // 镜头带 ⌘ 点镜块 = 多选(释放连播)+ 跟随 seek 到卡片上那个点 —— 同一下手势里两件事。
   // 真机上那一下把播放头甩到 51.0(另一个镜头的范围),然后一路自由播到片尾 59.96。
-  await h.call(() => window.dispatchEvent(new Event(PLAYTHROUGH_RELEASE_EVENT)));
+  await h.call(() => releasePlaythrough());
   await act(async () => { await h.transport.seekTo(30.0); });
   await h.run(200);
   // 新规矩:释放之后任何一次 seek 都不自动开播 —— 停在目标上等用户按播放。
@@ -261,4 +269,67 @@ it('§9 R23-N4(真机):释放时那一下点击自带的跟随 seek 不许把素
   await h.call(() => { void h.transport.play(); });
   await h.run(30);
   expect(h.player.pos).toBeGreaterThan(31);
+});
+
+async function dragTrack(move = true) {
+  const track = document.querySelector<HTMLElement>('.scrubber-r22-track')!;
+  vi.spyOn(track, 'getBoundingClientRect').mockReturnValue({ left: 0, width: 100, bottom: 20 } as DOMRect);
+  // jsdom has no PointerEvent; mouse events retain the pointer coordinates React reads.
+  await act(async () => {
+    fireEvent(track, new MouseEvent('pointerdown', { bubbles: true, clientX: 30, button: 0 }));
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    if (move) fireEvent(track, new MouseEvent('pointermove', { bubbles: true, clientX: 40 }));
+    fireEvent(track, new MouseEvent('pointerup', { bubbles: true, clientX: move ? 40 : 30 }));
+  });
+}
+
+it.each([true, false])('P-1(a) 释放后真轨道手势 move=%s 松手不得开播;显式播放才解除等待(基线红)', async move => {
+  const h = harness(A_SEGMENTS, A_OPTIONS);
+  await h.start(); await h.run(10);
+  await h.call(() => releasePlaythrough());
+  expect(h.player.paused).toBe(false);
+  await dragTrack(move); await h.run(3);
+  const commands = h.player.commands.map(c => c.cmd.type);
+  expect(commands.slice(commands.lastIndexOf('seek_abs') + 1)).not.toContain('play');
+  expect(h.player.paused).toBe(true);
+  await h.call(() => { void h.transport.play(); });
+  expect(h.player.paused).toBe(false);
+  await dragTrack(); await h.run(3);
+  expect(h.player.paused).toBe(false);
+});
+
+it('P-1(b) 普通播放拖轨道松手照常继续(基线绿)', async () => {
+  const h = harness(A_SEGMENTS, A_OPTIONS);
+  await h.call(() => { void h.transport.play(); });
+  await dragTrack(); await h.run(3);
+  expect(h.player.commands.at(-1)?.cmd.type).toBe('play');
+  expect(h.player.paused).toBe(false);
+});
+
+it('P-1 连播进行中拖轨道仍然停止连播并继续素材播放(基线绿)', async () => {
+  const h = harness(A_SEGMENTS, A_OPTIONS);
+  await h.start(); await h.run(10);
+  await dragTrack(); await h.run(3);
+  expect(h.controller.active).toBe(false);
+  expect(h.player.paused).toBe(false);
+});
+
+it('P-2 每一拍 AX 单对象读数含同段号与秒数(基线红)', async () => {
+  const h = harness(A_SEGMENTS, A_OPTIONS);
+  await h.start(); await h.run(300);
+  const paired = h.samples.filter(s => s.bandLeft !== null);
+  expect(paired.length).toBeGreaterThan(100);
+  for (const s of paired) {
+    expect(s.axText).toContain(`第 ${s.index + 1}/2 段`);
+    expect(s.axValue).toBeGreaterThanOrEqual(s.segIn - 1 / 25);
+    expect(s.axValue).toBeLessThanOrEqual(s.segOut + 1 / 25);
+  }
+});
+
+it('R24 帧边界出点:围栏停在 out − 1 帧(浮点够不到 out − 1/fps)也要接下一段,不许卡在第一段末帧', async () => {
+  // 真机 0.11.4 / R24 QA 包实测:I/O 打点保存的段 out=12.48(帧边界),mpv 停在 12.44,连播永远停在 1/3。
+  const h = harness([seg('f1', 7, 4.48, 12.48), seg('f2', 7, 46.48, 54.48)], { durations: new Map([[7, 60]]) });
+  await h.start(); await h.run(400);
+  expect(h.samples.some(s => s.index === 1 && s.truePos >= 46.48 - TOL)).toBe(true);
+  expect(h.controller.phase).toBe('done');
 });

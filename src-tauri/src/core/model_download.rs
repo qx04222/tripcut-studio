@@ -262,7 +262,7 @@ impl FileDownload<'_> {
                 file.name, file.size_bytes
             )));
         }
-        let digest = format!("{:x}", hasher.finalize());
+        let digest: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
         if digest != file.sha256 {
             return Err(io_error(format!(
                 "{} 的 SHA-256 校验失败(收到 {digest},期望 {}),已丢弃,不会启用",

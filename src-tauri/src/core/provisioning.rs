@@ -127,7 +127,7 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// R10 U-24:把用户自己下载的模型文件校验后放进 models 目录。

@@ -792,6 +792,10 @@ export interface JianyingDraftResult {
   experimental?: boolean;
   /** 与 `output_path` 同值。 */
   draft_path?: string;
+  /** 是否已将转写字幕写入剪映时间线文字轨(试验)。 */
+  subtitles_on_timeline?: boolean;
+  /** 实际写入时间线文字轨的字幕条数。 */
+  timeline_subtitle_count?: number;
 }
 
 export function getMediaServerInfo(): Promise<MediaServerInfo> {
@@ -1194,7 +1198,10 @@ export function getJianyingAvailability(): Promise<JianyingAvailability> {
   return invoke<JianyingAvailability>("get_jianying_availability");
 }
 
-export function generateJianyingDraft(): Promise<JianyingDraftResult> {
+export function generateJianyingDraft(options?: { subtitlesOnTimeline?: boolean }): Promise<JianyingDraftResult> {
+  if (options?.subtitlesOnTimeline === true) {
+    return invoke<JianyingDraftResult>("generate_jianying_draft", { subtitlesOnTimeline: true });
+  }
   return invoke<JianyingDraftResult>("generate_jianying_draft");
 }
 
@@ -1242,9 +1249,9 @@ export function playerSetOccluded(occluded: boolean): Promise<void> {
   return invoke<void>("player_set_occluded", { occluded });
 }
 
-/** `startPaused` = 载入后停在首帧(R23 镜头带连播换素材:seek 到入点、等首帧再开播)。 */
-export function playerOpen(clipId: number, startPaused = false): Promise<PlayerStatus> {
-  return invoke<PlayerStatus>("player_open", { clipId, startPaused });
+/** `startSeconds` 是源时间入点,提供时按该位置暂停打开;省略时保持旧参数对象。 */
+export function playerOpen(clipId: number, startPaused = false, startSeconds?: number): Promise<PlayerStatus> {
+  return invoke<PlayerStatus>("player_open", { clipId, startPaused, ...(startSeconds === undefined ? {} : { startSeconds }) });
 }
 
 export function playerClose(): Promise<void> {
@@ -2024,7 +2031,10 @@ export function openApp(bundleId: string): Promise<void> {
 export type JianyingHumanCheck = "none" | "ok" | "fail";
 
 /** 「我知道风险,仍然试着生成(试验)」:后端只对待验证名单里的版本放行,未知版本仍 reject。 */
-export function generateJianyingDraftForced(): Promise<JianyingDraftResult> {
+export function generateJianyingDraftForced(options?: { subtitlesOnTimeline?: boolean }): Promise<JianyingDraftResult> {
+  if (options?.subtitlesOnTimeline === true) {
+    return invoke<JianyingDraftResult>("generate_jianying_draft", { force: true, subtitlesOnTimeline: true });
+  }
   return invoke<JianyingDraftResult>("generate_jianying_draft", { force: true });
 }
 

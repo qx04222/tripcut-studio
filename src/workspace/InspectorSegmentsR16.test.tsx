@@ -21,6 +21,7 @@ const seg = (id: number) => ({ id, clip_id: 3, in_ticks: 0, out_ticks: 1000, tb_
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
+  apiMock.playerStatus.mockResolvedValue({ phase: "ready", clip_id: 3 } as never);
   __resetToastsForTests();
   __resetUndoForTests();
 });
@@ -96,6 +97,7 @@ describe("2026-09-19 frozen-video:复播精选段", () => {
     const view = render(<SelectSegmentsSection clipId={3} selectCount={1} readOnly={false} />);
     await screen.findByRole("list", { name: "精选段列表" });
     apiMock.listSelectSegments.mockResolvedValue([{ id: 9, clip_id: 5, in_ticks: 6005, out_ticks: 9005, tb_num: 1, tb_den: 600 }]);
+    apiMock.playerStatus.mockResolvedValue({ phase: "ready", clip_id: 5 } as never);
     view.rerender(<SelectSegmentsSection clipId={5} selectCount={1} readOnly={false} />);
     await waitFor(() => expect(apiMock.listSelectSegments).toHaveBeenLastCalledWith(5));
     await act(async () => {

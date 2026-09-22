@@ -75,6 +75,7 @@ export function JianyingResultCard({ result }: { result: JianyingDraftResult }):
         <p className="deliver-result-name">{result.draft_name}</p>
         <p className="deliver-result-meta">{draftContentLine(result)}</p>
         <p className="deliver-result-meta">{result.message}</p>
+        <TimelineSubtitleLine result={result} />
         <code className="deliver-result-path">{result.output_path}</code>
       </div>
     </Card>
@@ -84,6 +85,12 @@ export function JianyingResultCard({ result }: { result: JianyingDraftResult }):
 export const OPEN_JIANYING_LABEL = "打开剪映";
 export const HUMAN_CHECK_OK_LABEL = "可以用";
 export const HUMAN_CHECK_FAIL_LABEL = "打不开";
+
+function TimelineSubtitleLine({ result }: { result: JianyingDraftResult }): JSX.Element | null {
+  return result.subtitles_on_timeline === true ? (
+    <p className="deliver-result-meta">字幕已写进时间线:{result.timeline_subtitle_count ?? 0} 条(试验,请在剪映里核对位置与断句)</p>
+  ) : null;
+}
 
 /**
  * 试验草稿结果卡:「1 打开剪映 → 2 看草稿列表里有没有『<草稿名>』→ 3 能打开就点『可以用』,打不开点『打不开』」。
@@ -108,6 +115,7 @@ function ExperimentalDraftCard({ result }: { result: JianyingDraftResult }): JSX
       <div className="deliver-result-copy">
         <p className="deliver-result-title">试验草稿已写出,请到剪映里看一眼</p>
         <p className="deliver-result-meta">{draftContentLine(result)}</p>
+        <TimelineSubtitleLine result={result} />
         <ol className="deliver-experimental-steps">
           <li>
             打开剪映

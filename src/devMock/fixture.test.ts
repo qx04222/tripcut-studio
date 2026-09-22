@@ -117,3 +117,9 @@ it("r21 mock clips carry photo-core defaults", () => {
     expect(clip.companions).toEqual([]);
   }
 });
+
+it('P-3 player_open mock honours a source start without changing the legacy open', () => {
+  const started = handleMockCommand('player_open', { clipId: 2, startSeconds: 7.4 }) as { pos: number; paused: boolean };
+  expect(started).toMatchObject({ pos: 7.4, paused: true });
+  expect(handleMockCommand('player_open', { clipId: 2 })).toMatchObject({ pos: 0 });
+});

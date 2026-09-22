@@ -33,6 +33,17 @@ export const playthroughTime = (seconds: number) => {
 };
 export interface PlaythroughRange {
   inPoint: number; outPoint: number; index: number; total: number;
-  /** 切段中(旧源已停、seek 还没落地):此刻的 `currentTime` 还属于上一段,不能当位置显示。 */
+  /** 切段总状态;stage 区分停旧段与新段已提交,避免把旧段的位置重置到入点。 */
   switching?: boolean;
+  stage?: 'stopping' | 'loading' | 'seeking' | 'frame' | 'starting' | 'running' | 'finished';
+}
+
+/** 同一次渲染的 AX 快照:停旧段时保留旧位置,提交新段后才显示新入点。 */
+export function playthroughReadout(range: PlaythroughRange, position: number) {
+  const switching = range.stage !== undefined
+    ? !['running', 'finished'].includes(range.stage) : Boolean(range.switching);
+  return {
+    index: range.index, total: range.total, switching,
+    position: switching && range.stage !== 'stopping' ? range.inPoint : position,
+  };
 }

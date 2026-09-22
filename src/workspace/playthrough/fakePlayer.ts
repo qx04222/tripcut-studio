@@ -17,10 +17,13 @@ export interface FakePlayerOptions {
   /** 换素材(player_open)要几个 tick 才 ready。 */
   openTicks?: number;
   tickMs?: number;
+  /** 帧率:真 mpv 的 `end` 停在「end 之前的最后一帧」上,位置是那一帧的 pts(R24 真机)。 */
+  fps?: number;
 }
 
 export class FakePlayer {
   readonly tickMs: number;
+  private readonly fps: number;
   private readonly clips: ReadonlyMap<number, number>;
   private readonly seekLandTicks: number;
   private readonly openTicks: number;
@@ -30,7 +33,7 @@ export class FakePlayer {
   phase: PlayerStatus['phase'] = 'ready';
   speed = 1;
   /** 每个 tick 记一行:测试拿它当「采样日志」。 */
-  readonly samples: { t: number; clipId: number; pos: number; paused: boolean }[] = [];
+  readonly samples: { phase: PlayerStatus['phase']; t: number; clipId: number; pos: number; paused: boolean }[] = [];
   readonly commands: { t: number; cmd: PlayerCommand }[] = [];
   elapsed = 0;
   private pendingSeek: { target: number; ticks: number } | null = null;
@@ -44,6 +47,7 @@ export class FakePlayer {
     this.seekLandTicks = options.seekLandTicks ?? 0;
     this.openTicks = options.openTicks ?? 1;
     this.tickMs = options.tickMs ?? 80;
+    this.fps = options.fps ?? 25;
   }
 
   get duration(): number {
@@ -58,12 +62,13 @@ export class FakePlayer {
     };
   }
 
-  /** 换素材:和 Rust 的 player_open 一样,载入即播,几拍后才 ready。 */
-  open(clipId: number, startPaused = false): void {
+  /** 换素材:旧调用从 0 打开;传入源时间时直接暂停在该位置,几拍后 ready。 */
+  open(clipId: number, startPaused = false, startSeconds?: number): void {
     this.clipId = clipId;
     this.phase = 'loading';
-    this.pos = 0;
-    this.paused = startPaused;
+    const start = startSeconds !== undefined && Number.isFinite(startSeconds) && startSeconds >= 0 ? startSeconds : undefined;
+    this.pos = start ?? 0;
+    this.paused = start !== undefined || startPaused;
     this.pendingSeek = null;
     this.endFence = null;
     this.openCountdown = this.openTicks;
@@ -103,9 +108,12 @@ export class FakePlayer {
       if (this.pendingSeek.ticks <= 0) { this.pos = this.pendingSeek.target; this.pendingSeek = null; }
     } else if (this.phase === 'ready' && !this.paused) {
       const next = Math.min(this.duration, this.pos + (this.tickMs / 1000) * this.speed);
-      if (this.endFence !== null && next >= this.endFence) { this.pos = this.endFence; this.paused = true; }
+      // R24 真机:mpv `end` 落在帧边界上时停在上一帧(end=12.48 @25fps → time-pos 12.44 = 311/25),
+      // 不是停在 end 本身。以前这里写 `pos = endFence`,把「浮点差一丝够不到 out − 1 帧」的卡死藏住了。
+      const last = this.endFence === null ? null : (Math.ceil(this.endFence * this.fps - 1e-6) - 1) / this.fps;
+      if (last !== null && next >= last) { this.pos = last; this.paused = true; }
       else this.pos = next;
     }
-    this.samples.push({ t: this.elapsed, clipId: this.clipId, pos: this.pos, paused: this.paused });
+    this.samples.push({ phase: this.phase, t: this.elapsed, clipId: this.clipId, pos: this.pos, paused: this.paused });
   }
 }
