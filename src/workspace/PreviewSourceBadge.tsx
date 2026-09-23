@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { playerSetPreviewQuality, setSetting, type PlayerStatus } from "../api";
-import { createDropMonitor, qualityLabel, sourceBadgeLabel } from "./previewSource";
+import { autoPolicySuffix, createDropMonitor, qualityLabel, sourceBadgeLabel } from "./previewSource";
 import { requestStatusRefreshSoon, usePausedSourceRefresh } from "./previewSourceRefresh";
 
 export function PreviewSourceBadge({ status }: { status: PlayerStatus | null }) {
@@ -26,8 +26,9 @@ export function PreviewSourceBadge({ status }: { status: PlayerStatus | null }) 
   }
   return (
     <div className="preview-source-badge" role="status" aria-label="预览来源" title={`预览画质：${qualityLabel(status?.preview_quality)}`}>
-      <span>{label}{status?.preview_quality === "auto" && status.paused && status.source_kind === "original" ? " · 暂停看原片" : ""}</span>
-      {struggling ? <>
+      <span>{label}{autoPolicySuffix(status)}</span>
+      {/* R28:自动档由播放器自己在掉帧时退代理,只有手选的档位才需要提示 + 退路按钮。 */}
+      {struggling && status?.preview_quality !== "auto" ? <>
         <span className="preview-source-badge-warning">原片播放掉帧</span>
         <button type="button" aria-label="改用代理播放" onClick={() => void useProxy()}>改用代理播放</button>
       </> : null}

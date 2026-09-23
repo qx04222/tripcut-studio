@@ -5,6 +5,7 @@ use serde::Serialize;
 use libmpv2::Mpv;
 use crate::core::{artifacts, canonical_time::{self, ProxyTimeMapper}, db, media_source, memory_profile, settings};
 use super::PlayerStatus;
+pub use super::drop_watch::DropWatch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewQuality { Auto, High, Original, Performance }
@@ -33,6 +34,8 @@ pub struct SourcePlan {
     /// 为 None 时不会切到原片,核验完由后台 `refresh_source_plan_for_clip` 补上。
     pub quality: PreviewQuality, pub original: Option<SourceEntry>, pub proxy: Option<SourceEntry>,
     pub proxy_hq: Option<SourceEntry>, pub low_memory: bool,
+    /// R28:原片在外置盘(`rel_path` 是相对路径,核验要整文件哈希)。自动档据此决定打开时要不要当场核验原片。
+    pub original_external: bool,
 }
 impl SourcePlan {
     pub fn entry(&self, kind: SourceKind) -> Option<&SourceEntry> {
@@ -49,9 +52,10 @@ pub fn resolve_preview_plan_with(db_path: &Path, cache_root: &Path, clip_id: i64
     let resolve = || -> crate::core::error::Result<_> {
         let connection = db::open_project(db_path)?;
         let quality = PreviewQuality::parse(&settings::string_value(&connection, settings::PREVIEW_QUALITY_KEY, "auto")?);
+        let (width, height, rel_path): (i64,i64,String) = connection.query_row("SELECT COALESCE(width,0),COALESCE(height,0),rel_path FROM clips WHERE id=?1", [clip_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let mut plan = SourcePlan { quality, original: None, proxy: None,
-            proxy_hq: None, low_memory: memory_profile::resolve(&connection)?.low_memory_proxy() };
-        let (width, height): (i64,i64) = connection.query_row("SELECT COALESCE(width,0),COALESCE(height,0) FROM clips WHERE id=?1", [clip_id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            proxy_hq: None, low_memory: memory_profile::resolve(&connection)?.low_memory_proxy(),
+            original_external: !Path::new(&rel_path).is_absolute() };
         // 小尺寸原片不放大；关闭代理时不查询任何代理。原片档也查代理,但只在原片离线时兜底(角标如实写「代理」)。
         if settings::proxy_enabled(&connection)? && width.min(height) > 1080 {
             plan.proxy = cached_entry(&connection,cache_root,clip_id,SourceKind::Proxy)?;
@@ -89,12 +93,19 @@ pub fn resolve_preview_plan_with(db_path: &Path, cache_root: &Path, clip_id: i64
     resolve().map_err(|e| e.to_string())
 }
 /// 当前档位此刻就要读原片吗(纯函数,`original` 尚未填)。
+/// R28:自动档在标准机上播放也读原片,本机盘上的原片只做快速哈希,当场核验;外置盘要整文件哈希,
+/// 仍先开代理、后台核验完再换原片(`original_deferred`)。
 pub fn needs_original_now(plan: &SourcePlan) -> bool {
     match plan.quality {
         PreviewQuality::Original => true,
         PreviewQuality::High => plan.proxy_hq.is_none() && (!plan.low_memory || plan.proxy.is_none()),
-        PreviewQuality::Auto | PreviewQuality::Performance => plan.proxy.is_none(),
+        PreviewQuality::Auto => plan.proxy.is_none() || (!plan.low_memory && !plan.original_external),
+        PreviewQuality::Performance => plan.proxy.is_none(),
     }
+}
+/// 播放时要退到代理时用哪一份:有 1080p 高清代理用它,没有才 540p。
+pub fn playback_proxy(plan: &SourcePlan) -> SourceKind {
+    if plan.proxy_hq.is_some() { SourceKind::ProxyHq } else { SourceKind::Proxy }
 }
 /// 原片是否被延后核验(自动档暂停看原片要它,后台补上)。
 pub fn original_deferred(plan: &SourcePlan) -> bool {
@@ -122,7 +133,10 @@ pub fn initial_kind(plan: &SourcePlan) -> SourceKind {
         PreviewQuality::Original => &[O, H, P],
         PreviewQuality::High if plan.low_memory => &[H, P, O],
         PreviewQuality::High => &[H, O, P],
-        PreviewQuality::Auto | PreviewQuality::Performance => &[P, O, H],
+        // R28:自动档标准机一直读原片;省内存 / 低配机播放用代理(1080p 优先),暂停再换原片。
+        PreviewQuality::Auto if plan.low_memory => &[H, P, O],
+        PreviewQuality::Auto => &[O, H, P],
+        PreviewQuality::Performance => &[P, O, H],
     };
     order.iter().copied().find(|kind| plan.entry(*kind).is_some()).unwrap_or(O)
 }
@@ -131,14 +145,18 @@ pub fn initial_kind(plan: &SourcePlan) -> SourceKind {
 /// R26 P-3:真机量到去抖实际 113–171 ms(50 ms 轮询粒度);改为按剩余去抖精确唤醒(`debounce_wake`)并降到 80 ms。
 /// 不再往下压:拖进度条 / 逐帧之间的停顿更容易被当成「暂停」而中途换源。
 pub const AUTO_PAUSE_DEBOUNCE: Duration = Duration::from_millis(80);
-/// 去抖未到时渲染线程该在多久后醒来补 `tick`(None = 不需要提前醒)。
-pub fn debounce_wake(quality: PreviewQuality, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<Duration> {
-    (quality == PreviewQuality::Auto && paused && !eof && current != SourceKind::Original && paused_for < AUTO_PAUSE_DEBOUNCE)
+/// 去抖未到时渲染线程该在多久后醒来补 `tick`(None = 不需要提前醒)。只有「播放用代理」时才有去抖。
+pub fn debounce_wake(quality: PreviewQuality, plays_proxy: bool, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<Duration> {
+    (quality == PreviewQuality::Auto && plays_proxy && paused && !eof && current != SourceKind::Original && paused_for < AUTO_PAUSE_DEBOUNCE)
         .then(|| AUTO_PAUSE_DEBOUNCE - paused_for)
 }
-/// 可用来源由调用方检查，纯函数只负责时间与状态判定。
-pub fn auto_target(quality: PreviewQuality, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<SourceKind> {
+/// 可用来源由调用方检查，纯函数只负责时间与状态判定。返回 `Proxy` 表示「播放用的那份代理」,
+/// 调用方按 `playback_proxy` 选 1080p / 540p。
+/// R28:`plays_proxy` 为假(标准机、未因掉帧退代理)时自动档播放暂停都要原片 —— 0.11.8 以前播放中
+/// 一直是 540p,Retina 上 4K 素材监视器糊(TC-0115-003 复报)。
+pub fn auto_target(quality: PreviewQuality, plays_proxy: bool, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<SourceKind> {
     if quality != PreviewQuality::Auto || eof { return None; }
+    if !plays_proxy { return (current != SourceKind::Original).then_some(SourceKind::Original); }
     if paused && paused_for >= AUTO_PAUSE_DEBOUNCE && current != SourceKind::Original {
         Some(SourceKind::Original)
     } else if !paused && current == SourceKind::Original { Some(SourceKind::Proxy) } else { None }
@@ -161,11 +179,17 @@ pub struct SourceSwitcher {
     pub last_switch_ms: Option<f64>, pub last_error_s: Option<f64>,
     /// mpv `eof-reached` 的观察值(事件驱动,不在渲染线程同步读)。
     pub eof: bool, vo_drops: i64, decoder_drops: i64,
+    /// R28:本次打开里原片播放掉帧成片过(任何档位都记,自动档据此退代理;原片档点「改用代理播放」→ 自动档时立即生效)。
+    drop_watch: DropWatch, pub drop_burst: bool, pub degraded: bool,
+    /// R28:退到代理后代理照样持续掉帧 = 整机忙(别的程序抢 GPU / WindowServer),不是解不动原片 ——
+    /// 退代理只丢清晰度、换不来流畅,回原片并且本次不再降级。真机见 docs/qa/2026-09-23-r28-sharp.md。
+    pub proxy_burst: bool, pub degrade_blocked: bool,
 }
 impl SourceSwitcher {
     pub fn new(mapper: Option<ProxyTimeMapper>) -> Self {
         Self { plan: None, current: if mapper.is_some() { SourceKind::Proxy } else { SourceKind::Original },
-            current_mapper: mapper, swapping: None, paused_since: None, loaded: false, queued_kind: None, last_switch_ms: None, last_error_s: None, eof: false, vo_drops: 0, decoder_drops: 0 }
+            current_mapper: mapper, swapping: None, paused_since: None, loaded: false, queued_kind: None, last_switch_ms: None, last_error_s: None, eof: false, vo_drops: 0, decoder_drops: 0,
+            drop_watch: DropWatch::default(), drop_burst: false, degraded: false, proxy_burst: false, degrade_blocked: false }
     }
     pub fn install(&mut self, plan: SourcePlan, opened: SourceKind, status: &mut PlayerStatus) {
         // 刷新计划时保留实际已打开文件的映射，Original 档计划可不含任何代理。
@@ -177,9 +201,17 @@ impl SourceSwitcher {
         self.publish(status);
     }
     pub fn mapper(&self) -> Option<&ProxyTimeMapper> { self.current_mapper.as_ref() }
+    /// 自动档播放是否走代理:省内存 / 低配机,或本次打开原片掉帧成片。
+    pub fn plays_proxy(&self) -> bool { self.degraded || self.plan.as_ref().is_some_and(|p| p.low_memory) }
+    /// 自动档策略给角标:`original`(一直原片)/ `proxy`(播放代理、暂停原片)/ `degraded`(掉帧已退代理)。
+    pub fn auto_policy(&self) -> Option<&'static str> {
+        let plan = self.plan.as_ref().filter(|p| p.quality == PreviewQuality::Auto)?;
+        Some(if self.degraded { "degraded" } else if plan.low_memory { "proxy" } else { "original" })
+    }
     fn publish(&self, status: &mut PlayerStatus) {
         status.source_kind = Some(self.current.as_str().into());
         status.preview_quality = self.plan.as_ref().map(|p| p.quality.as_str().into());
+        status.auto_policy = self.auto_policy().map(Into::into);
         status.source_switch_ms = self.last_switch_ms;
         status.source_switch_error_s = self.last_error_s;
     }
@@ -205,15 +237,35 @@ impl SourceSwitcher {
         self.loaded = false;
         Ok(())
     }
-    pub fn file_loaded(&mut self) { self.loaded = true; self.eof = false; self.vo_drops = 0; self.decoder_drops = 0; }
+    pub fn file_loaded(&mut self) { self.loaded = true; self.eof = false; self.vo_drops = 0; self.decoder_drops = 0; self.drop_watch.set_eligible(Instant::now(), false); }
     /// 两个掉帧计数各自的最新观察值求和(事件驱动,不回头同步读另一个)。
     pub fn record_drops(&mut self, name: &str, value: i64) -> i64 {
         if name == "decoder-frame-drop-count" { self.decoder_drops = value.max(0); } else { self.vo_drops = value.max(0); }
-        self.vo_drops + self.decoder_drops
+        let total = self.vo_drops + self.decoder_drops;
+        if self.drop_watch.observe(Instant::now(), total) {
+            if self.current == SourceKind::Original && !self.drop_burst {
+                tracing::warn!(total, "原片播放持续掉帧");
+                self.drop_burst = true;
+            } else if self.current != SourceKind::Original && self.degraded && !self.proxy_burst {
+                tracing::warn!(total, "退代理后代理照样持续掉帧");
+                self.proxy_burst = true;
+            }
+        }
+        total
+    }
+    /// 自动档此刻该用的来源(换档 / 刷新计划时):播放走代理的档在播放中给代理、暂停中保持原片不来回换。
+    fn desired_kind(&self, plan: &SourcePlan, paused: bool) -> SourceKind {
+        if plan.quality == PreviewQuality::Auto && self.plays_proxy() {
+            if paused && self.current == SourceKind::Original { return SourceKind::Original; }
+            if !paused && (plan.proxy.is_some() || plan.proxy_hq.is_some()) { return playback_proxy(plan); }
+        }
+        initial_kind(plan)
     }
     pub fn on_playback_restart(&mut self, mpv: &Mpv, status: &mut PlayerStatus) {
         // 旧文件排队的 restart 不能提前结束新文件切换。
         if !self.loaded { return; }
+        // 每次定位 / 换源后的起步重新计宽限,拖进度条时的解码掉帧不算「播不动」。
+        self.drop_watch.set_eligible(Instant::now(), false);
         if let Some(swap) = self.swapping.take() {
             let position = mpv.get_property::<f64>("time-pos").ok().filter(|p| p.is_finite());
             if let Some(position) = position {
@@ -251,7 +303,7 @@ impl SourceSwitcher {
         if self.swapping.is_some() { return None; }
         let plan = self.plan.as_ref()?;
         let paused_for = self.paused_since.map_or(Duration::ZERO, |since| since.elapsed());
-        debounce_wake(plan.quality, paused, self.eof, paused_for, self.current)
+        debounce_wake(plan.quality, self.plays_proxy(), paused, self.eof, paused_for, self.current)
     }
     /// 用户按下暂停的时刻就是去抖起点(不等下一次 tick 才发现已暂停)。
     pub fn note_pause_command(&mut self) { self.paused_since = Some(Instant::now()); }
@@ -271,17 +323,33 @@ impl SourceSwitcher {
             self.queued_kind = None;
             status.paused = mpv.get_property("pause").unwrap_or(true);
         }
+        let watched = self.current == SourceKind::Original || self.degraded;
+        let playing = self.swapping.is_none() && status.phase == "ready" && !status.paused && !self.eof && watched;
+        self.drop_watch.set_eligible(Instant::now(), playing);
         if self.swapping.is_some() || status.phase != "ready" { return; }
+        let Some(plan) = &self.plan else { return; };
+        if plan.quality == PreviewQuality::Auto && self.drop_burst && !self.degraded && !self.degrade_blocked {
+            tracing::warn!("自动档:原片播放持续掉帧,本次改用代理播放(暂停仍看原片)");
+            self.degraded = true;
+            self.publish(status);
+        } else if self.degraded && self.proxy_burst {
+            tracing::warn!("自动档:代理也持续掉帧,是整机忙不是原片解不动,回原片且本次不再降级");
+            self.degraded = false;
+            self.degrade_blocked = true;
+            self.publish(status);
+        }
         let Some(plan) = &self.plan else { return; };
         let elapsed = if status.paused { self.paused_since.get_or_insert_with(Instant::now).elapsed() }
             else { self.paused_since = None; Duration::ZERO };
-        if let Some(target) = auto_target(plan.quality,status.paused,self.eof,elapsed,self.current) {
+        if let Some(target) = auto_target(plan.quality,self.plays_proxy(),status.paused,self.eof,elapsed,self.current) {
+            let target = if target == SourceKind::Proxy { playback_proxy(plan) } else { target };
             if let Err(error) = self.begin_swap(mpv,target,status.pos,status.paused) { tracing::warn!(%error,"自动换源失败"); }
         }
     }
     pub fn before_play(&mut self, mpv: &Mpv, status: &mut PlayerStatus) -> bool {
-        if self.plan.as_ref().is_some_and(|p| p.quality == PreviewQuality::Auto && p.proxy.is_some()) && self.current == SourceKind::Original && !self.eof {
-            match self.begin_swap(mpv,SourceKind::Proxy,status.pos,false) {
+        let proxy = self.plan.as_ref().filter(|p| p.quality == PreviewQuality::Auto && (p.proxy.is_some() || p.proxy_hq.is_some())).map(playback_proxy);
+        if let Some(proxy) = proxy.filter(|_| self.plays_proxy() && self.current == SourceKind::Original && !self.eof) {
+            match self.begin_swap(mpv,proxy,status.pos,false) {
                 Ok(()) => { status.paused = false; self.paused_since = None; return true; }
                 Err(error) => tracing::warn!(%error,"播放前切代理失败"),
             }
@@ -293,7 +361,10 @@ impl SourceSwitcher {
     pub fn set_quality(&mut self, mpv: &Mpv, status: &mut PlayerStatus, quality: PreviewQuality) -> Result<(), String> {
         let Some(plan) = &mut self.plan else { return Ok(()); };
         plan.quality = quality;
-        let target = initial_kind(plan);
+        // 原片档掉帧后点「改用代理播放」(= 切回自动)立即按掉帧处理,不再先播几秒原片。
+        if quality == PreviewQuality::Auto && self.drop_burst && !self.degrade_blocked { self.degraded = true; }
+        let Some(plan) = &self.plan else { return Ok(()); };
+        let target = self.desired_kind(plan, status.paused);
         self.publish(status);
         self.begin_swap(mpv,target,status.pos,status.paused)
     }

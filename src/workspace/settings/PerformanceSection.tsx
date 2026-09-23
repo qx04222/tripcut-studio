@@ -86,7 +86,7 @@ export function PerformanceSection(): JSX.Element {
           />
         </SettingsRow>
         <SettingsRow title="预览画质" htmlFor="settings-preview-quality"
-          help={`自动：播放用代理，暂停看原片；高画质：1080p 代理；原片：直接读原文件；性能优先：540p 代理。原片始终只读，导出永远读原片。${settings["performance.proxy_enabled"] === "false" ? "预览用小文件已关闭，所有档位均读取原片。" : ""}`}>
+          help={`自动：播放、暂停都看原片，原片掉帧或省内存机器才改播代理（有 1080p 用 1080p）；高画质：1080p 代理；原片：直接读原文件；性能优先：540p 代理。原片始终只读，导出永远读原片。${settings["performance.proxy_enabled"] === "false" ? "预览用小文件已关闭，所有档位均读取原片。" : ""}`}>
           <Select id="settings-preview-quality" aria-label="预览画质"
             value={settings["performance.preview_quality"] ?? "auto"}
             disabled={settings["performance.proxy_enabled"] === "false"}
@@ -96,7 +96,7 @@ export function PerformanceSection(): JSX.Element {
                 if (saved) return playerSetPreviewQuality(value).then(() => { requestStatusRefreshSoon(); });
               }).catch(() => undefined);
             }}>
-            <option value="auto">自动(推荐):播放用代理,暂停看原片</option>
+            <option value="auto">自动(推荐):看原片,掉帧才改播代理</option>
             <option value="high">高画质:1080p 代理</option>
             <option value="original">原片:直接读原文件</option>
             <option value="performance">性能优先:540p 代理</option>

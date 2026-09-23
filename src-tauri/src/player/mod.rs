@@ -11,6 +11,7 @@
 pub mod mpv_options;
 mod handoff;
 mod pause_drain;
+mod drop_watch;
 pub mod preview_source;
 use preview_source::{PreviewQuality, SourceKind, SourcePlan, SourceSwitcher};
 
@@ -262,6 +263,8 @@ pub struct PlayerStatus {
     pub source_switch_ms: Option<f64>,
     pub source_switch_error_s: Option<f64>,
     pub dropped_frames: Option<i64>,
+    /// R28:自动档策略 `original` / `proxy` / `degraded`(非自动档为 None)。
+    pub auto_policy: Option<String>,
 }
 
 impl PlayerStatus {
@@ -285,6 +288,7 @@ impl PlayerStatus {
             source_switch_ms: None,
             source_switch_error_s: None,
             dropped_frames: None,
+            auto_policy: None,
         }
     }
 
@@ -824,6 +828,10 @@ fn build_surface(window: &WebviewWindow, viewport: PlayerViewport, below: Option
     gl_view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
+    // R28:显式要 Retina 原生像素的 drawable。`render_frame` 按 `convertRectToBacking` 的像素尺寸
+    // 交给 mpv 画;若 drawable 是 1x,画面会被裁掉或放大变糊。当前链接的 SDK(27.0,≥10.15)默认
+    // 已是 YES(真机实测 mpv 渲染尺寸 = 截图视频区像素 1550×872 @2x),这里不再依赖链接期默认值。
+    gl_view.setWantsBestResolutionOpenGLSurface(true);
     handoff::place_view(&content_view, &gl_view, below, own);
     let gl_context = gl_view
         .openGLContext()

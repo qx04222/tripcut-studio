@@ -419,6 +419,8 @@ export interface PlayerStatus {
   source_switch_ms?: number | null;
   source_switch_error_s?: number | null;
   dropped_frames?: number | null;
+  /** R28:自动档策略。original = 播放暂停都原片;proxy = 省内存机播放用代理、暂停原片;degraded = 原片掉帧已退代理。 */
+  auto_policy?: "original" | "proxy" | "degraded" | null;
 }
 
 export interface ClipSearchHit {

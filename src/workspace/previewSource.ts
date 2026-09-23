@@ -6,6 +6,14 @@ export function sourceBadgeLabel(status: PlayerStatus | null): string | null {
   const edge = Math.min(status.source_width ?? 0, status.source_height ?? 0);
   return edge > 0 ? `${prefix} ${edge}p` : prefix;
 }
+/** R28:角标后缀。标准机自动档一直原片,不再写「暂停看原片」;掉帧退代理时如实说明。 */
+export function autoPolicySuffix(status: PlayerStatus | null): string {
+  if (status?.preview_quality !== "auto") return "";
+  const policy = status.auto_policy;
+  if (policy !== "proxy" && policy !== "degraded") return "";
+  if (status.source_kind === "original") return status.paused ? " · 暂停看原片" : "";
+  return policy === "degraded" ? " · 原片掉帧,改播代理" : "";
+}
 export function qualityLabel(quality: PreviewQuality | string | null | undefined): string {
   const labels: Record<string, string> = { auto: "自动", high: "高画质", original: "原片", performance: "性能优先" };
   return labels[quality ?? "auto"] ?? "自动";

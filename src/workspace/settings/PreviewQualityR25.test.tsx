@@ -19,7 +19,7 @@ it("四个选项默认自动，保存成功后通知播放器", async () => {
   const select = screen.getByRole("combobox", { name: "预览画质" }) as HTMLSelectElement;
   expect(select.value).toBe("auto");
   expect([...select.options].map((o) => [o.value, o.textContent])).toEqual([
-    ["auto", "自动(推荐):播放用代理,暂停看原片"], ["high", "高画质:1080p 代理"],
+    ["auto", "自动(推荐):看原片,掉帧才改播代理"], ["high", "高画质:1080p 代理"],
     ["original", "原片:直接读原文件"], ["performance", "性能优先:540p 代理"],
   ]);
   fireEvent.change(select, { target: { value: "high" } });

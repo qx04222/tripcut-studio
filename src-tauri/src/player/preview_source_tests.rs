@@ -7,7 +7,8 @@ fn r25_initial_truth_table() {
     use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
     // 顺序：proxy × hq × low_memory，各维先 false 后 true。
     for (quality, expected) in [
-        (PreviewQuality::Auto, [O,O,O,O,P,P,P,P]),
+        // R28:自动档标准机一直原片;省内存机播放用代理(1080p 优先)。
+        (PreviewQuality::Auto, [O,O,O,H,O,P,O,H]),
         (PreviewQuality::High, [O,O,H,H,O,P,H,H]),
         (PreviewQuality::Original, [O,O,O,O,O,O,O,O]),
         (PreviewQuality::Performance, [O,O,O,O,P,P,P,P]),
@@ -15,7 +16,7 @@ fn r25_initial_truth_table() {
         let mut index = 0;
         for proxy in [false,true] { for hq in [false,true] { for low in [false,true] {
             let plan = SourcePlan { quality, original: Some(entry(SourceKind::Original)), proxy: proxy.then(||entry(SourceKind::Proxy)),
-                proxy_hq: hq.then(||entry(SourceKind::ProxyHq)), low_memory: low };
+                proxy_hq: hq.then(||entry(SourceKind::ProxyHq)), low_memory: low, original_external: false };
             assert_eq!(initial_kind(&plan),expected[index],"{quality:?} {proxy} {hq} {low}");
             index += 1;
         } } }
@@ -25,13 +26,13 @@ fn r25_initial_truth_table() {
 fn r25_auto_debounce_eof_and_serialization() {
     // R26 P-3:去抖 100 → 80 ms(唤醒改为按剩余去抖精确定时,不再吃 50 ms 轮询粒度)。
     for ms in [0,79,80,81] {
-        assert_eq!(auto_target(PreviewQuality::Auto,true,false,Duration::from_millis(ms),SourceKind::Proxy),
+        assert_eq!(auto_target(PreviewQuality::Auto,true,true,false,Duration::from_millis(ms),SourceKind::Proxy),
             (ms>=80).then_some(SourceKind::Original));
     }
-    assert_eq!(auto_target(PreviewQuality::Auto,true,true,Duration::from_secs(1),SourceKind::Proxy),None);
-    assert_eq!(auto_target(PreviewQuality::Auto,false,false,Duration::ZERO,SourceKind::Original),Some(SourceKind::Proxy));
+    assert_eq!(auto_target(PreviewQuality::Auto,true,true,true,Duration::from_secs(1),SourceKind::Proxy),None);
+    assert_eq!(auto_target(PreviewQuality::Auto,true,false,false,Duration::ZERO,SourceKind::Original),Some(SourceKind::Proxy));
     for q in [PreviewQuality::High,PreviewQuality::Original,PreviewQuality::Performance] {
-        assert_eq!(auto_target(q,true,false,Duration::from_secs(1),SourceKind::Proxy),None);
+        assert_eq!(auto_target(q,true,true,false,Duration::from_secs(1),SourceKind::Proxy),None);
     }
     for (kind,name) in [(SourceKind::Proxy,"proxy"),(SourceKind::ProxyHq,"proxy_hq"),(SourceKind::Original,"original")] {
         assert_eq!(serde_json::to_value(kind).unwrap(),name);
@@ -53,6 +54,11 @@ fn r25_status_closed_serializes_all_new_fields() {
         assert!(value.as_object().unwrap().contains_key(field)); assert!(value[field].is_null());
     }
 }
+/// 档位不跟测试机内存走:省内存(`low`)或标准(`standard`),低配开关关掉。
+fn machine(c: &Connection, low: bool) {
+    settings::set_setting(c, settings::MEMORY_PROFILE_KEY, if low { "low" } else { "standard" }).unwrap();
+    settings::set_setting(c, settings::LOW_SPEC_MODE_KEY, "off").unwrap();
+}
 fn fixture() -> (TestDirectory,Connection,PathBuf) {
     let directory = TestDirectory::new();
     let connection = db::open_project(&directory.db_path()).unwrap();
@@ -71,6 +77,7 @@ fn fixture() -> (TestDirectory,Connection,PathBuf) {
 #[test]
 fn r25_resolver_checks_hash_map_file_settings_and_enqueues_high() {
     let (dir,connection,cache) = fixture();
+    machine(&connection, true); // R28:「自动档打开即代理」只在省内存机上成立
     let resolve = || resolve_preview_plan(&dir.db_path(),&cache,1).unwrap().1;
     assert_eq!(initial_kind(&resolve()),SourceKind::Proxy);
     connection.execute("UPDATE cache_artifacts SET source_hash='stale'",[]).unwrap();
@@ -133,8 +140,9 @@ fn r25_high_loads_ready_hq_with_its_own_map() {
 #[test]
 fn r25_original_is_deferred_and_optional() {
     use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
+    // R28:这组断言讲的是「外置盘原片延后核验」,原片设为外置。
     let plan = |quality, proxy: bool, hq: bool, low: bool, original: bool| SourcePlan { quality,
-        original: original.then(|| entry(O)), proxy: proxy.then(|| entry(P)), proxy_hq: hq.then(|| entry(H)), low_memory: low };
+        original: original.then(|| entry(O)), proxy: proxy.then(|| entry(P)), proxy_hq: hq.then(|| entry(H)), low_memory: low, original_external: true };
     // 自动 / 性能优先有 540p 代理就不在打开路径上核验原片(外置盘整文件哈希);原片档、缺 HQ 的高画质要。
     assert!(!needs_original_now(&plan(PreviewQuality::Auto, true, false, false, false)));
     assert!(!needs_original_now(&plan(PreviewQuality::Performance, true, false, false, false)));
@@ -167,6 +175,7 @@ fn r25_seek_and_step_during_swap_are_deferred_not_sent() {
 #[test]
 fn r25_offline_original_never_blocks_proxy_preview() {
     let (dir,c,cache) = fixture();
+    machine(&c, true); // R28:本机盘原片在标准机自动档会当场核验;延后核验的是省内存机 / 外置盘
     // 自动档有代理:打开路径不核验原片(original 延后),后台 force 时才核验。
     let plan = resolve_preview_plan(&dir.db_path(),&cache,1).unwrap().1;
     assert!(plan.original.is_none() && original_deferred(&plan));
@@ -203,15 +212,15 @@ fn r26_debounce_wake_is_the_remaining_debounce() {
     use super::debounce_wake;
     let d = |ms| Duration::from_millis(ms);
     // 自动档、暂停在代理上、去抖未到:按剩余时间唤醒,而不是等下一次 50 ms 轮询。
-    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(30),SourceKind::Proxy),Some(d(50)));
-    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(0),SourceKind::Proxy),Some(AUTO_PAUSE_DEBOUNCE));
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,false,d(30),SourceKind::Proxy),Some(d(50)));
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,false,d(0),SourceKind::Proxy),Some(AUTO_PAUSE_DEBOUNCE));
     // 已到期 / 在播 / EOF / 已是原片 / 非自动档:不需要提前唤醒。
-    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(80),SourceKind::Proxy),None);
-    assert_eq!(debounce_wake(PreviewQuality::Auto,false,false,d(0),SourceKind::Proxy),None);
-    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,d(10),SourceKind::Proxy),None);
-    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(10),SourceKind::Original),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,false,d(80),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,false,d(0),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,true,d(10),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,false,d(10),SourceKind::Original),None);
     for q in [PreviewQuality::High,PreviewQuality::Original,PreviewQuality::Performance] {
-        assert_eq!(debounce_wake(q,true,false,d(10),SourceKind::Proxy),None);
+        assert_eq!(debounce_wake(q,true,true,false,d(10),SourceKind::Proxy),None);
     }
 }
 #[test]
@@ -223,4 +232,132 @@ fn r26_file_loaded_during_swap_does_no_sync_property_reads() {
     let guard = body.find("if switcher.swapping.is_some() { switcher.file_loaded(); continue; }").expect("换源分支提前返回");
     let first_read = body.find("mpv.get_property").expect("非换源路径仍读属性");
     assert!(guard < first_read, "换源分支必须在第一次同步读之前");
+}
+
+#[test]
+fn r28_auto_standard_machine_plays_original_while_playing() {
+    use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
+    let d = Duration::from_millis;
+    // 标准机(plays_proxy=false):播放中、暂停中都要原片,不等去抖;已在原片 / EOF 不动。
+    assert_eq!(auto_target(PreviewQuality::Auto,false,false,false,d(0),P),Some(O), "播放中也换原片");
+    assert_eq!(auto_target(PreviewQuality::Auto,false,false,false,d(0),H),Some(O));
+    assert_eq!(auto_target(PreviewQuality::Auto,false,true,false,d(0),P),Some(O), "暂停不用等去抖");
+    assert_eq!(auto_target(PreviewQuality::Auto,false,false,false,d(0),O),None, "播放中不再退代理");
+    assert_eq!(auto_target(PreviewQuality::Auto,false,false,true,d(0),P),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,false,true,false,d(10),P),None);
+    // 性能优先档不受影响:永远 540p。
+    let plan = |low| SourcePlan { quality: PreviewQuality::Performance, original: Some(entry(O)), proxy: Some(entry(P)),
+        proxy_hq: Some(entry(H)), low_memory: low, original_external: false };
+    for low in [false,true] { assert_eq!(initial_kind(&plan(low)),P); }
+    for p in [PreviewQuality::Performance,PreviewQuality::High,PreviewQuality::Original] {
+        assert_eq!(auto_target(p,false,false,false,d(0),P),None);
+    }
+}
+#[test]
+fn r28_playback_proxy_prefers_1080p() {
+    use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
+    let plan = |hq: bool| SourcePlan { quality: PreviewQuality::Auto, original: Some(entry(O)), proxy: Some(entry(P)),
+        proxy_hq: hq.then(|| entry(H)), low_memory: true, original_external: false };
+    assert_eq!(playback_proxy(&plan(true)),H);
+    assert_eq!(playback_proxy(&plan(false)),P);
+}
+#[test]
+fn r28_resolver_auto_opens_original_on_standard_internal_and_defers_external() {
+    let (dir,c,cache) = fixture();
+    machine(&c,false);
+    let plan = resolve_preview_plan(&dir.db_path(),&cache,1).unwrap().1;
+    assert!(!plan.original_external);
+    assert!(plan.original.is_some(), "本机盘原片当场核验");
+    assert!(!original_deferred(&plan));
+    assert_eq!(initial_kind(&plan),SourceKind::Original, "标准机自动档打开即原片");
+    // 外置盘(相对路径):不在打开路径上整文件哈希,先开代理,后台核验后换原片。
+    c.execute("UPDATE clips SET rel_path='DCIM/source.mov'",[]).unwrap();
+    let plan = resolve_preview_plan(&dir.db_path(),&cache,1).unwrap().1;
+    assert!(plan.original_external && plan.original.is_none() && original_deferred(&plan));
+    assert_eq!(initial_kind(&plan),SourceKind::Proxy);
+    // 省内存机:照旧先代理。
+    c.execute("UPDATE clips SET rel_path=?1",[dir.path().join("source.mov").to_string_lossy()]).unwrap();
+    machine(&c,true);
+    let plan = resolve_preview_plan(&dir.db_path(),&cache,1).unwrap().1;
+    assert!(plan.low_memory && original_deferred(&plan));
+    assert_eq!(initial_kind(&plan),SourceKind::Proxy);
+}
+#[test]
+fn r28_drop_watch_needs_sustained_spread_drops_after_grace() {
+    let t0 = Instant::now(); let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let mut w = DropWatch::default();
+    assert!(!w.observe(at(0), 100), "未开播不计");
+    w.set_eligible(at(0), true);
+    assert!(!w.observe(at(500), 40), "起步宽限内的载入掉帧不算");
+    assert!(!w.observe(at(2900), 60));
+    // 真机形态:整机被抢 0.3 s,一口气掉 15–30 帧 —— 不算「解不动原片」。
+    let mut total = 60;
+    for i in 0..30u64 { total += 1; assert!(!w.observe(at(10_000 + i * 10), total), "单次卡顿不降级"); }
+    // 持续掉帧:连续 5 秒每秒掉 8 帧(50p 下 16%)。
+    let mut hit = false;
+    for sec in 0..5u64 { for k in 0..8u64 { total += 1; hit |= w.observe(at(20_000 + sec * 1000 + k * 100), total); } }
+    assert!(hit, "持续掉帧要降级");
+    // 暂停(不合格)清零,重新开播重新计宽限。
+    w.set_eligible(at(30_000), false);
+    w.set_eligible(at(30_000), true);
+    assert!(!w.observe(at(31_000), 500));
+    // 零星掉帧(每秒 1 帧,2%)永远不成片。
+    let mut w = DropWatch::default(); w.set_eligible(at(0), true);
+    for i in 0..60u64 { assert!(!w.observe(at(3000 + i * 1000), 100 + i as i64)); }
+}
+#[test]
+fn r28_switcher_degrades_auto_to_proxy_after_burst_and_publishes_policy() {
+    use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
+    let mpv = libmpv2::Mpv::with_initializer(|i| { i.set_property("vo","null")?; i.set_property("ao","null")?; Ok(()) }).unwrap();
+    let plan = |low| SourcePlan { quality: PreviewQuality::Auto, original: Some(entry(O)), proxy: Some(entry(P)),
+        proxy_hq: Some(entry(H)), low_memory: low, original_external: false };
+    let mut status = PlayerStatus::closed(); status.phase = "ready".into(); status.paused = false;
+    let mut sw = SourceSwitcher::new(None);
+    sw.install(plan(false), O, &mut status);
+    assert_eq!(status.auto_policy.as_deref(), Some("original"));
+    sw.tick(&mpv, &mut status);
+    assert_eq!(sw.current, O, "标准机播放中留在原片");
+    assert!(!sw.before_play(&mpv, &mut status), "开播前不再切代理");
+    assert_eq!(sw.current, O);
+    sw.drop_burst = true;
+    sw.tick(&mpv, &mut status);
+    assert!(sw.degraded);
+    assert_eq!(sw.current, H, "掉帧后播放退 1080p 代理");
+    assert_eq!(status.auto_policy.as_deref(), Some("degraded"));
+    // 代理也持续掉帧(真机:WindowServer / 别的程序抢 GPU):不是原片的锅 → 回原片,本次不再降级。
+    sw.swapping = None; // 换源落地
+    sw.proxy_burst = true;
+    sw.tick(&mpv, &mut status);
+    assert!(!sw.degraded && sw.degrade_blocked);
+    assert_eq!(status.auto_policy.as_deref(), Some("original"));
+    // 回原片要等换源完成(PlaybackRestart);这里模拟换源落地。
+    sw.swapping = None;
+    sw.tick(&mpv, &mut status);
+    assert_eq!(sw.current, O, "回到原片");
+    sw.swapping = None;
+    sw.drop_burst = true;
+    sw.tick(&mpv, &mut status);
+    assert!(!sw.degraded, "本次不再降级");
+    assert_eq!(sw.current, O);
+    // 原片档掉帧后切回自动:立即按掉帧处理(播放中给代理)。
+    let mut sw = SourceSwitcher::new(None); let mut status2 = status.clone();
+    let mut original = plan(false); original.quality = PreviewQuality::Original;
+    sw.install(original, O, &mut status2);
+    assert_eq!(status2.auto_policy, None);
+    sw.drop_burst = true;
+    sw.set_quality(&mpv, &mut status2, PreviewQuality::Auto).unwrap();
+    assert!(sw.degraded && sw.current == H);
+    // 省内存机:策略 proxy。
+    let mut sw = SourceSwitcher::new(None); let mut status3 = status.clone();
+    sw.install(plan(true), H, &mut status3);
+    assert_eq!(status3.auto_policy.as_deref(), Some("proxy"));
+}
+#[test]
+fn r28_gl_view_asks_for_best_resolution_surface_before_it_is_placed() {
+    let source = include_str!("mod.rs");
+    let start = source.find("fn build_surface(").expect("build_surface");
+    let body = &source[start..start + 4000];
+    let set = body.find("gl_view.setWantsBestResolutionOpenGLSurface(true);").expect("显式要 Retina 原生像素 drawable");
+    let place = body.find("handoff::place_view(").expect("place_view");
+    assert!(set < place, "挂进窗口前就要设好");
 }
