@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
+import { createTestApiMock } from "./workspace/testApiMock";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -13,7 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   playerSetViewport: vi.fn(),
   playerStatus: vi.fn(),
 }));
-vi.mock("./api", () => apiMocks);
+vi.mock("./api", async () => ({ ...(await createTestApiMock()), ...apiMocks }));
 
 import { PlayerOverlay, type EmbeddedPlayerControls } from "./PlayerOverlay";
 import type { ClipListItem, PlayerCommand, PlayerStatus } from "./api";
@@ -195,4 +196,21 @@ it('002: A → B → C fast switching ignores late A/B open results; only C publ
   expect(observed.length).toBeGreaterThan(0);
   expect(observed.every(s => s.clip_id === 11 && s.pos === 0 && !s.paused)).toBe(true);
   expect(sent()).toEqual([]);
+});
+
+
+it('R26: Pause 超时后等 sync,不报故障、不关闭,同批后续命令继续', async () => {
+  const controlsRef: { current: EmbeddedPlayerControls | null } = { current: null };
+  await mount(clipA, controlsRef);
+  apiMocks.playerClose.mockClear();
+  apiMocks.playerCommand.mockImplementation(async (cmd: PlayerCommand) => {
+    if (cmd.type === 'pause') throw '播放器命令响应超时';
+  });
+  await act(async () => {
+    await controlsRef.current!.send([{ type: 'pause' }, { type: 'set_end', seconds: 18 }, { type: 'play' }]);
+  });
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(apiMocks.playerClose).not.toHaveBeenCalled();
+  expect(sent()).toEqual([{ type: 'pause' }, { type: 'sync' }, { type: 'set_end', seconds: 18 }, { type: 'play' }]);
+  expect(apiMocks.playerCommand.mock.calls.every(([, owner]) => owner === 9)).toBe(true);
 });

@@ -22,6 +22,7 @@ export interface PlaythroughDeps {
 export type PlaythroughPhase = 'idle' | 'playing' | 'paused' | 'done';
 type Stage = 'stopping' | 'loading' | 'seeking' | 'frame' | 'starting' | 'running' | 'finished';
 interface Session {
+  mode: 'band' | 'selection';
   phase: PlaythroughPhase;
   index: number;
   stage: Stage;
@@ -32,7 +33,7 @@ interface Session {
   error: string | null;
   startPosition?: number;
 }
-const initial = (): Session => ({ phase: 'idle', index: 0, stage: 'finished', segments: [], token: 0, startedAt: 0, switchMs: null, error: null });
+const initial = (): Session => ({ mode: 'band', phase: 'idle', index: 0, stage: 'finished', segments: [], token: 0, startedAt: 0, switchMs: null, error: null });
 const active = (s: Session) => s.phase === 'playing' || s.phase === 'paused';
 export const PLAYTHROUGH_TIMEOUT_MS = 10_000;
 
@@ -111,9 +112,10 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     const index = list.findIndex(s => s.key === segment.key);
     standaloneKey.current = index < 0 ? segment.key : null;
     explicitRun.current = false;
+    publish({ mode: 'selection' });
     enter(index < 0 ? 0 : index, index < 0 ? [segment] : list, resume ? 'playing' : 'paused', position);
-  }, [enter]);
-  const start = useCallback((index = 0) => { standaloneKey.current = null; explicitRun.current = true; enter(index, latest.current.segments, 'playing'); }, [enter]);
+  }, [enter, publish]);
+  const start = useCallback((index = 0) => { standaloneKey.current = null; explicitRun.current = true; publish({ mode: 'band' }); enter(index, latest.current.segments, 'playing'); }, [enter, publish]);
 
   useEffect(() => {
     const s = session.current;
@@ -297,7 +299,7 @@ export function usePlaythrough(deps: PlaythroughDeps) {
   const progress = playthroughProgress(state.segments, state.index, state.phase === 'done' ? segment?.outPoint ?? 0 :
     state.stage === 'running' && deps.status?.clip_id === segment?.clipId ? deps.status?.pos ?? 0 : segment?.inPoint ?? 0);
   return {
-    phase: state.phase, stage: state.stage, index: state.index, segment, total: state.segments.length, active: active(state),
+    mode: state.mode, phase: state.phase, stage: state.stage, index: state.index, segment, total: state.segments.length, active: active(state),
     switching: active(state) && state.stage !== 'running', loop, switchMs: state.switchMs, error: state.error, ...progress,
     start, select, stop, pause, resume,
     next: () => { if (active(session.current)) enter(Math.min(session.current.segments.length - 1, session.current.index + 1)); },

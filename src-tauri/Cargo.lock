@@ -5482,7 +5482,7 @@ dependencies = [
 
 [[package]]
 name = "tripcut-studio"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "axum",
  "base64 0.23.1",

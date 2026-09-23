@@ -14,6 +14,8 @@ export interface FakePlayerOptions {
   clipId: number;
   /** seek 命令发出后还要几个 tick 位置才真正变(0 = 命令落地即到位)。 */
   seekLandTicks?: number;
+  /** Pause 响应延迟;同批后续命令等它落地(0 = 立即)。 */
+  pauseTicks?: number;
   /** 换素材(player_open)要几个 tick 才 ready。 */
   openTicks?: number;
   tickMs?: number;
@@ -27,6 +29,8 @@ export class FakePlayer {
   private readonly clips: ReadonlyMap<number, number>;
   private readonly seekLandTicks: number;
   private readonly openTicks: number;
+  private readonly pauseTicks: number;
+  private pendingPauses: { ticks: number; resolve: () => void }[] = [];
   clipId: number;
   pos = 0;
   paused = true;
@@ -46,6 +50,7 @@ export class FakePlayer {
     this.clipId = options.clipId;
     this.seekLandTicks = options.seekLandTicks ?? 0;
     this.openTicks = options.openTicks ?? 1;
+    this.pauseTicks = options.pauseTicks ?? 0;
     this.tickMs = options.tickMs ?? 80;
     this.fps = options.fps ?? 25;
   }
@@ -76,6 +81,14 @@ export class FakePlayer {
 
   send = async (commands: PlayerCommand[]): Promise<void> => {
     for (const cmd of commands) {
+      if (cmd.type === 'pause' && this.phase === 'ready' && this.pauseTicks > 0) {
+        await new Promise<void>(resolve => this.pendingPauses.push({ ticks: this.pauseTicks, resolve: () => {
+          this.paused = true;
+          this.commands.push({ t: this.elapsed, cmd });
+          resolve();
+        } }));
+        continue;
+      }
       this.commands.push({ t: this.elapsed, cmd });
       if (this.phase !== 'ready') continue;
       if (cmd.type === 'play') this.paused = false;
@@ -114,6 +127,12 @@ export class FakePlayer {
       if (last !== null && next >= last) { this.pos = last; this.paused = true; }
       else this.pos = next;
     }
+    this.pendingPauses = this.pendingPauses.filter(pending => {
+      pending.ticks -= 1;
+      if (pending.ticks > 0) return true;
+      pending.resolve();
+      return false;
+    });
     this.samples.push({ phase: this.phase, t: this.elapsed, clipId: this.clipId, pos: this.pos, paused: this.paused });
   }
 }

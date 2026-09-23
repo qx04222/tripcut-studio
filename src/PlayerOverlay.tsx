@@ -1,3 +1,4 @@
+import { sendPlayerCommandSettled } from "./playerCommandSettle";
 import { PreviewSourceBadge } from "./workspace/PreviewSourceBadge";
 import {
   useCallback,
@@ -13,7 +14,6 @@ import {
   createSelectSegment,
   listSelectSegments,
   playerClose,
-  playerCommand,
   STALE_CLIP_COMMAND,
   playerOpen,
   playerSetViewport,
@@ -283,9 +283,9 @@ export function PlayerOverlay({
     void Promise.resolve().then(async () => {
       if (!active || replayOpen.current !== request) return;
       replayOpen.current = null;
-      if (request.outPoint !== undefined) await playerCommand({ type: "set_end", seconds: request.outPoint }, request.clipId);
+      if (request.outPoint !== undefined) await sendPlayerCommandSettled({ type: "set_end", seconds: request.outPoint }, request.clipId);
       if (!active) return;
-      await playerCommand({ type: "play" }, request.clipId);
+      await sendPlayerCommandSettled({ type: "play" }, request.clipId);
       const next = await playerStatus();
       if (active) setStatus(next);
     }).catch(reason => { if (active) void reportFailure(reason); });
@@ -492,7 +492,7 @@ export function PlayerOverlay({
       try {
         for (const command of commands) {
           if (openedClipId.current !== owner) return;
-          await playerCommand(command, owner);
+          await sendPlayerCommandSettled(command, owner);
         }
         if (openedClipId.current !== owner) return;
       } catch (reason) {

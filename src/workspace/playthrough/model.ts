@@ -32,6 +32,7 @@ export const playthroughTime = (seconds: number) => {
   return `${String(Math.floor(whole / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
 };
 export interface PlaythroughRange {
+  mode?: 'band' | 'selection';
   inPoint: number; outPoint: number; index: number; total: number;
   /** 切段总状态;stage 区分停旧段与新段已提交,避免把旧段的位置重置到入点。 */
   switching?: boolean;

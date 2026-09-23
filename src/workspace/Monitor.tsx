@@ -173,8 +173,8 @@ export function Monitor(): JSX.Element {
   // 单段与连播共用活动选段绿框;视口范围由用户偏好决定。切段读数沿用原子快照。
   const playthroughProps: { playthrough?: PlaythroughRange } = (playthrough.phase !== "idle" && playthrough.segment) ? { playthrough: {
     inPoint: playthrough.segment.inPoint, outPoint: playthrough.segment.outPoint, index: playthrough.index, total: playthrough.total,
-    switching: playthrough.switching, stage: playthrough.stage,
-  } } : activeSelection ? { playthrough: { ...activeSelection, index: 0, total: 1, stage: "running" } } : {};
+    mode: playthrough.mode, switching: playthrough.switching, stage: playthrough.stage,
+  } } : activeSelection ? { playthrough: { ...activeSelection, mode: "selection", index: 0, total: 1, stage: "running" } } : {};
   const monitorIn = activeSelection?.clipId === selectedClipId ? activeSelection.inPoint : inPoint;
   const monitorOut = activeSelection?.clipId === selectedClipId ? activeSelection.outPoint : outPoint;
   const onNudge = transport.nudge;

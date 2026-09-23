@@ -60,6 +60,10 @@ pub fn init_options_for(low_spec: bool, decode_threads: usize) -> Vec<MpvOption>
         // 链接的 LGPL libmpv 用 -Dcplayer=false 编译,该属性不存在,只能是 optional。
         optional("osc", MpvValue::Bool(false)),
         required("pause", MpvValue::Bool(true)),
+        // 单声道布局被 coreaudio 拒绝(-50)后会回退 avfoundation,其约 4 s 音频缓冲
+        // 提前撞到 end/EOF;Pause 经 ao_drain 等缓冲放完,卡约 2 s。监视器预览下混
+        // 成立体声不损失预览用途,导出不经 mpv;两档均请求 stereo 以保持 coreaudio。
+        optional("audio-channels", MpvValue::Str("stereo")),
     ];
     if low_spec {
         options.extend([
@@ -80,6 +84,11 @@ pub fn init_options_for(low_spec: bool, decode_threads: usize) -> Vec<MpvOption>
         ]);
     }
     options
+}
+
+/// 真机诊断显式开启;空白视为未设置,有内容的路径原样保留。
+pub fn mpv_log_file_from_env(value: Option<String>) -> Option<String> {
+    value.filter(|path| !path.trim().is_empty())
 }
 
 /// 性能核数:`hw.perflevel0.logicalcpu`;读不到用 `hw.ncpu / 2`;都读不到按 2。
@@ -111,6 +120,25 @@ fn sysctl_usize(name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_profiles_request_optional_stereo_preview_audio() {
+        for low_spec in [false, true] {
+            let options = init_options_for(low_spec, 4);
+            assert_eq!(find(&options, "audio-channels"), Some(&optional("audio-channels", MpvValue::Str("stereo"))));
+        }
+    }
+
+    #[test]
+    fn diagnostic_log_file_is_opt_in_and_preserves_the_path() {
+        assert_eq!(mpv_log_file_from_env(None), None);
+        for empty in ["", " ", "\t\n"] {
+            assert_eq!(mpv_log_file_from_env(Some(empty.into())), None);
+        }
+        for path in ["/tmp/mpv-r26.log", "/tmp/mpv log.txt", " /tmp/space "] {
+            assert_eq!(mpv_log_file_from_env(Some(path.into())), Some(path.into()));
+        }
+    }
 
     fn find<'a>(options: &'a [MpvOption], name: &str) -> Option<&'a MpvOption> {
         options.iter().find(|option| option.name == name)

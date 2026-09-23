@@ -23,9 +23,10 @@ fn r25_initial_truth_table() {
 }
 #[test]
 fn r25_auto_debounce_eof_and_serialization() {
-    for ms in [0,99,100,101] {
+    // R26 P-3:去抖 100 → 80 ms(唤醒改为按剩余去抖精确定时,不再吃 50 ms 轮询粒度)。
+    for ms in [0,79,80,81] {
         assert_eq!(auto_target(PreviewQuality::Auto,true,false,Duration::from_millis(ms),SourceKind::Proxy),
-            (ms>=100).then_some(SourceKind::Original));
+            (ms>=80).then_some(SourceKind::Original));
     }
     assert_eq!(auto_target(PreviewQuality::Auto,true,true,Duration::from_secs(1),SourceKind::Proxy),None);
     assert_eq!(auto_target(PreviewQuality::Auto,false,false,Duration::ZERO,SourceKind::Original),Some(SourceKind::Proxy));
@@ -159,6 +160,7 @@ fn r25_seek_and_step_during_swap_are_deferred_not_sent() {
     assert_eq!(switcher.swapping.as_ref().unwrap().pending_seek, Some(7.5));
     assert!(switcher.defer_during_swap(&crate::player::PlayerCommand::StepFwd));
     assert!(!switcher.swapping.as_ref().unwrap().resume, "逐帧意味着要停住");
+    assert!(!switcher.defer_during_swap(&crate::player::PlayerCommand::Sync), "栅栏不被换源拦截");
     assert!(!switcher.defer_during_swap(&crate::player::PlayerCommand::Pause), "暂停是属性,载入中也能设");
     assert!(!switcher.defer_during_swap(&crate::player::PlayerCommand::SetEnd { seconds: Some(4.0) }));
 }
@@ -195,4 +197,30 @@ fn r25_drop_counts_sum_observed_values_and_reset_per_file() {
     switcher.file_loaded();
     assert!(!switcher.eof, "新文件载入清掉片尾标记");
     assert_eq!(switcher.record_drops("frame-drop-count", 1), 1);
+}
+#[test]
+fn r26_debounce_wake_is_the_remaining_debounce() {
+    use super::debounce_wake;
+    let d = |ms| Duration::from_millis(ms);
+    // 自动档、暂停在代理上、去抖未到:按剩余时间唤醒,而不是等下一次 50 ms 轮询。
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(30),SourceKind::Proxy),Some(d(50)));
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(0),SourceKind::Proxy),Some(AUTO_PAUSE_DEBOUNCE));
+    // 已到期 / 在播 / EOF / 已是原片 / 非自动档:不需要提前唤醒。
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(80),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,false,false,d(0),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,true,d(10),SourceKind::Proxy),None);
+    assert_eq!(debounce_wake(PreviewQuality::Auto,true,false,d(10),SourceKind::Original),None);
+    for q in [PreviewQuality::High,PreviewQuality::Original,PreviewQuality::Performance] {
+        assert_eq!(debounce_wake(q,true,false,d(10),SourceKind::Proxy),None);
+    }
+}
+#[test]
+fn r26_file_loaded_during_swap_does_no_sync_property_reads() {
+    // 真机:换源 FileLoaded 上同步 get_property 与新文件 vo reconfig 互等 200 ms。换源分支必须先于任何同步读返回。
+    let source = include_str!("mod.rs");
+    let start = source.find("Some(Ok(Event::FileLoaded)) => {").expect("FileLoaded 分支");
+    let body = &source[start..start + 1600];
+    let guard = body.find("if switcher.swapping.is_some() { switcher.file_loaded(); continue; }").expect("换源分支提前返回");
+    let first_read = body.find("mpv.get_property").expect("非换源路径仍读属性");
+    assert!(guard < first_read, "换源分支必须在第一次同步读之前");
 }

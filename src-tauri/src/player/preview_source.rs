@@ -128,7 +128,14 @@ pub fn initial_kind(plan: &SourcePlan) -> SourceKind {
 }
 /// 自动档暂停去抖。真机(M5,4K50 HEVC 10-bit)载入原片到首帧 60–280 ms;去抖 150 ms + 50 ms 轮询粒度时
 /// 暂停→原片 269–485 ms,贴着 0.5 s 验收线,所以降到 100 ms 并从 Pause 命令那一刻起算。
-pub const AUTO_PAUSE_DEBOUNCE: Duration = Duration::from_millis(100);
+/// R26 P-3:真机量到去抖实际 113–171 ms(50 ms 轮询粒度);改为按剩余去抖精确唤醒(`debounce_wake`)并降到 80 ms。
+/// 不再往下压:拖进度条 / 逐帧之间的停顿更容易被当成「暂停」而中途换源。
+pub const AUTO_PAUSE_DEBOUNCE: Duration = Duration::from_millis(80);
+/// 去抖未到时渲染线程该在多久后醒来补 `tick`(None = 不需要提前醒)。
+pub fn debounce_wake(quality: PreviewQuality, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<Duration> {
+    (quality == PreviewQuality::Auto && paused && !eof && current != SourceKind::Original && paused_for < AUTO_PAUSE_DEBOUNCE)
+        .then(|| AUTO_PAUSE_DEBOUNCE - paused_for)
+}
 /// 可用来源由调用方检查，纯函数只负责时间与状态判定。
 pub fn auto_target(quality: PreviewQuality, paused: bool, eof: bool, paused_for: Duration, current: SourceKind) -> Option<SourceKind> {
     if quality != PreviewQuality::Auto || eof { return None; }
@@ -216,6 +223,9 @@ impl SourceSwitcher {
             if let Err(error) = mpv.set_property("pause", !swap.resume) { tracing::warn!(%error,"换源后更新暂停态失败"); }
             status.paused = !swap.resume;
             status.frame = mpv.get_property("estimated-frame-number").ok();
+            // R26:宽高与来源同一刻发布(换源中的观察值被屏蔽),角标不会出现「代理 2160p」这种半新半旧。
+            status.source_width = mpv.get_property("width").ok();
+            status.source_height = mpv.get_property("height").ok();
             status.dropped_frames = Some(0);
             self.last_switch_ms = Some(swap.started.elapsed().as_secs_f64()*1000.0);
             self.last_error_s = position.map(|_| (status.pos-swap.target_source_seconds).abs());
@@ -235,6 +245,13 @@ impl SourceSwitcher {
                 if let Err(error) = self.begin_swap(mpv,target,status.pos,status.paused) { tracing::warn!(%error,"排队换源失败"); }
             }
         }
+    }
+    /// 下次该醒来的时刻(去抖剩余);换源中 / 没有计划时不提前醒。
+    pub fn next_wake(&self, paused: bool) -> Option<Duration> {
+        if self.swapping.is_some() { return None; }
+        let plan = self.plan.as_ref()?;
+        let paused_for = self.paused_since.map_or(Duration::ZERO, |since| since.elapsed());
+        debounce_wake(plan.quality, paused, self.eof, paused_for, self.current)
     }
     /// 用户按下暂停的时刻就是去抖起点(不等下一次 tick 才发现已暂停)。
     pub fn note_pause_command(&mut self) { self.paused_since = Some(Instant::now()); }

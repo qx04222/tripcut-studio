@@ -1094,6 +1094,7 @@ function playerCommand(cmd: Record<string, unknown>): void {
   const player = state.player;
   if (player.phase !== "ready") return;
   switch (cmd.type) {
+    case "sync": break; // 与渲染线程栅栏一致,不改变状态。
     case "play":
       player.paused = false;
       break;

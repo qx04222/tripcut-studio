@@ -87,6 +87,8 @@ impl Default for PlayerViewport {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlayerCommand {
+    /// 渲染线程队列栅栏:之前排队的命令已处理完,不调用 mpv。
+    Sync,
     Play,
     Pause,
     StepFwd,
@@ -194,7 +196,7 @@ fn mpv_calls_for(command: PlayerCommand) -> Result<Vec<MpvCall>, String> {
             _ => vec![MpvCall::SetPropertyStr("end", "none".to_owned())],
         },
         PlayerCommand::Play | PlayerCommand::Pause | PlayerCommand::StepFwd | PlayerCommand::StepBack
-        | PlayerCommand::SeekAbs { .. } => Vec::new(),
+        | PlayerCommand::SeekAbs { .. } | PlayerCommand::Sync => Vec::new(),
     })
 }
 
@@ -1103,6 +1105,9 @@ fn run_worker(
                 Err(error) => tracing::warn!(%error, option = option.name, "设置 mpv 选项失败"),
             }
         }
+        if let Some(path) = mpv_options::mpv_log_file_from_env(std::env::var("TRIPCUT_MPV_LOG_FILE").ok()) {
+            if let Err(error) = initializer.set_property("log-file", path.as_str()) { tracing::warn!(%error, "设置 mpv 诊断日志失败"); }
+        }
         Ok(())
     })
     .map_err(|error| format!("libmpv 初始化失败：{error}"))?;
@@ -1122,6 +1127,10 @@ fn run_worker(
     // R25:换源策略要的 EOF 也走观察事件。渲染线程上不许高频同步读属性(get_property 要等核心线程,
     // 核心又可能在等本线程出帧)——真机 High 档曾因每 20 ms 读一次 eof-reached 卡住 2 s,命令超时。
     mpv.observe_property("eof-reached", Format::Flag, 7).map_err(|error| format!("监听片尾失败：{error}"))?;
+    // R26:换源后的原片宽高(角标「原片 2160p」)也走观察事件,不在 FileLoaded 上同步读。
+    for (name, id) in [("width", 8), ("height", 9)] {
+        mpv.observe_property(name, Format::Int64, id).map_err(|error| format!("监听画面尺寸失败：{error}"))?;
+    }
     let mut switcher = SourceSwitcher::new(time_mapper.cloned());
     let render_pending = Arc::new(AtomicBool::new(false));
     let events_pending = Arc::new(AtomicBool::new(false));
@@ -1174,7 +1183,10 @@ fn run_worker(
         // recv_timeout 超时时轮询事件，队列一直有渲染消息时就永远不会超时，
         // time-pos / duration 等观察值会停在 0。每次处理任意 worker 消息后都
         // drain 一次事件；50ms timeout 只负责静止画面时的兜底。
-        let message = match receiver.recv_timeout(Duration::from_millis(50)) {
+        // R26 P-3:自动档暂停去抖未到时按剩余时间醒来,不吃 50 ms 轮询粒度。
+        let idle = Duration::from_millis(50);
+        let wait = switcher.next_wake(lock(status).paused).map_or(idle, |d| d.clamp(Duration::from_millis(1), idle));
+        let message = match receiver.recv_timeout(wait) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 drain_events(&mpv, status, &mut switcher, &mut pending_seek, &mut seek_samples, &mut handoff.gate)?;
@@ -1307,6 +1319,7 @@ fn execute_command(
     pending_seek: &mut Option<Instant>,
 ) -> Result<(), String> {
     match command {
+        PlayerCommand::Sync => {}
         PlayerCommand::Play => {
             mpv.set_property("pause", false)
                 .map_err(|error| format!("播放失败：{error}"))?;
@@ -1372,6 +1385,11 @@ fn drain_events(
             None => return Ok(()),
             Some(Err(error)) => return Err(format!("mpv 事件错误：{error}")),
             Some(Ok(Event::FileLoaded)) => {
+                // R26 P-3:换源中不在渲染线程上同步读属性。新文件的 vo reconfig 要本线程出帧/处理
+                // render update,而同步 get_property 要等核心线程 —— 两头互等到 vo_libmpv 的 200 ms 超时
+                // (「mpv_render_context_render() not being called or stuck」),暂停换原片因此多 ~200 ms。
+                // 同一素材换源时长不变;宽高走观察事件。
+                if switcher.swapping.is_some() { switcher.file_loaded(); continue; }
                 let mut snapshot = lock(status);
                 snapshot.duration = switcher.mapper()
                     .map(|mapper| mapper.source_duration_seconds())
@@ -1379,7 +1397,6 @@ fn drain_events(
                 snapshot.source_width = mpv.get_property("width").ok();
                 snapshot.source_height = mpv.get_property("height").ok();
                 switcher.file_loaded();
-                if switcher.swapping.is_some() { continue; }
                 snapshot.paused = mpv.get_property("pause").unwrap_or(true);
                 snapshot.frame = mpv.get_property("estimated-frame-number").ok();
                 // FileLoaded 可能早于 time-pos 的观察通知:首份 ready 必须读真实入点。
@@ -1401,7 +1418,7 @@ fn drain_events(
             }
             Some(Ok(Event::PropertyChange { name, change, .. })) => {
                 if let ("eof-reached", PropertyData::Flag(value)) = (name, &change) { switcher.eof = *value; continue; }
-                if switcher.swapping.is_some() && matches!(name, "time-pos" | "duration" | "pause" | "estimated-frame-number" | "frame-drop-count" | "decoder-frame-drop-count") { continue; }
+                if switcher.swapping.is_some() && matches!(name, "time-pos" | "duration" | "pause" | "estimated-frame-number" | "frame-drop-count" | "decoder-frame-drop-count" | "width" | "height") { continue; }
                 let mut snapshot = lock(status);
                 match (name, change) {
                     ("time-pos", PropertyData::Double(value)) => {
@@ -1417,6 +1434,8 @@ fn drain_events(
                             .max(0.0)
                     }
                     ("pause", PropertyData::Flag(value)) => snapshot.paused = value,
+                    ("width", PropertyData::Int64(value)) => snapshot.source_width = Some(value),
+                    ("height", PropertyData::Int64(value)) => snapshot.source_height = Some(value),
                     ("estimated-frame-number", PropertyData::Int64(value)) => {
                         snapshot.frame = Some(value)
                     }
@@ -1891,3 +1910,6 @@ mod tests {
         assert!(mpv_calls_for(PlayerCommand::SeekAbs { seconds: 1.0 }).unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod command_settle_tests;

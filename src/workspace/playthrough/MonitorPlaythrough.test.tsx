@@ -307,6 +307,9 @@ it('001/002: selected shot with autoAdvance off fences, replays at in, then pool
   await act(async () => { setPlaythroughSegments(sequence); requestSegmentSelection(sequence[0]!, 3, true); });
   await waitFor(() => expect(live).toMatchObject({ pos: 3, paused: false }));
   expect(getActiveSelection()?.key).toBe('a');
+  expect(screen.getByText('选段 · 第 1/2 段 · 章 1')).toBeTruthy();
+  expect(screen.getByTitle('选段:当前段')).toBeTruthy();
+  expect(screen.getByRole('progressbar', { name: '镜头带总进度' }).getAttribute('aria-valuetext')).toBe('选段 第 1/2 段');
   expect(commandsAfterOpen(9)).toContainEqual({ type: 'set_end', seconds: 4 });
   expect(screen.getByRole('switch', { name: '连播' }).getAttribute('aria-checked')).toBe('false');
   live = { ...live, pos: 3.96 };
@@ -335,6 +338,9 @@ it('001: Inspector replay uses the same active selection and fence as the monito
   fireEvent.click(await screen.findByRole('button', { name: '复播精选段 1' }));
   await waitFor(() => expect(live).toMatchObject({ pos: 38.5, paused: false }));
   expect(getActiveSelection()).toMatchObject({ inPoint: 38.5, outPoint: 46.5, fps: 50 });
+  expect(screen.getByText('选段 · 章')).toBeTruthy();
+  expect(screen.getByTitle('选段:当前段')).toBeTruthy();
+  expect(screen.getByRole('progressbar', { name: '镜头带总进度' }).getAttribute('aria-valuetext')).toBe('选段');
   const commands = commandsAfterOpen(9);
   const play = commands.map(c => c.type).lastIndexOf('play');
   expect(commands.slice(0, play)).toContainEqual({ type: 'set_end', seconds: 46.5 });

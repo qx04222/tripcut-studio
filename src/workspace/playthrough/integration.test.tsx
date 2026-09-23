@@ -13,7 +13,7 @@ import type { ClipListItem, PlayerStatus } from '../../api';
 import type { BandSegment } from '../shotBandModel';
 import type { PlaythroughController } from './usePlaythrough';
 const segment = { key: 's', clipId: 1, inPoint: 2, outPoint: 4, chapter: '1', fps: 25 };
-const controller = () => ({ active: true, phase: 'playing', segment, index: 2, total: 12, elapsed: 42, duration: 187, loop: false,
+const controller = () => ({ mode: 'band', active: true, phase: 'playing', segment, index: 2, total: 12, elapsed: 42, duration: 187, loop: false,
   start: vi.fn(), stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), next: vi.fn(), previous: vi.fn(), toggleLoop: vi.fn(),
 } as unknown as PlaythroughController);
 beforeEach(() => { setPlaythroughSegments([]); publishPlaythrough(null); });

@@ -20,14 +20,14 @@ const listeners = new Set<() => void>();
 const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
 const emit = () => { for (const fn of listeners) fn(); };
 let segments: readonly PlaythroughSegment[] = [];
-export type PlaythroughView = Pick<PlaythroughController, 'active' | 'phase' | 'index' | 'total' | 'segment' | 'elapsed' | 'duration' | 'switchMs'>;
+export type PlaythroughView = Pick<PlaythroughController, 'mode' | 'active' | 'phase' | 'index' | 'total' | 'segment' | 'elapsed' | 'duration' | 'switchMs'>;
 let view: PlaythroughView | null = null;
 export function setPlaythroughSegments(next: readonly PlaythroughSegment[]) {
   if (JSON.stringify(segments) === JSON.stringify(next)) return;
   segments = next; emit();
 }
 export function publishPlaythrough(next: PlaythroughController | null) {
-  const value = next ? { active: next.active, phase: next.phase, index: next.index, total: next.total,
+  const value = next ? { mode: next.mode, active: next.active, phase: next.phase, index: next.index, total: next.total,
     segment: next.segment, elapsed: next.elapsed, duration: next.duration, switchMs: next.switchMs } : null;
   if (JSON.stringify(value) === JSON.stringify(view)) return;
   view = value; emit();
@@ -54,7 +54,7 @@ export function usePlaythroughCommands(controller: PlaythroughController, enable
       const { controller: c, enabled: allowed } = latest.current;
       if (!allowed) return;
       const key = (event as CustomEvent<{ key?: string }>).detail?.key;
-      if (key === undefined && c.active) { c.stop(); return; }
+      if (key === undefined && c.active) { if (c.mode === 'band') c.stop(); else c.start(0); return; }
       const index = key === undefined ? 0 : segments.findIndex(s => s.key === key);
       if (index >= 0 && segments[index]) c.start(index);
     };

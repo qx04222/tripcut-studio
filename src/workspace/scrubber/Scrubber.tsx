@@ -113,7 +113,7 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
           onPointerLeave={leave}>{edge === "in" ? "I" : "O"}</div> : null;
       })}
     </span>
-    {playthrough && <span className="scrubber-r22-playthrough-label" title="镜头带连播:当前段">{segmentLabel}</span>}
+    {playthrough && <span className="scrubber-r22-playthrough-label" title={playthrough.mode === "selection" ? "选段:当前段" : "镜头带连播:当前段"}>{segmentLabel}</span>}
     <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={zoom}
       title="完整素材 / 放大片段；放大时越界自动显示完整素材"
       onClick={() => void writeScrubberView(zoom ? "full" : "zoom")}>

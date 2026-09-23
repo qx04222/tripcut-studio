@@ -396,7 +396,9 @@ export type PlayerCommand =
   // R23 出点围栏:mpv `end` 属性。播到这一秒就停(keep-open 停在那一帧,不关实例)。
   // 镜头带连播用它让「到 out 就结束」由播放器保证,不再只靠前端轮询位置去追。
   // `seconds: null` = 撤掉围栏。
-  | { type: "set_end"; seconds: number | null };
+  | { type: "set_end"; seconds: number | null }
+  // 渲染线程队列栅栏:只等之前的命令处理完,不改变播放器状态。
+  | { type: "sync" };
 
 export interface PlayerStatus {
   phase: "closed" | "loading" | "ready" | "error";
