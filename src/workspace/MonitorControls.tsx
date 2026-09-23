@@ -3,6 +3,7 @@ import { useRef, useState, type JSX } from "react";
 import { formatTimecode } from "../PlayerOverlay";
 import type { ClipListItem, PlayerStatus } from "../api";
 import { MonitorHeatStrip } from "./MonitorHeatStrip";
+import { useDisplayPosition } from "./scrubber/useDisplayPosition";
 import { EditableTimecode } from "./scrubber/EditableTimecode";
 import { clipFps } from "./useMonitorTransport";
 import { MonitorSeekBar } from "./MonitorSeekBar";
@@ -22,6 +23,8 @@ export interface MonitorControlsProps {
   muted: boolean;
   /** R11 §3 / R12 §5:速度标签(×1 / ×2 / ×4 / ×0.5 / 倒退)。 */
   speedLabel?: string;
+  rate?: number;
+  seeking?: boolean;
   /** Y-10:J 倒退中(mpv 其实是暂停 + 逐帧后退):走带按钮要显示「暂停」,按它 = 停下倒退。 */
   rewinding?: boolean;
   looping?: boolean;
@@ -83,6 +86,8 @@ export function MonitorControls({
   saving,
   muted,
   speedLabel = "×1",
+  rate = 1,
+  seeking = false,
   rewinding = false,
   looping = false,
   suggestions,
@@ -101,6 +106,12 @@ export function MonitorControls({
   onToggleAutoAdvance,
 }: MonitorControlsProps): JSX.Element {
   const fps = clipFps(clip);
+  const extrapolated = useDisplayPosition(status, {
+    rate, seeking, rewinding, end: playthrough?.outPoint,
+    switching: playthrough?.switching || (playthrough?.stage !== undefined && !["running", "finished"].includes(playthrough.stage)) || status?.clip_id !== clip.id,
+  });
+  // R24 P-2:换段途中(stopping 除外)段号已是新段,读数先落新段入点,不露出旧素材 / 未 seek 的位置。
+  const displayPosition = playthrough ? playthroughReadout(playthrough, extrapolated).position : extrapolated;
   const inKey = useActionKey("mark-in");
   const outKey = useActionKey("mark-out");
   const fullscreenKey = useActionKey("fullscreen");
@@ -199,10 +210,10 @@ export function MonitorControls({
 
         <span className="monitor-seek">
           <span className="monitor-timecode">
-            <EditableTimecode seconds={playthrough ? playthroughReadout(playthrough, status?.pos ?? 0).position : status?.pos ?? 0} fps={fps} duration={status?.duration ?? 0} disabled={!ready} onSeek={onSeek} />
+            <EditableTimecode seconds={displayPosition} fps={fps} duration={status?.duration ?? 0} disabled={!ready} onSeek={onSeek} />
           </span>
           <MonitorSeekBar key={clip.id} fps={fps} onPause={onPause} onResume={onResume} onTrim={onTrim} onShuttle={onShuttle}
-            onMark={edge => edge === "in" ? onMarkIn() : onMarkOut()} status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} playthrough={playthrough} />
+            displayPosition={displayPosition} onMark={edge => edge === "in" ? onMarkIn() : onMarkOut()} status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} playthrough={playthrough} />
           <span className="monitor-timecode">
             <span className="monitor-duration" aria-label="素材总时长" title={formatTimecode(status?.duration ?? 0, fps)}>
               {formatShortTimecode(status?.duration ?? 0)}

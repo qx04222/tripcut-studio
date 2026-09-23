@@ -10,6 +10,7 @@ import { useWheelFrames } from "./useWheelFrames";
 import { useScrubberMedia } from "./useScrubberMedia";
 export interface ScrubberProps {
   status: PlayerStatus | null; inPoint: number | null; outPoint: number | null;
+  displayPosition?: number;
   fps?: number; onSeek(seconds: number): void | Promise<unknown>; heat?: ReactNode;
   /** R22-B 镜头带连播:当前段在本素材内的 in→out 与第几段;不连播时不传、不画。用户在轨道上的任何 seek 仍走 `onSeek`(连播由走带那头收到人工 seek 后停止)。 */
   playthrough?: PlaythroughRange;
@@ -17,13 +18,13 @@ export interface ScrubberProps {
   onTrim?(edge: "in" | "out", seconds: number): void;
   onShuttle?(key: "j" | "k" | "l"): void; onMark?(edge: "in" | "out"): void;
 }
-export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, onPause, onResume, onTrim, onShuttle, onMark, playthrough }: ScrubberProps) {
+export function Scrubber({ status, displayPosition = status?.pos ?? 0, inPoint, outPoint, fps = 30, onSeek, heat, onPause, onResume, onTrim, onShuttle, onMark, playthrough }: ScrubberProps) {
   const ready = status?.phase === "ready" && status.duration > 0;
   const duration = ready ? status.duration : 0, clipId = ready ? status.clip_id : null;
   const zoom = usePlayerPrefs().scrubberView === "zoom";
   const [width, setWidth] = useState(600);
-  const readout = playthrough ? playthroughReadout(playthrough, status?.pos ?? 0) : null;
-  const snapshotPosition = readout?.position ?? status?.pos ?? 0;
+  // R24 P-2:换段途中(stopping 除外)读数先落新段入点;其余时刻用显示位置(播放中外推,暂停 = 实际状态)。
+  const snapshotPosition = playthrough ? playthroughReadout(playthrough, displayPosition).position : displayPosition;
   const range = useMemo((): readonly [number, number] => {
     const candidate = visibleRange(duration, playthrough?.inPoint ?? inPoint, playthrough?.outPoint ?? outPoint, zoom);
     // 越界时回完整视图,保留用户偏好;回到片段内会恢复放大。
@@ -43,11 +44,11 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   }, [gesture.track]);
   useEffect(() => { setHover(null); }, [clipId]);
   const pct = (n: number) => `${ratioAt(n, shownRange) * 100}%`;
-  // R24:段号、指针与 AXValueDescription 共用一次快照;stopping 保留旧段真位置。
-  // 指针、数字都等同一份实际状态回读;手势目标仅用于悬停预览,不冒充已解码位置。
+  // 指针、数字与 AX 共用一个显示位置;暂停和定位中使用实际状态。
+  // 手势与键盘命令始终读取真实状态,不使用显示外推值。
   const value = snapshotPosition;
   const headPct = `${(value - shownRange[0]) / (shownRange[1] - shownRange[0] || 1) * 100}%`;
-  const segmentLabel = readout ? `第 ${readout.index + 1}/${readout.total} 段` : null;
+  const segmentLabel = playthrough ? `第 ${playthrough.index + 1}/${playthrough.total} 段` : null;
   const marked = inPoint !== null && outPoint !== null && outPoint > inPoint;
   // 指针不 clamp;选段越界保留诊断标记。
   const outOfSegment = playthrough !== undefined && ready && !playthrough.switching &&

@@ -76,11 +76,15 @@ export function JianyingResultCard({ result }: { result: JianyingDraftResult }):
         <p className="deliver-result-meta">{draftContentLine(result)}</p>
         <p className="deliver-result-meta">{result.message}</p>
         <TimelineSubtitleLine result={result} />
+        <p className="deliver-result-meta">{FOLDER_ACCESS_HINT}</p>
         <code className="deliver-result-path">{result.output_path}</code>
       </div>
     </Card>
   );
 }
+
+/** R27 真机:素材在桌面等受保护文件夹时,剪映第一次打开草稿会弹 macOS 授权框;点「不允许」会被系统永久记下。 */
+export const FOLDER_ACCESS_HINT = "剪映第一次打开时,macOS 可能会问能不能访问素材所在的文件夹(比如桌面),请点「允许」;否则素材会显示离线。";
 
 export const OPEN_JIANYING_LABEL = "打开剪映";
 export const HUMAN_CHECK_OK_LABEL = "可以用";
@@ -88,7 +92,7 @@ export const HUMAN_CHECK_FAIL_LABEL = "打不开";
 
 function TimelineSubtitleLine({ result }: { result: JianyingDraftResult }): JSX.Element | null {
   return result.subtitles_on_timeline === true ? (
-    <p className="deliver-result-meta">字幕已写进时间线:{result.timeline_subtitle_count ?? 0} 条(试验,请在剪映里核对位置与断句)</p>
+    <p className="deliver-result-meta">字幕已写进时间线:{result.timeline_subtitle_count ?? 0} 条</p>
   ) : null;
 }
 

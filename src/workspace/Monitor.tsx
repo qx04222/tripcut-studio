@@ -61,6 +61,7 @@ export function Monitor(): JSX.Element {
   const [outPoint, setOutPoint] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [pendingSeeks, setPendingSeeks] = useState(0);
   const controlsRef = useRef<EmbeddedPlayerControls | null>(null);
   // onPlayPause 在走带建好之前就定义了 —— 按播放要撤连播留下的出点围栏,只能经 ref 拿。
   const transportRef = useRef<MonitorTransport | null>(null);
@@ -139,7 +140,11 @@ export function Monitor(): JSX.Element {
 
   const send = useCallback(async (commands: Parameters<EmbeddedPlayerControls["send"]>[0]) => {
     if (clip?.kind === "photo") return;
-    await controlsRef.current?.send(commands);
+    // 只给显示层挂起外推,不改变命令内容;并发定位全部落地后才恢复。
+    const seeking = commands.some(command => ['seek_abs', 'step_fwd', 'step_back'].includes(command.type));
+    if (seeking) setPendingSeeks(count => count + 1);
+    try { await controlsRef.current?.send(commands); }
+    finally { if (seeking) setPendingSeeks(count => count - 1); }
   }, [clip?.kind]);
 
   const onPlayPause = useCallback(() => {
@@ -396,6 +401,8 @@ export function Monitor(): JSX.Element {
         saving={saving}
         muted={transport.muted}
         speedLabel={transport.speedLabel}
+        rate={transport.rate}
+        seeking={pendingSeeks > 0}
         rewinding={transport.rewinding}
         looping={transport.looping}
         suggestions={suggestions}

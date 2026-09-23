@@ -48,12 +48,14 @@ describe('R22 镜头带连播状态机', () => {
     expect(h.transport.play).toHaveBeenCalledTimes(2);
     expect(h.result.current.switchMs).toBeGreaterThanOrEqual(0);
   });
-  it('最后一段 done 并停在 out 前最后一帧', async () => {
+  it('R27 围栏停在 out 后 done 不再 seek,保留解码末帧', async () => {
     const h = mount(); await h.start(1);
     await h.update({ status: status(2, 6) });
+    h.transport.seekTo.mockClear();
     await h.update({ status: status(2, 9, true) });
     expect(h.result.current.phase).toBe('done');
-    expect(h.transport.seekTo).toHaveBeenLastCalledWith(8.96, { source: 'playthrough' });
+    expect(h.transport.seekTo).not.toHaveBeenCalled();
+    h.unmount();
   });
   it('暂停继续保留索引,前后跳段,循环默认关且打开后绕回首段', async () => {
     const h = mount(); await h.start();
@@ -233,4 +235,18 @@ describe('R25 修剪出点围栏', () => {
     expect(h.transport.play).not.toHaveBeenCalled();
     h.unmount();
   });
+});
+
+// 围栏附近保留 mpv 的帧与位置;只有真越界才回末帧。
+it.each([-1.5, -1, 0, 0.5])('R27 出点附近 %s 帧不再定位,越界超过一帧才回退', async offset => {
+  const h = mount(); await h.start(1);
+  h.transport.seekTo.mockClear();
+  await h.update({ status: status(2, 9 + offset / 25, true) });
+  expect(h.result.current.phase).toBe('done');
+  expect(h.transport.seekTo).not.toHaveBeenCalled();
+  await h.start(1); h.transport.seekTo.mockClear();
+  await h.update({ status: status(2, 9 + 1.1 / 25, false) });
+  expect(h.result.current.phase).toBe('done');
+  expect(h.transport.seekTo).toHaveBeenCalledExactlyOnceWith(8.96, { source: 'playthrough' });
+  h.unmount();
 });

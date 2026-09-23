@@ -9,7 +9,7 @@ import type { ClipListItem, PlayerStatus } from '../../api';
 import { timecode } from './model';
 beforeEach(() => { __resetPlayerPrefsForTests(); vi.stubGlobal('PointerEvent', MouseEvent); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-it.each([30, 50, 60])('004/006: %i fps pause, drag, +/-1 and resumed snapshots keep numeric, AX and pointer equal', fps => {
+it.each([30, 50, 60])('004/006: %i fps 暂停、拖动、步进与恢复使用同一个显示位置', fps => {
   const onSeek = vi.fn(), onNudge = vi.fn(), onPlayPause = vi.fn();
   const status = { phase: 'ready', clip_id: 1, pos: 5, duration: 100, paused: false } as PlayerStatus;
   const props = { clip: { id: 1, fps_num: fps, fps_den: 1 } as ClipListItem, status, inPoint: 20, outPoint: 30,
@@ -29,7 +29,7 @@ it.each([30, 50, 60])('004/006: %i fps pause, drag, +/-1 and resumed snapshots k
   view.rerender(<MonitorControls {...props} status={{ ...status, paused: true }} />);
   vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue({ left: 0, width: 100 } as DOMRect);
   fireEvent.pointerDown(slider, { clientX: 40 });
-  // While decoding the request, all readouts still describe the last returned frame.
+  // 定位尚未解码时不外推,三处显示仍共用最后回读的位置。
   assertPosition(5);
   fireEvent.pointerUp(slider, { clientX: 40 });
   expect(onSeek).toHaveBeenLastCalledWith(40);

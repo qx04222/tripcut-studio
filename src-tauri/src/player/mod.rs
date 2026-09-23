@@ -10,6 +10,7 @@
 /// R16 车道 E:libmpv 初始化选项表(标准 / 低配两套),`run_worker` 只按表设置。
 pub mod mpv_options;
 mod handoff;
+mod pause_drain;
 pub mod preview_source;
 use preview_source::{PreviewQuality, SourceKind, SourcePlan, SourceSwitcher};
 
@@ -1174,6 +1175,7 @@ fn run_worker(
     // Exact-seek latency is closed by mpv's PlaybackRestart event. No render
     // call or `seeking` property polling participates in this measurement.
     let mut pending_seek: Option<Instant> = None;
+    let mut end_fence: Option<f64> = None;
     let mut seek_samples = Vec::new();
     // 隐藏期间不往 GL drawable 画:AppKit 对 hidden 的 NSOpenGLView 不保证
     // drawable 有效。解除遮挡时补画一帧,画面立刻接上。
@@ -1257,7 +1259,7 @@ fn run_worker(
                     if let Some(swap) = &mut switcher.swapping { swap.resume = false; }
                 }
                 let deferred = !handled && switcher.defer_during_swap(&command);
-                let result = if handled || deferred { Ok(()) } else { execute_command(&mpv, status, switcher.mapper(), command, &mut pending_seek) };
+                let result = if handled || deferred { Ok(()) } else { execute_command(&mpv, status, switcher.mapper(), command, &mut pending_seek, &mut end_fence) };
                 if let Err(error) = &result {
                     lock(status).fail(error.clone());
                 }
@@ -1317,6 +1319,7 @@ fn execute_command(
     time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
     command: PlayerCommand,
     pending_seek: &mut Option<Instant>,
+    end_fence: &mut Option<f64>,
 ) -> Result<(), String> {
     match command {
         PlayerCommand::Sync => {}
@@ -1326,6 +1329,7 @@ fn execute_command(
             lock(status).paused = false;
         }
         PlayerCommand::Pause => {
+            pause_drain::prepare_pause(mpv, *end_fence);
             mpv.set_property("pause", true)
                 .map_err(|error| format!("暂停失败：{error}"))?;
             lock(status).paused = true;
@@ -1355,13 +1359,19 @@ fn execute_command(
                 return Err(format!("精确定位失败：{error}"));
             }
         }
+        PlayerCommand::SetEnd { seconds } => {
+            for call in mpv_calls_for(PlayerCommand::SetEnd { seconds })? {
+                apply_mpv_call(mpv, call)?;
+            }
+            // 与实际 end 属性保持一致,只有设置成功才更新;新播放器实例从无围栏开始。
+            *end_fence = seconds.filter(|value| value.is_finite() && *value >= 0.0);
+        }
         command @ (PlayerCommand::ApplyDisplayLut { .. }
         | PlayerCommand::ClearDisplayLut
         | PlayerCommand::SelectAudioTrack { .. }
         | PlayerCommand::SetMute { .. }
         | PlayerCommand::SetSpeed { .. }
-        | PlayerCommand::SetRotation { .. }
-        | PlayerCommand::SetEnd { .. }) => {
+        | PlayerCommand::SetRotation { .. }) => {
             for call in mpv_calls_for(command)? {
                 apply_mpv_call(mpv, call)?;
             }

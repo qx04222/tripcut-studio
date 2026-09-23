@@ -103,10 +103,10 @@ import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "./WorkspaceStore
 beforeEach(() => {
   __resetWorkspaceForTests();
   __resetModalStackForTests();
-  window.requestAnimationFrame = (callback: FrameRequestCallback) => {
-    callback(0);
-    return 1;
-  };
+  // rAF 必须异步调度,同步桩会让持续动画递归溢出。
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback =>
+    window.setTimeout(() => callback(performance.now()), 16));
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(id => window.clearTimeout(id));
   apiMocks.listClips.mockResolvedValue([clip]);
   apiMocks.listStoryGaps.mockResolvedValue([gap]);
   apiMocks.listSelectSegments.mockResolvedValue([]);
@@ -588,4 +588,33 @@ describe("Monitor", () => {
     await waitFor(() => expect(apiMocks.playerSetViewport).toHaveBeenCalled());
     vi.unstubAllGlobals();
   });
+});
+
+it('R27 Monitor 定位未返回时停止显示外推,定位落地后按新状态继续', async () => {
+  let now = 1000, id = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  vi.mocked(window.requestAnimationFrame).mockImplementation(cb => { frames.set(++id, cb); return id; });
+  vi.mocked(window.cancelAnimationFrame).mockImplementation(key => { frames.delete(key); });
+  const tick = async (ms: number) => {
+    now += ms;
+    await act(async () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(cb => cb(now)); });
+  };
+  const playing = { ...readyStatus, paused: false };
+  apiMocks.playerOpen.mockResolvedValue(playing);
+  apiMocks.playerStatus.mockResolvedValue(playing);
+  __resetWorkspaceForTests({ selection: { kind: 'clip', clipId: 9 } });
+  render(<Monitor />); await flush(); await tick(0); await flush();
+  const value = () => Number(screen.getByRole('slider', { name: '播放位置' }).getAttribute('aria-valuenow'));
+  expect(value()).toBe(12.5);
+  await tick(40); expect(value()).toBeCloseTo(12.54);
+  let finish!: () => void;
+  apiMocks.playerCommand.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  fireEvent.click(screen.getByRole('button', { name: '前进一秒' }));
+  await tick(40); expect(value()).toBe(12.5);
+  expect(apiMocks.playerCommand).toHaveBeenLastCalledWith({ type: 'seek_abs', seconds: 13.5 }, 9);
+  apiMocks.playerStatus.mockResolvedValue({ ...playing, pos: 13.5 });
+  await act(async () => finish());
+  expect(value()).toBe(13.5);
+  await tick(40); expect(value()).toBeCloseTo(13.54);
 });

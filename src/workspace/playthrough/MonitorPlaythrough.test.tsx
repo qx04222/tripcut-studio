@@ -121,10 +121,10 @@ beforeEach(() => {
   __resetPlayerPrefsForTests();
   __resetPoolOrderForTests();
   setPoolOrder([9, 10]);
-  window.requestAnimationFrame = (callback: FrameRequestCallback) => {
-    callback(0);
-    return 1;
-  };
+  // rAF 必须异步调度,同步桩会让持续动画递归溢出。
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback =>
+    window.setTimeout(() => callback(performance.now()), 16));
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(id => window.clearTimeout(id));
   live = closedStatus();
   log = [];
   apiMocks.listClips.mockResolvedValue([clipA, clipB]);
@@ -162,6 +162,7 @@ afterEach(() => {
   cleanup();
   setPlaythroughSegments([]);
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -354,8 +355,9 @@ it('002: fullscreen recreation after segment preview returns to material zero au
   await renderInPane();
   await act(async () => requestSegmentSelection(sequence[0]!, 3, true));
   await waitFor(() => expect(live).toMatchObject({ pos: 3, paused: false }));
+  const opensBeforeFullscreen = apiMocks.playerOpen.mock.calls.length;
   await act(async () => dispatchWorkspace({ type: 'set-immersive', immersive: true }));
-  await waitFor(() => expect(apiMocks.playerOpen.mock.calls.length).toBeGreaterThanOrEqual(2));
+  await waitFor(() => expect(apiMocks.playerOpen.mock.calls.length).toBe(opensBeforeFullscreen + 1));
   await flush();
   expect(live).toMatchObject({ pos: 0, paused: false });
   expect(getActiveSelection()).toBeNull();

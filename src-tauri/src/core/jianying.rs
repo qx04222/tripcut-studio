@@ -26,14 +26,15 @@ const PROJECT_NAME: &str = "旅剪项目";
 /// R14 C-1:草稿名里集名的最大字符数——剪映草稿列表一行放不下太长的名字,超出即截断。
 const DRAFT_NAME_TITLE_MAX_CHARS: usize = 40;
 
-pub const SUPPORTED_JIANYING_VERSIONS: &[&str] = &["11.3.0"];
+pub const SUPPORTED_JIANYING_VERSIONS: &[&str] = &["11.3.0", "11.4.13189"];
 
 /// 已在本机装上、但还没人眼验证过的剪映版本。2026-09-10 实测:11.4.13169(09-12 又自动升到 11.4.13189)把草稿文件改名为
 /// `template-2.tmp` 且连同 `draft_info.json` 一起加密(1164 字节非 JSON),金丝雀的键集比对
 /// 已无从做起;TripCut 写出的明文 11.3.0 草稿在 11.4 里能否打开,只能由业主在剪映里开一次确认。
 /// 在此之前:应用侧照旧按"不支持的版本"拒绝生成草稿(不假装可用);真机金丝雀对这些版本打印
 /// WARN 并跳过键集比对,而不是让整个门禁一直红。确认可用后把版本挪进 `SUPPORTED_JIANYING_VERSIONS`。
-pub const JIANYING_VERSIONS_PENDING_HUMAN_CHECK: &[&str] = &["11.4.13169", "11.4.13189"];
+/// 2026-09-23:11.4.13189 已真机确认能打开 11.3.0 格式草稿(含字幕文字轨),已挪进白名单(R27)。
+pub const JIANYING_VERSIONS_PENDING_HUMAN_CHECK: &[&str] = &["11.4.13169"];
 
 /// R14 §9 A:人眼验证结果落在 settings 的键前缀,完整键 `jianying.human_check.<version>`,
 /// 值 "ok" | "fail"。只对 `JIANYING_VERSIONS_PENDING_HUMAN_CHECK` 里的版本有意义 —— 未知版本
@@ -1980,8 +1981,14 @@ mod r14_force_tests {
     }
 
     #[test]
-    fn pending_version_is_not_usable_but_force_allowed() {
+    fn owner_verified_11_4_13189_is_whitelisted() {
         let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::None);
+        assert!(status.whitelisted && status.usable && status.supported);
+    }
+
+    #[test]
+    fn pending_version_is_not_usable_but_force_allowed() {
+        let status = availability_from(Ok("11.4.13169".to_owned()), true, HumanCheck::None);
         assert!(!status.usable);
         assert!(!status.supported);
         assert!(!status.whitelisted);
@@ -1998,7 +2005,7 @@ mod r14_force_tests {
 
     #[test]
     fn human_check_ok_makes_pending_version_usable() {
-        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::Ok);
+        let status = availability_from(Ok("11.4.13169".to_owned()), true, HumanCheck::Ok);
         assert!(status.usable);
         assert!(status.supported);
         assert!(!status.whitelisted);
@@ -2007,7 +2014,7 @@ mod r14_force_tests {
 
     #[test]
     fn human_check_fail_keeps_pending_version_unusable_but_retryable() {
-        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::Fail);
+        let status = availability_from(Ok("11.4.13169".to_owned()), true, HumanCheck::Fail);
         assert!(!status.usable);
         assert!(status.force_allowed);
         assert_eq!(status.human_check, HumanCheck::Fail);
@@ -2021,7 +2028,7 @@ mod r14_force_tests {
 
     #[test]
     fn missing_draft_root_blocks_force_too() {
-        let status = availability_from(Ok("11.4.13189".to_owned()), false, HumanCheck::None);
+        let status = availability_from(Ok("11.4.13169".to_owned()), false, HumanCheck::None);
         assert!(!status.force_allowed);
     }
 
@@ -2029,19 +2036,19 @@ mod r14_force_tests {
     fn human_check_setting_round_trips_through_settings_whitelist() {
         let directory = TestDirectory::new();
         let connection = db::open_project(&directory.db_path()).unwrap();
-        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::None);
-        set_human_check(&connection, "11.4.13189", HumanCheck::Ok).unwrap();
-        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::Ok);
+        assert_eq!(human_check_from_settings(&connection, "11.4.13169").unwrap(), HumanCheck::None);
+        set_human_check(&connection, "11.4.13169", HumanCheck::Ok).unwrap();
+        assert_eq!(human_check_from_settings(&connection, "11.4.13169").unwrap(), HumanCheck::Ok);
         assert_eq!(
-            settings::setting_value(&connection, "jianying.human_check.11.4.13189").unwrap().as_deref(),
+            settings::setting_value(&connection, "jianying.human_check.11.4.13169").unwrap().as_deref(),
             Some("ok")
         );
-        set_human_check(&connection, "11.4.13189", HumanCheck::Fail).unwrap();
-        assert_eq!(human_check_from_settings(&connection, "11.4.13189").unwrap(), HumanCheck::Fail);
+        set_human_check(&connection, "11.4.13169", HumanCheck::Fail).unwrap();
+        assert_eq!(human_check_from_settings(&connection, "11.4.13169").unwrap(), HumanCheck::Fail);
         // 未知版本不许记「可以用」:那会绕过白名单。
         assert!(set_human_check(&connection, "12.0.0", HumanCheck::Ok).is_err());
         // 值只认 ok / fail。
-        assert!(settings::set_setting(&connection, "jianying.human_check.11.4.13189", "maybe").is_err());
+        assert!(settings::set_setting(&connection, "jianying.human_check.11.4.13169", "maybe").is_err());
     }
 
     #[test]
@@ -2050,7 +2057,7 @@ mod r14_force_tests {
         let mut connection = seed_selected_clip(&directory);
         let root = directory.path().join("draft-root");
         std::fs::create_dir(&root).unwrap();
-        let status = availability_from(Ok("11.4.13189".to_owned()), true, HumanCheck::None);
+        let status = availability_from(Ok("11.4.13169".to_owned()), true, HumanCheck::None);
 
         assert!(generate_with_availability(&mut connection, &status, &root, false, false).is_err());
         let result = generate_with_availability(&mut connection, &status, &root, true, false).unwrap();

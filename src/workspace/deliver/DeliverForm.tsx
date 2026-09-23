@@ -42,7 +42,7 @@ function jianyingBadge(form: DeliverFormState): { tone: BadgeTone; text: string 
 
 /** R14 §9 A:待验证版本的试验开关。AX 名「仍然试着生成」;可见文案带「(试验)」。 */
 export const FORCE_DRAFT_LABEL = "仍然试着生成";
-export const SUBTITLES_ON_TIMELINE_LABEL = "字幕写进时间线(试验)";
+export const SUBTITLES_ON_TIMELINE_LABEL = "字幕写进时间线";
 const FORCE_DRAFT_LINE = "试验草稿只新增一份、用新名字;就算剪映打不开,也不影响剪映里已有的草稿。";
 
 /** 交付目标(平台 / 时长)+ 输出格式(联系表 / 剪映草稿)两节(规格 §4.2 第 1 条)。 */
@@ -165,7 +165,7 @@ export function DeliverForm({ form, hasVideos = true, useJianyingDraft, onUseJia
                       disabled={form.nativeBusy}
                     />
                   </div>
-                  <p className="deliver-switch-help">默认关。打开后把转写字幕按精选段入点对到时间线,写成剪映文字轨;TripCut字幕/ 里的 SRT 照常输出。字幕轨结构取自开源 pyJianYingDraft,还没在你这版剪映里亲眼核对过。</p>
+                  <p className="deliver-switch-help">默认关。打开后把转写字幕按精选段入点对到时间线,写成剪映文字轨(底部居中白字);TripCut字幕/ 里的 SRT 照常输出。已在剪映 11.4 里核对过时间与文字。</p>
                 </div>
               ) : null}
             </div>

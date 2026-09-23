@@ -121,10 +121,10 @@ beforeEach(() => {
   __resetPlayerPrefsForTests();
   __resetPoolOrderForTests();
   setPoolOrder([9, 10]);
-  window.requestAnimationFrame = (callback: FrameRequestCallback) => {
-    callback(0);
-    return 1;
-  };
+  // rAF 必须异步调度,同步桩会让持续动画递归溢出。
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback =>
+    window.setTimeout(() => callback(performance.now()), 16));
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(id => window.clearTimeout(id));
   live = closedStatus();
   log = [];
   apiMocks.listClips.mockResolvedValue([clipA, clipB]);
@@ -324,6 +324,8 @@ describe("R17 playfix:同一条素材再次 player_open(全屏来回)也从零�
 });
 
 it('002: ten actual Monitor opens alternate long/short clips and suggestions; every first ready is playing at zero', async () => {
+  // 本用例检查首份回读,固定显示时钟;帧间推进由 R27 专用测试覆盖。
+  vi.spyOn(performance, 'now').mockReturnValue(1000);
   const clips = Array.from({ length: 10 }, (_, i) => ({ ...clipA, id: 9+i, duration_ticks: i % 2 ? 8000 : 200000 }));
   const original = JSON.stringify(clips);
   apiMocks.listClips.mockResolvedValue(clips);

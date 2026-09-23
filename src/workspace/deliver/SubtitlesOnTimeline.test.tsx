@@ -18,7 +18,7 @@ import { DeliverDrawer } from "../DeliverDrawer";
 import { __resetWorkspaceForTests } from "../WorkspaceStore";
 import { __resetToastsForTests } from "../ui/toastStore";
 import { FORCE_DRAFT_LABEL, SUBTITLES_ON_TIMELINE_LABEL } from "./DeliverForm";
-import { JianyingResultCard } from "./DeliverResultCard";
+import { FOLDER_ACCESS_HINT, JianyingResultCard } from "./DeliverResultCard";
 import { __resetExportModeForTests, openDeliverAs } from "./exportModeRequest";
 
 const episode: EpisodeSummary = {
@@ -79,7 +79,9 @@ describe("R24 字幕写进时间线", () => {
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finish({ ...draft, subtitles_on_timeline: true, timeline_subtitle_count: 7 }));
     expect((toggle as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByText("字幕已写进时间线:7 条(试验,请在剪映里核对位置与断句)")).toBeTruthy();
+    expect(screen.getByText("字幕已写进时间线:7 条")).toBeTruthy();
+    // R27 真机:原片在桌面等受保护文件夹时剪映首开会弹 macOS 授权框,结果卡要提前说
+    expect(screen.getByText(FOLDER_ACCESS_HINT)).toBeTruthy();
   });
 
   it.each([false, true])("待验证版本也显示开关,开启=%s 时强制生成传对应参数", async (enabled) => {
@@ -122,7 +124,7 @@ describe("R24 字幕写进时间线", () => {
 
   it.each([false, true])("普通/试验结果卡 experimental=%s 显示字幕条数", (experimental) => {
     render(<JianyingResultCard result={{ ...draft, experimental, subtitles_on_timeline: true, timeline_subtitle_count: 7 }} />);
-    expect(screen.getByText("字幕已写进时间线:7 条(试验,请在剪映里核对位置与断句)")).toBeTruthy();
+    expect(screen.getByText("字幕已写进时间线:7 条")).toBeTruthy();
   });
 
   it.each([undefined, false])("字幕字段为 %s 时普通/试验结果卡均不增加字幕行", (enabled) => {

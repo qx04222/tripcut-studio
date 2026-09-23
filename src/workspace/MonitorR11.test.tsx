@@ -110,10 +110,10 @@ beforeEach(() => {
   __resetWorkspaceForTests({ selection: { kind: "clip", clipId: 9 }, focusedPane: "monitor" });
   __resetPlayerPrefsForTests();
   __resetPoolOrderForTests();
-  window.requestAnimationFrame = (callback: FrameRequestCallback) => {
-    callback(0);
-    return 1;
-  };
+  // rAF 必须异步调度,同步桩会让持续动画递归溢出。
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback =>
+    window.setTimeout(() => callback(performance.now()), 16));
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(id => window.clearTimeout(id));
   liveStatus = { ...readyStatus };
   apiMocks.listClips.mockResolvedValue([clip, clip10]);
   apiMocks.listStoryGaps.mockResolvedValue([]);

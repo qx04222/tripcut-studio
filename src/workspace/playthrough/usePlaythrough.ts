@@ -178,7 +178,8 @@ export function usePlaythrough(deps: PlaythroughDeps) {
     if (advance && loopRef.current) { enter(0); return; }
     publish({ phase: 'done', stage: 'finished' });
     void deps.transport.pause().then(() => {
-      if (mounted.current && session.current.token === token && session.current.phase === 'done') {
+      // 围栏已停在末帧时再 exact seek 会让 HEVC 的 time-pos 倒跳;只有真越界才纠偏。
+      if (status.pos > segment.outPoint + 0.5 * frame && mounted.current && session.current.token === token && session.current.phase === 'done') {
         return latest.current.transport.seekTo(Math.max(segment.inPoint, segment.outPoint - 1 / segment.fps), { source: 'playthrough' });
       }
     }).catch(() => undefined);
