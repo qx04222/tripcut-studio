@@ -283,29 +283,6 @@ fn r28_resolver_auto_opens_original_on_standard_internal_and_defers_external() {
     assert_eq!(initial_kind(&plan),SourceKind::Proxy);
 }
 #[test]
-fn r28_drop_watch_needs_sustained_spread_drops_after_grace() {
-    let t0 = Instant::now(); let at = |ms: u64| t0 + Duration::from_millis(ms);
-    let mut w = DropWatch::default();
-    assert!(!w.observe(at(0), 100), "未开播不计");
-    w.set_eligible(at(0), true);
-    assert!(!w.observe(at(500), 40), "起步宽限内的载入掉帧不算");
-    assert!(!w.observe(at(2900), 60));
-    // 真机形态:整机被抢 0.3 s,一口气掉 15–30 帧 —— 不算「解不动原片」。
-    let mut total = 60;
-    for i in 0..30u64 { total += 1; assert!(!w.observe(at(10_000 + i * 10), total), "单次卡顿不降级"); }
-    // 持续掉帧:连续 5 秒每秒掉 8 帧(50p 下 16%)。
-    let mut hit = false;
-    for sec in 0..5u64 { for k in 0..8u64 { total += 1; hit |= w.observe(at(20_000 + sec * 1000 + k * 100), total); } }
-    assert!(hit, "持续掉帧要降级");
-    // 暂停(不合格)清零,重新开播重新计宽限。
-    w.set_eligible(at(30_000), false);
-    w.set_eligible(at(30_000), true);
-    assert!(!w.observe(at(31_000), 500));
-    // 零星掉帧(每秒 1 帧,2%)永远不成片。
-    let mut w = DropWatch::default(); w.set_eligible(at(0), true);
-    for i in 0..60u64 { assert!(!w.observe(at(3000 + i * 1000), 100 + i as i64)); }
-}
-#[test]
 fn r28_switcher_degrades_auto_to_proxy_after_burst_and_publishes_policy() {
     use SourceKind::{Original as O, Proxy as P, ProxyHq as H};
     let mpv = libmpv2::Mpv::with_initializer(|i| { i.set_property("vo","null")?; i.set_property("ao","null")?; Ok(()) }).unwrap();
@@ -361,3 +338,7 @@ fn r28_gl_view_asks_for_best_resolution_surface_before_it_is_placed() {
     let place = body.find("handoff::place_view(").expect("place_view");
     assert!(set < place, "挂进窗口前就要设好");
 }
+
+/// R29 的判据 / 遮挡 / 记忆测试(文件行数上限,分出去)。
+#[path = "preview_source_r29_tests.rs"]
+mod r29;

@@ -3020,7 +3020,8 @@ async fn player_open(
     tauri::async_runtime::spawn_blocking(move || {
         let (connection, plan) =
             crate::player::preview_source::resolve_preview_plan(&db_path, &cache_root, clip_id)?;
-        let kind = crate::player::preview_source::initial_kind(&plan);
+        // R29:本次会话已判过原片播不动的素材,开播直接用代理(1080p 优先)。
+        let kind = crate::player::auto_memory::open_kind(&plan, clip_id, start_paused.unwrap_or(false));
         let entry = plan.entry(kind).ok_or("预览来源不可用")?;
         player.open(entry.path.clone(), clip_id, entry.mapper.clone(), start_paused.unwrap_or(false), start_seconds)?;
         let original_deferred = crate::player::preview_source::original_deferred(&plan);
@@ -3186,7 +3187,10 @@ fn refresh_completed_high_preview(status: &PlayerStatus, player: &PlayerManager,
     use std::sync::atomic::{AtomicBool, Ordering};
     static CHECKING: AtomicBool = AtomicBool::new(false);
     static LAST_CHECK: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    if status.preview_quality.as_deref() != Some("high") || status.source_kind.as_deref() == Some("proxy_hq") { return; }
+    // R29:自动档原片播不动退到 540p 时,也按需生成 1080p,生成好就换上(播放中才换;暂停看的是原片)。
+    let degraded_on_540 = status.preview_quality.as_deref() == Some("auto") && status.auto_policy.as_deref() == Some("degraded")
+        && status.source_kind.as_deref() == Some("proxy");
+    if (status.preview_quality.as_deref() != Some("high") && !degraded_on_540) || status.source_kind.as_deref() == Some("proxy_hq") { return; }
     let Some(clip_id) = status.clip_id else { return; };
     if status.source_kind.as_deref() == Some("original") && status.source_width.zip(status.source_height).is_some_and(|(w,h)| w.min(h) <= 1080) { return; }
     {
@@ -3205,15 +3209,31 @@ fn refresh_completed_high_preview(status: &PlayerStatus, player: &PlayerManager,
             let connection = core::db::open_project(&db_path).map_err(|e| e.to_string())?;
             let ready: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM cache_artifacts a JOIN clips c ON c.id=a.clip_id
                 WHERE a.clip_id=?1 AND a.kind='proxy_hq' AND a.source_hash=c.quick_hash)", [clip_id], |r| r.get(0)).map_err(|e|e.to_string())?;
-            if !ready { return Ok(()); }
+            if !ready {
+                if degraded_on_540 && !degraded_hq_queued(clip_id) {
+                    crate::player::preview_source::ensure_proxy_hq(&connection, &cache_root, clip_id).map_err(|e| e.to_string())?;
+                    tracing::info!(clip_id, "自动档原片播不动:排队生成 1080p 预览,生成前暂用 540p");
+                }
+                return Ok(());
+            }
             let (_, plan) = crate::player::preview_source::resolve_preview_plan(&db_path, &cache_root, clip_id)?;
             if plan.quality == crate::player::preview_source::PreviewQuality::High && plan.proxy_hq.is_some() {
                 player.refresh_source_plan_for_clip(clip_id, plan, true)?;
+            } else if degraded_on_540 && plan.quality == crate::player::preview_source::PreviewQuality::Auto && plan.proxy_hq.is_some() {
+                player.refresh_source_plan_for_clip(clip_id, plan, false)?;
             }
             Ok(())
         };
         if let Err(error) = check() { tracing::warn!(%error, "刷新高清代理失败"); }
     });
+}
+
+/// R29:自动档退代理时 1080p 预览每条素材本次会话只排一次队(返回 true = 之前排过)。
+#[cfg(target_os = "macos")]
+fn degraded_hq_queued(clip_id: i64) -> bool {
+    static QUEUED: Mutex<Option<std::collections::HashSet<i64>>> = Mutex::new(None);
+    let mut guard = QUEUED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    !guard.get_or_insert_with(std::collections::HashSet::new).insert(clip_id)
 }
 
 fn development_root() -> Result<PathBuf> {

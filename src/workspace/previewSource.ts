@@ -6,13 +6,16 @@ export function sourceBadgeLabel(status: PlayerStatus | null): string | null {
   const edge = Math.min(status.source_width ?? 0, status.source_height ?? 0);
   return edge > 0 ? `${prefix} ${edge}p` : prefix;
 }
-/** R28:角标后缀。标准机自动档一直原片,不再写「暂停看原片」;掉帧退代理时如实说明。 */
+/** R28:角标后缀。标准机自动档一直原片,不再写「暂停看原片」。
+ *  R29:退代理时写业主看得懂的原因 ——「原片播放不动」,不再说「掉帧」(业主:「为啥说我原片掉帧啊,拍摄的问题么」);
+ *  有 1080p 就用 1080p,没有时先用 540p 并说明 1080p 正在生成。 */
 export function autoPolicySuffix(status: PlayerStatus | null): string {
   if (status?.preview_quality !== "auto") return "";
   const policy = status.auto_policy;
   if (policy !== "proxy" && policy !== "degraded") return "";
   if (status.source_kind === "original") return status.paused ? " · 暂停看原片" : "";
-  return policy === "degraded" ? " · 原片掉帧,改播代理" : "";
+  if (policy !== "degraded") return "";
+  return status.source_kind === "proxy_hq" ? " · 原片播放不动,暂用 1080p 预览" : " · 原片播放不动,1080p 预览生成中";
 }
 export function qualityLabel(quality: PreviewQuality | string | null | undefined): string {
   const labels: Record<string, string> = { auto: "自动", high: "高画质", original: "原片", performance: "性能优先" };

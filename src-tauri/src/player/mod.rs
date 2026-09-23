@@ -12,6 +12,8 @@ pub mod mpv_options;
 mod handoff;
 mod pause_drain;
 mod drop_watch;
+mod diag;
+pub mod auto_memory;
 pub mod preview_source;
 use preview_source::{PreviewQuality, SourceKind, SourcePlan, SourceSwitcher};
 
@@ -950,6 +952,19 @@ fn resize_surface(
 
 /// 在 AppKit 主线程上切换原生视图的 hidden。只改可见性,不动 frame、
 /// GL context 或 mpv 播放状态。
+/// R29:主线程上读监视器所在窗口是否真的在屏上(没最小化、没被整个盖住、应用没隐藏),结果写进 `flag`。
+/// 不等待:渲染线程只读上一次的结果。
+fn probe_window_visible(window: &WebviewWindow, surface: &RenderSurface, flag: Arc<AtomicBool>) {
+    let view = MainThreadView(surface.gl_view.clone());
+    let _ = window.run_on_main_thread(move || {
+        let view = view;
+        let MainThreadView(inner) = view;
+        let visible = inner.window().is_some_and(|w| !w.isMiniaturized()
+            && w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible));
+        flag.store(visible, Ordering::Release);
+    });
+}
+
 fn set_surface_hidden(
     window: &WebviewWindow,
     surface: &RenderSurface,
@@ -1140,6 +1155,13 @@ fn run_worker(
     for (name, id) in [("width", 8), ("height", 9)] {
         mpv.observe_property(name, Format::Int64, id).map_err(|error| format!("监听画面尺寸失败：{error}"))?;
     }
+    // R29:播不动的判定按素材帧率算应有帧率,只在 1 倍速时做。
+    for (name, id) in [("speed", 10), ("container-fps", 11)] {
+        mpv.observe_property(name, Format::Double, id).map_err(|error| format!("监听播放速度失败：{error}"))?;
+    }
+    // R29:`TRIPCUT_PLAYER_DIAG=1` 时每秒一行呈现帧率 / 掉帧 / 解码与显示参数 / GPU 耗时(真机取证用,默认关)。
+    let mut diag = diag::Diag::new(diag::enabled_from_env(std::env::var("TRIPCUT_PLAYER_DIAG").ok()));
+    if diag.on { diag::observe(&mpv); }
     let mut switcher = SourceSwitcher::new(time_mapper.cloned());
     let render_pending = Arc::new(AtomicBool::new(false));
     let events_pending = Arc::new(AtomicBool::new(false));
@@ -1188,6 +1210,12 @@ fn run_worker(
     // 隐藏期间不往 GL drawable 画:AppKit 对 hidden 的 NSOpenGLView 不保证
     // drawable 有效。解除遮挡时补画一帧,画面立刻接上。
     let mut hidden = occluded;
+    switcher.set_hidden(hidden);
+    // R29:窗口最小化 / 整个被别的窗口盖住 / 应用隐藏时 AppKit 会把画帧节流到每秒个位数(真机:最小化后
+    // 呈现 0.8–8 帧/秒),那也不是原片播不动。主线程每 0.5 s 看一次窗口是否在屏上,不在屏上与 DOM 遮挡同样不评判。
+    let window_visible = Arc::new(AtomicBool::new(true));
+    let mut seen_visible = true;
+    let mut visibility_probed = Instant::now();
     let shutdown_reply = loop {
         // mpv 的 render 回调在播放时可持续以帧率灌入 RenderWake。若只在
         // recv_timeout 超时时轮询事件，队列一直有渲染消息时就永远不会超时，
@@ -1199,7 +1227,7 @@ fn run_worker(
         let message = match receiver.recv_timeout(wait) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_events(&mpv, status, &mut switcher, &mut pending_seek, &mut seek_samples, &mut handoff.gate)?;
+                drain_events(&mpv, status, &mut switcher, &mut pending_seek, &mut seek_samples, &mut handoff.gate, &mut diag)?;
                 switcher.tick(&mpv, &mut lock(status));
                 handoff.redraw_ready(&render_context, surface, hidden)?;
                 continue;
@@ -1214,9 +1242,13 @@ fn run_worker(
                 let flags = render_context
                     .update()
                     .map_err(|error| format!("mpv render update 失败：{error}"))?;
-                if flags & mpv_render_update::Frame != 0 && !hidden
-                    && render_frame(&render_context, surface)? {
-                    handoff.frame_rendered();
+                if flags & mpv_render_update::Frame != 0 && !hidden {
+                    let started = Instant::now();
+                    if render_frame_timed(&render_context, surface, diag.on.then_some(&mut diag.gpu))? {
+                        switcher.frame_presented();
+                        diag.frame(started.elapsed());
+                        handoff.frame_rendered();
+                    }
                 }
             }
             WorkerMessage::ForceRedraw => {
@@ -1227,6 +1259,7 @@ fn run_worker(
             WorkerMessage::SetOccluded(occluded, reply) => {
                 let result = set_surface_hidden(window, surface, occluded).and_then(|()| {
                     hidden = occluded;
+                    switcher.set_hidden(occluded || !seen_visible);
                     if hidden {
                         Ok(())
                     } else {
@@ -1294,8 +1327,20 @@ fn run_worker(
             &mut pending_seek,
             &mut seek_samples,
             &mut handoff.gate,
+            &mut diag,
         )?;
+        if visibility_probed.elapsed() >= Duration::from_millis(500) {
+            visibility_probed = Instant::now();
+            probe_window_visible(window, surface, Arc::clone(&window_visible));
+        }
+        let visible_now = window_visible.load(Ordering::Acquire);
+        if visible_now != seen_visible {
+            seen_visible = visible_now;
+            tracing::debug!(visible = visible_now, "监视器窗口在屏状态变化");
+        }
+        switcher.set_hidden(hidden || !seen_visible);
         switcher.tick(&mpv, &mut lock(status));
+        if diag.on { let s = lock(status); let playing = !s.paused && s.phase == "ready"; drop(s); diag.tick(switcher.current.as_str(), playing); }
         handoff.redraw_ready(&render_context, surface, hidden)?;
     };
 
@@ -1303,6 +1348,11 @@ fn run_worker(
 }
 
 fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> Result<bool, String> {
+    render_frame_timed(render_context, surface, None)
+}
+
+/// `gpu`:诊断开启时记这一帧的 flushBuffer 耗时并抽样 glFinish(在 CGL 锁内)。
+fn render_frame_timed(render_context: &RenderContext<'_>, surface: &RenderSurface, gpu: Option<&mut diag::GpuTimer>) -> Result<bool, String> {
     // 整个画帧 + 交换都在 CGL 锁里:主线程的 -update(窗口缩放、setFrame、
     // 取消隐藏)要等这一帧画完才能重建 drawable,反过来也一样。
     let _lock = CglLock::acquire(&surface.gl_context);
@@ -1316,7 +1366,10 @@ fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> 
     render_context
         .render::<()>(0, width, height, true)
         .map_err(|error| format!("mpv render 失败：{error}"))?;
+    let mut gpu = gpu;
+    if let Some(timer) = gpu.as_deref_mut() { timer.after_render(); }
     surface.gl_context.flushBuffer();
+    if let Some(timer) = gpu { timer.after_flush(); }
     render_context.report_swap();
     Ok(true)
 }
@@ -1395,6 +1448,7 @@ fn drain_events(
     pending_seek: &mut Option<Instant>,
     seek_samples: &mut Vec<f64>,
     handoff: &mut handoff::HandoffGate,
+    diag: &mut diag::Diag,
 ) -> Result<(), String> {
     loop {
         let ev = mpv.wait_event(0.0);
@@ -1436,6 +1490,13 @@ fn drain_events(
             }
             Some(Ok(Event::PropertyChange { name, change, .. })) => {
                 if let ("eof-reached", PropertyData::Flag(value)) = (name, &change) { switcher.eof = *value; continue; }
+                match (name, &change) {
+                    ("speed", PropertyData::Double(value)) => { switcher.set_speed(*value); continue; }
+                    ("container-fps", PropertyData::Double(value)) => { switcher.set_source_fps(*value); continue; }
+                    _ => {}
+                }
+                if diag.on_property(name, &change) { continue; }
+                if let ("frame-drop-count" | "decoder-frame-drop-count", PropertyData::Int64(value)) = (name, &change) { diag.drops(name, *value); }
                 if switcher.swapping.is_some() && matches!(name, "time-pos" | "duration" | "pause" | "estimated-frame-number" | "frame-drop-count" | "decoder-frame-drop-count" | "width" | "height") { continue; }
                 let mut snapshot = lock(status);
                 match (name, change) {

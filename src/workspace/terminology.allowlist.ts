@@ -38,8 +38,8 @@ export const TERMINOLOGY_EXCEPTIONS: readonly TerminologyException[] = [
   },
   {
     file: "src/workspace/previewSource.ts",
-    line: /原片掉帧,改播代理/,
-    reason: "R28 TC-0115-003 复报:自动档原片掉帧自动退代理时,角标要如实说清现在看的是代理、为什么;与角标「代理 / 原片」同一套说法。",
+    line: /原片播放不动,暂用 1080p 预览|原片播放不动,1080p 预览生成中/,
+    reason: "R28/R29 TC-0115-003 复报:自动档原片播不动自动退代理时,角标要如实说清为什么(业主看不懂「掉帧」);与角标「代理 / 原片」同一套说法。",
   },
   {
     file: "src/workspace/PreviewSourceBadge.tsx",

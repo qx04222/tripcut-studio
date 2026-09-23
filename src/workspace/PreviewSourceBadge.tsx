@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { playerSetPreviewQuality, setSetting, type PlayerStatus } from "../api";
 import { autoPolicySuffix, createDropMonitor, qualityLabel, sourceBadgeLabel } from "./previewSource";
 import { requestStatusRefreshSoon, usePausedSourceRefresh } from "./previewSourceRefresh";
+import { isPlayerOccluded } from "./modalStack";
 
 export function PreviewSourceBadge({ status }: { status: PlayerStatus | null }) {
   const monitor = useRef(createDropMonitor());
@@ -13,8 +14,9 @@ export function PreviewSourceBadge({ status }: { status: PlayerStatus | null }) 
       monitor.current = createDropMonitor();
       clip.current = status?.clip_id;
     }
+    // R29:监视器被覆盖层盖住时原生视图不画帧,mpv 把每一帧都记成掉帧 —— 那段不算,按暂停处理(清零重计)。
     setStruggling(monitor.current.feed(status?.frame ?? null, status?.dropped_frames,
-      status?.paused ?? true, status?.source_kind).struggling);
+      (status?.paused ?? true) || isPlayerOccluded(), status?.source_kind).struggling);
   }, [status]);
   const label = sourceBadgeLabel(status);
   if (!label) return null;

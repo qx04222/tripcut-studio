@@ -21,7 +21,7 @@ it("R28 标准机自动档:播放、暂停都是「原片 2160p」,不再写「�
 });
 it("R28 掉帧已退代理:角标如实写代理分辨率与原因;暂停回原片", () => {
   const { rerender } = render(<PreviewSourceBadge status={status({ auto_policy: "degraded", source_kind: "proxy_hq", source_width: 1920, source_height: 1080 })} />);
-  expect(badge()).toBe("代理 1080p · 原片掉帧,改播代理");
+  expect(badge()).toBe("代理 1080p · 原片播放不动,暂用 1080p 预览"); // R29 迁移:文案改为业主看得懂的原因
   rerender(<PreviewSourceBadge status={status({ auto_policy: "degraded", paused: true })} />);
   expect(badge()).toBe("原片 2160p · 暂停看原片");
 });

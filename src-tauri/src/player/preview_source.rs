@@ -6,6 +6,7 @@ use libmpv2::Mpv;
 use crate::core::{artifacts, canonical_time::{self, ProxyTimeMapper}, db, media_source, memory_profile, settings};
 use super::PlayerStatus;
 pub use super::drop_watch::DropWatch;
+use super::auto_memory::{self, AutoDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewQuality { Auto, High, Original, Performance }
@@ -61,19 +62,7 @@ pub fn resolve_preview_plan_with(db_path: &Path, cache_root: &Path, clip_id: i64
             plan.proxy = cached_entry(&connection,cache_root,clip_id,SourceKind::Proxy)?;
             plan.proxy_hq = cached_entry(&connection,cache_root,clip_id,SourceKind::ProxyHq)?;
             if quality == PreviewQuality::High && plan.proxy_hq.is_none() {
-                let enqueue = || -> crate::core::error::Result<_> {
-                    // 映射丢失/文件被外部删除也属于缺 HQ；持写锁复查，避免抹掉刚完成的任务。
-                    let transaction = rusqlite::Transaction::new_unchecked(&connection, rusqlite::TransactionBehavior::Immediate)?;
-                    let ready = cached_entry(&transaction,cache_root,clip_id,SourceKind::ProxyHq)?;
-                    if ready.is_none() {
-                        transaction.execute("DELETE FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy_hq'",[clip_id])?;
-                        transaction.execute("DELETE FROM proxy_hq_time_map WHERE clip_id=?1",[clip_id])?;
-                    }
-                    transaction.commit()?;
-                    if ready.is_none() { artifacts::enqueue_proxy_hq_if_needed(&connection,clip_id)?; }
-                    Ok(ready)
-                };
-                match enqueue() {
+                match ensure_proxy_hq(&connection, cache_root, clip_id) {
                     Ok(ready) => plan.proxy_hq = ready,
                     Err(error) => tracing::warn!(%error, "高清代理入队失败，继续使用当前可用来源"),
                 }
@@ -91,6 +80,19 @@ pub fn resolve_preview_plan_with(db_path: &Path, cache_root: &Path, clip_id: i64
         Ok((connection,plan))
     };
     resolve().map_err(|e| e.to_string())
+}
+/// 缺 1080p 高清代理就排一条(幂等);已就绪则返回它。高画质档打开时、R29 起自动档原片播不动退代理时都走这里。
+pub fn ensure_proxy_hq(connection: &Connection, cache_root: &Path, clip_id: i64) -> crate::core::error::Result<Option<SourceEntry>> {
+    // 映射丢失/文件被外部删除也属于缺 HQ；持写锁复查，避免抹掉刚完成的任务。
+    let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    let ready = cached_entry(&transaction,cache_root,clip_id,SourceKind::ProxyHq)?;
+    if ready.is_none() {
+        transaction.execute("DELETE FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy_hq'",[clip_id])?;
+        transaction.execute("DELETE FROM proxy_hq_time_map WHERE clip_id=?1",[clip_id])?;
+    }
+    transaction.commit()?;
+    if ready.is_none() { artifacts::enqueue_proxy_hq_if_needed(connection,clip_id)?; }
+    Ok(ready)
 }
 /// 当前档位此刻就要读原片吗(纯函数,`original` 尚未填)。
 /// R28:自动档在标准机上播放也读原片,本机盘上的原片只做快速哈希,当场核验;外置盘要整文件哈希,
@@ -184,18 +186,28 @@ pub struct SourceSwitcher {
     /// R28:退到代理后代理照样持续掉帧 = 整机忙(别的程序抢 GPU / WindowServer),不是解不动原片 ——
     /// 退代理只丢清晰度、换不来流畅,回原片并且本次不再降级。真机见 docs/qa/2026-09-23-r28-sharp.md。
     pub proxy_burst: bool, pub degrade_blocked: bool,
+    /// R29:监视器被 DOM 覆盖层盖住(不画帧)、倍速、素材帧率 —— 播不动的判定只在「1 倍速、看得见」时做。
+    hidden: bool, speed: f64, source_fps: f64, clip_id: Option<i64>,
 }
 impl SourceSwitcher {
     pub fn new(mapper: Option<ProxyTimeMapper>) -> Self {
         Self { plan: None, current: if mapper.is_some() { SourceKind::Proxy } else { SourceKind::Original },
             current_mapper: mapper, swapping: None, paused_since: None, loaded: false, queued_kind: None, last_switch_ms: None, last_error_s: None, eof: false, vo_drops: 0, decoder_drops: 0,
-            drop_watch: DropWatch::default(), drop_burst: false, degraded: false, proxy_burst: false, degrade_blocked: false }
+            drop_watch: DropWatch::default(), drop_burst: false, degraded: false, proxy_burst: false, degrade_blocked: false,
+            hidden: false, speed: 1.0, source_fps: 0.0, clip_id: None }
     }
     pub fn install(&mut self, plan: SourcePlan, opened: SourceKind, status: &mut PlayerStatus) {
         // 刷新计划时保留实际已打开文件的映射，Original 档计划可不含任何代理。
         if self.plan.is_none() {
             self.current = opened;
             self.current_mapper = plan.entry(opened).and_then(|e| e.mapper.clone());
+            // R29:同一素材本次会话判过就沿用,不再每次先播几秒原片再掉。
+            self.clip_id = status.clip_id;
+            match self.clip_id.and_then(auto_memory::recall) {
+                Some(AutoDecision::Degraded) => { self.drop_burst = true; self.degraded = plan.quality == PreviewQuality::Auto; }
+                Some(AutoDecision::Blocked) => self.degrade_blocked = true,
+                None => {}
+            }
         }
         self.plan = Some(plan);
         self.publish(status);
@@ -237,21 +249,30 @@ impl SourceSwitcher {
         self.loaded = false;
         Ok(())
     }
-    pub fn file_loaded(&mut self) { self.loaded = true; self.eof = false; self.vo_drops = 0; self.decoder_drops = 0; self.drop_watch.set_eligible(Instant::now(), false); }
-    /// 两个掉帧计数各自的最新观察值求和(事件驱动,不回头同步读另一个)。
+    pub fn file_loaded(&mut self) { self.loaded = true; self.eof = false; self.vo_drops = 0; self.decoder_drops = 0; self.source_fps = 0.0; self.drop_watch.set_eligible(Instant::now(), false); }
+    /// 两个掉帧计数各自的最新观察值求和(事件驱动,不回头同步读另一个)。R29 起只给角标 / 日志用,不参与降级判定。
     pub fn record_drops(&mut self, name: &str, value: i64) -> i64 {
         if name == "decoder-frame-drop-count" { self.decoder_drops = value.max(0); } else { self.vo_drops = value.max(0); }
-        let total = self.vo_drops + self.decoder_drops;
-        if self.drop_watch.observe(Instant::now(), total) {
-            if self.current == SourceKind::Original && !self.drop_burst {
-                tracing::warn!(total, "原片播放持续掉帧");
-                self.drop_burst = true;
-            } else if self.current != SourceKind::Original && self.degraded && !self.proxy_burst {
-                tracing::warn!(total, "退代理后代理照样持续掉帧");
-                self.proxy_burst = true;
-            }
+        self.vo_drops + self.decoder_drops
+    }
+    /// 渲染线程真正画到屏上的一帧(播不动的判定只看这个)。
+    pub fn frame_presented(&mut self) { self.drop_watch.frame(Instant::now()); }
+    /// 监视器被 DOM 覆盖层盖住:不画帧,期间不评判;解除后重新计宽限。
+    pub fn set_hidden(&mut self, hidden: bool) { self.hidden = hidden; if hidden { self.drop_watch.set_eligible(Instant::now(), false); } }
+    pub fn set_speed(&mut self, speed: f64) { self.speed = speed; }
+    pub fn set_source_fps(&mut self, fps: f64) { self.source_fps = fps; }
+    /// 结算呈现帧率;持续播不动就立旗(原片 → `drop_burst`,已退的代理 → `proxy_burst`)。
+    pub fn update_watch(&mut self, now: Instant, playing: bool) {
+        let normal_speed = (self.speed - 1.0).abs() < 0.01;
+        self.drop_watch.set_eligible(now, playing && !self.hidden && normal_speed);
+        if !self.drop_watch.observe(now, self.source_fps) { return; }
+        if self.current == SourceKind::Original && !self.drop_burst {
+            tracing::warn!(fps = self.source_fps, "原片持续播不动(呈现帧率低于素材帧率 90%)");
+            self.drop_burst = true;
+        } else if self.current != SourceKind::Original && self.degraded && !self.proxy_burst {
+            tracing::warn!(fps = self.source_fps, "退代理后代理照样播不动");
+            self.proxy_burst = true;
         }
-        total
     }
     /// 自动档此刻该用的来源(换档 / 刷新计划时):播放走代理的档在播放中给代理、暂停中保持原片不来回换。
     fn desired_kind(&self, plan: &SourcePlan, paused: bool) -> SourceKind {
@@ -325,17 +346,19 @@ impl SourceSwitcher {
         }
         let watched = self.current == SourceKind::Original || self.degraded;
         let playing = self.swapping.is_none() && status.phase == "ready" && !status.paused && !self.eof && watched;
-        self.drop_watch.set_eligible(Instant::now(), playing);
+        self.update_watch(Instant::now(), playing);
         if self.swapping.is_some() || status.phase != "ready" { return; }
         let Some(plan) = &self.plan else { return; };
         if plan.quality == PreviewQuality::Auto && self.drop_burst && !self.degraded && !self.degrade_blocked {
-            tracing::warn!("自动档:原片播放持续掉帧,本次改用代理播放(暂停仍看原片)");
+            tracing::warn!("自动档:原片持续播不动,本次改用代理播放(1080p 优先,暂停仍看原片)");
             self.degraded = true;
+            if let Some(id) = self.clip_id { auto_memory::remember(id, AutoDecision::Degraded); }
             self.publish(status);
         } else if self.degraded && self.proxy_burst {
-            tracing::warn!("自动档:代理也持续掉帧,是整机忙不是原片解不动,回原片且本次不再降级");
+            tracing::warn!("自动档:代理也持续播不动,是整机忙不是原片解不动,回原片且本次不再降级");
             self.degraded = false;
             self.degrade_blocked = true;
+            if let Some(id) = self.clip_id { auto_memory::remember(id, AutoDecision::Blocked); }
             self.publish(status);
         }
         let Some(plan) = &self.plan else { return; };
