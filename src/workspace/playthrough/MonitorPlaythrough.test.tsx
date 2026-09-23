@@ -92,7 +92,7 @@ vi.mock("../../api", async () => ({ ...(await createTestApiMock()), ...apiMocks 
 import { Monitor } from "../Monitor";
 import { __resetPlayerPrefsForTests } from "../playerPrefs";
 import { __resetPoolOrderForTests, setPoolOrder } from "../poolOrder";
-import { __resetWorkspaceForTests, getWorkspaceSnapshot } from "../WorkspaceStore";
+import { __resetWorkspaceForTests, dispatchWorkspace, getWorkspaceSnapshot } from "../WorkspaceStore";
 
 type LogEntry = { kind: "open"; clipId: number } | { kind: "cmd"; type: string; seconds?: number; speed?: number };
 
@@ -132,9 +132,9 @@ beforeEach(() => {
   apiMocks.listSelectSegments.mockResolvedValue([]);
   // 真机:`PlayerManager::open` 停掉旧实例、起新实例 —— 状态从 loading(clip_id, pos 0) 开始,
   // loadfile 之后 pause=false(载入即播),FileLoaded 才翻 ready。这里把 ready 合到下一次读状态。
-  apiMocks.playerOpen.mockImplementation(async (clipId: number) => {
+  apiMocks.playerOpen.mockImplementation(async (clipId: number, startPaused = false, startSeconds?: number) => {
     log.push({ kind: "open", clipId });
-    live = { ...closedStatus(), phase: "loading", clip_id: clipId, duration: DURATIONS[clipId] ?? 0, paused: false };
+    live = { ...closedStatus(), phase: "loading", clip_id: clipId, duration: DURATIONS[clipId] ?? 0, pos: startSeconds ?? 0, paused: startPaused || startSeconds !== undefined };
     const initial = { ...live };
     live = { ...live, phase: "ready" };
     return initial;
@@ -204,6 +204,7 @@ const sequence = [
 ];
 describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
   it('有最精彩处偏好时仍从段入点播,跨 clip 的 pause/open/seek/play 有序,末段停住', async () => {
+    apiMocks.getSettings.mockResolvedValue({ 'ui.player.auto_advance': 'true' });
     await renderInPane();
     await act(async () => { setPlaythroughSegments(sequence); });
     await act(async () => requestPlaythrough());
@@ -228,6 +229,7 @@ describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
     expect(live.pos).toBe(8.96);
   });
   it('播放键暂停/继续保持段;人工滑杆 seek 打断且不会再接下一段', async () => {
+    apiMocks.getSettings.mockResolvedValue({ 'ui.player.auto_advance': 'true' });
     await renderInPane();
     await act(async () => { setPlaythroughSegments(sequence); });
     await act(async () => requestPlaythrough());
@@ -245,7 +247,7 @@ describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
     expect(screen.getByText('第 1/2 段')).toBeTruthy();
     const band = document.querySelector<HTMLElement>('.scrubber-r22-track [data-playing]');
     // R23 §8C:刻度范围 == 活动选段,连播带从轨道最左开始铺。
-    expect(band?.style.left).toBe('0%');
+    expect(Number.parseFloat(band!.style.left)).toBeCloseTo(2 / 60 * 100);
     // 用户在自绘轨道上按下 = 人工 seek(pointer 事件,R22-A 的 div[role=slider] 没有 change 事件)→ 连播立即停止。
     vi.stubGlobal('PointerEvent', MouseEvent);
     const slider = screen.getByRole('slider', { name: '播放位置' });
@@ -255,12 +257,12 @@ describe('R22 完整 Monitor → Transport → PlayerOverlay 通道', () => {
     await waitFor(() => expect(screen.queryByRole('group', { name: '镜头带连播预览' })).toBeNull());
     // R23 §8C:轨道此刻代表活动选段 2→4 s,按在 70/600 处 = 2.2333 s,按 25 fps 量到 2.24
     // (旧值 7 是「按整条素材 0–60 s 算」—— 那个刻度就是 ISSUE-B)。
-    await waitFor(() => expect(live.pos).toBe(2.24));
+    await waitFor(() => expect(live.pos).toBe(7));
     expect(screen.queryByText(/第 \d+\/\d+ 段/)).toBeNull();
     expect(document.querySelector('.scrubber-r22-track [data-playing]')).toBeNull();
     expect(live.clip_id).toBe(9);
     // 连播停了,但用户只是拖了一下进度条,素材本身继续播(不留在暂停)。
-    await waitFor(() => expect(live.paused).toBe(false));
+    await waitFor(() => expect(live.paused).toBe(true));
     live = { ...live, pos: 3.96 };
     await flush(); await flush();
     expect(live.clip_id).toBe(9);
@@ -285,6 +287,7 @@ it('末段恰在素材末尾,媒体池连播开着也不能越过镜头带终点
 });
 
 it('暂停中选择播放速度继续本段,仍在出点自动接下一段', async () => {
+  apiMocks.getSettings.mockResolvedValue({ 'ui.player.auto_advance': 'true' });
   await renderInPane();
   await act(async () => { setPlaythroughSegments(sequence); });
   await act(async () => requestPlaythrough());
@@ -296,4 +299,61 @@ it('暂停中选择播放速度继续本段,仍在出点自动接下一段', asy
   await waitFor(() => expect(live.paused).toBe(false));
   live = { ...live, pos: 3.96 };
   await waitFor(() => expect(live.clip_id).toBe(10));
+});
+
+it('001/002: selected shot with autoAdvance off fences, replays at in, then pool selection opens zero playing without fence', async () => {
+  const { requestSegmentSelection, getActiveSelection } = await import('./selection');
+  await renderInPane();
+  await act(async () => { setPlaythroughSegments(sequence); requestSegmentSelection(sequence[0]!, 3, true); });
+  await waitFor(() => expect(live).toMatchObject({ pos: 3, paused: false }));
+  expect(getActiveSelection()?.key).toBe('a');
+  expect(commandsAfterOpen(9)).toContainEqual({ type: 'set_end', seconds: 4 });
+  expect(screen.getByRole('switch', { name: '连播' }).getAttribute('aria-checked')).toBe('false');
+  live = { ...live, pos: 3.96 };
+  await waitFor(() => expect(live.paused).toBe(true));
+  expect(live.clip_id).toBe(9);
+  expect(apiMocks.playerOpen).not.toHaveBeenCalledWith(10, true, 6);
+  expect(document.querySelector('[data-playing]')).toBeTruthy();
+  fireEvent.click(await screen.findByRole('button', { name: '播放' }));
+  await waitFor(() => expect(live).toMatchObject({ pos: 2, paused: false }));
+  await act(async () => dispatchWorkspace({ type: 'select-clip', clipId: 10 }));
+  await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalledWith(10));
+  // This fixture's open returns loading and becomes ready on the next status read.
+  await screen.findByRole('button', { name: '暂停' });
+  expect(live).toMatchObject({ pos: 0, paused: false });
+  expect(getActiveSelection()).toBeNull();
+  expect(commandsAfterOpen(10).filter(c => ['pause', 'seek_abs', 'set_end'].includes(c.type))).toEqual([]);
+});
+
+it('001: Inspector replay uses the same active selection and fence as the monitor', async () => {
+  const { SelectSegmentsSection } = await import('../InspectorSegments');
+  const { getActiveSelection } = await import('./selection');
+  apiMocks.listSelectSegments.mockResolvedValue([{ id: 77, clip_id: 9, in_ticks: 38500, out_ticks: 46500, tb_num: 1, tb_den: 1000 }]);
+  await renderInPane();
+  live = { ...live, duration: 200 };
+  render(<SelectSegmentsSection clipId={9} selectCount={1} readOnly={false} fps={50} />);
+  fireEvent.click(await screen.findByRole('button', { name: '复播精选段 1' }));
+  await waitFor(() => expect(live).toMatchObject({ pos: 38.5, paused: false }));
+  expect(getActiveSelection()).toMatchObject({ inPoint: 38.5, outPoint: 46.5, fps: 50 });
+  const commands = commandsAfterOpen(9);
+  const play = commands.map(c => c.type).lastIndexOf('play');
+  expect(commands.slice(0, play)).toContainEqual({ type: 'set_end', seconds: 46.5 });
+  live = { ...live, pos: 46.48 };
+  await waitFor(() => expect(live.paused).toBe(true));
+  expect(live.pos).toBeCloseTo(46.48);
+});
+
+it('002: fullscreen recreation after segment preview returns to material zero autoplay', async () => {
+  const { requestSegmentSelection, getActiveSelection } = await import('./selection');
+  await renderInPane();
+  await act(async () => requestSegmentSelection(sequence[0]!, 3, true));
+  await waitFor(() => expect(live).toMatchObject({ pos: 3, paused: false }));
+  await act(async () => dispatchWorkspace({ type: 'set-immersive', immersive: true }));
+  await waitFor(() => expect(apiMocks.playerOpen.mock.calls.length).toBeGreaterThanOrEqual(2));
+  await flush();
+  expect(live).toMatchObject({ pos: 0, paused: false });
+  expect(getActiveSelection()).toBeNull();
+  await act(async () => dispatchWorkspace({ type: 'set-immersive', immersive: false }));
+  await screen.findByRole('button', { name: '暂停' });
+  expect(live).toMatchObject({ pos: 0, paused: false });
 });

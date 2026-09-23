@@ -58,6 +58,7 @@ vi.mock("../api", async (importOriginal) => ({
 
 import type { ClipListItem, PlayerStatus, Storyboard, StoryItem } from "../api";
 import { BAND_TILE_WIDTH } from "./bandTimeline";
+import { SELECT_SEGMENT_EVENT, type SelectionRequest } from "./playthrough/selection";
 import { ShotBand } from "./ShotBand";
 import { BAND_SEGMENT_PITCH } from "./shotBandModel";
 import { ToastHost } from "./ui/Toast";
@@ -194,9 +195,10 @@ async function renderBand(): Promise<void> {
   await screen.findByRole("gridcell", { name: "镜头 1：A.MP4" });
 }
 
-function seekEvents(): number[] {
+/** R25 TC-0115-001:点镜块 / 刻度 = 进入选段模式,带的是素材秒(不再广播 seek-ratio)。 */
+function selectionEvents(): number[] {
   const seen: number[] = [];
-  window.addEventListener("tripcut:seek-ratio", (event) => seen.push((event as CustomEvent<{ ratio: number }>).detail.ratio));
+  window.addEventListener(SELECT_SEGMENT_EVENT, (event) => seen.push((event as CustomEvent<SelectionRequest>).detail.position));
   return seen;
 }
 
@@ -210,7 +212,8 @@ describe("§4 时间刻度", () => {
 
   it("点刻度:落在 B 块中点 → 选中 B 并按 B 的入出点换算成素材比例广播 seek((0.5 + 2) / 6)", async () => {
     await renderBand();
-    const seen = seekEvents();
+    // R25 迁移:原断言「广播 seek-ratio 2.5/6」→ 选段请求落点 2.5 s(同一时刻,改由选段状态机定位并立围栏)。
+    const seen = selectionEvents();
     const hit = screen.getByRole("button", { name: "在时间刻度上定位" });
     vi.spyOn(hit, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 800, height: 22, right: 800, bottom: 22, x: 0, y: 0, toJSON: () => ({}) });
     await act(async () => {
@@ -219,12 +222,13 @@ describe("§4 时间刻度", () => {
     expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 2 });
     // 素材刚切过去时播放器还没就绪;状态轮询追上「就绪且是 B」才发。
     await waitFor(() => expect(seen.length).toBe(1));
-    expect(seen[0]).toBeCloseTo(2.5 / 6, 6);
+    expect(seen[0]).toBeCloseTo(2.5, 6);
   });
 
   it("点镜块:选中之外还按点在块内的位置定位(A 块 25% → 1 s / 6 s)", async () => {
     await renderBand();
-    const seen = seekEvents();
+    // R25 迁移:原断言「seek-ratio 1/6」→ 选段请求落点 1 s。
+    const seen = selectionEvents();
     const first = screen.getByRole("gridcell", { name: "镜头 1：A.MP4" });
     vi.spyOn(first, "getBoundingClientRect").mockReturnValue({ left: 100, top: 0, width: BAND_TILE_WIDTH, height: 112, right: 100 + BAND_TILE_WIDTH, bottom: 112, x: 100, y: 0, toJSON: () => ({}) });
     apiMocks.playerStatus.mockResolvedValue({ ...READY, clip_id: 1, pos: 0 });
@@ -233,7 +237,7 @@ describe("§4 时间刻度", () => {
     });
     expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 1 });
     await waitFor(() => expect(seen.length).toBe(1));
-    expect(seen[0]).toBeCloseTo(1 / 6, 6);
+    expect(seen[0]).toBeCloseTo(1, 6);
   });
 });
 

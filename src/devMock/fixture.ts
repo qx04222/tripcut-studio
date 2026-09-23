@@ -1477,6 +1477,7 @@ const HANDLERS: Record<string, Handler> = {
   restore_select_segment: noop,
 
   // --- 播放器 ---
+  player_set_preview_quality: noop,
   player_set_viewport: noop,
   player_set_occluded: noop,
   player_open: ({ clipId, startSeconds }) => playerOpen(num(clipId, "clipId"), typeof startSeconds === "number" ? startSeconds : undefined),
@@ -2813,3 +2814,21 @@ HANDLERS.generate_jianying_draft = (args) => {
   const enabled = args.subtitlesOnTimeline === true;
   return { ...result, subtitles_on_timeline: enabled, timeline_subtitle_count: enabled ? 7 : 0 } satisfies JianyingDraftResult;
 };
+
+// R25: opt-in stress photos; ?photos=1 remains unchanged and may be combined with this flag.
+import { buildPhotoGridStressFixtures } from "./photoFixtures";
+export const PHOTO_GRID_STRESS_CLIPS_R25 = buildPhotoGridStressFixtures(state.clips[0]!);
+if (typeof location !== "undefined" && new URLSearchParams(location.search).get("photostress") === "1") {
+  state.clips.push(...PHOTO_GRID_STRESS_CLIPS_R25);
+  // list_similar_groups already returns this shared state; use a dedicated group ID.
+  state.similarGroups.push({
+    id: 9025, min_similarity: 0.97,
+    members: PHOTO_GRID_STRESS_CLIPS_R25.slice(0, 3).map((clip, index) => ({ clip_id: clip.id!, is_primary: index === 0 })),
+  });
+  // R11's HANDLERS.list_clips (above) flips has_suggestions by `id % 2 === 0` for every clip —
+  // the ?photos=1 branch already re-wraps list_clips to force it back to false for kind==="photo"
+  // (video-only "AI suggested segment" concept), but that wrap only fires under ?photos=1. Mirror
+  // it here so ?photostress=1 alone doesn't leak the bolt badge onto half the stress photos.
+  const listBeforeStress = HANDLERS.list_clips;
+  HANDLERS.list_clips = args => (listBeforeStress(args) as ClipListItem[]).map(clip => clip.kind === "photo" ? { ...clip, has_suggestions: false } : clip);
+}

@@ -11,6 +11,7 @@ use super::error::{CoreError, Result};
 pub const THEME_KEY: &str = "appearance.theme";
 pub const UI_SCALE_KEY: &str = "appearance.ui_scale";
 pub const WORKER_COUNT_KEY: &str = "performance.worker_count";
+pub const PREVIEW_QUALITY_KEY: &str = "performance.preview_quality";
 pub const PROXY_ENABLED_KEY: &str = "performance.proxy_enabled";
 pub const MEMORY_PROFILE_KEY: &str = "performance.memory_profile";
 /// R16 车道 E:「省电 / 低配模式」三态开关(`auto` | `on` | `off`),见 `memory_profile`。
@@ -237,6 +238,7 @@ fn defaults() -> BTreeMap<String, String> {
         (THEME_KEY.to_owned(), "system".to_owned()),
         (UI_SCALE_KEY.to_owned(), "1.0".to_owned()),
         (WORKER_COUNT_KEY.to_owned(), DEFAULT_WORKER_COUNT.to_string()),
+        (PREVIEW_QUALITY_KEY.to_owned(), "auto".to_owned()),
         (PROXY_ENABLED_KEY.to_owned(), "true".to_owned()),
         (MEMORY_PROFILE_KEY.to_owned(), "auto".to_owned()),
         (LOW_SPEC_MODE_KEY.to_owned(), "auto".to_owned()),
@@ -392,6 +394,7 @@ fn validate_setting(key: &str, value: &str) -> Result<()> {
         THEME_KEY => matches!(value, "system" | "light" | "dark" | "jianying-dark"),
         UI_SCALE_KEY => matches!(value, "0.9" | "1.0" | "1.15" | "1.3"),
         WORKER_COUNT_KEY => value.parse::<usize>().is_ok_and(|count| (1..=8).contains(&count)),
+        PREVIEW_QUALITY_KEY => matches!(value, "auto" | "high" | "original" | "performance"),
         PROXY_ENABLED_KEY => matches!(value, "true" | "false"),
         MEMORY_PROFILE_KEY => matches!(value, "auto" | "standard" | "low"),
         LOW_SPEC_MODE_KEY => matches!(value, "auto" | "on" | "off"),
@@ -1221,6 +1224,7 @@ pub fn clear_cache_and_rebuild(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let removed_database_rows = transaction.execute("DELETE FROM cache_artifacts", [])?;
     transaction.execute("DELETE FROM proxy_time_map", [])?;
+    transaction.execute("DELETE FROM proxy_hq_time_map", [])?;
     transaction.execute("DELETE FROM clip_embeddings", [])?;
     transaction.execute("DELETE FROM clip_dimensions", [])?;
     // R6 Task 7d 修复 Medium:`strip`(胶片条)此前不在这份名单里——它的
@@ -1241,7 +1245,7 @@ pub fn clear_cache_and_rebuild(
              owner_id = NULL, lease_expires_at = NULL, cancel_requested = 0,
              next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')
+         WHERE kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'proxy_hq', 'clip_embed')
            AND status != 'running'
            AND NOT (
              kind IN ('thumbnail', 'photo_preview')
@@ -1750,7 +1754,7 @@ mod tests {
         let pending: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM jobs
-                 WHERE kind IN ('thumbnail', 'photo_preview', 'waveform', 'proxy', 'clip_embed')
+                 WHERE kind IN ('thumbnail', 'photo_preview', 'waveform', 'proxy', 'proxy_hq', 'clip_embed')
                    AND status = 'pending' AND attempt = 0",
                 [],
                 |row| row.get(0),

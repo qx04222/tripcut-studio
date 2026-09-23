@@ -396,6 +396,55 @@ pub fn load_proxy_mapper(connection: &Connection, clip_id: i64) -> Result<Option
     Ok(ProxyTimeMapper::from_points(tb_num, tb_den, points))
 }
 
+pub fn replace_proxy_hq_map(
+    connection: &mut Connection,
+    clip_id: i64,
+    points: &[ProxyTimePoint],
+) -> Result<()> {
+    if points.len() < 2 {
+        return Err(CoreError::Artifact(format!(
+            "素材 {clip_id} 的代理时间映射点不足"
+        )));
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute("DELETE FROM proxy_hq_time_map WHERE clip_id = ?1", [clip_id])?;
+    for point in points {
+        transaction.execute(
+            "INSERT INTO proxy_hq_time_map(clip_id, proxy_ts_ms, source_ticks)
+             VALUES (?1, ?2, ?3)",
+            params![clip_id, point.proxy_ts_ms, point.source_ticks],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+pub fn load_proxy_hq_mapper(connection: &Connection, clip_id: i64) -> Result<Option<ProxyTimeMapper>> {
+    let time_base = connection
+        .query_row(
+            "SELECT tb_num, tb_den FROM clips WHERE id = ?1",
+            [clip_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((tb_num, tb_den)) = time_base else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT proxy_ts_ms, source_ticks FROM proxy_hq_time_map
+         WHERE clip_id = ?1 ORDER BY proxy_ts_ms",
+    )?;
+    let points = statement
+        .query_map([clip_id], |row| {
+            Ok(ProxyTimePoint {
+                proxy_ts_ms: row.get(0)?,
+                source_ticks: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(ProxyTimeMapper::from_points(tb_num, tb_den, points))
+}
+
 pub fn list_device_clocks(connection: &Connection) -> Result<Vec<DeviceClockSetting>> {
     let mut statement = connection.prepare(
         "SELECT device_model, COUNT(*),

@@ -31,4 +31,19 @@ export const TERMINOLOGY_EXCEPTIONS: readonly TerminologyException[] = [
     line: /LLM CLI 可用性|最近 LLM 调用账本|tokens/,
     reason: "订阅大模型的调用账本给排障用(provider / tokens 是账单上的原词),在「高级」节里,不是主路径文案。",
   },
+  {
+    file: "src/workspace/previewSource.ts",
+    line: /const prefix = status\.source_kind === "original" \? "原片" : "代理"/,
+    reason: "R25 TC-0115-003:业主验收原话要求监视器写明「原片」还是「代理」及分辨率(例「代理 540p」),换成「预览小文件」会和验收条目对不上。",
+  },
+  {
+    file: "src/workspace/PreviewSourceBadge.tsx",
+    line: /改用代理播放/,
+    reason: "R25 TC-0115-003:掉帧提示的退路按钮,与角标「代理 / 原片」同一套说法;验收条目原话是「允许退回代理」。",
+  },
+  {
+    file: "src/workspace/settings/PerformanceSection.tsx",
+    line: /播放用代理|1080p 代理|540p 代理/,
+    reason: "R25 TC-0115-003:「预览画质」四档要与监视器角标(「代理 540p」「原片 2160p」)用同一套词,业主报告的四档原话就是「代理 / 原片 / 1920×1080 / 960×540」。",
+  },
 ];

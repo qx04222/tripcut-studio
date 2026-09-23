@@ -84,3 +84,48 @@ export function buildStandaloneRawFixture(base: ClipListItem): ClipListItem {
     }, companions: [],
   };
 }
+
+/** R25: nine offline photos with real preview aspect ratios and a three-photo burst. */
+export function buildPhotoGridStressFixtures(base: ClipListItem): ClipListItem[] {
+  // Keep the R21 preview generator and its existing images byte-for-byte unchanged.
+  function preview(width: number, height: number, index: number): string {
+    const scale = 1024 / Math.max(width, height);
+    const w = Math.round(width * scale);
+    const h = Math.round(height * scale);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+      <defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#7296a8"/><stop offset="1" stop-color="#e7d8b4"/></linearGradient></defs>
+      <rect width="100%" height="100%" fill="url(#sky)"/>
+      <circle cx="${w * .72}" cy="${h * .25}" r="${Math.min(w, h) * .07}" fill="#f8e4aa"/>
+      <path d="M0 ${h * .6} L${w * .22} ${h * .3} L${w * .52} ${h * .7} L${w * .76} ${h * .42} L${w} ${h * .65} V${h} H0Z" fill="#576c67"/>
+      <path d="M0 ${h * .7} Q${w * .5} ${h * .57} ${w} ${h * .77} V${h} H0Z" fill="#94a69d"/>
+      <path d="M0 ${h * .87} Q${w * .3} ${h * .65} ${w} ${h} H0Z" fill="#384b40"/>
+      <text x="20" y="${h - 24}" font-family="sans-serif" font-size="20" fill="#f4ecda">R25 PHOTO ${index + 1} · OFFLINE</text>
+    </svg>`;
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  }
+  const sizes = [
+    [3840, 2160], [1080, 1920], [2160, 2160],
+    [3840, 2160], [7680, 4320], [5712, 4284], [4032, 3024], [1080, 1920], [2160, 2160],
+  ] as const;
+  const photoBase = buildPhotoFixtures(base)[2]!;
+  return sizes.map(([width, height], index) => {
+    const portrait = height > width;
+    const name = `R25-${index + 1}-${width}x${height}${index === 5 ? '-长文件名尺寸一致性验证' : ''}.JPG`;
+    const url = preview(width, height, index);
+    const day = index < 3 ? "20" : "21";
+    const time = `08:${String(index + 10).padStart(2, "0")}:00`;
+    return {
+      ...photoBase, id: 210 + index, file_name: name, path: `/mock/photos/${name}`,
+      width, height, orientation: portrait ? "portrait" : width === height ? "square" : "landscape",
+      cover_url: url, star_rating: index === 4 ? 5 : null,
+      photo: {
+        ...photoBase.photo!, width: portrait ? height : width, height: portrait ? width : height,
+        orientation: portrait ? 6 : 1, preview_url: url,
+        // Three in the first date section collapse to one; the final square has no EXIF date.
+        taken_at: index === 8 ? null : `2026-09-${day}T${time}Z`,
+        taken_at_local: index === 8 ? null : `2026-09-${day}T${time}+00:00`,
+        tz_guess: index === 8 ? null : "UTC+00:00",
+      },
+    };
+  });
+}

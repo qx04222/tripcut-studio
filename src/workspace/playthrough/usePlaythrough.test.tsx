@@ -184,3 +184,53 @@ describe('连播 × 镜头带编辑', () => {
     h.unmount();
   });
 });
+
+describe('R25 修剪出点围栏', () => {
+  it('挂起后先等新 SetEnd 落地,再 Play', async () => {
+    const h = mount(); await h.start();
+    await act(async () => window.dispatchEvent(new Event('tripcut:trim-seek')));
+    h.transport.play.mockClear(); h.transport.setEnd.mockClear();
+    let finish!: () => void;
+    h.transport.setEnd.mockImplementationOnce(() => new Promise<void>(r => { finish = r; }));
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 5 }, segments[1]!] });
+    expect(h.transport.setEnd).toHaveBeenCalledWith(5);
+    expect(h.transport.play).not.toHaveBeenCalled();
+    await act(async () => finish());
+    expect(h.transport.play).toHaveBeenCalledTimes(1);
+    expect(h.transport.setEnd.mock.invocationCallOrder[0]).toBeLessThan(h.transport.play.mock.invocationCallOrder[0]!);
+    h.unmount();
+  });
+  it('running 当前段出点变更重挂但不 Play;其他段变化不重挂', async () => {
+    const h = mount(); await h.start();
+    h.transport.play.mockClear(); h.transport.setEnd.mockClear();
+    await h.update({ segments: [segments[0]!, { ...segments[1]!, outPoint: 10 }] });
+    expect(h.transport.setEnd).not.toHaveBeenCalled();
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 5 }, segments[1]!] });
+    expect(h.transport.setEnd).toHaveBeenCalledExactlyOnceWith(5);
+    expect(h.transport.play).not.toHaveBeenCalled();
+    h.unmount();
+  });
+  it('围栏失败走 fail,停止连播且不 Play', async () => {
+    const h = mount(); await h.start();
+    await act(async () => window.dispatchEvent(new Event('tripcut:trim-seek')));
+    h.transport.play.mockClear();
+    h.transport.setEnd.mockRejectedValueOnce(new Error('fence failed'));
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 5 }, segments[1]!] });
+    expect(h.result.current.phase).toBe('idle');
+    expect(h.result.current.error).toContain('fence failed');
+    expect(h.transport.play).not.toHaveBeenCalled();
+    h.unmount();
+  });
+  it('等待 SetEnd 时 stop 使令牌过期,迟到完成不能 Play', async () => {
+    const h = mount(); await h.start();
+    await act(async () => window.dispatchEvent(new Event('tripcut:trim-seek')));
+    h.transport.play.mockClear();
+    let finish!: () => void;
+    h.transport.setEnd.mockImplementationOnce(() => new Promise<void>(r => { finish = r; }));
+    await h.update({ segments: [{ ...segments[0]!, outPoint: 5 }, segments[1]!] });
+    await act(async () => h.result.current.stop());
+    await act(async () => finish());
+    expect(h.transport.play).not.toHaveBeenCalled();
+    h.unmount();
+  });
+});

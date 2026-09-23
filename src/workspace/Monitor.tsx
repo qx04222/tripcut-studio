@@ -1,3 +1,5 @@
+import { getActiveSelection, useActiveSelection } from "./playthrough/selection";
+import { PreviewSourceBadge } from "./PreviewSourceBadge";
 import type { PlaythroughRange } from "./playthrough/model";
 import { PlaythroughOverlay } from "./playthrough/PlaythroughOverlay";
 import { useMonitorPlaythrough } from "./playthrough/useMonitorPlaythrough";
@@ -49,6 +51,7 @@ export function Monitor(): JSX.Element {
   const immersive = useWorkspace((state) => state.immersive);
   const workspaceMode = useWorkspace((state) => state.workspaceMode);
   const playthroughView = usePlaythroughView();
+  const activeSelection = useActiveSelection();
   const feed = useClipsFeed();
 
   const [clips, setClips] = useState<readonly ClipListItem[]>([]);
@@ -146,15 +149,14 @@ export function Monitor(): JSX.Element {
     }
     // U-09:mpv keep-open 停在尾帧时单发 play 什么都不会发生(图标翻成暂停、时间不动)。
     // 播完再按播放 = 从头放。
-    // R23:按播放 = 人工开播,先撤出点围栏 —— 连播释放后素材停在 activeSegment.out,
-    // 围栏还留着,不撤的话按播放会当场又被挡在 out 上。
+    // 活动选段到出点后从入点重播;素材模式到片尾才从 0 重播。
     const fence = transportRef.current?.userPlayCommands() ?? [];
-    void send(isAtEnd(status)
+    void send(isAtEnd(status) && !getActiveSelection()
       ? [...fence, { type: "seek_abs", seconds: 0 }, { type: "play" }]
       : [...fence, { type: "play" }]);
   }, [send, status]);
 
-  // R11 §1.2:时刻分 + 建议段;§3:变速 / 逐帧 / 循环 / 自动下一条 / 静音记忆 / 从最高分开播。
+  // 建议只用于热力与候选;走带独立处理位置、围栏和播放偏好。
   const suggestions = useClipSuggestions(clip?.kind === "photo" ? null : clip, status?.phase === "ready" ? status.duration : 0);
   // 所有 seek 走走带的 seekTo:它记着「最后要去的位置」,暂停态下 seek 未落地时打点 / 逐帧
   // 才不会拿旧读数算(V-04)。
@@ -164,40 +166,43 @@ export function Monitor(): JSX.Element {
     send,
     inPoint,
     outPoint,
-    bestStart: suggestions.bestStart,
-    momentsLoaded: suggestions.momentsLoaded,
-    openAt: controlsRef.current?.openAt,
     playthroughActive: playthroughView !== null && playthroughView.phase !== "idle",
   });
   transportRef.current = transport;
   const playthrough = useMonitorPlaythrough(transport, status, selectedClipId, workspaceMode === "video" && !immersive && MONITOR_EMBEDDED_PLAYBACK);
-  // R23:这份 range 不只是画一条带 —— 连播中它就是进度条的刻度范围与指针的来源
-  // (MonitorControls → MonitorSeekBar → Scrubber)。`switching` 让切段那几拍的指针
-  // 停在新段入点,而不是画一个还属于上一段的位置。
-  const playthroughProps: { playthrough?: PlaythroughRange } = playthrough.active && playthrough.segment ? { playthrough: {
+  // 单段与连播共用活动选段绿框;视口范围由用户偏好决定。切段读数沿用原子快照。
+  const playthroughProps: { playthrough?: PlaythroughRange } = (playthrough.phase !== "idle" && playthrough.segment) ? { playthrough: {
     inPoint: playthrough.segment.inPoint, outPoint: playthrough.segment.outPoint, index: playthrough.index, total: playthrough.total,
     switching: playthrough.switching, stage: playthrough.stage,
-  } } : {};
+  } } : activeSelection ? { playthrough: { ...activeSelection, index: 0, total: 1, stage: "running" } } : {};
+  const monitorIn = activeSelection?.clipId === selectedClipId ? activeSelection.inPoint : inPoint;
+  const monitorOut = activeSelection?.clipId === selectedClipId ? activeSelection.outPoint : outPoint;
   const onNudge = transport.nudge;
   const onSeek = transport.seekTo;
   // Y-10:J 倒退中 mpv 是暂停的,单看 status 会把空格 / 走带按钮当成「播放」—— 倒退中一律等于 K(停下)。
   const { rewinding, shuttle } = transport;
   const togglePlayback = useCallback(() => {
     if (playthrough.active) {
-      if (playthrough.phase === "paused") playthrough.resume(); else playthrough.pause();
+      if (playthrough.phase === "paused" || status?.paused) playthrough.resume(); else playthrough.pause();
       return;
     }
-    if (playthrough.phase === "done") playthrough.stop();
+    if (playthrough.phase === "done") { playthrough.resume(); return; }
     if (rewinding) {
       shuttle("k");
       return;
     }
     onPlayPause();
-  }, [rewinding, shuttle, onPlayPause, playthrough]);
+  }, [rewinding, shuttle, onPlayPause, playthrough, status?.paused]);
+
+  useEffect(() => {
+    if (!activeSelection) return;
+    setInPoint(activeSelection.inPoint);
+    setOutPoint(activeSelection.outPoint);
+  }, [activeSelection]);
 
   // 当前建议一变(载入 / N / ⇧N)就把入出点填成它 —— I / O 微调、S 或 Enter 保存,都是同一条路。
   const { current: currentSuggestion, index: suggestionIndex } = suggestions;
-  const playthroughRunning = playthroughView !== null && playthroughView.phase !== "idle";
+  const playthroughRunning = activeSelection !== null || (playthroughView !== null && playthroughView.phase !== "idle");
   useEffect(() => {
     if (!currentSuggestion) return;
     // R23 §7.1:连播播的是镜头带里已经保存的精选段。建议段一填进 I/O 栏就成了刻度的来源,
@@ -358,6 +363,7 @@ export function Monitor(): JSX.Element {
 
   return (
     <MonitorFrame meta={clip.file_name} rootRef={rootRef}>
+      <PreviewSourceBadge status={status} />
       <div className={`monitor-stage${playthrough.active ? " playthrough-stage" : ""}`} ref={stageRef}>
         {playthrough.active ? <PlaythroughOverlay controller={playthrough} /> : null}
         <div className="monitor-well monitor-well--video">
@@ -373,7 +379,7 @@ export function Monitor(): JSX.Element {
             controlsRef={controlsRef}
           />
           {/* R19 V-05:井内不再挂文件名 / 规格 chip —— 文件名在栏标题条里,规格在检查器里,一件事只说一遍。 */}
-          <IoRail status={status} inPoint={inPoint} outPoint={outPoint} />
+          <IoRail status={status} inPoint={monitorIn} outPoint={monitorOut} />
         </div>
       </div>
       <MonitorControls
@@ -396,8 +402,8 @@ export function Monitor(): JSX.Element {
         onPlayPause={togglePlayback}
         onNudge={onNudge}
         onToggleMute={transport.toggleMute}
-        onCycleSpeed={() => { if (!playthrough.switching) { if (playthrough.phase === "done") playthrough.stop(); playthrough.resume(); transport.shuttle("l"); } }}
-        onSelectSpeed={(rate) => { if (!playthrough.switching) { if (playthrough.phase === "done") playthrough.stop(); playthrough.resume(); transport.setRate(rate); } }}
+        onCycleSpeed={() => { if (!playthrough.switching) { playthrough.resume(); transport.shuttle("l"); } }}
+        onSelectSpeed={(rate) => { if (!playthrough.switching) { playthrough.resume(); transport.setRate(rate); } }}
         onMarkIn={() => markAt("in")}
         onMarkOut={() => markAt("out")}
         onSaveSegment={() => void onSaveSegment()}

@@ -1,3 +1,4 @@
+import { requestSegmentSelection } from "./playthrough/selection";
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 
 import { listSelectSegments, playerCommand, playerStatus, type SelectSegment } from "../api";
@@ -35,11 +36,13 @@ export function SelectSegmentsSection({
   clipId,
   selectCount,
   readOnly,
+  fps = 30,
 }: {
   clipId: number;
   /** feed 里这条素材的精选段计数:它一变就重取列表(保存 / 删除都会动它)。 */
   selectCount: number;
   readOnly: boolean;
+  fps?: number;
 }): JSX.Element {
   const [segments, setSegments] = useState<SelectSegment[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -78,17 +81,23 @@ export function SelectSegmentsSection({
 
   const replay = useCallback(
     async (segment: SelectSegment) => {
-      window.dispatchEvent(new Event("tripcut:manual-seek"));
+      if (!mounted.current || currentClipId.current !== clipId || segment.clip_id !== clipId) return;
       const inSeconds = segmentSeconds(segment.in_ticks, segment.tb_num, segment.tb_den);
+      const outSeconds = segmentSeconds(segment.out_ticks, segment.tb_num, segment.tb_den);
+      if (requestSegmentSelection({ key: `segment:${segment.id}`, clipId, inPoint: inSeconds, outPoint: outSeconds, fps, chapter: '' }, inSeconds, true)) {
+        setNotice(null); return;
+      }
       try {
         const status = await playerStatus();
         if (!mounted.current || currentClipId.current !== clipId || segment.clip_id !== clipId) return;
         if (status.phase !== "ready" || status.clip_id !== clipId) {
-          replayRequest.current = requestOpenAt(clipId, inSeconds, true);
+          replayRequest.current = requestOpenAt(clipId, inSeconds, true, outSeconds);
           setNotice(null);
           return;
         }
+        await playerCommand({ type: "set_end", seconds: null }, clipId);
         await playerCommand({ type: "seek_abs", seconds: inSeconds }, clipId);
+        await playerCommand({ type: "set_end", seconds: outSeconds }, clipId);
         await playerCommand({ type: "play" }, clipId);
         // 监视器暂停时停表,不广播它就不知道已经在放(时间码 / 播放键停在旧值,气泡也不让位)。
         window.dispatchEvent(new Event(PLAYER_STATUS_REFRESH_EVENT));
@@ -99,7 +108,7 @@ export function SelectSegmentsSection({
     },
     // 2026-09-19 frozen-video:以前是 `[]`,闭包里的 clipId 永远是首次挂载那条;R17 起后端按素材
     // 归属拒命令(「命令属于已换掉的素材」),换过素材后「复播」就整个哑掉。
-    [clipId],
+    [clipId, fps],
   );
 
   const remove = useCallback(

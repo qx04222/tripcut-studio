@@ -4,6 +4,8 @@ import { isHomeOpen } from '../homeStore';
 import type { PlaythroughController } from './usePlaythrough';
 import type { PlaythroughSegment } from './model';
 
+import { SELECT_SEGMENT_EVENT, type SelectionRequest } from './selection';
+
 const EVENT = 'tripcut:playthrough';
 /** 0.11.3 接线:镜头带开始编辑(⇧/⌘ 多选、框选、拖动段)→ 连播停、素材继续播(与拖进度条同语义,不暂停)。 */
 export const PLAYTHROUGH_RELEASE_EVENT = 'tripcut:playthrough-release';
@@ -56,6 +58,12 @@ export function usePlaythroughCommands(controller: PlaythroughController, enable
       const index = key === undefined ? 0 : segments.findIndex(s => s.key === key);
       if (index >= 0 && segments[index]) c.start(index);
     };
+    const select = (event: Event) => {
+      if (!latest.current.enabled) return;
+      event.preventDefault();
+      const { segment, position, resume } = (event as CustomEvent<SelectionRequest>).detail;
+      latest.current.controller.select(segment, position, resume);
+    };
     const keydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat || event.isComposing || isTextFieldTarget(event.target) || isAnyModalOpen() || isHomeOpen()) return;
       if (!event.metaKey || !event.shiftKey || event.ctrlKey || event.altKey || event.key.toLowerCase() !== 'p') return;
@@ -63,18 +71,19 @@ export function usePlaythroughCommands(controller: PlaythroughController, enable
       event.preventDefault(); requestPlaythrough();
     };
     window.addEventListener(EVENT, request);
+    window.addEventListener(SELECT_SEGMENT_EVENT, select);
     document.addEventListener('keydown', keydown);
-    return () => { window.removeEventListener(EVENT, request); document.removeEventListener('keydown', keydown); };
+    return () => { window.removeEventListener(SELECT_SEGMENT_EVENT, select); window.removeEventListener(EVENT, request); document.removeEventListener('keydown', keydown); };
   }, []);
 }
 
 /** 一次性的源时间打开请求;不同素材的 Overlay 不能抢走它。 */
 export const PLAYER_OPEN_AT_EVENT = 'tripcut:player-open-at';
-export interface OpenAtRequest { clipId: number; seconds: number; resume: boolean }
+export interface OpenAtRequest { clipId: number; seconds: number; resume: boolean; outPoint?: number }
 let pendingOpenAt: OpenAtRequest | null = null;
-export function requestOpenAt(clipId: number, seconds: number, resume = false) {
+export function requestOpenAt(clipId: number, seconds: number, resume = false, outPoint?: number) {
   if (!Number.isFinite(seconds) || seconds < 0) return null;
-  const request = { clipId, seconds, resume };
+  const request = { clipId, seconds, resume, ...(outPoint === undefined ? {} : { outPoint }) };
   pendingOpenAt = request;
   window.dispatchEvent(new CustomEvent(PLAYER_OPEN_AT_EVENT, { detail: request }));
   return request;

@@ -9,34 +9,34 @@
 <p align="center"><strong>不上传 · 不按小时计费 · 原片只读 · 出剪映</strong><br>
 素材和分析都留在你的 Mac 上；买断制、没有按分钟算的云端账单；只登记原片位置，从不改写；挑好的片段一键交给剪映继续剪。</p>
 
-<p align="center"><strong>v0.11.5：连播不再卡在第一段末尾</strong> —— 入 / 出点打在帧上的段也能顺利接下一段；切到另一条素材直接停在入点那一帧，不再闪开头；导出剪映草稿可把字幕直接写进时间线（试验，默认关）。</p>
+<p align="center"><strong>v0.11.6：单选镜头只播选段、打开素材从头播</strong> —— 进度条默认看整条素材并框出选段；三条建议按时间先后排；4K 素材暂停就换原片画面（预览画质四档）；照片网格卡片一样大。</p>
 
 <p align="center">
-  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.11.5">下载 v0.11.5</a>
+  <a href="https://github.com/qx04222/tripcut-studio/releases/tag/v0.11.6">下载 v0.11.6</a>
   · <a href="docs/USER_GUIDE.md">用户指南</a>
-  · <a href="docs/releases/v0.11.5.md">版本说明</a>
+  · <a href="docs/releases/v0.11.6.md">版本说明</a>
   · <a href="docs/design/design-system.md">设计系统</a>
   · <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img alt="Release v0.11.5" src="https://img.shields.io/badge/preview-v0.11.5-f4a261?style=flat-square">
+  <img alt="Release v0.11.6" src="https://img.shields.io/badge/preview-v0.11.6-f4a261?style=flat-square">
   <img alt="macOS Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=flat-square&amp;logo=apple">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-offline-2a9d8f?style=flat-square">
   <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-3b82f6?style=flat-square">
 </p>
 
 > [!IMPORTANT]
-> **被拦截时这样做**（v0.11.5 是未签名的 Apple Silicon 预览版，第一次打开 macOS 会拦一下，这是正常的）：
+> **被拦截时这样做**（v0.11.6 是未签名的 Apple Silicon 预览版，第一次打开 macOS 会拦一下，这是正常的）：
 > 1. 打开 DMG，把「旅剪工作台」拖进「应用程序」；
 > 2. 在「应用程序」里**右键点击**旅剪工作台 → 选「打开」；
 > 3. 弹出的对话框再点一次「打开」。之后就和普通软件一样双击启动。
 >
-> 本版 DMG：[`TripCut-Studio_0.11.5_github-preview-v0.11.5-20260922T2138Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.11.5/TripCut-Studio_0.11.5_github-preview-v0.11.5-20260922T2138Z_preview_aarch64.dmg)。请用有独立备份的素材测试；不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。
+> 本版 DMG：[`TripCut-Studio_0.11.6_github-preview-v0.11.6-20260923T0213Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.11.6/TripCut-Studio_0.11.6_github-preview-v0.11.6-20260923T0213Z_preview_aarch64.dmg)。请用有独立备份的素材测试；不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。
 >
 > <details><summary>想核对下载没被改过（可选）</summary>
 >
-> 同时下载 `SHA256SUMS.txt`，DMG 的 SHA-256 应为 `015e0d0b40a2196645fb148352edc9bbaafecd8bade774cf0c8921c74d815752`。ad-hoc 签名与 Gatekeeper 的完整说明见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。
+> 同时下载 `SHA256SUMS.txt`，DMG 的 SHA-256 应为 `9c74ef6c778acdaf66a6c1c93edbcb7daeaabe9132b8f86f8251890ab8f1521c`。ad-hoc 签名与 Gatekeeper 的完整说明见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。
 > </details>
 >
 > **本版把散落的功能收成一条四步流水线，键位、设置与引导都向剪映对齐，并给出两条把片段交给剪映的路**；已安装 v0.3.0 / v0.5.0 的用户可直接在「设置 → 关于 → 检查更新」应用内升级到本版（0.6.0 未对外发布，本版一并包含它的全部改动）。
@@ -54,7 +54,7 @@
 > **0.8.2**：修好「剪映素材包 / 导出片段」在别的电脑上全部失败的问题（导出改用软件自带的 ffmpeg，并自动回退编码），修好切下一条素材从上一条停住位置起播的问题；顶栏齿轮旁新增「新版本」提醒。
 > **0.8.1**：默认开启自动更新——启动后自动检查、后台静默下载、下载好只提醒一次「重启完成更新」，以后不用再手动下载 DMG。
 > **0.8.0**：该有的按钮都有了（删除／改名／移出／取消任务／找回缺失素材…都在界面上），支持 macOS 14+ 与 8 GB 低配机，分析更快。
-> 完整说明见 [v0.11.5](docs/releases/v0.11.5.md) / [v0.11.4](docs/releases/v0.11.4.md) / [v0.11.3](docs/releases/v0.11.3.md) / [v0.11.2](docs/releases/v0.11.2.md) / [v0.11.1](docs/releases/v0.11.1.md) / [v0.11.0](docs/releases/v0.11.0.md) / [v0.10.2](docs/releases/v0.10.2.md) / [v0.10.1](docs/releases/v0.10.1.md) / [v0.10.0](docs/releases/v0.10.0.md) / [v0.9.1](docs/releases/v0.9.1.md) / [v0.9.0](docs/releases/v0.9.0.md) / [v0.8.4](docs/releases/v0.8.4.md) / [v0.8.3](docs/releases/v0.8.3.md) / [v0.8.2](docs/releases/v0.8.2.md) / [v0.8.1](docs/releases/v0.8.1.md) / [v0.8.0](docs/releases/v0.8.0.md) 更新说明。
+> 完整说明见 [v0.11.6](docs/releases/v0.11.6.md) / [v0.11.5](docs/releases/v0.11.5.md) / [v0.11.4](docs/releases/v0.11.4.md) / [v0.11.3](docs/releases/v0.11.3.md) / [v0.11.2](docs/releases/v0.11.2.md) / [v0.11.1](docs/releases/v0.11.1.md) / [v0.11.0](docs/releases/v0.11.0.md) / [v0.10.2](docs/releases/v0.10.2.md) / [v0.10.1](docs/releases/v0.10.1.md) / [v0.10.0](docs/releases/v0.10.0.md) / [v0.9.1](docs/releases/v0.9.1.md) / [v0.9.0](docs/releases/v0.9.0.md) / [v0.8.4](docs/releases/v0.8.4.md) / [v0.8.3](docs/releases/v0.8.3.md) / [v0.8.2](docs/releases/v0.8.2.md) / [v0.8.1](docs/releases/v0.8.1.md) / [v0.8.0](docs/releases/v0.8.0.md) 更新说明。
 
 ## 它解决的不是剪辑，而是剪辑前的混乱
 
@@ -299,13 +299,13 @@ TripCut Studio 是一个中文优先、Local-first 的 macOS 素材工作台。�
 
 ## 下载与第一次使用
 
-1. 前往 [v0.11.5 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.11.5)，下载 [`TripCut-Studio_0.11.5_github-preview-v0.11.5-20260922T2138Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.11.5/TripCut-Studio_0.11.5_github-preview-v0.11.5-20260922T2138Z_preview_aarch64.dmg)，打开 DMG，把“旅剪工作台”拖入「应用程序」；
+1. 前往 [v0.11.6 Release](https://github.com/qx04222/tripcut-studio/releases/tag/v0.11.6)，下载 [`TripCut-Studio_0.11.6_github-preview-v0.11.6-20260923T0213Z_preview_aarch64.dmg`](https://github.com/qx04222/tripcut-studio/releases/download/v0.11.6/TripCut-Studio_0.11.6_github-preview-v0.11.6-20260923T0213Z_preview_aarch64.dmg)，打开 DMG，把“旅剪工作台”拖入「应用程序」；
 2. 第一次启动会被 macOS 拦一下：在「应用程序」里**右键**旅剪工作台 → 「打开」→ 再点一次「打开」（页首的「被拦截时这样做」）；
 3. 看到首页后点「新建一集」，选一个装着视频的文件夹，顶栏右上角的「下一步：…」会带你走完 选文件夹 → 软件挑 / 你按 F → 拖顺序 → 交给剪映；用一份有备份的短素材先走一遍。
 
 <details><summary>可选：核对下载、了解安全边界</summary>
 
-同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256 为 `015e0d0b40a2196645fb148352edc9bbaafecd8bade774cf0c8921c74d815752`。完整安全边界见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。
+同时下载 `SHA256SUMS.txt`，核对 DMG 的 SHA-256 为 `9c74ef6c778acdaf66a6c1c93edbcb7daeaabe9132b8f86f8251890ab8f1521c`。完整安全边界见[未签名预览版说明](docs/UNSIGNED_PREVIEW.md)。不要关闭 Gatekeeper，也不要运行来源不明的解除隔离命令。
 </details>
 
 ## 产品边界

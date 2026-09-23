@@ -214,9 +214,9 @@ describe("R11 §1.2:热力条与建议段", () => {
     expect(await screen.findByText("已采用建议 1 · 精选段已保存")).toBeTruthy();
   });
 
-  it("选中素材默认停在最高分时刻(ui.player.start_at_best 默认开;R12 起只预览不开播);关掉就不跳", async () => {
+  it("旧最精彩偏好开或关都不自动 seek", async () => {
     await renderInPane();
-    await waitFor(() => expect(commands()).toContainEqual({ type: "seek_abs", seconds: 20 }));
+    expect(commands()).not.toContainEqual({ type: "seek_abs", seconds: 20 });
     cleanup();
     vi.clearAllMocks();
     apiMocks.getSettings.mockResolvedValue({ "ui.player.start_at_best": "false" });

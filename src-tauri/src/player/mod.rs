@@ -9,6 +9,9 @@
 
 /// R16 车道 E:libmpv 初始化选项表(标准 / 低配两套),`run_worker` 只按表设置。
 pub mod mpv_options;
+mod handoff;
+pub mod preview_source;
+use preview_source::{PreviewQuality, SourceKind, SourcePlan, SourceSwitcher};
 
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
@@ -249,6 +252,13 @@ pub struct PlayerStatus {
     pub seek_p50_ms: Option<f64>,
     pub seek_p95_ms: Option<f64>,
     pub last_seek_ms: Option<f64>,
+    pub source_kind: Option<String>,
+    pub source_width: Option<i64>,
+    pub source_height: Option<i64>,
+    pub preview_quality: Option<String>,
+    pub source_switch_ms: Option<f64>,
+    pub source_switch_error_s: Option<f64>,
+    pub dropped_frames: Option<i64>,
 }
 
 impl PlayerStatus {
@@ -265,6 +275,13 @@ impl PlayerStatus {
             seek_p50_ms: None,
             seek_p95_ms: None,
             last_seek_ms: None,
+            source_kind: None,
+            source_width: None,
+            source_height: None,
+            preview_quality: None,
+            source_switch_ms: None,
+            source_switch_error_s: None,
+            dropped_frames: None,
         }
     }
 
@@ -325,12 +342,15 @@ struct ManagerState {
     /// Resize 也不会把它露出来。
     occluded: bool,
     session: Option<PlayerSession>,
+    outgoing: Option<PlayerSession>,
+    generation: u64,
 }
 
 struct PlayerSession {
     sender: mpsc::Sender<WorkerMessage>,
     status: Arc<Mutex<PlayerStatus>>,
     worker: Option<JoinHandle<()>>,
+    view: handoff::ViewSlot,
 }
 
 /// 回收已经真正退出的孤儿渲染线程:join() 拿回它们的终止状态并释放
@@ -357,6 +377,8 @@ enum WorkerMessage {
     EventsWake,
     Command(PlayerCommand, mpsc::Sender<Result<(), String>>),
     Shutdown(mpsc::Sender<()>),
+    SetSourcePlan(Box<SourcePlan>, SourceKind, mpsc::Sender<Result<(), String>>),
+    SetPreviewQuality(PreviewQuality, mpsc::Sender<Result<(), String>>),
 }
 
 impl PlayerManager {
@@ -367,10 +389,46 @@ impl PlayerManager {
                 viewport: PlayerViewport::default(),
                 occluded: false,
                 session: None,
+                outgoing: None,
+                generation: 0,
             })),
             operation: Arc::new(Mutex::new(())),
             orphans: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn install_source_plan(&self, plan: SourcePlan, opened_kind: SourceKind) -> Result<(), String> {
+        self.send_source_message(|reply| WorkerMessage::SetSourcePlan(Box::new(plan), opened_kind, reply))
+    }
+
+    pub fn set_preview_quality(&self, quality: PreviewQuality) -> Result<(), String> {
+        self.send_source_message(|reply| WorkerMessage::SetPreviewQuality(quality, reply))
+    }
+
+    fn send_source_message(&self, message: impl FnOnce(mpsc::Sender<Result<(), String>>) -> WorkerMessage) -> Result<(), String> {
+        let _operation = lock(&self.operation);
+        self.send_source_message_locked(message)
+    }
+
+    fn send_source_message_locked(&self, message: impl FnOnce(mpsc::Sender<Result<(), String>>) -> WorkerMessage) -> Result<(), String> {
+        let sender = lock(&self.state).session.as_ref().map(|s| s.sender.clone());
+        let Some(sender) = sender else { return Ok(()); };
+        let (reply, receiver) = mpsc::channel();
+        sender.send(message(reply)).map_err(|e| e.to_string())?;
+        receiver.recv_timeout(COMMAND_TIMEOUT).map_err(|e| e.to_string())?
+    }
+
+    /// 后台 HQ 完成时只更新仍在同一素材、同一档位的会话。
+    pub fn refresh_source_plan_for_clip(&self, clip_id: i64, plan: SourcePlan, only_if_high: bool) -> Result<(), String> {
+        let _operation = lock(&self.operation);
+        let status = self.status();
+        if status.clip_id != Some(clip_id) || (only_if_high && status.preview_quality.as_deref() != Some("high")) {
+            return Ok(());
+        }
+        let opened = match status.source_kind.as_deref() { Some("proxy") => SourceKind::Proxy, Some("proxy_hq") => SourceKind::ProxyHq, _ => SourceKind::Original };
+        let quality = plan.quality;
+        self.send_source_message_locked(|reply| WorkerMessage::SetSourcePlan(Box::new(plan), opened, reply))?;
+        self.send_source_message_locked(|reply| WorkerMessage::SetPreviewQuality(quality, reply))
     }
 
     pub fn set_viewport(&self, viewport: PlayerViewport) -> Result<(), String> {
@@ -429,7 +487,12 @@ impl PlayerManager {
     ) -> Result<PlayerStatus, String> {
         let _operation = lock(&self.operation);
         reap_orphans(&mut lock(&self.orphans));
-        self.stop_current()?;
+        let (generation, below) = handoff::begin(&mut lock(&self.state), &self.orphans);
+        let handoff = handoff::Handoff::new(self, generation).inspect_err(|_| {
+            handoff::retire_outgoing(&mut lock(&self.state), &self.orphans);
+        })?;
+        let view = handoff::ViewSlot::default();
+        let worker_view = Arc::clone(&view);
 
         let (viewport, occluded) = {
             let state = lock(&self.state);
@@ -446,6 +509,9 @@ impl PlayerManager {
             .spawn(move || {
                 worker_entry(
                     window,
+                    below,
+                    worker_view,
+                    handoff,
                     viewport,
                     occluded,
                     start_paused,
@@ -464,6 +530,7 @@ impl PlayerManager {
             sender,
             status: Arc::clone(&status),
             worker: Some(worker),
+            view,
         };
         lock(&self.state).session = Some(session);
 
@@ -543,31 +610,7 @@ impl PlayerManager {
     }
 
     fn stop_current(&self) -> Result<(), String> {
-        let session = lock(&self.state).session.take();
-        if let Some(mut session) = session {
-            let (reply_sender, reply_receiver) = mpsc::channel();
-            let sent = session
-                .sender
-                .send(WorkerMessage::Shutdown(reply_sender))
-                .is_ok();
-            let acknowledged = sent && reply_receiver.recv_timeout(CLOSE_TIMEOUT).is_ok();
-            if let Some(worker) = session.worker.take() {
-                if !sent || acknowledged || worker.is_finished() {
-                    let _ = worker.join();
-                } else {
-                    // 超时:不能在这里阻塞 Tauri 执行器等一条卡死的原生
-                    // teardown,但也不能像过去那样直接 drop 掉 JoinHandle——
-                    // 那样 manager 就再没有任何引用能确认这条线程/原生 view
-                    // 何时才真正退出（回归修复）。把它挪进 orphans 继续
-                    // 追踪,下次 open()/close() 时 reap_orphans() 会在线程
-                    // 真正结束后补上 join() 并释放。
-                    session.worker = Some(worker);
-                    lock(&self.orphans).push(session);
-                    return Err("播放器关闭超时，渲染线程已隔离退出流程".to_owned());
-                }
-            }
-        }
-        Ok(())
+        handoff::stop_sessions(&self.state, &self.orphans)
     }
 }
 
@@ -579,6 +622,7 @@ fn record_occlusion(state: &mut ManagerState, occluded: bool) -> Option<mpsc::Se
     if !changed {
         return None;
     }
+    handoff::occlude_outgoing(state, occluded);
     state.session.as_ref().map(|session| session.sender.clone())
 }
 
@@ -647,13 +691,13 @@ pub fn resolve_playback_source(
     Ok((connection, source, None))
 }
 
-fn create_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<RenderSurface, String> {
+fn create_surface(window: &WebviewWindow, viewport: PlayerViewport, below: Option<handoff::ViewSlot>, own: handoff::ViewSlot) -> Result<RenderSurface, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let window_for_main = window.clone();
     window
         .run_on_main_thread(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                build_surface(&window_for_main, viewport)
+                build_surface(&window_for_main, viewport, below, own)
             }))
             .unwrap_or_else(|payload| Err(format!("创建播放器原生视图时 panic：{}", panic_text(payload))));
             let _ = sender.send(result);
@@ -727,7 +771,7 @@ define_class!(
     }
 );
 
-fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<RenderSurface, String> {
+fn build_surface(window: &WebviewWindow, viewport: PlayerViewport, below: Option<handoff::ViewSlot>, own: handoff::ViewSlot) -> Result<RenderSurface, String> {
     let mtm = MainThreadMarker::new().ok_or_else(|| "播放器视图未运行在 AppKit 主线程".to_owned())?;
     let ns_window_ptr = window
         .ns_window()
@@ -777,7 +821,7 @@ fn build_surface(window: &WebviewWindow, viewport: PlayerViewport) -> Result<Ren
     gl_view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
-    content_view.addSubview_positioned_relativeTo(&gl_view, NSWindowOrderingMode::Above, None);
+    handoff::place_view(&content_view, &gl_view, below, own);
     let gl_context = gl_view
         .openGLContext()
         .ok_or_else(|| "NSOpenGLView 缺少 OpenGL context".to_owned())?;
@@ -934,6 +978,9 @@ impl Drop for CurrentContextGuard<'_> {
 #[allow(clippy::too_many_arguments)] // 渲染线程装配参数,拆结构属重构,留待专卡
 fn worker_entry(
     window: WebviewWindow,
+    below: Option<handoff::ViewSlot>,
+    own: handoff::ViewSlot,
+    mut handoff: handoff::Handoff,
     viewport: PlayerViewport,
     occluded: bool,
     start_paused: bool,
@@ -945,7 +992,7 @@ fn worker_entry(
     callback_sender: mpsc::Sender<WorkerMessage>,
     started: mpsc::Sender<Result<(), String>>,
 ) {
-    let mut surface = match create_surface(&window, viewport) {
+    let mut surface = match create_surface(&window, viewport, below, Arc::clone(&own)) {
         Ok(surface) => surface,
         Err(error) => {
             let _ = started.send(Err(error.clone()));
@@ -964,7 +1011,7 @@ fn worker_entry(
         if let Err(error) = set_surface_hidden(&window, &surface, true) {
             let _ = started.send(Err(error.clone()));
             lock(&status).fail(error);
-            schedule_surface_removal(&window, removal);
+            schedule_surface_removal(&window, removal, own);
             return;
         }
     }
@@ -981,6 +1028,7 @@ fn worker_entry(
             receiver,
             callback_sender,
             &started,
+            &mut handoff,
         )
     }));
 
@@ -999,7 +1047,7 @@ fn worker_entry(
         }
     };
 
-    schedule_surface_removal(&window, removal);
+    schedule_surface_removal(&window, removal, own);
     if let Some(reply) = shutdown_reply {
         let _ = reply.send(());
     }
@@ -1034,6 +1082,7 @@ fn run_worker(
     receiver: mpsc::Receiver<WorkerMessage>,
     callback_sender: mpsc::Sender<WorkerMessage>,
     started: &mpsc::Sender<Result<(), String>>,
+    handoff: &mut handoff::Handoff,
 ) -> Result<Option<mpsc::Sender<()>>, String> {
     surface.gl_context.makeCurrentContext();
     let _current_context = CurrentContextGuard(&surface.gl_context);
@@ -1067,6 +1116,13 @@ fn run_worker(
     mpv.observe_property("estimated-frame-number", Format::Int64, OBSERVE_FRAME)
         .map_err(|error| format!("监听帧号失败：{error}"))?;
 
+    for (name, id) in [("frame-drop-count", 5), ("decoder-frame-drop-count", 6)] {
+        mpv.observe_property(name, Format::Int64, id).map_err(|error| format!("监听掉帧失败：{error}"))?;
+    }
+    // R25:换源策略要的 EOF 也走观察事件。渲染线程上不许高频同步读属性(get_property 要等核心线程,
+    // 核心又可能在等本线程出帧)——真机 High 档曾因每 20 ms 读一次 eof-reached 卡住 2 s,命令超时。
+    mpv.observe_property("eof-reached", Format::Flag, 7).map_err(|error| format!("监听片尾失败：{error}"))?;
+    let mut switcher = SourceSwitcher::new(time_mapper.cloned());
     let render_pending = Arc::new(AtomicBool::new(false));
     let events_pending = Arc::new(AtomicBool::new(false));
     let event_sender = callback_sender.clone();
@@ -1121,7 +1177,9 @@ fn run_worker(
         let message = match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_events(&mpv, status, time_mapper, &mut pending_seek, &mut seek_samples)?;
+                drain_events(&mpv, status, &mut switcher, &mut pending_seek, &mut seek_samples, &mut handoff.gate)?;
+                switcher.tick(&mpv, &mut lock(status));
+                handoff.redraw_ready(&render_context, surface, hidden)?;
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1134,13 +1192,14 @@ fn run_worker(
                 let flags = render_context
                     .update()
                     .map_err(|error| format!("mpv render update 失败：{error}"))?;
-                if flags & mpv_render_update::Frame != 0 && !hidden {
-                    render_frame(&render_context, surface)?;
+                if flags & mpv_render_update::Frame != 0 && !hidden
+                    && render_frame(&render_context, surface)? {
+                    handoff.frame_rendered();
                 }
             }
             WorkerMessage::ForceRedraw => {
-                if !hidden {
-                    render_frame(&render_context, surface)?;
+                if !hidden && render_frame(&render_context, surface)? {
+                    handoff.frame_rendered();
                 }
             }
             WorkerMessage::SetOccluded(occluded, reply) => {
@@ -1149,7 +1208,9 @@ fn run_worker(
                     if hidden {
                         Ok(())
                     } else {
-                        render_frame(&render_context, surface)
+                        render_frame(&render_context, surface).map(|rendered| {
+                            if rendered { handoff.frame_rendered(); }
+                        })
                     }
                 });
                 let failure = result.as_ref().err().cloned();
@@ -1178,7 +1239,13 @@ fn run_worker(
                 events_pending.store(false, Ordering::Release);
             }
             WorkerMessage::Command(command, reply) => {
-                let result = execute_command(&mpv, status, time_mapper, command, &mut pending_seek);
+                let handled = matches!(&command, PlayerCommand::Play) && switcher.before_play(&mpv, &mut lock(status));
+                if matches!(&command, PlayerCommand::Pause) && !lock(status).paused { switcher.note_pause_command(); }
+                if matches!(&command, PlayerCommand::Pause | PlayerCommand::StepFwd | PlayerCommand::StepBack) {
+                    if let Some(swap) = &mut switcher.swapping { swap.resume = false; }
+                }
+                let deferred = !handled && switcher.defer_during_swap(&command);
+                let result = if handled || deferred { Ok(()) } else { execute_command(&mpv, status, switcher.mapper(), command, &mut pending_seek) };
                 if let Err(error) = &result {
                     lock(status).fail(error.clone());
                 }
@@ -1188,21 +1255,32 @@ fn run_worker(
                     return Err(error);
                 }
             }
+            WorkerMessage::SetSourcePlan(plan, opened, reply) => {
+                switcher.install(*plan, opened, &mut lock(status));
+                let _ = reply.send(Ok(()));
+            }
+            WorkerMessage::SetPreviewQuality(quality, reply) => {
+                let result = switcher.set_quality(&mpv, &mut lock(status), quality);
+                let _ = reply.send(result);
+            }
             WorkerMessage::Shutdown(reply) => break Some(reply),
         }
         drain_events(
             &mpv,
             status,
-            time_mapper,
+            &mut switcher,
             &mut pending_seek,
             &mut seek_samples,
+            &mut handoff.gate,
         )?;
+        switcher.tick(&mpv, &mut lock(status));
+        handoff.redraw_ready(&render_context, surface, hidden)?;
     };
 
     Ok(shutdown_reply)
 }
 
-fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> Result<(), String> {
+fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> Result<bool, String> {
     // 整个画帧 + 交换都在 CGL 锁里:主线程的 -update(窗口缩放、setFrame、
     // 取消隐藏)要等这一帧画完才能重建 drawable,反过来也一样。
     let _lock = CglLock::acquire(&surface.gl_context);
@@ -1211,14 +1289,14 @@ fn render_frame(render_context: &RenderContext<'_>, surface: &RenderSurface) -> 
     let height = bounds.size.height.round() as i32;
     if width < 2 || height < 2 {
         // 零尺寸 / 被裁到看不见的 drawable 上 glClear 没有意义,也是撞坏资源表的路径之一。
-        return Ok(());
+        return Ok(false);
     }
     render_context
         .render::<()>(0, width, height, true)
         .map_err(|error| format!("mpv render 失败：{error}"))?;
     surface.gl_context.flushBuffer();
     render_context.report_swap();
-    Ok(())
+    Ok(true)
 }
 
 fn execute_command(
@@ -1282,9 +1360,10 @@ fn execute_command(
 fn drain_events(
     mpv: &Mpv,
     status: &Arc<Mutex<PlayerStatus>>,
-    time_mapper: Option<&crate::core::canonical_time::ProxyTimeMapper>,
+    switcher: &mut SourceSwitcher,
     pending_seek: &mut Option<Instant>,
     seek_samples: &mut Vec<f64>,
+    handoff: &mut handoff::HandoffGate,
 ) -> Result<(), String> {
     loop {
         let ev = mpv.wait_event(0.0);
@@ -1294,20 +1373,26 @@ fn drain_events(
             Some(Err(error)) => return Err(format!("mpv 事件错误：{error}")),
             Some(Ok(Event::FileLoaded)) => {
                 let mut snapshot = lock(status);
-                snapshot.duration = time_mapper
+                snapshot.duration = switcher.mapper()
                     .map(|mapper| mapper.source_duration_seconds())
                     .unwrap_or_else(|| mpv.get_property("duration").unwrap_or(snapshot.duration));
+                snapshot.source_width = mpv.get_property("width").ok();
+                snapshot.source_height = mpv.get_property("height").ok();
+                switcher.file_loaded();
+                if switcher.swapping.is_some() { continue; }
                 snapshot.paused = mpv.get_property("pause").unwrap_or(true);
                 snapshot.frame = mpv.get_property("estimated-frame-number").ok();
                 // FileLoaded 可能早于 time-pos 的观察通知:首份 ready 必须读真实入点。
                 if let Ok(position) = mpv.get_property::<f64>("time-pos") {
-                    snapshot.pos = time_mapper
+                    snapshot.pos = switcher.mapper()
                         .map(|mapper| mapper.source_seconds_for_proxy_seconds(position))
                         .unwrap_or(position).max(0.0);
                 }
                 snapshot.mark_ready();
             }
             Some(Ok(Event::PlaybackRestart)) => {
+                handoff.playback_restart();
+                switcher.on_playback_restart(mpv, &mut lock(status));
                 if let Some(started) = pending_seek.take() {
                     let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
                     seek_samples.push(elapsed);
@@ -1315,16 +1400,18 @@ fn drain_events(
                 }
             }
             Some(Ok(Event::PropertyChange { name, change, .. })) => {
+                if let ("eof-reached", PropertyData::Flag(value)) = (name, &change) { switcher.eof = *value; continue; }
+                if switcher.swapping.is_some() && matches!(name, "time-pos" | "duration" | "pause" | "estimated-frame-number" | "frame-drop-count" | "decoder-frame-drop-count") { continue; }
                 let mut snapshot = lock(status);
                 match (name, change) {
                     ("time-pos", PropertyData::Double(value)) => {
-                        snapshot.pos = time_mapper
+                        snapshot.pos = switcher.mapper()
                             .map(|mapper| mapper.source_seconds_for_proxy_seconds(value))
                             .unwrap_or(value)
                             .max(0.0)
                     }
                     ("duration", PropertyData::Double(value)) => {
-                        snapshot.duration = time_mapper
+                        snapshot.duration = switcher.mapper()
                             .map(|mapper| mapper.source_duration_seconds())
                             .unwrap_or(value)
                             .max(0.0)
@@ -1333,10 +1420,15 @@ fn drain_events(
                     ("estimated-frame-number", PropertyData::Int64(value)) => {
                         snapshot.frame = Some(value)
                     }
+                    ("frame-drop-count" | "decoder-frame-drop-count", PropertyData::Int64(value)) => {
+                        snapshot.dropped_frames = Some(switcher.record_drops(name, value));
+                        tracing::debug!(dropped = snapshot.dropped_frames, frame = snapshot.frame, "player frame drops");
+                    }
                     _ => {}
                 }
             }
             Some(Ok(Event::EndFile(_))) => {
+                if switcher.swapping.is_some() { continue; }
                 let mut snapshot = lock(status);
                 snapshot.paused = true;
                 snapshot.pos = snapshot.duration;
@@ -1349,13 +1441,14 @@ fn drain_events(
     }
 }
 
-fn schedule_surface_removal(window: &WebviewWindow, view: MainThreadView) {
+fn schedule_surface_removal(window: &WebviewWindow, view: MainThreadView, own: handoff::ViewSlot) {
     let _ = window.run_on_main_thread(move || {
         // 强制整值捕获:2021 闭包的精确捕获(含模式解构)会只捕 view.0(非 Send),
         // 绕过包装器的 unsafe Send;先整体重绑再解构是官方惯用法。
         let view = view;
         let MainThreadView(inner) = view;
         inner.removeFromSuperview();
+        lock(&own).take();
     });
 }
 
@@ -1423,6 +1516,7 @@ mod tests {
             sender: channel().0,
             status: Arc::new(Mutex::new(PlayerStatus::closed())),
             worker: Some(worker),
+            view: Arc::default(),
         }
     }
 
@@ -1516,6 +1610,8 @@ mod tests {
             viewport: PlayerViewport::default(),
             occluded: false,
             session: None,
+            outgoing: None,
+            generation: 0,
         };
         assert!(record_occlusion(&mut state, true).is_none());
         assert!(state.occluded);
@@ -1530,10 +1626,13 @@ mod tests {
         let mut state = ManagerState {
             viewport: PlayerViewport::default(),
             occluded: false,
+            outgoing: None,
+            generation: 0,
             session: Some(PlayerSession {
                 sender,
                 status: Arc::new(Mutex::new(PlayerStatus::closed())),
                 worker: None,
+                view: Arc::default(),
             }),
         };
         let mut notified = Vec::new();

@@ -15,6 +15,7 @@ use super::jobs::{self, Job};
 
 pub const COVER_FILE: &str = "cover.jpg";
 pub const STRIP_FILE: &str = "strip.jpg";
+pub const PROXY_HQ_FILE: &str = "proxy_1080.mp4";
 pub const PROXY_FILE: &str = "proxy.mp4";
 pub const WAVEFORM_FILE: &str = "waveform.json";
 pub const WAVEFORM_BINS: usize = 2_000;
@@ -123,6 +124,7 @@ pub fn run_artifact_job(connection: &mut Connection, job: &Job, cache_root: &Pat
         "strip" => run_strip(connection, job, cache_root),
         "waveform" => run_waveform(connection, job, cache_root),
         "proxy" => run_proxy(connection, job, cache_root),
+        "proxy_hq" => run_proxy_hq(connection, job, cache_root),
         other => Err(CoreError::Artifact(format!(
             "不支持的缓存任务种类：{other}"
         ))),
@@ -537,6 +539,31 @@ pub fn run_proxy(connection: &mut Connection, job: &Job, cache_root: &Path) -> R
     )
 }
 
+pub fn run_proxy_hq(connection: &mut Connection, job: &Job, cache_root: &Path) -> Result<()> {
+    if super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
+    if !super::settings::proxy_enabled(connection)? {
+        return complete_direct(connection, job, &parse_payload(job)?);
+    }
+    let payload = parse_payload(job)?;
+    let source = validate_source(connection, &payload)?;
+    if source.width.min(source.height) <= 1080 || plays_source_directly(&source) {
+        return complete_direct(connection, job, &payload);
+    }
+    // R17 exportfix:配置的 ffmpeg 缺 VideoToolbox 时改用包内那份(见 settings::export_ffmpeg)。
+    let ffmpeg = super::settings::export_ffmpeg(connection)?;
+    let ffprobe = super::settings::configured_ffprobe(connection, &ffmpeg)?;
+    let low_memory = super::memory_profile::resolve(connection)?.low_memory_proxy();
+    run_proxy_with(
+        connection,
+        job,
+        cache_root,
+        &ffmpeg,
+        &ffprobe,
+        PROXY_TIMEOUT,
+        low_memory,
+    )
+}
+
 /// R16 预览策略:≤1080p 的 H.264 8-bit、恒定帧率、码率 ≤ 50 Mbps 的源片**不做**预览小文件——
 /// libmpv 的 VideoToolbox 硬解直接播这类文件毫无压力,而 R13 压测里 720p / 1.5 Mbps 的源
 /// 转成 540p 代理反而比原片还大(缓存 1.2 GB ≈ 素材 1.3 GB)。只给 4K、HEVC / 10-bit / HDR、
@@ -582,10 +609,10 @@ pub fn proxy_cache_limit_bytes(connection: &Connection) -> Result<u64> {
     Ok((gb.max(1.0) * (1u64 << 30) as f64) as u64)
 }
 
-/// 当前预览小文件(`cache_artifacts.kind = 'proxy'`)合计字节数。
+/// 两种预览小文件(`proxy` / `proxy_hq`)合计字节数。
 pub fn proxy_cache_bytes(connection: &Connection) -> Result<u64> {
     let bytes: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(bytes), 0) FROM cache_artifacts WHERE kind = 'proxy'",
+        "SELECT COALESCE(SUM(bytes), 0) FROM cache_artifacts WHERE kind IN ('proxy','proxy_hq')",
         [],
         |row| row.get(0),
     )?;
@@ -595,10 +622,15 @@ pub fn proxy_cache_bytes(connection: &Connection) -> Result<u64> {
 /// 播放器打开一条素材的预览小文件时调:把文件 mtime 顶到现在。LRU 淘汰按这个时间排,
 /// 不加表列、不动迁移;文件不在 / 不是代理路径都静默(不影响播放)。
 pub fn touch_proxy_played(connection: &Connection, cache_root: &Path, clip_id: i64) {
+    touch_proxy_kind_played(connection, cache_root, clip_id, "proxy");
+}
+
+pub fn touch_proxy_kind_played(connection: &Connection, cache_root: &Path, clip_id: i64, kind: &str) {
+    if !matches!(kind, "proxy" | "proxy_hq") { return; }
     let rel_path: Option<String> = connection
         .query_row(
-            "SELECT rel_path FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy'",
-            [clip_id],
+            "SELECT rel_path FROM cache_artifacts WHERE clip_id = ?1 AND kind = ?2",
+            params![clip_id, kind],
             |row| row.get(0),
         )
         .optional()
@@ -607,7 +639,10 @@ pub fn touch_proxy_played(connection: &Connection, cache_root: &Path, clip_id: i
     let Some(rel_path) = rel_path else {
         return;
     };
+    let file_name = if kind == "proxy_hq" { PROXY_HQ_FILE } else { PROXY_FILE };
+    if rel_path != format!("{clip_id}/{file_name}") { return; }
     let path = cache_root.join(rel_path);
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) { return; }
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
         if let Err(error) = file.set_modified(std::time::SystemTime::now()) {
             tracing::debug!(%error, path = %path.display(), "touch proxy mtime failed");
@@ -639,7 +674,7 @@ pub fn enforce_proxy_cache_limit(
     }
     let mut candidates: Vec<(i64, String, u64, std::time::SystemTime)> = {
         let mut statement = connection.prepare(
-            "SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind = 'proxy'",
+            "SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind IN ('proxy','proxy_hq')",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u64))
@@ -662,9 +697,13 @@ pub fn enforce_proxy_cache_limit(
         let path = cache_root.join(&rel_path);
         remove_if_exists(&path)?;
         connection.execute(
-            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy'",
-            [clip_id],
+            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND rel_path = ?2 AND kind IN ('proxy','proxy_hq')",
+            params![clip_id, rel_path],
         )?;
+        connection.execute("DELETE FROM proxy_time_map WHERE clip_id=?1 AND NOT EXISTS
+            (SELECT 1 FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy')", [clip_id])?;
+        connection.execute("DELETE FROM proxy_hq_time_map WHERE clip_id=?1 AND NOT EXISTS
+            (SELECT 1 FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy_hq')", [clip_id])?;
         total = total.saturating_sub(bytes);
         report.removed += 1;
         report.bytes += bytes;
@@ -696,7 +735,8 @@ fn run_proxy_with(
 ) -> Result<()> {
     let payload = parse_payload(job)?;
     let source = validate_source(connection, &payload)?;
-    if source.height <= 540 || plays_source_directly(&source) {
+    let hq = job.kind == "proxy_hq";
+    if (if hq { source.width.min(source.height) <= 1080 } else { source.height <= 540 }) || plays_source_directly(&source) {
         return complete_direct(connection, job, &payload);
     }
 
@@ -711,7 +751,8 @@ fn run_proxy_with(
         )));
     }
 
-    let final_path = clip_root.join(PROXY_FILE);
+    let file_name = if hq { PROXY_HQ_FILE } else { PROXY_FILE };
+    let final_path = clip_root.join(file_name);
     let temporary_path = jobs::temporary_output_path(&final_path, job.attempt);
     remove_if_exists(&temporary_path)?;
 
@@ -721,14 +762,17 @@ fn run_proxy_with(
     if let Err(error) = run_ffmpeg_file_with_fallback(
         ffmpeg,
         |hardware_decode| {
-            proxy_args(
+            if hq {
+                proxy_hq_args(&source_path, &temporary_path, hardware_decode, low_memory,
+                    source_bitrate_bps(source.byte_size, source.duration_seconds), encoder)
+            } else { proxy_args(
                 &source_path,
                 &temporary_path,
                 hardware_decode,
                 low_memory,
                 source_bitrate_bps(source.byte_size, source.duration_seconds),
                 encoder,
-            )
+            ) }
         },
         timeout,
         &temporary_path,
@@ -752,8 +796,8 @@ fn run_proxy_with(
     );
 
     let artifacts = [FinalArtifact {
-        kind: "proxy",
-        file_name: PROXY_FILE,
+        kind: if hq { "proxy_hq" } else { "proxy" },
+        file_name,
         temporary_path: &temporary_path,
     }];
     if let Err(error) = finalize_artifacts(
@@ -1038,6 +1082,52 @@ fn proxy_bitrate(low_memory: bool, source_bitrate: Option<f64>) -> String {
     format!("{}k", (target / 1_000.0).round() as i64)
 }
 
+/// R25：沿用代理编码参数，只提升尺寸与码率，不烘焙显示 LUT。
+/// 短边 1080 用 ffmpeg 表达式按**自动旋转后**的帧判横竖:手机竖拍常是「编码 3840×2160 + 旋转 90」,
+/// 按 `clips.width/height` 判会把竖片缩成 608×1080。
+pub(crate) const PROXY_HQ_SCALE: &str = "scale='if(gte(iw,ih),-2,1080)':'if(gte(iw,ih),1080,-2)'";
+fn proxy_hq_args(
+    source: &str, output: &Path, hardware_decode: bool, low_memory: bool,
+    source_bitrate: Option<f64>, encoder: super::media_tools::H264Encoder,
+) -> Vec<OsString> {
+    let mut args = proxy_args(source, output, hardware_decode, low_memory, source_bitrate, encoder);
+    let bitrate = source_bitrate.filter(|n| n.is_finite()).unwrap_or(4_000_000.0)
+        .clamp(4_000_000.0, if low_memory { 10_000_000.0 } else { 16_000_000.0 });
+    for index in 1..args.len() {
+        if args[index - 1] == "-vf" {
+            args[index] = PROXY_HQ_SCALE.into();
+        } else if args[index - 1] == "-b:v" {
+            args[index] = format!("{bitrate:.0}").into();
+        }
+    }
+    args
+}
+
+/// 按需入队；事务锁让重复点击与并发连接都只产生一条未完成任务。
+pub fn enqueue_proxy_hq_if_needed(connection: &Connection, clip_id: i64) -> Result<bool> {
+    const EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM cache_artifacts a JOIN clips c ON c.id=a.clip_id
+          WHERE a.clip_id=?1 AND a.kind='proxy_hq' AND a.source_hash=c.quick_hash)
+         OR EXISTS(SELECT 1 FROM jobs WHERE kind='proxy_hq'
+          AND clip_id=?1 AND status IN ('pending','running','blocked','cancelling'))";
+    if connection.query_row(EXISTS_SQL, [clip_id], |row| row.get::<_, bool>(0))? { return Ok(false); }
+    // 原片核验(外置盘要整文件哈希)放在写锁之外:不许为了排一条任务把整库写锁握上几十秒。
+    let path = super::media_source::verified_clip_path(connection, clip_id)?;
+    let transaction = rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    if transaction.query_row(EXISTS_SQL, [clip_id], |row| row.get::<_, bool>(0))? { return Ok(false); }
+    let source_hash: String = transaction.query_row("SELECT quick_hash FROM clips WHERE id=?1", [clip_id], |r| r.get(0))?;
+    let payload = serde_json::to_string(&ArtifactJobPayload {
+        clip_id, path: path.to_string_lossy().into_owned(), source_hash: source_hash.clone(),
+    }).map_err(|e| CoreError::Artifact(e.to_string()))?;
+    let hash = blake3::hash(format!("proxy_hq\0{clip_id}\0{source_hash}").as_bytes()).to_hex().to_string();
+    transaction.execute(
+        "INSERT INTO jobs(kind,payload,payload_hash,status,attempt,next_attempt_at,created_at,updated_at)
+         VALUES ('proxy_hq',?1,?2,'pending',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+          strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        params![payload,hash])?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 fn proxy_args(
     source: &str,
     output: &Path,
@@ -1273,6 +1363,7 @@ fn finalize_artifacts(
         first_result.get_or_insert(final_path);
     }
 
+    let map_table = if job.kind == "proxy_hq" { "proxy_hq_time_map" } else { "proxy_time_map" };
     if let Some(points) = proxy_time_map {
         if points.len() < 2 {
             return Err(CoreError::Artifact(format!(
@@ -1281,13 +1372,12 @@ fn finalize_artifacts(
             )));
         }
         transaction.execute(
-            "DELETE FROM proxy_time_map WHERE clip_id = ?1",
+            &format!("DELETE FROM {map_table} WHERE clip_id = ?1"),
             [payload.clip_id],
         )?;
         for point in points {
             transaction.execute(
-                "INSERT INTO proxy_time_map(clip_id, proxy_ts_ms, source_ticks)
-                 VALUES (?1, ?2, ?3)",
+                &format!("INSERT INTO {map_table}(clip_id, proxy_ts_ms, source_ticks) VALUES (?1, ?2, ?3)"),
                 params![payload.clip_id, point.proxy_ts_ms, point.source_ticks],
             )?;
         }
@@ -1347,11 +1437,11 @@ fn complete_direct(
             payload.clip_id
         )));
     }
-    transaction.execute("DELETE FROM proxy_time_map WHERE clip_id = ?1", [payload.clip_id])?;
+    let map_table = if job.kind == "proxy_hq" { "proxy_hq_time_map" } else { "proxy_time_map" };
+    transaction.execute(&format!("DELETE FROM {map_table} WHERE clip_id = ?1"), [payload.clip_id])?;
     for point in time_map {
         transaction.execute(
-            "INSERT INTO proxy_time_map(clip_id, proxy_ts_ms, source_ticks)
-             VALUES (?1, ?2, ?3)",
+            &format!("INSERT INTO {map_table}(clip_id, proxy_ts_ms, source_ticks) VALUES (?1, ?2, ?3)"),
             params![payload.clip_id, point.proxy_ts_ms, point.source_ticks],
         )?;
     }
@@ -1904,6 +1994,23 @@ mod tests {
             )
             .unwrap();
         (connection.last_insert_rowid(), source_hash)
+    }
+
+    #[test]
+    fn r25_hq_args_dimensions_and_bitrate_clamps() {
+        use super::super::media_tools::H264Encoder;
+        // 短边 1080 的表达式由 ffmpeg 按自动旋转后的帧求值(横 3840×2160 → 1920×1080、竖 → 1080×1920,
+        // 本机 ffmpeg 实测);这里钉住参数本身。
+        {
+            for (source,low,expected) in [(1_000_000.0,false,"4000000"),(8_000_000.0,false,"8000000"),(30_000_000.0,false,"16000000"),(30_000_000.0,true,"10000000")] {
+                let args=proxy_hq_args("source.mov",Path::new("proxy_1080.mp4"),true,low,Some(source),H264Encoder::VideoToolbox);
+                let strings:Vec<_>=args.iter().map(|s|s.to_string_lossy()).collect();
+                assert!(strings.iter().any(|s|s==PROXY_HQ_SCALE));
+                assert!(!strings.iter().any(|s|s.contains("540")));
+                let i=strings.iter().position(|s|s=="-b:v").unwrap(); assert_eq!(strings[i+1],expected);
+                for value in ["h264_videotoolbox","yuv420p","cfr","aac","96k","+faststart"] { assert!(strings.iter().any(|s|s==value)); }
+            }
+        }
     }
 
     #[test]

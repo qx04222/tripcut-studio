@@ -1165,6 +1165,7 @@ fn run_import_probe_inner(connection:&mut Connection,job:&Job,ffprobe:&OsStr,tim
             [clip_id],
         )?;
         transaction.execute("DELETE FROM proxy_time_map WHERE clip_id = ?1", [clip_id])?;
+        transaction.execute("DELETE FROM proxy_hq_time_map WHERE clip_id = ?1", [clip_id])?;
     }
     transaction.commit()?;
 

@@ -410,6 +410,13 @@ export interface PlayerStatus {
   seek_p50_ms: number | null;
   seek_p95_ms: number | null;
   last_seek_ms: number | null;
+  source_kind?: "proxy" | "proxy_hq" | "original" | null;
+  source_width?: number | null;
+  source_height?: number | null;
+  preview_quality?: PreviewQuality | null;
+  source_switch_ms?: number | null;
+  source_switch_error_s?: number | null;
+  dropped_frames?: number | null;
 }
 
 export interface ClipSearchHit {
@@ -2685,4 +2692,9 @@ export function setBandOrder(episodeId: number, order: BandOrderItem[], chapterO
 }
 export function trimBandSegment(episodeId: number, segmentId: number, expected: [number, number], bounds: [number, number]): Promise<void> {
   return invoke<void>("trim_band_segment", { episodeId, segmentId, expected, bounds });
+}
+
+export type PreviewQuality = "auto" | "high" | "original" | "performance";
+export function playerSetPreviewQuality(quality: PreviewQuality): Promise<void> {
+  return invoke("player_set_preview_quality", { quality });
 }

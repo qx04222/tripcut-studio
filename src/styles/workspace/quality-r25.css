@@ -1,0 +1,31 @@
+/* R25：角标在标题行，避开原生视频视图。 */
+.preview-source-badge {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-2);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: calc(100% - var(--space-6));
+  padding: var(--space-1) var(--space-2);
+  color: var(--info);
+  background: var(--surface-panel);
+  border-radius: var(--radius-4);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+}
+.preview-source-badge:where(.player-controlbar *) {
+  position: static;
+  max-width: none;
+}
+.preview-source-badge .preview-source-badge-warning { color: var(--warn); }
+.preview-source-badge button {
+  color: var(--accent-text);
+  background: var(--surface-card);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-4);
+  font-size: var(--text-11);
+  transition: background var(--motion-fast);
+}
+.preview-source-badge button:focus-visible { box-shadow: var(--ring); }

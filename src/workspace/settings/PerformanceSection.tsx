@@ -3,7 +3,9 @@ import type { JSX } from "react";
 import { SectionHeader, Select, Toggle } from "../ui";
 import { SettingsRow } from "./SettingsControls";
 import { useSettingsFormContext } from "./SettingsFormContext";
-import type { SettingsStatus } from "../../api";
+import type { SettingsStatus, PreviewQuality } from "../../api";
+import { playerSetPreviewQuality } from "../../api";
+import { requestStatusRefreshSoon } from "../previewSourceRefresh";
 import { bytesLabel } from "./settingsModel";
 
 /** R16:预览小文件目录上限可选档(GB)。 */
@@ -82,6 +84,23 @@ export function PerformanceSection(): JSX.Element {
             checked={settings["performance.background_only_when_idle"] === "true"}
             onChange={(next) => void form.save("performance.background_only_when_idle", String(next))}
           />
+        </SettingsRow>
+        <SettingsRow title="预览画质" htmlFor="settings-preview-quality"
+          help={`自动：播放用代理，暂停看原片；高画质：1080p 代理；原片：直接读原文件；性能优先：540p 代理。原片始终只读，导出永远读原片。${settings["performance.proxy_enabled"] === "false" ? "预览用小文件已关闭，所有档位均读取原片。" : ""}`}>
+          <Select id="settings-preview-quality" aria-label="预览画质"
+            value={settings["performance.preview_quality"] ?? "auto"}
+            disabled={settings["performance.proxy_enabled"] === "false"}
+            onChange={(event) => {
+              const value = event.currentTarget.value as PreviewQuality;
+              void form.save("performance.preview_quality", value).then((saved) => {
+                if (saved) return playerSetPreviewQuality(value).then(() => { requestStatusRefreshSoon(); });
+              }).catch(() => undefined);
+            }}>
+            <option value="auto">自动(推荐):播放用代理,暂停看原片</option>
+            <option value="high">高画质:1080p 代理</option>
+            <option value="original">原片:直接读原文件</option>
+            <option value="performance">性能优先:540p 代理</option>
+          </Select>
         </SettingsRow>
         <SettingsRow title="预览用小文件" help="关闭后播放器直接读原片,新导入不再排队生成预览小文件。" align="end">
           <Toggle

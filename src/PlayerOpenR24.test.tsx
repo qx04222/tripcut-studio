@@ -57,7 +57,7 @@ it('P-3 ready Inspector replay still seeks then plays on the same clip', async (
   render(inspector); await flush();
   fireEvent.click(screen.getByRole('button', { name: '复播精选段 1' })); await flush();
   expect(api.playerCommand.mock.calls.map(([cmd]) => cmd)).toEqual([
-    { type: 'seek_abs', seconds: 7.4 }, { type: 'play' },
+    { type: 'set_end', seconds: null }, { type: 'seek_abs', seconds: 7.4 }, { type: 'set_end', seconds: 9 }, { type: 'play' },
   ]);
   expect(api.playerOpen).not.toHaveBeenCalled();
 });

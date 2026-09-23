@@ -195,8 +195,11 @@ it("R21 monitor: video/photo workspaces stay isolated while photo preview never 
   await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalledWith(9), { timeout: 5000 });
   await flush();
   await flush();
-  await waitFor(() => expect(log).toContainEqual({ kind: "cmd", type: "seek_abs", seconds: 20 }), { timeout: 5000 });
-  expect(log).toEqual([{ kind: "open", clipId: 9 }, { kind: "cmd", type: "pause" }, { kind: "cmd", type: "seek_abs", seconds: 20 }]);
+  // R25 TC-0115-002(迁移):原断言「open → pause → seek_abs 20(最精彩处)」→ 从 0 自动播放,无 pause / seek。
+  await waitFor(() => expect(live.phase).toBe("ready"), { timeout: 5000 });
+  await flush();
+  expect(log.filter(entry => entry.kind === "open" || entry.type === "pause" || entry.type === "seek_abs")).toEqual([{ kind: "open", clipId: 9 }]);
+  expect(live.paused).toBe(false);
   await act(async () => {
     dispatchWorkspace({ type: "set-workspace-mode", mode: "photo" });
     dispatchWorkspace({ type: "select-clip", clipId: 20 });
@@ -222,7 +225,8 @@ it("R21 monitor: video/photo workspaces stay isolated while photo preview never 
     dispatchWorkspace({ type: "set-workspace-mode", mode: "video" });
     dispatchWorkspace({ type: "select-clip", clipId: 10 });
   });
-  await waitFor(() => expect(log).toContainEqual({ kind: "cmd", type: "seek_abs", seconds: 5 }));
-  expect(log.slice(before.length)).toEqual([{ kind: "open", clipId: 10 }, { kind: "cmd", type: "pause" }, { kind: "cmd", type: "seek_abs", seconds: 5 }]);
+  await waitFor(() => expect(log.slice(before.length)).toContainEqual({ kind: "open", clipId: 10 }));
+  await flush();
+  expect(log.slice(before.length).filter(entry => entry.kind === "open" || entry.type === "pause" || entry.type === "seek_abs")).toEqual([{ kind: "open", clipId: 10 }]);
   expect(apiMocks.playerOpen.mock.calls.map(([id]) => id)).toEqual([9, 10]);
 });

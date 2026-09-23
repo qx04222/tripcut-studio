@@ -12,7 +12,7 @@
 .photo-ws-grid-item-row + .photo-ws-grid-item-row { margin-top: 10px; }
 .photo-ws-card-wrap { position: relative; min-width: 0; }
 .photo-ws-card-flags { position: absolute; z-index: var(--z-sticky); right: 6px; bottom: 6px; display: flex; align-items: center; gap: 4px; }
-.photo-ws-junk-chip, .photo-ws-primary-chip, .photo-ws-similar-count { border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 2px 6px; background: var(--bg-elevated); color: var(--text-secondary); font-size: var(--text-11); }
+.photo-ws-junk-chip, .photo-ws-primary-chip, .photo-ws-similar-count { border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 2px 6px; background: var(--bg-elevated); color: var(--text-secondary); font-size: var(--text-11); white-space: nowrap; flex-shrink: 0; }
 .photo-ws-primary-chip { color: var(--accent); font-weight: 650; }
 .photo-ws-junk-chip { color: var(--text-secondary); font-weight: 650; }
 .photo-ws-card-flags .ui-button { min-height: 22px; padding-inline: 6px; background: var(--bg-elevated); }
@@ -83,3 +83,140 @@
 .photo-ws-empty { margin: auto; padding: 24px; color: var(--text-muted); font-size: var(--text-12); text-align: center; }
 
 @media (max-width: 1040px) { .photo-ws-upper { grid-template-columns: minmax(0, 1fr) minmax(300px, 0.8fr); } }
+
+/* PhotoGrid has no .media-pool ancestor: reserve the same well before images load. */
+.photo-ws-card-wrap .pool-card-image {
+  aspect-ratio: auto;
+  height: 118px;
+  display: grid;
+  place-items: center;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--media-well);
+}
+.photo-ws-card-wrap .pool-card-image img {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+}
+.photo-ws-grid-pane[data-photo-fit="cover"] .photo-ws-card-wrap .pool-card-image img {
+  object-fit: cover;
+}
+/* `<button>` boxes default to shrink-to-fit width even under display:flex, so at a fixed
+   118px image height a portrait/square photo's narrower intrinsic contribution (height ×
+   its own aspect ratio) can pull the whole card narrower than its grid cell — R25 owner
+   review 2026-09-22, "时间未知" group card measured 139.9px vs 160.7px siblings. Force the
+   card to always fill its cell instead of shrink-wrapping its content. */
+.photo-ws-card-wrap .pool-card {
+  width: 100%;
+  /* Fixed total height, reserved for every card whether or not it needs the last row:
+     padding-top 4 + image 118 + gap 3 + name 16 + gap 3 + meta 16 + gap 3 + the optional
+     `.pool-card-badges` quality-label row (virtually 16, matches name/meta) + padding-bottom
+     4 = 183. `.pool-card-badges` only exists in the DOM when a photo has an analysis quality
+     flag ("虚焦"/"疑似失焦"/etc, PoolCard.tsx's `showBadges`) — without a fixed card height
+     that one card is the only one in its row that grows, measured 188px vs 170px siblings
+     (R25 owner review 2026-09-22). Cards without the row just leave this space blank instead
+     of shrinking, which is what keeps every card in the same density equal height. */
+  height: calc(4px + 118px + 3px + 16px + 3px + 16px + 3px + 16px + 4px);
+  overflow: hidden;
+}
+/* workspace.css uses one-line filenames and 16px line heights for both rows, but never
+   gives `.pool-card-name-line` (only `.media-pool` does, with a 3-line clamp design this
+   pane doesn't have room for) any truncation rule — a long filename rendered `nowrap` with
+   no ellipsis pushes `.pool-card`'s own shrink-to-fit width wider than its cell and bleeds
+   into the next card (R25 owner review 2026-09-22, R25-6 measured 275.75px card in a
+   160.7px cell). Single-line "middle ellipsis": head truncates, the fixed tail (extension)
+   published by `fileNameLines` always stays visible. */
+.photo-ws-card-wrap .pool-card-name,
+.photo-ws-card-wrap .pool-card-meta {
+  min-height: 16px;
+  flex-shrink: 0;
+}
+.photo-ws-card-wrap .pool-card-name {
+  overflow: hidden;
+}
+.photo-ws-card-wrap .pool-card-name-line {
+  /* No flex-grow (0): a short filename's two spans should sit flush together like plain
+     text, not stretch apart with a gap between them. Both spans DO get flex-shrink:1 with
+     an auto basis — proportional shrink by their own content width — rather than pinning
+     the tail rigid: `fileNameLines` picks its cut near the string's *midpoint* length-wise,
+     not by a fixed "extension-only" rule, so a filename with a long CJK remainder (R25-6
+     stress fixture) can make the "tail" wider than the head — a rigid tail would then take
+     100% of the row and collapse the head to 0 width (R25 owner review 2026-09-22).
+     Proportional shrink keeps both readable down to their ellipsis. */
+  flex: 0 1 auto;
+  overflow: hidden;
+  min-width: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* The "n 条建议"闪电角标 assumes a ~5ch video duration ("12:34") next to it at the same
+   bottom-right baseline (player-r11.css); a photo's resolution text ("7680×4320") is much
+   wider and gets covered. `has_suggestions` should already be forced false for every photo
+   clip (see fixture.ts), but keep the two corners apart here too as a second guard in case
+   an upstream data bug ever sets it true on a photo again. */
+.photo-ws-card-wrap .pool-card-bolt {
+  right: auto;
+  left: 6px;
+  bottom: 6px;
+}
+/* The similar-group action row ("主图"/"×n"/"展开"/"擂台", up to 4 pills) is an overlay
+   anchored to the card's bottom-right (right:6px/bottom:6px), but the card's bottom is the
+   fixed info strip (name + meta), not the image — it printed on top of the filename (R25
+   owner review 2026-09-22). There is no dead space to push it into as a single unconstrained
+   row either: every fixed-height card is exactly padding + 118px image + gap + 16px name +
+   gap + 16px meta + padding, and 4 pills at natural width (~230px measured) are already
+   wider than the ~150-160px card — moving that unconstrained row to any single corner still
+   runs it into whichever other overlay (照片/RAW badge top-right, RAW/伴随 badge top-left,
+   time/resolution badge bottom-right) or the info strip sits in its path (confirmed on the
+   shipped R21 baseline: 湖畔晨光.JPG is a group primary *and* has RAW companions, so both
+   top corners are already taken). Bound the row to the image's own width (left:6px/right:6px)
+   and let it wrap instead of overflow, starting below the top badges' own height (~20px) so
+   it never overlaps them either — it can grow to two lines without reaching the 118px image's
+   bottom edge (where the time/resolution badge and the bolt guard live). */
+.photo-ws-card-wrap .photo-ws-card-flags {
+  top: 26px;
+  left: 6px;
+  right: 6px;
+  bottom: auto;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/* These photo-only overlays also lose their .media-pool rules in PhotoGrid. */
+.photo-ws-card-wrap .photo-r21-badge,
+.photo-ws-card-wrap .photo-r21-raw {
+  position: absolute;
+  top: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-4);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  z-index: var(--z-sticky);
+}
+.photo-ws-card-wrap .photo-r21-badge { right: var(--space-1); }
+.photo-ws-card-wrap .photo-r21-raw { left: var(--space-1); cursor: pointer; }
+.photo-ws-card-wrap .photo-r21-companions {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-1) var(--space-1);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: var(--text-11);
+  line-height: var(--lh-11);
+  box-shadow: var(--shadow-card);
+  z-index: var(--z-sticky);
+}
+.photo-ws-card-wrap .photo-r21-companions [role="listitem"] { display: flex; gap: var(--space-1); white-space: nowrap; }
+.photo-ws-card-wrap .photo-r21-companion-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.photo-ws-card-wrap .photo-r21-companion-role { flex: 0 0 auto; color: var(--text-secondary); }
+.photo-ws-card-wrap .photo-r21-card[aria-expanded="true"] .photo-r21-badge,
+.photo-ws-card-wrap .photo-r21-card[aria-expanded="true"] .photo-r21-raw { z-index: var(--z-band-playhead); }

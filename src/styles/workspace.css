@@ -1,3 +1,4 @@
+@import "./workspace/quality-r25.css";
 @import "./workspace/scrubber-r22.css";
 @import "./workspace/playthrough-r22.css";
 /*
@@ -910,6 +911,7 @@
 /* 预览监视器(规格 §3.2):标题条 → 16:9 暗井居中 → 一条控件条贴底。 */
 
 .monitor {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;

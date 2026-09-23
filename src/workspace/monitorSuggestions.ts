@@ -37,7 +37,8 @@ export function suggestionRanges(suggestions: readonly SegmentSuggestion[], clip
       score: item.score,
       reasons: item.reasons,
     }))
-    .filter((item) => item.outSeconds > item.inSeconds);
+    .filter((item) => item.outSeconds > item.inSeconds)
+    .sort((a, b) => a.inSeconds - b.inSeconds || a.outSeconds - b.outSeconds || b.score - a.score);
 }
 
 /**

@@ -98,7 +98,7 @@ describe("MonitorControls · seek bar(U-09)", () => {
     expect(handlers.onSeek).not.toHaveBeenCalled();
   });
 
-  it("拖动中 seek 按 rAF 合并,松手立刻定位到最终值;拖动中显示本地值不被状态拉回", () => {
+  it("拖动中 seek 按 rAF 合并,松手立刻定位到最终值;指针与数字共同等待真实状态回读", () => {
     vi.useFakeTimers();
     const handlers = renderControls();
     const slider = screen.getByRole("slider", { name: "播放位置" }) as HTMLElement;
@@ -115,7 +115,8 @@ describe("MonitorControls · seek bar(U-09)", () => {
       vi.advanceTimersByTime(20);
     });
     expect(handlers.onSeek).toHaveBeenCalledTimes(2);
-    expect(slider.getAttribute("aria-valuenow")).toBe("7");
+    expect(slider.getAttribute("aria-valuenow")).toBe("35.9");
+    expect(screen.getByLabelText("当前时间码").getAttribute("title")).toBe("00:00:35.900");
     expect(handlers.onSeek).toHaveBeenLastCalledWith(7);
     fireEvent.pointerMove(slider, { clientX: 90 });
     fireEvent.pointerUp(slider, { clientX: 90 });

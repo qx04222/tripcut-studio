@@ -5102,6 +5102,31 @@ mod tests {
         clip_id
     }
 
+    #[test]
+    fn r25_export_source_is_original_for_every_preview_quality() {
+        let d=TestDirectory::new(); let c=db::open_project(&d.db_path()).unwrap();
+        let source=d.path().join("source.mov"); std::fs::write(&source,b"original source bytes").unwrap();
+        let id=insert_clip(&c,&source,"2026-09-22T00:00:00Z",&[1],None);
+        for (kind,file) in [("proxy","proxy.mp4"),("proxy_hq","proxy_1080.mp4")] {
+            let relative=format!("{id}/{file}");
+            std::fs::create_dir_all(d.path().join(id.to_string())).unwrap();
+            std::fs::write(d.path().join(&relative),b"proxy bytes").unwrap();
+            c.execute("INSERT INTO cache_artifacts(clip_id,kind,rel_path,source_hash,bytes,created_at)
+                SELECT id,?2,?3,quick_hash,11,'now' FROM clips WHERE id=?1",params![id,kind,relative]).unwrap();
+        }
+        for quality in ["original","high","auto","performance"] {
+            crate::core::settings::set_setting(&c,"performance.preview_quality",quality).unwrap();
+            let mut clips=selected_clips(&c).unwrap(); assert!(!clips.is_empty());
+            for clip in &mut clips {
+                assert_eq!(verified_export_source(&c,clip).unwrap(),source.canonicalize().unwrap());
+            }
+        }
+        assert_eq!(std::fs::read(&source).unwrap(),b"original source bytes");
+        // 测试自身放在 cfg(test) 后；生产导出取源不得引用监视器策略。
+        let production=include_str!("deliver.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("preview_source"));
+    }
+
     fn export_clip_fixture(
         name: &str,
         in_ticks: i64,

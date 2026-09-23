@@ -131,14 +131,14 @@ it('§8A 单素材两个不连续选段:不进 (34.2, 39.4),两段各自从真�
   expect(h.controller.phase).toBe('done');
 });
 
-it('§8A 出点围栏由播放器自己守:每段开播前设 end,连播停时撤掉', async () => {
+it('§8A 出点围栏由播放器自己守:每段开播前设 end,播完保留选段围栏', async () => {
   const h = harness(A_SEGMENTS, A_OPTIONS);
   await h.start();
   await h.run(300);
   const fences = h.player.commands.filter(c => c.cmd.type === 'set_end')
     .map(c => (c.cmd as { seconds: number | null }).seconds);
   expect(fences.filter(v => v !== null)).toEqual([34.2, 45.6]);
-  expect(fences.at(-1)).toBeNull();
+  expect(fences.at(-1)).toBe(45.6);
 });
 
 it('§8B 跨素材:新实例首份就绪状态即入点,不留旧位置、不跳不重复', async () => {
@@ -158,19 +158,19 @@ it('§8B 跨素材:新实例首份就绪状态即入点,不留旧位置、不跳
   expect(h.player.samples.filter(s => s.clipId === 9 && s.pos < 3 - 0.5 / 25)).toEqual([]);
 });
 
-it('§8C 刻度与指针:monitorRange == activeSegment,指针连续推进,越界不靠 clamp 遮', async () => {
+it('§8C 刻度与指针:完整素材刻度,绿框跟随活动选段,指针连续推进,越界不靠 clamp 遮', async () => {
   const h = harness(A_SEGMENTS, A_OPTIONS);
   await h.start();
   await h.run(300);
   // 越界旗一次都不能亮 —— 真越界了这里就红,而不是被 ratioAt clamp 成 100% 看不出来。
   expect(h.samples.filter(s => s.outOfRange)).toEqual([]);
-  // 刻度范围 = 活动选段:范围既然就是选段,连播带每一拍都铺满整条轨。
-  expect(new Set(h.samples.filter(s => s.bandLeft !== null).map(s => s.bandLeft))).toEqual(new Set(['0%']));
+  // R25:完整素材刻度下,绿框按选段绝对入点定位。
+  expect(h.samples.filter(s => s.bandLeft !== null).every(s => Math.abs(Number.parseFloat(s.bandLeft!) - s.segIn / 121 * 100) < 1e-6)).toBe(true);
   // 段内指针连续不回头,且从段首走到段尾。
   const first = h.samples.filter(s => s.index === 0 && !s.truePaused && s.headPct !== null).map(s => s.headPct!);
   expect(first.every((v, i) => i === 0 || v >= first[i - 1]! - 1e-9)).toBe(true);
-  expect(Math.max(...first)).toBeGreaterThan(95);
-  expect(Math.min(...first)).toBeLessThan(5);
+  expect(Math.max(...first)).toBeGreaterThan(34 / 121 * 100);
+  expect(Math.min(...first)).toBeLessThan(27 / 121 * 100);
 });
 
 it('§8C 暂停后指针与时间码停在同一位置,继续后接着走', async () => {
@@ -306,12 +306,12 @@ it('P-1(b) 普通播放拖轨道松手照常继续(基线绿)', async () => {
   expect(h.player.paused).toBe(false);
 });
 
-it('P-1 连播进行中拖轨道仍然停止连播并继续素材播放(基线绿)', async () => {
+it('R25 连播中段外拖轨道退出选段并暂停,松手不自动播放', async () => {
   const h = harness(A_SEGMENTS, A_OPTIONS);
   await h.start(); await h.run(10);
   await dragTrack(); await h.run(3);
   expect(h.controller.active).toBe(false);
-  expect(h.player.paused).toBe(false);
+  expect(h.player.paused).toBe(true);
 });
 
 it('P-2 每一拍 AX 单对象读数含同段号与秒数(基线红)', async () => {

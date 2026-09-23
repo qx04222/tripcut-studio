@@ -3018,18 +3018,58 @@ async fn player_open(
     let cache_root = runtime.cache_root.clone();
     let player = player.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (connection, path, time_mapper) =
-            crate::player::resolve_playback_source(&db_path, &cache_root, clip_id)?;
-        // R16:预览小文件的 LRU 按「最近播放」排,打开即 touch(没有代理时是空操作)。
-        if time_mapper.is_some() {
-            core::artifacts::touch_proxy_played(&connection, &cache_root, clip_id);
+        let (connection, plan) =
+            crate::player::preview_source::resolve_preview_plan(&db_path, &cache_root, clip_id)?;
+        let kind = crate::player::preview_source::initial_kind(&plan);
+        let entry = plan.entry(kind).ok_or("预览来源不可用")?;
+        player.open(entry.path.clone(), clip_id, entry.mapper.clone(), start_paused.unwrap_or(false), start_seconds)?;
+        let original_deferred = crate::player::preview_source::original_deferred(&plan);
+        player.install_source_plan(plan, kind)?;
+        core::artifacts::touch_proxy_kind_played(&connection, &cache_root, clip_id, kind.as_str());
+        // R25:自动档有代理时原片不在打开路径上核验(外置盘要整文件哈希);后台核验完再补进计划,
+        // 之后暂停才会切原片。核验失败只记日志,监视器继续用代理。
+        if original_deferred {
+            let (db_path, cache_root, player) = (db_path.clone(), cache_root.clone(), player.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let refreshed = crate::player::preview_source::resolve_preview_plan_with(&db_path, &cache_root, clip_id, true)
+                    .and_then(|(_, plan)| player.refresh_source_plan_for_clip(clip_id, plan, false));
+                if let Err(error) = refreshed {
+                    tracing::warn!(%error, clip_id, "后台核验原片失败,暂停时继续显示代理");
+                }
+            });
         }
-        let status = player.open(path, clip_id, time_mapper, start_paused.unwrap_or(false), start_seconds)?;
+        let status = player.status();
         apply_stored_display_prefs(&connection, clip_id, &player);
         Ok::<PlayerStatus, String>(status)
     })
     .await
     .map_err(|error| format!("播放器启动任务异常结束：{error}"))?
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn player_set_preview_quality(
+    quality: String,
+    runtime: tauri::State<'_, RuntimeState>,
+    player: tauri::State<'_, PlayerManager>,
+) -> std::result::Result<(), String> {
+    use crate::player::preview_source::{self, PreviewQuality};
+    let db_path = runtime.db_path.clone();
+    let cache_root = runtime.cache_root.clone();
+    let player = player.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = player.status();
+        let Some(clip_id) = status.clip_id else { return Ok(()); };
+        let q = PreviewQuality::parse(&quality);
+        // 设置页已保存；这里也保存，保证单独调用命令时 High 按正确档位入队。
+        let connection = core::db::open_project(&db_path).map_err(|e| e.to_string())?;
+        core::settings::set_setting(&connection, core::settings::PREVIEW_QUALITY_KEY, q.as_str()).map_err(|e| e.to_string())?;
+        let (connection, plan) = preview_source::resolve_preview_plan_with(&db_path, &cache_root, clip_id, q == PreviewQuality::Auto)?;
+        let target = preview_source::initial_kind(&plan);
+        player.refresh_source_plan_for_clip(clip_id, plan, false)?;
+        core::artifacts::touch_proxy_kind_played(&connection, &cache_root, clip_id, target.as_str());
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// After a clip loads, replays any stored preview-only display LUT and
@@ -3117,8 +3157,9 @@ async fn player_set_speed(
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn player_status(player: tauri::State<'_, PlayerManager>) -> PlayerStatus {
+fn player_status(player: tauri::State<'_, PlayerManager>, runtime: tauri::State<'_, RuntimeState>) -> PlayerStatus {
     let status = player.status();
+    refresh_completed_high_preview(&status, player.inner(), runtime.inner());
     // R22 真机诊断:每一次落地的 seek(player 线程自己量的 命令→PlaybackRestart)在
     // `TRIPCUT_LOG=debug` 下记一行,拖动手感可以从日志里逐次读延迟,不用改 player/。
     // 只在 80ms 轮询看到样本数变化时写,INFO 级别下一行都不出。
@@ -3137,6 +3178,42 @@ fn player_status(player: tauri::State<'_, PlayerManager>) -> PlayerStatus {
         }
     }
     status
+}
+
+/// 状态轮询只触发后台检查，渲染线程不查库、不等待 HQ 转码。
+#[cfg(target_os = "macos")]
+fn refresh_completed_high_preview(status: &PlayerStatus, player: &PlayerManager, runtime: &RuntimeState) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static CHECKING: AtomicBool = AtomicBool::new(false);
+    static LAST_CHECK: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if status.preview_quality.as_deref() != Some("high") || status.source_kind.as_deref() == Some("proxy_hq") { return; }
+    let Some(clip_id) = status.clip_id else { return; };
+    if status.source_kind.as_deref() == Some("original") && status.source_width.zip(status.source_height).is_some_and(|(w,h)| w.min(h) <= 1080) { return; }
+    {
+        let Ok(mut last) = LAST_CHECK.lock() else { return; };
+        if last.is_some_and(|instant| instant.elapsed() < std::time::Duration::from_secs(1)) || CHECKING.swap(true, Ordering::AcqRel) { return; }
+        *last = Some(std::time::Instant::now());
+    }
+    let db_path = runtime.db_path.clone();
+    let cache_root = runtime.cache_root.clone();
+    let player = player.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { CHECKING.store(false, Ordering::Release); } }
+        let _reset = Reset;
+        let check = || -> std::result::Result<(), String> {
+            let connection = core::db::open_project(&db_path).map_err(|e| e.to_string())?;
+            let ready: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM cache_artifacts a JOIN clips c ON c.id=a.clip_id
+                WHERE a.clip_id=?1 AND a.kind='proxy_hq' AND a.source_hash=c.quick_hash)", [clip_id], |r| r.get(0)).map_err(|e|e.to_string())?;
+            if !ready { return Ok(()); }
+            let (_, plan) = crate::player::preview_source::resolve_preview_plan(&db_path, &cache_root, clip_id)?;
+            if plan.quality == crate::player::preview_source::PreviewQuality::High && plan.proxy_hq.is_some() {
+                player.refresh_source_plan_for_clip(clip_id, plan, true)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = check() { tracing::warn!(%error, "刷新高清代理失败"); }
+    });
 }
 
 fn development_root() -> Result<PathBuf> {
@@ -4132,6 +4209,8 @@ pub fn run() {
             player_set_occluded,
             #[cfg(target_os = "macos")]
             player_open,
+            #[cfg(target_os = "macos")]
+            player_set_preview_quality,
             #[cfg(target_os = "macos")]
             player_close,
             #[cfg(target_os = "macos")]

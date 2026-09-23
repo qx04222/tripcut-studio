@@ -1,3 +1,4 @@
+import { clipFps } from "./useMonitorTransport";
 import { PhotoInspector } from "./PhotoInspector";
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
 import {
@@ -323,7 +324,7 @@ function ClipInspector({ clipId }: { clipId: number }): JSX.Element {
       ) : null}
       {clip.kind !== "photo" && sections.includes("segments") ? (
         <DefaultSectionCard id="segments" meta={clip.select_count > 0 ? `${clip.select_count} 段` : undefined}>
-          <SelectSegmentsSection clipId={clipId} selectCount={clip.select_count} readOnly={feed.episode.viewing !== null} />
+          <SelectSegmentsSection fps={clipFps(clip)} clipId={clipId} selectCount={clip.select_count} readOnly={feed.episode.viewing !== null} />
         </DefaultSectionCard>
       ) : null}
       {sections.includes("takes") && stack ? (

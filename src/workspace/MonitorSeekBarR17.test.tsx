@@ -34,7 +34,7 @@ describe("R17 playfix:seek bar 的拖动态不跨素材", () => {
     const slider = screen.getByRole("slider", { name: "播放位置" });
     vi.spyOn(slider, "getBoundingClientRect").mockReturnValue({ left: 0, width: 600 } as DOMRect);
     fireEvent.pointerDown(slider, { clientX: 123 });
-    expect(slider.getAttribute("aria-valuenow")).toBe("12.3");
+    expect(slider.getAttribute("aria-valuenow")).toBe("3");
     view.rerender(<MonitorSeekBar status={null} inPoint={null} outPoint={null} onSeek={onSeek} />);
     view.rerender(<MonitorSeekBar status={ready(10, 0, 30)} inPoint={null} outPoint={null} onSeek={onSeek} />);
     expect(screen.getByRole("slider", { name: "播放位置" }).getAttribute("aria-valuenow")).toBe("0");

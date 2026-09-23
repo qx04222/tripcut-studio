@@ -41,21 +41,17 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("R11 播放器偏好开关", () => {
-  it("「选中素材从最精彩处开播」默认开、「播完自动播下一条」默认关(R12 §5);拨动写 ui.player.* 并同步给监视器", async () => {
+  it("最精彩开关已移除;连播默认关并同步设置", async () => {
     const panel = await openAppearance();
-    const startAtBest = within(panel).getByRole("switch", { name: "选中素材从最精彩处开播" });
+    const startAtBest = within(panel).queryByRole("switch", { name: "选中素材从最精彩处开播" });
     const autoAdvance = within(panel).getByRole("switch", { name: "播完自动播下一条" });
-    expect(startAtBest.getAttribute("aria-checked")).toBe("true");
+    expect(startAtBest).toBeNull();
     expect(autoAdvance.getAttribute("aria-checked")).toBe("false");
     await loadPlayerPrefs();
-    expect(getPlayerPrefs()).toMatchObject({ startAtBest: true, autoAdvance: false });
-    await act(async () => {
-      startAtBest.click();
-      await Promise.resolve();
-    });
-    expect(apiMocks.setSetting).toHaveBeenCalledWith("ui.player.start_at_best", "false");
-    expect(getPlayerPrefs().startAtBest).toBe(false);
-    await waitFor(() => expect(startAtBest.getAttribute("aria-checked")).toBe("false"));
+    expect(getPlayerPrefs()).toMatchObject({ scrubberView: "full", autoAdvance: false });
+    expect(apiMocks.setSetting).not.toHaveBeenCalledWith("ui.player.start_at_best", expect.anything());
+    expect(getPlayerPrefs()).not.toHaveProperty("startAtBest");
+    expect(within(panel).queryByText("选中素材从最精彩处开播")).toBeNull();
     await act(async () => {
       autoAdvance.click();
       await Promise.resolve();

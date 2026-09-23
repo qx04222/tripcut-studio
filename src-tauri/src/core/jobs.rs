@@ -237,7 +237,7 @@ pub(crate) enum ResourceClass {
 
 pub(crate) fn resource_class(kind: &str) -> ResourceClass {
     match kind {
-        "photo_probe" | "thumbnail" | "photo_preview" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "music_analyze"
+        "photo_probe" | "thumbnail" | "photo_preview" | "strip" | "analyze_l1" | "analyze_motion" | "proxy" | "proxy_hq" | "music_analyze"
         | "moments" => ResourceClass::Decode,
         "clip_embed" | "classify_dims" | "transcribe" => ResourceClass::HeavyModel,
         _ => ResourceClass::Light,
@@ -246,7 +246,7 @@ pub(crate) fn resource_class(kind: &str) -> ResourceClass {
 
 /// SQL 字面量:与 `resource_class` 的 Decode 分支必须逐字一致。
 pub(crate) const DECODE_KINDS_SQL: &str =
-    "('photo_probe','thumbnail','photo_preview','strip','analyze_l1','analyze_motion','proxy','music_analyze','moments')";
+    "('photo_probe','thumbnail','photo_preview','strip','analyze_l1','analyze_motion','proxy','proxy_hq','music_analyze','moments')";
 /// SQL 字面量:与 `resource_class` 的 HeavyModel 分支必须逐字一致。
 pub(crate) const HEAVY_KINDS_SQL: &str = "('clip_embed','classify_dims','transcribe')";
 /// R16 P1-6:用户「全部暂停」期间仍放行的两类——导出是用户此刻点的,缓存清理是用户刚删过东西;
@@ -392,6 +392,7 @@ pub fn claim_next_for_owner_filtered(
                         WHEN 'waveform' THEN 20
                         WHEN 'transcribe' THEN 15
                         WHEN 'proxy' THEN 10
+                        WHEN 'proxy_hq' THEN 10
                         WHEN 'full_hash' THEN 8
                         WHEN 'similar_cluster' THEN 5
                         -- R15:后台缓存清理紧跟导入探测之后跑,删掉的东西尽快腾出磁盘。
@@ -808,13 +809,13 @@ pub fn cancel_all_jobs(connection: &mut Connection) -> Result<usize> {
 
 /// 清理缓存前取消正在跑的「可再生成文件」任务(与 `settings::clear_cache_and_rebuild`
 /// 重置的五种一致;R15 补上此前漏掉的 strip)。
-pub const CACHE_JOB_KINDS_SQL: &str = "('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')";
+pub const CACHE_JOB_KINDS_SQL: &str = "('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy','proxy_hq', 'clip_embed')";
 
 pub fn cancel_cache_jobs(connection: &mut Connection) -> Result<usize> {
     let mut statement = connection.prepare(
         "SELECT id FROM jobs
          WHERE status='running'
-           AND kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy', 'clip_embed')",
+           AND kind IN ('thumbnail', 'photo_preview', 'strip', 'waveform', 'proxy','proxy_hq', 'clip_embed')",
     )?;
     let ids = statement
         .query_map([], |row| row.get::<_, i64>(0))?
@@ -1966,7 +1967,7 @@ impl JobRunner {
 
         // R21 PH-01:照片不进任何视频专用任务。旧库里已排的视频任务撞上 kind='photo'
         // 一律在这里直接置 done,不再进入各 run_* 再由分支二次 mark_done。
-        if matches!(job.kind.as_str(), "classify_dims" | "metadata_backfill" | "analyze_motion" | "moments" | "transcribe" | "clip_embed" | "strip" | "waveform" | "proxy" | "ocr_scan")
+        if matches!(job.kind.as_str(), "classify_dims" | "metadata_backfill" | "analyze_motion" | "moments" | "transcribe" | "clip_embed" | "strip" | "waveform" | "proxy" | "proxy_hq" | "ocr_scan")
             && super::photo_probe::skip_video_job(connection, job)? { return Ok(()); }
         match job.kind.as_str() {
             "noop" => mark_done(connection, job.id, job.attempt)?,
@@ -2138,7 +2139,7 @@ impl JobRunner {
                 let project_root = db_path.parent().unwrap_or_else(|| Path::new("."));
                 super::generation::run_poll_job(connection, job, project_root)?;
             }
-            "thumbnail" | "photo_preview" | "strip" | "waveform" | "proxy" => {
+            "thumbnail" | "photo_preview" | "strip" | "waveform" | "proxy" | "proxy_hq" => {
                 match super::artifacts::run_artifact_job(connection, job, &cache_root) {
                     Ok(()) if job.kind == "waveform" => {
                         enqueue_dimensions_after(connection, job, &cache_root);
@@ -2449,6 +2450,7 @@ mod tests {
         "waveform",
         "transcribe",
         "proxy",
+        "proxy_hq",
         "similar_cluster",
         "ocr_scan",
         "music_analyze",

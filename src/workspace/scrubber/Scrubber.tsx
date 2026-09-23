@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from
 import { createPortal } from "react-dom";
 import type { PlayerStatus } from "../../api";
 import { playthroughReadout, type PlaythroughRange } from "../playthrough/model";
+import { usePlayerPrefs, writeScrubberView } from "../playerPrefs";
 import { clamp, ratioAt, timecode, visibleRange } from "./model";
 import { useScrubGesture, type Edge } from "./useScrubGesture";
 import { ScrubberLayers } from "./ScrubberLayers";
@@ -19,14 +20,15 @@ export interface ScrubberProps {
 export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, onPause, onResume, onTrim, onShuttle, onMark, playthrough }: ScrubberProps) {
   const ready = status?.phase === "ready" && status.duration > 0;
   const duration = ready ? status.duration : 0, clipId = ready ? status.clip_id : null;
-  const [zoom, setZoom] = useState(() => { try { return localStorage.getItem("tripcut.scrubber.range") !== "full"; } catch { return true; } });
+  const zoom = usePlayerPrefs().scrubberView === "zoom";
   const [width, setWidth] = useState(600);
-  // R23 ISSUE-B:连播中刻度的唯一真值是活动选段,不是 I/O 栏 —— 那里装的是 AI 建议(报告 §4.2
-  // 的四行错误范围都正好 8 s 宽,就是建议段)。不加 10% 余量:不变量写的是 monitorRange == activeSegment。
-  const range = useMemo((): readonly [number, number] => (playthrough
-    ? [playthrough.inPoint, playthrough.outPoint]
-    : visibleRange(duration, inPoint, outPoint, zoom)),
-  [duration, inPoint, outPoint, zoom, playthrough]);
+  const readout = playthrough ? playthroughReadout(playthrough, status?.pos ?? 0) : null;
+  const snapshotPosition = readout?.position ?? status?.pos ?? 0;
+  const range = useMemo((): readonly [number, number] => {
+    const candidate = visibleRange(duration, playthrough?.inPoint ?? inPoint, playthrough?.outPoint ?? outPoint, zoom);
+    // 越界时回完整视图,保留用户偏好;回到片段内会恢复放大。
+    return snapshotPosition < candidate[0] || snapshotPosition > candidate[1] ? [0, duration] : candidate;
+  }, [duration, inPoint, outPoint, zoom, playthrough, snapshotPosition]);
   const gesture = useScrubGesture({ ready, clipId, pos: status?.pos ?? 0, duration, fps, paused: status?.paused !== false,
     range, inPoint, outPoint, onSeek, onPause, onResume, onTrim });
   useWheelFrames(gesture.track, ready, fps, gesture.position, gesture.seek);
@@ -42,13 +44,12 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
   useEffect(() => { setHover(null); }, [clipId]);
   const pct = (n: number) => `${ratioAt(n, shownRange) * 100}%`;
   // R24:段号、指针与 AXValueDescription 共用一次快照;stopping 保留旧段真位置。
-  // 用户正在拖 / 点时以手势落点为准(与 R23 相同的优先级);真位置照旧夹进素材范围。
-  const readout = playthrough ? playthroughReadout(playthrough, clamp(status?.pos ?? 0, 0, duration)) : null;
-  const value = gesture.local ?? readout?.position ?? clamp(status?.pos ?? 0, 0, duration);
+  // 指针、数字都等同一份实际状态回读;手势目标仅用于悬停预览,不冒充已解码位置。
+  const value = snapshotPosition;
+  const headPct = `${(value - shownRange[0]) / (shownRange[1] - shownRange[0] || 1) * 100}%`;
   const segmentLabel = readout ? `第 ${readout.index + 1}/${readout.total} 段` : null;
   const marked = inPoint !== null && outPoint !== null && outPoint > inPoint;
-  // R23 §8C:`ratioAt` 会把越界的位置 clamp 到 0%/100%,看起来只是「指针不动」。
-  // 连播中一旦真位置落在活动选段外就挂旗,验收测试盯它 —— clamp 不许把越界播放遮过去。
+  // 指针不 clamp;选段越界保留诊断标记。
   const outOfSegment = playthrough !== undefined && ready && !playthrough.switching &&
     (value < playthrough.inPoint - 0.1 || value > playthrough.outPoint + 0.1);
   const keyboard = (event: KeyboardEvent, edge: Edge) => {
@@ -92,12 +93,12 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
         onLostPointerCapture={() => gesture.end()} onPointerLeave={leave}>
         <ScrubberLayers range={shownRange} width={width} duration={duration} peaks={media.peaks} heat={heat} />
         <span className="scrubber-r22-fill" aria-hidden="true" style={{ width: pct(value) }} />
-        {inPoint !== null && <span className="monitor-seek-range scrubber-r22-range" aria-hidden="true"
+        {!playthrough && inPoint !== null && <span className="monitor-seek-range scrubber-r22-range" aria-hidden="true"
           style={{ left: pct(inPoint), width: outPoint === null ? "2px" : `calc(${pct(outPoint)} - ${pct(inPoint)})` }} />}
-        {marked && <><span className="scrubber-r22-outside" style={{ left: 0, width: pct(inPoint) }} /><span className="scrubber-r22-outside" style={{ left: pct(outPoint), right: 0 }} /></>}
+        {!playthrough && marked && <><span className="scrubber-r22-outside" style={{ left: 0, width: pct(inPoint) }} /><span className="scrubber-r22-outside" style={{ left: pct(outPoint), right: 0 }} /></>}
         {playthrough && <span className="scrubber-r22-playthrough" data-playing="" aria-hidden="true"
           style={{ left: pct(playthrough.inPoint), width: `calc(${pct(playthrough.outPoint)} - ${pct(playthrough.inPoint)})` }} />}
-        <span className="scrubber-r22-head" aria-hidden="true" style={{ left: pct(value) }} />
+        <span className="scrubber-r22-head" aria-hidden="true" style={{ left: headPct }} />
       </div>
       {(["in", "out"] as const).map(edge => {
         const point = edge === "in" ? inPoint : outPoint;
@@ -113,11 +114,10 @@ export function Scrubber({ status, inPoint, outPoint, fps = 30, onSeek, heat, on
       })}
     </span>
     {playthrough && <span className="scrubber-r22-playthrough-label" title="镜头带连播:当前段">{segmentLabel}</span>}
-    {/* R23:连播中刻度固定等于活动选段,这个开关此刻说了不算 —— 按下去什么都不会变,
-        就别让它看起来还能按(禁用 + 显示「片段」,与实际刻度一致)。 */}
-    <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={playthrough ? true : zoom && marked}
-      disabled={Boolean(playthrough) || !marked} onClick={() => { const next = !zoom; setZoom(next); try { localStorage.setItem("tripcut.scrubber.range", next ? "segment" : "full"); } catch { /* optional preference */ } }}>
-      {playthrough || (zoom && marked) ? "片段" : "全片"}
+    <button type="button" className="scrubber-r22-scope" aria-label="切换进度条范围" aria-pressed={zoom}
+      title="完整素材 / 放大片段；放大时越界自动显示完整素材"
+      onClick={() => void writeScrubberView(zoom ? "full" : "zoom")}>
+      {zoom ? "放大片段" : "完整素材"}
     </button>
     {previewVisible && createPortal(<div className="scrubber-r22-preview" role="tooltip" style={{ left: hover.x, top: hover.y }}>
       {media.preview?.url ? <img src={media.preview.url} width={160} height={90} alt="悬停位置预览" crossOrigin="anonymous" /> : <span className="scrubber-r22-no-frame">{media.preview?.url === null ? "预览暂不可用" : "正在取帧…"}</span>}

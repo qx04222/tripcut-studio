@@ -17,6 +17,7 @@ export function PhotoGrid(): JSX.Element {
   const photos = useMemo(() => feed.clips.filter((clip) => clip.kind === "photo"), [feed.clips]);
   const [groups, setGroups] = useState<SimilarGroup[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
+  const [fit, setFit] = useState<"contain" | "cover">("contain");
   const readOnly = useWorkspace((state) => state.viewingEpisode !== null);
   const anchorId = useWorkspace((state) => state.anchorClipId);
   const sections = useMemo(() => buildPhotoSections(photos, groups, expandedGroups), [photos, groups, expandedGroups]);
@@ -28,7 +29,7 @@ export function PhotoGrid(): JSX.Element {
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const update = (width: number) => setColumns(Math.max(1, Math.min(4, Math.floor((width + 10) / 160))));
+    const update = (width: number) => setColumns(Math.max(1, Math.floor((width + 10) / 160)));
     update(viewport.clientWidth);
     const observer = new ResizeObserver((entries) => update(entries[0]?.contentRect.width ?? viewport.clientWidth));
     observer.observe(viewport);
@@ -96,8 +97,12 @@ export function PhotoGrid(): JSX.Element {
     selectFirstOnEntry: true,
   });
   return (
-    <section className="photo-ws-grid-pane" aria-label="照片网格">
-      <PaneHead title="照片网格" meta={`${photos.length} 张`} />
+    <section className="photo-ws-grid-pane" aria-label="照片网格" data-photo-fit={fit === "cover" ? "cover" : undefined}>
+      <PaneHead title="照片网格" meta={`${photos.length} 张`}>
+        <Button size="sm" variant="ghost" aria-label="照片适应/裁切" aria-pressed={fit === "cover"} onClick={() => setFit((current) => current === "contain" ? "cover" : "contain")}>
+          {fit === "cover" ? "裁切" : "适应"}
+        </Button>
+      </PaneHead>
       <div
         className="photo-ws-grid-scroll"
         ref={viewportRef}

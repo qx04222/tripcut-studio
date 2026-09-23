@@ -70,7 +70,7 @@ export function MonitorHeatStrip({ points, ranges, activeIndex, durationSeconds,
       <title>{label}</title>
       {bars}
       {blocks}
-      {position !== null ? <line className="monitor-heat-head" x1={x(position)} x2={x(position)} y1={0} y2={H} /> : null}
+      {position !== null ? <line className="monitor-heat-head" x1={position / durationSeconds * W} x2={position / durationSeconds * W} y1={0} y2={H} /> : null}
     </svg>
   );
 }

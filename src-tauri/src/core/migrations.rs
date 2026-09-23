@@ -1543,6 +1543,43 @@ CREATE TABLE archive_op_files (
 CREATE INDEX archive_ops_pending_idx ON archive_ops(status);
 "#;
 
+/// R25：逐行保留已有缓存，高清代理独立映射。
+pub const MIGRATION_0055: &str = r#"
+ALTER TABLE cache_artifacts RENAME TO cache_artifacts_before_0055;
+DROP INDEX cache_artifacts_source_idx;
+
+CREATE TABLE cache_artifacts (
+    id INTEGER PRIMARY KEY,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN (
+        'cover', 'strip', 'proxy', 'proxy_hq', 'waveform', 'transcript', 'srt'
+    )),
+    rel_path TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    bytes INTEGER NOT NULL CHECK(bytes >= 0),
+    created_at TEXT NOT NULL,
+    UNIQUE(clip_id, kind),
+    UNIQUE(rel_path)
+);
+
+INSERT INTO cache_artifacts(
+    id, clip_id, kind, rel_path, source_hash, bytes, created_at
+)
+SELECT id, clip_id, kind, rel_path, source_hash, bytes, created_at
+FROM cache_artifacts_before_0055;
+
+DROP TABLE cache_artifacts_before_0055;
+CREATE INDEX cache_artifacts_source_idx ON cache_artifacts(clip_id, source_hash);
+
+CREATE TABLE proxy_hq_time_map (
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    proxy_ts_ms INTEGER NOT NULL CHECK(proxy_ts_ms >= 0),
+    source_ticks INTEGER NOT NULL CHECK(source_ticks >= 0),
+    PRIMARY KEY(clip_id, proxy_ts_ms)
+);
+CREATE INDEX proxy_hq_time_map_source_idx ON proxy_hq_time_map(clip_id, source_ticks);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -1698,9 +1735,10 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 52, sql: MIGRATION_0052 },
     Migration { version: 53, sql: MIGRATION_0053 },
     Migration { version: 54, sql: MIGRATION_0054 },
+    Migration { version: 55, sql: MIGRATION_0055 },
 ];
 
-pub const LATEST_SCHEMA_VERSION: i64 = 54;
+pub const LATEST_SCHEMA_VERSION: i64 = 55;
 
 #[cfg(test)]
 mod tests {
@@ -1992,9 +2030,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_54() {
-        assert_eq!(LATEST_SCHEMA_VERSION, 54);
-        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 54);
+    fn schema_version_is_55() {
+        assert_eq!(LATEST_SCHEMA_VERSION, 55);
+        assert_eq!(MIGRATIONS.last().expect("至少一条迁移").version, 55);
     }
 
     /// R19 results 车道 P-03:0049 建 `auto_select_runs` 并给 `segments` 加 `auto_select_run_id`。

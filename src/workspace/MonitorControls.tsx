@@ -10,7 +10,7 @@ import { ActionKbd, useActionKey } from "./KeymapKbd";
 import { Button, Menu, Toggle, Toolbar } from "./ui";
 import { PLAYBACK_RATES, type PlaybackRate } from "./useMonitorTransport";
 import type { ClipSuggestionsState } from "./useClipSuggestions";
-import type { PlaythroughRange } from "./playthrough/model";
+import { playthroughReadout, type PlaythroughRange } from "./playthrough/model";
 
 export interface MonitorControlsProps {
   clip: ClipListItem;
@@ -199,7 +199,7 @@ export function MonitorControls({
 
         <span className="monitor-seek">
           <span className="monitor-timecode">
-            <EditableTimecode seconds={status?.pos ?? 0} fps={fps} duration={status?.duration ?? 0} disabled={!ready} onSeek={onSeek} />
+            <EditableTimecode seconds={playthrough ? playthroughReadout(playthrough, status?.pos ?? 0).position : status?.pos ?? 0} fps={fps} duration={status?.duration ?? 0} disabled={!ready} onSeek={onSeek} />
           </span>
           <MonitorSeekBar key={clip.id} fps={fps} onPause={onPause} onResume={onResume} onTrim={onTrim} onShuttle={onShuttle}
             onMark={edge => edge === "in" ? onMarkIn() : onMarkOut()} status={status} inPoint={inPoint} outPoint={outPoint} onSeek={onSeek} heat={heat} playthrough={playthrough} />

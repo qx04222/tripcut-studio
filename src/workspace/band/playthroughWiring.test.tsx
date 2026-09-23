@@ -93,3 +93,16 @@ it("拖边修剪的跟随 seek 带 band-trim 来源,不广播 manual-seek", asyn
   fireEvent.pointerCancel(handle, { pointerId: 2 });
   manual.off(); ratio.off();
 });
+
+it('001: clicking a shot requests the saved segment at its in-point even without a pointer ratio', async () => {
+  const request = listen('tripcut:select-segment');
+  await mount();
+  fireEvent.click(cells()[0]!);
+  expect(request.fn).toHaveBeenCalledTimes(1);
+  const detail = (request.fn.mock.calls[0]![0] as CustomEvent).detail;
+  expect(detail.segment.key).toBe('segment:101');
+  expect(detail.position).toBe(detail.segment.inPoint);
+  expect(detail.segment.outPoint).toBeGreaterThan(detail.segment.inPoint);
+  expect(detail.resume).toBe(false);
+  request.off();
+});

@@ -1,8 +1,9 @@
+import { requestSegmentSelection } from "./playthrough/selection";
 import { useCallback, useMemo, useState } from "react";
 
 import type { ClipListItem, Storyboard } from "../api";
 import { chapterOffsets, foldKey } from "./bandGeometry";
-import { pxToTime, seekRatioFor, timelineSpans, timelineTotalMs, type TimelineSpan } from "./bandTimeline";
+import { pxToTime, timelineSpans, timelineTotalMs, type TimelineSpan } from "./bandTimeline";
 import type { BandChapter, BandSegment } from "./shotBandModel";
 import { useBandPlayhead, type BandPlayhead } from "./useBandPlayhead";
 import { clipDurationSeconds, useBandTrim, type BandTrimApi } from "./useBandTrim";
@@ -62,36 +63,30 @@ export function useBandTimeline({
   const trim = useBandTrim(board, clipsById);
   const { requestSeek } = playhead;
 
-  const clipMs = useCallback(
-    (clipId: number) => {
-      const seconds = clipDurationSeconds(clipsById.get(clipId));
-      return seconds === null ? 0 : seconds * 1_000;
-    },
-    [clipsById],
-  );
-
-  const seekAtPx = useCallback(
-    (px: number) => {
-      const hit = pxToTime(spans, px);
-      if (!hit || hit.span.clipId === null) return;
-      const ratio = seekRatioFor(hit.span, hit.ratio, clipMs(hit.span.clipId));
-      if (hit.span.clipId !== selectedClipId) selectClip(hit.span.clipId);
-      if (clipsById.get(hit.span.clipId)?.kind === "photo") return;
-      if (ratio !== null) requestSeek(hit.span.clipId, ratio);
-    },
-    [spans, clipMs, selectedClipId, selectClip, requestSeek, clipsById],
-  );
-
   const seekInSegment = useCallback(
     (segment: BandSegment, ratio: number) => {
       if (segment.clipId === null || segment.mediaKind === "photo") return;
       const span = spans.find((candidate) => candidate.key === segment.key);
       if (!span) return;
-      const seekRatio = seekRatioFor(span, ratio, clipMs(segment.clipId));
-      if (seekRatio !== null) requestSeek(segment.clipId, seekRatio);
+      const inPoint = segment.inTicks * segment.tbNum / segment.tbDen;
+      const outPoint = segment.outTicks * segment.tbNum / segment.tbDen;
+      const clip = clipsById.get(segment.clipId);
+      const fps = clip?.fps_num && clip?.fps_den ? clip.fps_num / clip.fps_den : 30;
+      const position = inPoint + Math.min(1, Math.max(0, ratio)) * (outPoint - inPoint);
+      const handled = requestSegmentSelection({ key: segment.key, clipId: segment.clipId, inPoint, outPoint, fps, chapter: String(segment.chapterId ?? '') }, position);
+      if (!handled) selectClip(segment.clipId);
+
     },
-    [spans, clipMs, requestSeek],
+    [spans, clipsById, selectClip],
   );
+
+  const seekAtPx = useCallback((px: number) => {
+    const hit = pxToTime(spans, px);
+    if (!hit) return;
+    const segment = chapters.flatMap(chapter => chapter.segments).find(s => s.key === hit.span.key);
+    if (segment?.mediaKind === "photo" && segment.clipId !== null) selectClip(segment.clipId);
+    else if (segment) seekInSegment(segment, hit.ratio);
+  }, [spans, chapters, selectClip, seekInSegment]);
 
   const preview = (segment: BandSegment, seconds: number) => {
     if (segment.clipId === null) return;

@@ -54,13 +54,6 @@ export function AppearanceSection(): JSX.Element {
         <SettingsRow title="界面缩放" help="同步调整筛片、导入、交付与设置页的阅读尺度。">
           <Segmented options={SCALES} value={settings["appearance.ui_scale"] ?? "1.0"} onChange={(value) => void form.save("appearance.ui_scale", value)} />
         </SettingsRow>
-        <SettingsRow title="选中素材从最精彩处开播" help="按画面分析找到最精彩的时刻,选中素材时预览帧就停在那里;按空格才开始播。" align="end">
-          <Toggle
-            label="选中素材从最精彩处开播"
-            checked={readUiBool(settings, "ui.player.start_at_best")}
-            onChange={(next) => savePlayerPref("ui.player.start_at_best", next)}
-          />
-        </SettingsRow>
         <SettingsRow title="播完自动播下一条" help="按媒体池当前顺序接着播;到最后一条停下。监视器上的「连播」开关是同一个设置。" align="end">
           <Toggle
             label="播完自动播下一条"

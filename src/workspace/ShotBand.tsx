@@ -181,9 +181,9 @@ export function ShotBand(): JSX.Element {
       if (segment.kind === "slot" && segment.chapterId !== null && segment.slot !== null) {
         selectSlot(segment.chapterId, segment.slot);
       } else if (segment.clipId !== null) {
-        selectClip(segment.clipId);
+        if (segment.mediaKind === "photo") selectClip(segment.clipId);
         // R13 §4:点在镜块几分之几处就定位到本段的那一刻(整条素材 = 素材的那一刻)。
-        if (ratio !== undefined) seekInSegment(segment, ratio);
+        seekInSegment(segment, ratio ?? 0);
       }
       takesRef.current?.resetTakes();
       // 单键评级只认「事件目标就是容器本身」(useRatingHotkeys 的既有语义) ——

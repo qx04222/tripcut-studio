@@ -172,27 +172,27 @@ async function movePlayhead(seconds: number, paused = true): Promise<void> {
 }
 
 describe("R12 §5:点卡片 = 预览", () => {
-  it("素材一就绪先暂停(mpv 载入即播,不能让它跑),时刻分到齐后停在最精彩帧;全程没有 play", async () => {
+  it("新素材从零自动播放,时刻分到齐也不暂停或 seek", async () => {
     await renderInPane();
-    await waitFor(() => expect(commands()).toContainEqual({ type: "pause" }));
-    await waitFor(() => expect(commands()).toContainEqual({ type: "seek_abs", seconds: 20 }));
+    expect(commands()).not.toContainEqual({ type: "pause" });
+    expect(commands()).not.toContainEqual({ type: "seek_abs", seconds: 20 });
     // 暂停在 seek 之前:先停住再挪,画面不会先跑一段。
     const types = commands().map((cmd) => cmd.type);
-    expect(types.indexOf("pause")).toBeLessThan(types.indexOf("seek_abs"));
+    expect(liveStatus).toMatchObject({ pos: 0, paused: false });
     expect(types).not.toContain("play");
-    expect(screen.getByRole("button", { name: "播放" })).toBeTruthy();
-    // 空格才开播。
+    expect(screen.getByRole("button", { name: "暂停" })).toBeTruthy();
+    // 空格暂停。
     const region = screen.getByRole("region", { name: "预览监视器" });
     region.focus();
     fireEvent.keyDown(region, { key: " ", code: "Space" });
     await flush();
-    expect(commands().at(-1)).toEqual({ type: "play" });
+    expect(commands().at(-1)).toEqual({ type: "pause" });
   });
 
-  it("关掉「从最精彩处」只暂停在首帧,不 seek", async () => {
+  it("旧偏好关闭同样从零自动播放,不 seek", async () => {
     apiMocks.getSettings.mockResolvedValue({ "ui.player.start_at_best": "false" });
     await renderInPane();
-    await waitFor(() => expect(commands()).toContainEqual({ type: "pause" }));
+    expect(commands()).not.toContainEqual({ type: "pause" });
     await flush();
     expect(commands().filter((cmd) => cmd.type === "seek_abs")).toEqual([]);
   });
@@ -255,6 +255,8 @@ describe("R12 §5:原生真变速与逐帧", () => {
     nativeMpv();
     const region = await renderInPane();
     region.focus();
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await flush();
     const speed = screen.getByRole("button", { name: "播放速度" });
     expect(speed.textContent).toBe("×1");
     apiMocks.playerCommand.mockClear();
@@ -334,6 +336,8 @@ describe("R12 §5:原生真变速与逐帧", () => {
     liveStatus = { ...liveStatus, pos: 30 };
     const region = await renderInPane();
     region.focus();
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await flush();
     expect(screen.getByRole("button", { name: "播放" })).toBeTruthy();
     fireEvent.keyDown(region, { key: "j", code: "KeyJ" });
     await flush();
@@ -370,6 +374,8 @@ describe("R12 §5:原生真变速与逐帧", () => {
     nativeMpv();
     const region = await renderInPane();
     region.focus();
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await flush();
     apiMocks.playerCommand.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "播放速度" }));
     const menu = screen.getByRole("menu", { name: "播放速度" });
@@ -385,6 +391,8 @@ describe("R12 §5:原生真变速与逐帧", () => {
     nativeMpv();
     const region = await renderInPane();
     region.focus();
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await flush();
     fireEvent.keyDown(region, { key: "l", code: "KeyL" });
     await flush();
     fireEvent.keyDown(region, { key: "l", code: "KeyL" });

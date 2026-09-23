@@ -199,11 +199,11 @@ function commandsAfterOpen(clipId: number): Array<{ type: string; seconds?: numb
 async function letAPlayTo(seconds: number, paused: boolean): Promise<void> {
   // 先把 A 放起来(点卡片 = 预览:就绪先暂停,要用户开播)。
   const region = screen.getByRole("region", { name: "预览监视器" });
-  await waitFor(() => expect(commandsAfterOpen(9)).toContainEqual({ type: "pause" }));
+  expect(commandsAfterOpen(9)).not.toContainEqual({ type: "pause" });
   await flush();
   await flush();
   region.focus();
-  fireEvent.keyDown(region, { key: " ", code: "Space" });
+  if (live.paused) fireEvent.keyDown(region, { key: " ", code: "Space" });
   await flush();
   await waitFor(() => expect(live.paused).toBe(false));
   live = { ...live, pos: seconds };
@@ -224,7 +224,7 @@ async function selectB(): Promise<void> {
   });
   await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalledWith(10));
   // 等 B 就绪、预览暂停落地、时刻分到齐。
-  await waitFor(() => expect(commandsAfterOpen(10)).toContainEqual({ type: "pause" }));
+  expect(commandsAfterOpen(10)).not.toContainEqual({ type: "pause" });
   await flush();
   await flush();
   await act(async () => {
@@ -254,17 +254,17 @@ describe("R17 playfix:换素材从头开始", () => {
     expect(live.pos).toBe(0);
   });
 
-  it("开着「从最精彩处」(默认):切 B → seek 到 B 自己的最精彩处 5 s,不是 A 的 20 s,也不是 A 停住的 12.3 s", async () => {
+  it("开着「从最精彩处」(默认):切 B 仍从零自动播放,不继承建议或旧位置", async () => {
     await renderInPane();
-    await waitFor(() => expect(commandsAfterOpen(9)).toContainEqual({ type: "seek_abs", seconds: 20 }));
+    expect(commandsAfterOpen(9)).not.toContainEqual({ type: "seek_abs", seconds: 20 });
     await letAPlayTo(12.3, true);
     await selectB();
     const seeks = commandsAfterOpen(10).filter((cmd) => cmd.type === "seek_abs");
-    expect(seeks).toEqual([{ type: "seek_abs", seconds: 5 }]);
-    expect(live.pos).toBe(5);
+    expect(seeks).toEqual([]);
+    expect(live.pos).toBe(0);
   });
 
-  it("「连播」开着:A 播完自动接力到 B,B 也从头(seek 只有 B 自己的最精彩处)", async () => {
+  it("「连播」开着:A 播完自动接力到 B,B 也从零自动播放且无 seek", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     apiMocks.getSettings.mockResolvedValue({ "ui.player.auto_advance": "true" });
     await renderInPane();
@@ -285,18 +285,18 @@ describe("R17 playfix:换素材从头开始", () => {
     live = { ...live, paused: true };
     await waitFor(() => expect(getWorkspaceSnapshot().selection).toEqual({ kind: "clip", clipId: 10 }));
     await waitFor(() => expect(apiMocks.playerOpen).toHaveBeenCalledWith(10));
-    await waitFor(() => expect(commandsAfterOpen(10)).toContainEqual({ type: "pause" }));
+    expect(commandsAfterOpen(10)).not.toContainEqual({ type: "pause" });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     const seeks = commandsAfterOpen(10).filter((cmd) => cmd.type === "seek_abs");
-    expect(seeks.every((cmd) => cmd.seconds === 5)).toBe(true);
-    expect([0, 5]).toContain(live.pos);
+    expect(seeks).toEqual([]);
+    expect(live.pos).toBe(0);
   });
 });
 
-describe("R17 playfix:同一条素材再次 player_open(全屏来回)也要按「点卡片 = 预览」重来", () => {
-  it("A 播放中进全屏再退出:嵌入态重新 player_open(新实例从 0 开始、载入即播),就绪后必须再暂停一次、再停到最精彩处", async () => {
+describe("R17 playfix:同一条素材再次 player_open(全屏来回)也从零自动播放", () => {
+  it("A 播放中进全屏再退出:嵌入态重新 player_open(新实例从 0 开始、载入即播),就绪后保持从零自动播放", async () => {
     await renderInPane();
     await letAPlayTo(12.3, false);
     const opensBefore = apiMocks.playerOpen.mock.calls.length;
@@ -312,13 +312,39 @@ describe("R17 playfix:同一条素材再次 player_open(全屏来回)也要按�
     const at = log.map((entry, index) => (entry.kind === "open" ? index : -1)).filter((index) => index >= 0).at(-1)!;
     await waitFor(() => {
       const after = log.slice(at + 1).flatMap((entry) => (entry.kind === "cmd" ? [entry.type] : []));
-      expect(after).toContain("pause");
+      expect(after).not.toContain("pause");
     });
     await waitFor(() => {
       const after = log.slice(at + 1).flatMap((entry) => (entry.kind === "cmd" ? [entry] : []));
-      expect(after).toContainEqual(expect.objectContaining({ type: "seek_abs", seconds: 20 }));
+      expect(after).not.toContainEqual(expect.objectContaining({ type: "seek_abs", seconds: 20 }));
     });
-    expect(live.paused).toBe(true);
-    expect(live.pos).toBe(20);
+    expect(live.paused).toBe(false);
+    expect(live.pos).toBe(0);
   });
+});
+
+it('002: ten actual Monitor opens alternate long/short clips and suggestions; every first ready is playing at zero', async () => {
+  const clips = Array.from({ length: 10 }, (_, i) => ({ ...clipA, id: 9+i, duration_ticks: i % 2 ? 8000 : 200000 }));
+  const original = JSON.stringify(clips);
+  apiMocks.listClips.mockResolvedValue(clips);
+  apiMocks.getClipMoments.mockImplementation(async id => id % 2 ? momentsFor(id) : []);
+  apiMocks.playerOpen.mockImplementation(async (id: number) => {
+    log.push({ kind: 'open', clipId: id });
+    live = { ...closedStatus(), phase: 'ready', clip_id: id, duration: id % 2 ? 200 : 8, pos: 0, paused: false };
+    return { ...live };
+  });
+  await renderInPane();
+  for (const clip of clips) {
+    await act(async () => dispatchWorkspace({ type: 'select-clip', clipId: clip.id }));
+    await waitFor(() => expect(live.clip_id).toBe(clip.id));
+    await flush();
+    expect(live).toMatchObject({ pos: 0, paused: false });
+    expect(commandsAfterOpen(clip.id).filter(c => ['pause', 'seek_abs', 'set_end'].includes(c.type))).toEqual([]);
+    expect(screen.getByRole('button', { name: '暂停' })).toBeTruthy();
+    expect(screen.getByRole('slider', { name: '播放位置' }).getAttribute('aria-valuenow')).toBe('0');
+    expect(screen.getByLabelText('当前时间码').getAttribute('title')).toBe('00:00:00.000');
+  }
+  expect(apiMocks.playerOpen).toHaveBeenCalledTimes(10);
+  expect(apiMocks.createSelectSegment).not.toHaveBeenCalled();
+  expect(JSON.stringify(clips)).toBe(original);
 });

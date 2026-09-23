@@ -31,6 +31,7 @@ export const UI_SETTING_DEFAULTS = {
   "ui.player.start_at_best": "true",
   "ui.player.auto_advance": "false",
   "ui.player.muted": "false",
+  "ui.player.scrubber_view": "full",
   // R11 车道 E:快速导出上次用的文件夹(空串 = 还没选过;首次或目录不可用时弹一次文件夹面板)。
   "ui.export.last_dir": "",
   // R11 简化专项:首启三步引导「看过了」(库里一有素材或点关闭就写 true)。

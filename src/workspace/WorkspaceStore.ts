@@ -1,3 +1,4 @@
+import { MATERIAL_MODE_EVENT } from "./playthrough/selection";
 import { useSyncExternalStore } from "react";
 import type { ClipDimensionKey, SettingsMap } from "../api";
 import type { SettingsSectionId } from "../settingsSections";
@@ -76,6 +77,7 @@ export type WorkspaceAction =
   | { type: "set-workspace-mode"; mode: WorkspaceMode }
   | {
       type: "select-clip";
+      source?: "segment";
       clipId: number;
       shift?: boolean;
       meta?: boolean;
@@ -410,6 +412,7 @@ export function subscribeWorkspace(listener: () => void): () => void {
 }
 
 export function dispatchWorkspace(action: WorkspaceAction): void {
+  if (action.type === "select-clip" && action.source !== "segment") window.dispatchEvent(new Event(MATERIAL_MODE_EVENT));
   const next = workspaceReducer(state, action);
   if (next === state) return;
   const pairs = persistedPairs(state, next);

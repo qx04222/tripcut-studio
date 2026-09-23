@@ -1,3 +1,4 @@
+import { PreviewSourceBadge } from "./workspace/PreviewSourceBadge";
 import {
   useCallback,
   useEffect,
@@ -282,6 +283,8 @@ export function PlayerOverlay({
     void Promise.resolve().then(async () => {
       if (!active || replayOpen.current !== request) return;
       replayOpen.current = null;
+      if (request.outPoint !== undefined) await playerCommand({ type: "set_end", seconds: request.outPoint }, request.clipId);
+      if (!active) return;
       await playerCommand({ type: "play" }, request.clipId);
       const next = await playerStatus();
       if (active) setStatus(next);
@@ -769,6 +772,7 @@ export function PlayerOverlay({
             <small>{segmentNotice ?? `${segments.length} 段已保存`}</small>
           </div>
           <div className="player-clip-meta">
+            <PreviewSourceBadge status={status} />
             <strong title={clip.file_name}>{clip.file_name}</strong>
             <span>
               {frameLabel(status, fps)}

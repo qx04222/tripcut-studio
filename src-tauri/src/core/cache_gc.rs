@@ -200,7 +200,7 @@ pub struct StaleSweep {
 }
 
 /// 「多久没用就自动清掉」:把 `days` 天没再被读写过的预览小文件删掉,连同它在
-/// `cache_artifacts` 里的行。只碰 `kind='proxy'` —— 这是唯一一类「删了会自动重建、
+/// `cache_artifacts` 里的行。只碰 `proxy` / `proxy_hq` —— 这两种都是「删了会自动重建、
 /// 删了也不影响任何已有判断」的缓存;封面、指纹这些删掉会让界面出现空白格。
 ///
 /// 判据用文件自己的 mtime(`enforce_proxy_cache_limit` 用的也是它当「最近播过」),
@@ -219,7 +219,7 @@ pub fn sweep_stale_proxies(
     let max_age = std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60);
     let stale: Vec<(i64, String, u64)> = {
         let mut statement = connection
-            .prepare("SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind = 'proxy'")?;
+            .prepare("SELECT clip_id, rel_path, bytes FROM cache_artifacts WHERE kind IN ('proxy','proxy_hq')")?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u64))
         })?;
@@ -239,9 +239,13 @@ pub fn sweep_stale_proxies(
             std::fs::remove_file(&path).map_err(CoreError::Io)?;
         }
         connection.execute(
-            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND kind = 'proxy' AND rel_path = ?2",
+            "DELETE FROM cache_artifacts WHERE clip_id = ?1 AND kind IN ('proxy','proxy_hq') AND rel_path = ?2",
             rusqlite::params![clip_id, rel_path],
         )?;
+        connection.execute("DELETE FROM proxy_time_map WHERE clip_id=?1 AND NOT EXISTS
+            (SELECT 1 FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy')", [clip_id])?;
+        connection.execute("DELETE FROM proxy_hq_time_map WHERE clip_id=?1 AND NOT EXISTS
+            (SELECT 1 FROM cache_artifacts WHERE clip_id=?1 AND kind='proxy_hq')", [clip_id])?;
         report.removed += 1;
         report.bytes = report.bytes.saturating_add(bytes);
     }

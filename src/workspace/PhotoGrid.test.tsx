@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ClipListItem, SimilarGroup } from "../api";
 const api = vi.hoisted(() => ({
   primaryId: 10,
   listSimilarGroups: vi.fn(),
@@ -13,6 +14,7 @@ const feedState = vi.hoisted(() => ({ current: {} as Record<string, unknown> }))
 vi.mock("./useClipsFeed", () => ({ useClipsFeed: () => feedState.current, refreshClipsFeed: vi.fn(async () => undefined), patchClipInFeed: vi.fn() }));
 import { photoFixture } from "./photoTestFixtures";
 import { PhotoGrid } from "./PhotoGrid";
+import { buildPhotoGridStressFixtures } from "../devMock/photoFixtures";
 import { PhotoMonitor } from "./PhotoMonitor";
 import { OPEN_DUEL } from "./duel/duelBus";
 import { __resetPoolOrderForTests, getPoolOrder } from "./poolOrder";
@@ -63,6 +65,61 @@ afterEach(() => { cleanup(); globalThis.ResizeObserver = NativeResizeObserver; }
 function resizeGrid(width: number): void {
   act(() => resizeCallback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver));
 }
+
+it("宽网格突破四列上限，缩窄后仍至少保留一列", async () => {
+  render(<PhotoGrid />);
+  await waitFor(() => expect(getPoolOrder()).toEqual([10, 12, 13, 14, 15]));
+  const grid = screen.getByRole("grid", { name: "照片网格" });
+  resizeGrid(1600);
+  expect(Number(grid.getAttribute("aria-colcount"))).toBeGreaterThan(4);
+  resizeGrid(90);
+  expect(grid.getAttribute("aria-colcount")).toBe("1");
+});
+
+it("照片默认适应，裁切按钮切换状态与网格属性后可切回", async () => {
+  render(<PhotoGrid />);
+  await waitFor(() => expect(getPoolOrder()).toEqual([10, 12, 13, 14, 15]));
+  const button = screen.getByRole("button", { name: "照片适应/裁切" });
+  const pane = screen.getByRole("region", { name: "照片网格" });
+  expect(button.getAttribute("aria-pressed")).toBe("false");
+  expect(button.textContent).toBe("适应");
+  expect(pane.hasAttribute("data-photo-fit")).toBe(false);
+  fireEvent.click(button);
+  expect(button.getAttribute("aria-pressed")).toBe("true");
+  expect(button.textContent).toBe("裁切");
+  expect(pane.getAttribute("data-photo-fit")).toBe("cover");
+  fireEvent.click(button);
+  expect(button.getAttribute("aria-pressed")).toBe("false");
+  expect(button.textContent).toBe("适应");
+  expect(pane.hasAttribute("data-photo-fit")).toBe(false);
+});
+
+it("压力夹具覆盖真实预览比例，三张相似组折叠为独立单卡片日期行", async () => {
+  const clips = buildPhotoGridStressFixtures(photoFixture);
+  expect(clips.map((clip) => clip.id)).toEqual([210, 211, 212, 213, 214, 215, 216, 217, 218]);
+  expect(new Set(clips.map((clip) => `${clip.width}x${clip.height}`))).toEqual(new Set([
+    "3840x2160", "7680x4320", "5712x4284", "4032x3024", "1080x1920", "2160x2160",
+  ]));
+  for (const clip of clips) {
+    const svg = new DOMParser().parseFromString(decodeURIComponent(clip.cover_url!.split(",")[1]!), "image/svg+xml").documentElement;
+    expect(Number(svg.getAttribute("width")) / Number(svg.getAttribute("height"))).toBeCloseTo(clip.width! / clip.height!, 2);
+    if (clip.orientation === "portrait") {
+      expect(clip.photo).toMatchObject({ width: 1920, height: 1080, orientation: 6 });
+    }
+  }
+  feedState.current = { clips, clipsById: new Map(clips.map((clip) => [clip.id!, clip])), shotStackByClipId: new Map(), gaps: [], loading: false };
+  api.listSimilarGroups.mockResolvedValueOnce([{ id: 9025, min_similarity: 0.97, members: clips.slice(0, 3).map((clip, index) => ({ clip_id: clip.id!, is_primary: index === 0 })) }]);
+  render(<PhotoGrid />);
+  const expand = await screen.findByRole("button", { name: "展开相似组 3 张" });
+  resizeGrid(650);
+  expect(screen.getAllByRole("gridcell")).toHaveLength(7);
+  const dateGroup = screen.getAllByRole("rowgroup")[0]!;
+  expect(within(dateGroup).getAllByRole("row")).toHaveLength(1);
+  expect(within(dateGroup).getAllByRole("gridcell")).toHaveLength(1);
+  expect(within(screen.getByRole("rowgroup", { name: "时间未知" })).getAllByRole("gridcell")).toHaveLength(1);
+  fireEvent.click(expand);
+  expect(screen.getAllByRole("gridcell")).toHaveLength(9);
+});
 
 it("折叠相似组后把可见代表顺序交给照片监视器，且 AX 不嵌套 gridcell", async () => {
   render(<PhotoGrid />);
@@ -208,4 +265,27 @@ it("历史集只读时仍可方向与确认键浏览，但禁用擂台与评级�
   act(() => fireEvent.keyDown(document.getElementById("pool-clip-12")!, { key: "4", code: "Digit4" }));
   expect(api.rateClip).not.toHaveBeenCalled();
   expect(api.clearClipRating).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["", 0, false],
+  ["?photostress=1", 9, true],
+  ["?photos=1", 7, false],
+  ["?photos=1&photostress=1", 16, true],
+] as const)("mock 路由 %s 只在显式启用时追加压力照片与相似组", async (search, count, stress) => {
+  vi.resetModules();
+  vi.stubGlobal("location", { search });
+  try {
+    const { handleMockCommand, PHOTO_CLIPS_R21, PHOTO_RAW_CLIP_R21 } = await import("../devMock/fixture");
+    const clips = handleMockCommand("list_clips", {}) as ClipListItem[];
+    const groups = handleMockCommand("list_similar_groups", {}) as SimilarGroup[];
+    expect(clips.filter((clip) => clip.kind === "photo")).toHaveLength(count);
+    expect(clips.filter((clip) => clip.id! >= 210 && clip.id! <= 218)).toHaveLength(stress ? 9 : 0);
+    expect(groups.find((group) => group.id === 9025)?.members.map((member) => member.clip_id)).toEqual(stress ? [210, 211, 212] : undefined);
+    expect(PHOTO_CLIPS_R21.map((clip) => clip.id)).toEqual([201, 202, 203, 204, 205, 206]);
+    expect(PHOTO_RAW_CLIP_R21.id).toBe(207);
+  } finally {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  }
 });

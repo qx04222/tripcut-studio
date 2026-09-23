@@ -175,3 +175,24 @@ describe("R17 playfix:嵌入通道只属于已打开的那条素材", () => {
     expect(sent()).toEqual([{ type: "pause" }]);
   });
 });
+
+it('002: A → B → C fast switching ignores late A/B open results; only C publishes playing at zero', async () => {
+  const a = deferred<PlayerStatus>(), b = deferred<PlayerStatus>(), c = deferred<PlayerStatus>();
+  apiMocks.playerOpen.mockImplementation((id: number) => id === 9 ? a.promise : id === 10 ? b.promise : c.promise);
+  const controlsRef: { current: EmbeddedPlayerControls | null } = { current: null };
+  const root = await mount(clipA, controlsRef);
+  const observed: PlayerStatus[] = [];
+  const observe = (s: PlayerStatus | null) => { if (s?.phase === 'ready') observed.push(s); };
+  await act(async () => root.render(<PlayerOverlay clip={clipB} variant="embedded" onExit={() => {}} controlsRef={controlsRef} onStatusChange={observe} />));
+  await flush();
+  await act(async () => root.render(<PlayerOverlay clip={{ ...clipB, id: 11 }} variant="embedded" onExit={() => {}} controlsRef={controlsRef} onStatusChange={observe} />));
+  await flush();
+  await act(async () => { c.resolve({ ...readyA, clip_id: 11, pos: 0, paused: false }); });
+  await flush();
+  await act(async () => { b.resolve({ ...readyA, clip_id: 10, pos: 99 }); a.resolve({ ...readyA, pos: 88 }); });
+  await flush();
+  expect(apiMocks.playerOpen.mock.calls).toEqual([[9], [10], [11]]);
+  expect(observed.length).toBeGreaterThan(0);
+  expect(observed.every(s => s.clip_id === 11 && s.pos === 0 && !s.paused)).toBe(true);
+  expect(sent()).toEqual([]);
+});

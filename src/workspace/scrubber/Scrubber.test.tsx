@@ -1,3 +1,4 @@
+import { __resetPlayerPrefsForTests, getPlayerPrefs } from "../playerPrefs";
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -5,7 +6,7 @@ import type { PlayerStatus } from "../../api";
 import { Scrubber } from "./Scrubber";
 import { EditableTimecode } from "./EditableTimecode";
 const status = { phase: "ready", clip_id: 9, pos: 3, duration: 60, paused: true } as PlayerStatus;
-beforeEach(() => { vi.useFakeTimers(); vi.stubGlobal("PointerEvent", MouseEvent); localStorage.clear(); });
+beforeEach(() => { vi.useFakeTimers(); vi.stubGlobal("PointerEvent", MouseEvent); localStorage.clear(); __resetPlayerPrefsForTests(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 function setup(extra = {}) {
   const onSeek = vi.fn(); const onPause = vi.fn(async () => {}); const onResume = vi.fn(); const onTrim = vi.fn();
@@ -50,11 +51,11 @@ it("pauses a playing clip before seeking and resumes only on release", async () 
   expect(onSeek).toHaveBeenLastCalledWith(30);
   expect(onResume).toHaveBeenCalledOnce();
 });
-it("zoom defaults to segment and remembers full range; handles clamp", () => {
+it("defaults to full and persists zoom via settings; handles clamp", () => {
   const { onTrim } = setup({ inPoint: 10, outPoint: 20 });
-  expect(screen.getByRole("button", { name: "切换进度条范围" }).textContent).toBe("片段");
+  expect(screen.getByRole("button", { name: "切换进度条范围" }).textContent).toBe("完整素材");
   fireEvent.click(screen.getByRole("button", { name: "切换进度条范围" }));
-  expect(localStorage.getItem("tripcut.scrubber.range")).toBe("full");
+  expect(getPlayerPrefs().scrubberView).toBe("zoom");
   const handle = screen.getByRole("slider", { name: "入点" });
   fireEvent.keyDown(handle, { key: "End" });
   expect(onTrim).toHaveBeenLastCalledWith("in", 19.96);

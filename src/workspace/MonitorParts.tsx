@@ -56,7 +56,7 @@ export function IoRail({
         ) : null}
         {inPoint !== null ? <span className="monitor-io-mark monitor-io-mark--in" style={{ left: pct(inPoint) }} /> : null}
         {outPoint !== null ? <span className="monitor-io-mark monitor-io-mark--out" style={{ left: pct(outPoint) }} /> : null}
-        <span className="monitor-io-head" style={{ left: pct(status.pos) }} />
+        <span className="monitor-io-head" style={{ left: `${status.pos / status.duration * 100}%` }} />
       </div>
     </div>
   );

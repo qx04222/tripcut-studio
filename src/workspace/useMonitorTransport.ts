@@ -1,3 +1,4 @@
+import { getActiveSelection } from "./playthrough/selection";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ClipListItem, PlayerCommand, PlayerStatus } from "../api";
@@ -38,10 +39,10 @@ export interface MonitorTransportDeps {
   send(commands: PlayerCommand[]): Promise<void>;
   inPoint: number | null;
   outPoint: number | null;
-  /** 最高分时刻(秒);素材一就绪预览帧就停在这里(设置 `ui.player.start_at_best`)。 */
-  bestStart: number | null;
-  /** 时刻分已经拉完(成功或失败)—— 没到齐之前不决定从哪开播。 */
-  momentsLoaded: boolean;
+  /** 兼容旧调用方;建议不参与打开位置。 */
+  bestStart?: number | null;
+  /** 兼容旧调用方;不等待分析结果。 */
+  momentsLoaded?: boolean;
   playthroughActive?: boolean;
   openAt?: number | null;
 }
@@ -60,7 +61,7 @@ export interface MonitorTransport {
   play(): Promise<void>;
   gesturePause(): Promise<void>;
   gestureResume(): Promise<void>;
-  /** 显式开播:解除手势等待并撤围栏,供播放按钮拼接回头 seek。 */
+  /** 显式开播:解除手势等待;活动选段保留围栏并在出点回到入点。 */
   userPlayCommands(): PlayerCommand[];
   pause(): Promise<void>;
   /**
@@ -101,9 +102,9 @@ export interface MonitorTransport {
  * - ⇧L 循环 = 播放头越过出点就回入点(保存后由监视器调 stopLoop);
  * - 播完自动下一条(「连播」,默认关)= 顺媒体池当前可见顺序,末尾停;循环中不跳;
  * - 静音记忆 = `ui.player.muted`,素材就绪时补发一次 set_mute;
- * - 点卡片 = 预览(R12 §5):素材就绪先暂停,时刻分到齐后停在最高分时刻(每条素材只做一次)。
+ * - 素材打开从 0 自动播放;建议仅作为绿框和 I/O 候选。
  */
-export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bestStart, momentsLoaded, playthroughActive = false, openAt = null }: MonitorTransportDeps): MonitorTransport {
+export function useMonitorTransport({ clip, status, send, inPoint, outPoint, playthroughActive = false }: MonitorTransportDeps): MonitorTransport {
   const prefs = usePlayerPrefs();
   const [rate, setRateState] = useState<PlaybackRate>(1);
   const [rewinding, setRewinding] = useState(false);
@@ -157,9 +158,10 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   }, []);
   const seekTo = useCallback(
     async (seconds: number, options?: { source: "playthrough" | "band-trim" }) => {
+      const wasArmed = fence.current !== null || getActiveSelection() !== null;
       // 无来源 = 人工 seek(连播停);playthrough = 连播自己的;band-trim = 镜头带拖边修剪的跟随(连播挂起,见 playthrough/store)。
       if (options?.source === "band-trim") window.dispatchEvent(new Event("tripcut:trim-seek"));
-      else if (options?.source !== "playthrough") window.dispatchEvent(new Event("tripcut:manual-seek"));
+      else if (options?.source !== "playthrough") window.dispatchEvent(new CustomEvent("tripcut:manual-seek", { detail: { seconds } }));
       const current = readyStatus();
       if (!current) return false;
       const target = Math.min(current.duration, Math.max(0, seconds));
@@ -168,11 +170,13 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       // 引起释放的那一下点击自己就带一次跟随 seek(⌘ 点镜块 = 多选 + seek 到卡片上那个点),
       // 真机实测它会把播放头甩进别的镜头范围再自由播到片尾 59.96 —— 报告 §9 不许出现的未选帧。
       // 释放之后任何一次 seek 都不自动开播,要用户自己按播放。
-      const armed = fence.current !== null;
+      const selected = getActiveSelection();
+      const inside = selected?.clipId === current.clip_id && target >= selected.inPoint && target < selected.outPoint;
+      const armed = wasArmed;
       if (armed && options?.source !== "playthrough") awaitingUserPlay.current = true;
       const commands: PlayerCommand[] = options?.source === "playthrough"
         ? [{ type: "seek_abs", seconds: target }]
-        : [...fenceCommands(), { type: "seek_abs", seconds: target }, ...(armed ? [{ type: "pause" as const }] : [])];
+        : [...(inside && options?.source !== "band-trim" ? [] : fenceCommands()), { type: "seek_abs", seconds: target }, ...(armed ? [{ type: "pause" as const }] : [])];
       await sendAnchored(commands, target);
       return true;
     },
@@ -181,8 +185,14 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
 
   const userPlayCommands = useCallback(() => {
     awaitingUserPlay.current = false;
+    const selected = getActiveSelection();
+    const current = readyStatus();
+    if (selected && current?.clip_id === selected.clipId) {
+      fence.current = selected.outPoint;
+      return [...(current.pos >= selected.outPoint - 2 / clipFps(clip) ? [{ type: "seek_abs" as const, seconds: selected.inPoint }] : []), { type: "set_end" as const, seconds: selected.outPoint }];
+    }
     return fenceCommands();
-  }, [fenceCommands]);
+  }, [fenceCommands, readyStatus, clip]);
   const play = useCallback(async () => {
     if (!readyStatus()) return;
     awaitingUserPlay.current = false;
@@ -240,10 +250,10 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     setRewinding(false);
     setRateState(next);
     mpvRate.current = next;
-    // L / 速度菜单 = 人工开播:撤掉连播释放时留下的出点围栏,从这里起自由播。
+    // L / 速度菜单同样尊重活动选段,出点重播仍在围栏内。
     const commands: PlayerCommand[] = [...userPlayCommands(), { type: "set_speed", speed: next }];
     if (current.paused) {
-      if (isAtEnd(current)) commands.push({ type: "seek_abs", seconds: 0 });
+      if (isAtEnd(current) && !getActiveSelection()) commands.push({ type: "seek_abs", seconds: 0 });
       commands.push({ type: "play" });
     }
     void latest.current.send(commands);
@@ -279,12 +289,14 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
   // 逐帧走原生 frame-step / frame-back-step:mpv 自己暂停、自己算下一帧的位置,不再按
   // pos ± 1/fps 发 seek(V-04 的算错位置从根上没了);读数由通道等到位置变了再交出去。
   const frame = useCallback((direction: 1 | -1) => {
-    window.dispatchEvent(new Event("tripcut:manual-seek"));
-    if (!readyStatus()) return;
+    const current = readyStatus();
+    if (!current) return;
+    const target = current.pos + direction / fps;
+    window.dispatchEvent(new CustomEvent("tripcut:manual-seek", { detail: { seconds: target } }));
     setRewinding(false);
     anchor.current = null;
-    void latest.current.send([...fenceCommands(), { type: direction > 0 ? "step_fwd" : "step_back" }]);
-  }, [readyStatus, fenceCommands]);
+    void latest.current.send([...(getActiveSelection() ? [] : fenceCommands()), { type: direction > 0 ? "step_fwd" : "step_back" }]);
+  }, [readyStatus, fenceCommands, fps]);
 
   const nudge = useCallback(
     (seconds: number) => {
@@ -354,7 +366,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
       seenMidClipFor.current = clipId;
       return;
     }
-    if (playthroughActive || looping || !prefs.autoAdvance || seenMidClipFor.current !== clipId) return;
+    if (getActiveSelection() || playthroughActive || looping || !prefs.autoAdvance || seenMidClipFor.current !== clipId) return;
     if (Date.now() - manualSelectionAt.current < AUTO_ADVANCE_SUPPRESS_MS) return;
     if (advancedFor.current === clipId) return;
     advancedFor.current = clipId;
@@ -364,40 +376,24 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
     dispatchWorkspace({ type: "select-clip", clipId: next });
   }, [ready, clipId, status, looping, prefs.autoAdvance, playthroughActive]);
 
-  // R12 §5:点卡片 = 预览。mpv 载入即播(player_open 把 pause 翻成 false),素材一就绪
-  // 先把它停住 —— 不等时刻分,等一拍画面就跑起来了;静音记忆也在这一拍补发。
-  const pausedFor = useRef<number | null>(null);
+  // 普通 open 已由原生层从 0 自动播放;就绪只恢复静音和速度,不暂停、不 seek。
   const preparedFor = useRef<number | null>(null);
-  // R17 playfix:「每条素材只做一次」按的是一次 player_open,不是 clipId —— 全屏来回会把同一条
-  // 素材再开一个新实例(从 0 开始、载入即播)。播放器一离开这条的就绪态(换源 / 重开 / 出错)
-  // 就把两枚旗子放掉,下次就绪再暂停、再停到最精彩处。
+  const appliedMute = useRef<boolean | null>(null);
+  useEffect(() => { if (!ready) { preparedFor.current = null; appliedMute.current = null; } }, [ready]);
   useEffect(() => {
-    if (ready) return;
-    pausedFor.current = null;
-    preparedFor.current = null;
-  }, [ready]);
-  useEffect(() => {
-    if (!ready || clipId === null || pausedFor.current === clipId) return;
-    pausedFor.current = clipId;
-    const commands: PlayerCommand[] = [{ type: "pause" }];
-    if (prefs.muted) commands.push({ type: "set_mute", muted: true });
-    if (mpvRate.current !== 1) {
+    if (!ready || clipId === null) return;
+    const first = preparedFor.current !== clipId;
+    if (!first && appliedMute.current === prefs.muted) return;
+    preparedFor.current = clipId;
+    appliedMute.current = prefs.muted;
+    const commands: PlayerCommand[] = [];
+    if (prefs.muted || !first) commands.push({ type: "set_mute", muted: prefs.muted });
+    if (first && mpvRate.current !== 1) {
       mpvRate.current = 1;
       commands.push({ type: "set_speed", speed: 1 });
     }
-    void send(commands);
+    if (commands.length) void send(commands);
   }, [ready, clipId, prefs.muted, send]);
-
-  // 「从最精彩处」:时刻分到齐后把预览帧停在最高分时刻(每条素材只做一次);
-  // 拉失败的素材 bestStart 是 null,停在首帧。开播仍由用户按空格 / 点播放。
-  useEffect(() => {
-    if (!ready || clipId === null || preparedFor.current === clipId) return;
-    if (playthroughActive || openAt !== null) { preparedFor.current = clipId; return; }
-    if (!prefs.startAtBest) return;
-    if (!momentsLoaded) return;
-    preparedFor.current = clipId;
-    if (bestStart !== null && bestStart > 0) void send([{ type: "seek_abs", seconds: bestStart }]);
-  }, [ready, clipId, prefs.startAtBest, bestStart, momentsLoaded, send, playthroughActive, openAt]);
 
   const toggleAutoAdvance = useCallback(() => {
     void writePlayerPref("ui.player.auto_advance", !prefs.autoAdvance);
@@ -405,6 +401,7 @@ export function useMonitorTransport({ clip, status, send, inPoint, outPoint, bes
 
   const toggleMute = useCallback(() => {
     const next = !prefs.muted;
+    appliedMute.current = next;
     void writePlayerPref("ui.player.muted", next);
     void latest.current.send([{ type: "set_mute", muted: next }]);
   }, [prefs.muted]);

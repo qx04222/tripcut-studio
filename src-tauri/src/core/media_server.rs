@@ -228,7 +228,7 @@ fn is_cache_artifact_path(path: &Path) -> bool {
         components.next(),
         Some(Component::Normal(value))
             if value.to_str().is_some_and(|name| {
-                matches!(name, "cover.jpg" | "cover.png" | "preview.jpg" | "preview.png" | "strip.jpg" | "proxy.mp4" | "waveform.json")
+                matches!(name, "cover.jpg" | "cover.png" | "preview.jpg" | "preview.png" | "strip.jpg" | "proxy.mp4" | "proxy_1080.mp4" | "waveform.json")
                     || super::scrubber_frames::is_frame_name(name)
             })
     );
