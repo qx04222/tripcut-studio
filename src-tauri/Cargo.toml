@@ -102,7 +102,7 @@ tracing = "=0.1.44"
 # R18 M-03:让 123 个 tracing 调用点真的落盘。只开 fmt + ansi 之外的最小特性集——
 # 不开 env-filter(它会拉 regex),级别用 TRIPCUT_LOG 自己解析成 LevelFilter。
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
-tracing-appender = "=0.2.3"
+tracing-appender = "=0.2.5"
 ttf-parser = "=0.25.1"
 # 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
 # url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
