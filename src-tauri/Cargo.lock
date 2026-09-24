@@ -2546,6 +2546,33 @@ dependencies = [
  "aes",
  "bitflags 2.13.1",
  "cbc",
+ "ecb",
+ "encoding_rs",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap 2.14.1",
+ "itoa",
+ "log",
+ "md-5",
+ "nom",
+ "rand 0.10.2",
+ "rangemap",
+ "sha2 0.11.0",
+ "stringprep",
+ "thiserror 2.0.20",
+ "weezl",
+]
+
+[[package]]
+name = "lopdf"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfffda0fe1ab0157e1a13c14bebd3f28671f2fccb7922f0722ec53926e6922d3"
+dependencies = [
+ "aes",
+ "bitflags 2.13.1",
+ "brotli-decompressor",
+ "cbc",
  "chrono",
  "ecb",
  "encoding_rs",
@@ -2553,7 +2580,6 @@ dependencies = [
  "getrandom 0.4.3",
  "indexmap 2.14.1",
  "itoa",
- "jiff",
  "log",
  "md-5",
  "nom",
@@ -2563,7 +2589,6 @@ dependencies = [
  "sha2 0.11.0",
  "stringprep",
  "thiserror 2.0.20",
- "time",
  "weezl",
 ]
 
@@ -3398,7 +3423,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "image",
- "lopdf",
+ "lopdf 0.44.0",
  "serde",
  "serde_derive",
  "serde_json",
@@ -5493,7 +5518,7 @@ dependencies = [
  "image_hasher",
  "libc",
  "libmpv2",
- "lopdf",
+ "lopdf 0.45.0",
  "notify-rust",
  "objc2",
  "objc2-app-kit",

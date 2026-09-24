@@ -37,7 +37,7 @@ blake3 = "=1.8.7"
 sha2 = "0.11"
 libc = "=0.2.189"
 libmpv2 = "=6.0.0"
-lopdf = "=0.44.0"
+lopdf = "=0.45.0"
 objc2 = "=0.6.4"
 # block2 pinned alongside objc2/objc2-foundation: R6 Task 4 睡眠唤醒订阅用
 # `NSNotificationCenter addObserverForName:object:queue:usingBlock:`,该
