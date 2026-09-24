@@ -15,7 +15,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 [dependencies]
 # R21 photo-core: macOS ImageIO + future photo similarity hashing.
 objc2-image-io = { version = "=0.3.2", default-features = false, features = ["std", "CGImageSource", "CGImageProperties", "CGImageDestination", "objc2-core-graphics"] }
-image_hasher = "=3.0.0"
+image_hasher = "=3.1.1"
 # 三者早已在依赖树里(objc2 家族 / image 0.25.10 由 reqwest 等间接带入),这里只是提升为
 # 直接依赖以便按名导入;版本与 Cargo.lock 既有条目完全一致,不引入新包。
 objc2-core-foundation = "=0.3.2"
