@@ -85,7 +85,7 @@ rfd = "=0.17.2"
 # Read + 后台线程 + mpsc 逐块卡死检测(见 core/minimax.rs 的
 # `download`/`TempFileGuard`),不再调用 bytes_stream/wrap_stream——全仓
 # grep 确认没有别处用到,已去掉这个 feature。
-reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "blocking"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "blocking"] }
 # R7 Task 4：Retry-After 头的 RFC 1123 HTTP-date 形式解析。已经是
 # hyper 的传递依赖(Cargo.lock 锁定 1.0.3),这里显式声明成直接依赖才能在
 # core/minimax.rs 里 `use httpdate::parse_http_date`。
