@@ -10,12 +10,12 @@ name = "tripcut_studio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "=2.6.3", features = [] }
+tauri-build = { version = "=2.7.4", features = [] }
 
 [dependencies]
 # R21 photo-core: macOS ImageIO + future photo similarity hashing.
 objc2-image-io = { version = "=0.3.2", default-features = false, features = ["std", "CGImageSource", "CGImageProperties", "CGImageDestination", "objc2-core-graphics"] }
-image_hasher = "=3.0.0"
+image_hasher = "=3.1.1"
 # 三者早已在依赖树里(objc2 家族 / image 0.25.10 由 reqwest 等间接带入),这里只是提升为
 # 直接依赖以便按名导入;版本与 Cargo.lock 既有条目完全一致,不引入新包。
 objc2-core-foundation = "=0.3.2"
@@ -28,14 +28,14 @@ tauri-plugin-dialog = "2"
 base64 = "=0.23.1"
 # 应用内自动更新(R6 Task 1)。=2.11.0 是与 tauri =2.11.5 兼容的最新版
 # (2.10+ 要求 tauri ^2.10);process 用于更新装好后重启进程(=2.3.1 要求 tauri ^2.8.2)。
-tauri-plugin-process = "=2.3.1"
-tauri-plugin-updater = "=2.11.0"
+tauri-plugin-process = "=2.4.0"
+tauri-plugin-updater = "=2.14.0"
 axum = { version = "=0.8.9", features = ["http1", "tokio"] }
 blake3 = "=1.8.7"
 # R10 U-24:导入 Whisper 模型文件前校验 SHA-256(官方 Hugging Face LFS 的 oid 就是
 # SHA-256)。=0.10.9 已经是 Cargo.lock 里锁定的传递版本,这里只是提升为直接依赖。
 sha2 = "0.11"
-libc = "=0.2.189"
+libc = "=0.2.191"
 libmpv2 = "=6.0.0"
 lopdf = "=0.44.0"
 objc2 = "=0.6.4"
@@ -85,7 +85,7 @@ rfd = "=0.17.2"
 # Read + 后台线程 + mpsc 逐块卡死检测(见 core/minimax.rs 的
 # `download`/`TempFileGuard`),不再调用 bytes_stream/wrap_stream——全仓
 # grep 确认没有别处用到,已去掉这个 feature。
-reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "blocking"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "blocking"] }
 # R7 Task 4：Retry-After 头的 RFC 1123 HTTP-date 形式解析。已经是
 # hyper 的传递依赖(Cargo.lock 锁定 1.0.3),这里显式声明成直接依赖才能在
 # core/minimax.rs 里 `use httpdate::parse_http_date`。
@@ -94,22 +94,22 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # R5 Task 1 音乐节拍分析：纯 Rust FFT，无 C 依赖、无 RUSTSEC 通告。
 rustfft = "=6.4.1"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-tauri = { version = "=2.11.5", features = [] }
-thiserror = "=2.0.20"
-tokio = { version = "=1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+serde_json = "=1.0.154"
+tauri = { version = "=2.12.5", features = [] }
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "=0.1.44"
 # R18 M-03:让 123 个 tracing 调用点真的落盘。只开 fmt + ansi 之外的最小特性集——
 # 不开 env-filter(它会拉 regex),级别用 TRIPCUT_LOG 自己解析成 LevelFilter。
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
-tracing-appender = "=0.2.3"
+tracing-appender = "=0.2.5"
 ttf-parser = "=0.25.1"
 # 已是 tauri/updater 的传递依赖(Cargo.lock 锁定 2.5.8);updater.rs 直接用
 # url::Url 解析回环覆盖端点(M1 review 修复),不能只靠传递依赖的隐式版本。
 url = "=2.5.8"
-uuid = { version = "=1.26.1", features = ["v4"] }
+uuid = { version = "=1.29.0", features = ["v4"] }
 walkdir = "=2.5.0"
-tauri-plugin-notification = "=2.4.0"
+tauri-plugin-notification = "=2.7.0"
 # R18 H-16:通知上的「在 Finder 中显示」。tauri-plugin-notification 的桌面
 # builder 只暴露 title/body/icon/sound,动作按钮拿不到;插件自己用的就是这个
 # crate(Cargo.lock 早已锁定 4.18.0,这里只是把传递依赖写成直接依赖,
