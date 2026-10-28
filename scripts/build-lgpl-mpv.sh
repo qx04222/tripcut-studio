@@ -94,22 +94,25 @@ ACTUAL_MPV_COMMIT="$(git rev-parse HEAD)"
 #   af067b5 ao_coreaudio: cleanup ao on init failure
 #   c5d391a ao_coreaudio: register hotplug after succesful audiounit init
 # 换 MPV_TAG 时如果这两个提交已经进了发布版,下面的 is-ancestor 判断会自动跳过。
-MPV_FIXES=(af067b5ea8e5fe396ebd9d3f895e51a7e75b3c09 c5d391a)
+MPV_FIXES=(af067b5ea8e5fe396ebd9d3f895e51a7e75b3c09 c5d391adba7bd024954d0df1e0405f5749f4d4ca)
 if grep -q "uninit(ao);" audio/out/ao_coreaudio.c \
   && grep -q "if (p->audio_unit) {" audio/out/ao_coreaudio.c; then
   echo "    ao_coreaudio hotplug 修复已存在,保持幂等"
 else
-  NEED_FETCH=1
   for FIX in "${MPV_FIXES[@]}"; do
     if git merge-base --is-ancestor "$FIX" HEAD 2>/dev/null; then
       echo "    上游修复 ${FIX:0:7} 已含在 $MPV_TAG,跳过"
       continue
     fi
-    if [ "$NEED_FETCH" = 1 ]; then
-      echo "==> 拉取上游 master 以取修复提交"
-      git fetch --quiet --depth=200 origin master
-      NEED_FETCH=0
+    if ! git cat-file -e "$FIX^{commit}" 2>/dev/null; then
+      echo "==> 拉取固定上游修复 ${FIX:0:7}"
+      git fetch --quiet --depth=2 origin "$FIX"
     fi
+    [ "$(git rev-parse --verify "$FIX^{commit}")" = "$FIX" ] || {
+      echo "ERROR: 上游修复提交不匹配，拒绝继续"; exit 1
+    }
+    # A commit without its parent is treated as a root patch by cherry-pick.
+    git rev-parse --verify "$FIX^" >/dev/null
     echo "==> cherry-pick 上游修复 ${FIX:0:7}"
     git -c user.name=build -c user.email=build@local cherry-pick --no-commit "$FIX" \
       || { echo "ERROR: cherry-pick ${FIX:0:7} 失败(源码版本可能已变),请人工核对"; exit 1; }

@@ -29,7 +29,7 @@ base64 = "=0.23.1"
 # 应用内自动更新(R6 Task 1)。=2.11.0 是与 tauri =2.11.5 兼容的最新版
 # (2.10+ 要求 tauri ^2.10);process 用于更新装好后重启进程(=2.3.1 要求 tauri ^2.8.2)。
 tauri-plugin-process = "=2.4.0"
-tauri-plugin-updater = "=2.14.0"
+tauri-plugin-updater = "=2.14.1"
 axum = { version = "=0.8.9", features = ["http1", "tokio"] }
 blake3 = "=1.8.7"
 # R10 U-24:导入 Whisper 模型文件前校验 SHA-256(官方 Hugging Face LFS 的 oid 就是
