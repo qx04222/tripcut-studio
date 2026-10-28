@@ -1627,12 +1627,17 @@ mod tests {
 
     #[test]
     fn ffmpeg_random_crop_sequence_classifies_handheld() {
-        let filter = format!(
-            "{FIXED_PATTERN},crop=240:180:x='60+6*sin(n*0.37)':y='50+6*sin(n*0.61)'"
-        );
+        // Use the calibrated random crop below. With 2 Hz analysis sampling,
+        // a sine crop can alias to low frequency and is not reliably shaky.
+        let filter = format!("{FIXED_PATTERN},{STABLE_JITTER_CROP}");
         let Some(result) = analyze_fixture(&filter, "handheld.mp4") else { return };
         assert_eq!(result.class, "handheld");
-        assert!(result.shake_score >= crate::core::settings::DEFAULT_JITTER_THRESHOLD);
+        assert!(
+            result.shake_score >= crate::core::settings::DEFAULT_JITTER_THRESHOLD,
+            "shake_score={}, threshold={}",
+            result.shake_score,
+            crate::core::settings::DEFAULT_JITTER_THRESHOLD,
+        );
     }
 
     #[test]
